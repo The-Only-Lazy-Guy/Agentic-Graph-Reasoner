@@ -145,7 +145,35 @@ class RGCNEncoder(nn.Module):
         h2 = self.conv2(h1, inputs.edge_index, inputs.edge_type)
         h2 = self.norm2(h2 + h1)
 
-        return h2   # [N, 256]
+        return h2   # [N, GNN_HIDDEN_DIM]
+
+    def encode_to_kv(
+        self,
+        inputs: GraphEncoderInputs,
+        active_subgraph,               # ActiveSubgraph
+        k_proj: "nn.Linear",
+        v_proj: "nn.Linear",
+    ):
+        """Full pipeline: GraphEncoderInputs -> GraphMemoryKV.
+
+        Runs forward pass then projects to K, V and attaches masks.
+        k_proj and v_proj are owned by RecurrentAttentionBlock.
+        """
+        from v5.subgraph import GraphMemoryKV
+        node_embs = self.forward(inputs)                     # [N, GNN_HIDDEN_DIM]
+        K = k_proj(node_embs)                                # [N, CROSS_ATTN_DIM]
+        V = v_proj(node_embs)                                # [N, CROSS_ATTN_DIM]
+        return GraphMemoryKV(
+            K=K,
+            V=V,
+            node_embeddings=node_embs,
+            node_ids=active_subgraph.node_ids,
+            node_types=active_subgraph.node_types,
+            planning_mask=active_subgraph.planning_mask,
+            evidence_mask=active_subgraph.evidence_mask,
+            invalidator_flags=active_subgraph.invalidator_flags,
+            slot_relevance=active_subgraph.slot_relevance,
+        )
 
 
 def build_encoder_inputs(

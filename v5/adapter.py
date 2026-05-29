@@ -28,9 +28,10 @@ import torch.nn as nn
 from torch import Tensor
 
 from v5.cross_attention import V5AttentionAdapter
-from v5.gnn_encoder import GNN_HIDDEN_DIM, RGCNEncoder, GraphEncoderInputs, build_encoder_inputs
+from v5.gnn_encoder import GNN_HIDDEN_DIM, RGCNEncoder
 from v5.goal_encoder import GoalEncoder, encode_task_frame
 from v5.loop_state import LoopState
+from v5.subgraph import ActiveSubgraph, GraphMemoryKV, build_active_subgraph
 
 # Qwen3-4B: 36 transformer layers (0-indexed)
 PLANNING_LAYER = 8
@@ -57,8 +58,8 @@ class GraphAttentionInjector:
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # Populated by prepare_session()
-        self._node_ids: List[str] = []
-        self._base_node_embeddings: Optional[Tensor] = None  # [N, GNN_HIDDEN_DIM]
+        self._active_subgraph: Optional[ActiveSubgraph] = None
+        self._graph_kv: Optional[GraphMemoryKV] = None       # GNN output, session-cached
         self._goal: Optional[Tensor] = None                  # [1, GOAL_DIM]
         self._task_frame: Optional[dict] = None
         self._r_plan: int = 4
@@ -80,15 +81,16 @@ class GraphAttentionInjector:
         r_plan: int = 4,
         r_evidence: int = 6,
     ) -> None:
-        """Pre-compute GNN embeddings and goal vector for this session.
+        """Pre-compute GNN embeddings, masks, and goal vector for this session.
+
+        GNN runs once. K, V, planning_mask, evidence_mask cached in GraphMemoryKV.
 
         Args:
-            graph: MemoryGraph instance (subgraph already filtered to top-K)
+            graph: MemoryGraph instance (already pre-filtered to top-K nodes)
             node_ids: ordered node IDs in the subgraph
             text_embeddings: {node_id: [768-float]} pre-computed BERT embeddings
             task_frame: dict with task_family, question_mode, required_slots
         """
-        self._node_ids = node_ids
         self._task_frame = task_frame
         self._r_plan = r_plan
         self._r_evidence = r_evidence
@@ -96,43 +98,48 @@ class GraphAttentionInjector:
         self._plan_state = None
         self._evid_state = None
 
-        encoder_inputs = build_encoder_inputs(graph, node_ids, text_embeddings, self.device)
+        # Build ActiveSubgraph (encoder inputs + planning/evidence masks)
+        self._active_subgraph = build_active_subgraph(
+            graph, node_ids, text_embeddings, self.device, task_frame
+        )
 
+        # GNN forward pass (once per session)
+        plan_block = self.adapter.planning_block
         self.gnn.eval()
         with torch.no_grad():
-            self._base_node_embeddings = self.gnn(encoder_inputs)  # [N, GNN_HIDDEN_DIM]
+            self._graph_kv = self.gnn.encode_to_kv(
+                self._active_subgraph.encoder_inputs,
+                self._active_subgraph,
+                k_proj=plan_block.K_proj,
+                v_proj=plan_block.V_proj,
+            )
 
         self.goal_encoder.eval()
         with torch.no_grad():
-            self._goal = encode_task_frame(task_frame, self.device, self.goal_encoder)  # [1, GOAL_DIM]
+            self._goal = encode_task_frame(task_frame, self.device, self.goal_encoder)
 
     def _planning_hook(self, module, args, output):
-        """Forward hook for layer 8 (planning block)."""
-        if self._base_node_embeddings is None:
+        """Forward hook for layer 8 (planning block). Uses planning_mask."""
+        if self._graph_kv is None:
             return output
 
-        # output is typically a tuple; hidden states are output[0]
         if isinstance(output, tuple):
             h = output[0]
         else:
             h = output
 
-        # Take the first token's hidden state as the reasoning anchor
-        # h shape: [B, seq_len, d_lm]
         h_anchor = h[:, 0, :]   # [B, d_lm]
 
         h_updated, state, logs = self.adapter.run_planning(
             h=h_anchor,
             goal=self._goal,
-            node_embeddings=self._base_node_embeddings,
-            node_ids=self._node_ids,
+            graph_kv=self._graph_kv,      # GraphMemoryKV with planning_mask
             r_max=self._r_plan,
             task_frame=self._task_frame,
         )
         self._plan_state = state
         self._loop_logs.extend(logs)
 
-        # Inject updated h back into the first token position
         h_new = h.clone()
         h_new[:, 0, :] = h_updated
         if isinstance(output, tuple):
@@ -140,8 +147,8 @@ class GraphAttentionInjector:
         return h_new
 
     def _evidence_hook(self, module, args, output):
-        """Forward hook for layer 20 (evidence block)."""
-        if self._base_node_embeddings is None:
+        """Forward hook for layer 20 (evidence block). Uses evidence_mask."""
+        if self._graph_kv is None:
             return output
 
         if isinstance(output, tuple):
@@ -154,8 +161,7 @@ class GraphAttentionInjector:
         h_updated, state, logs = self.adapter.run_evidence(
             h=h_anchor,
             goal=self._goal,
-            node_embeddings=self._base_node_embeddings,
-            node_ids=self._node_ids,
+            graph_kv=self._graph_kv,      # GraphMemoryKV with evidence_mask
             r_max=self._r_evidence,
             task_frame=self._task_frame,
         )

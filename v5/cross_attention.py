@@ -38,6 +38,8 @@ CROSS_ATTN_DIM = 512
 from v5.goal_encoder import NUM_SLOTS as _NUM_SLOTS
 Q_INPUT_DIM = LM_HIDDEN_DIM + GOAL_DIM + _NUM_SLOTS   # 2560 + 128 + 10 = 2698
 
+_NEG_INF = -1e9   # mask value added to logits before softmax
+
 
 class CrossAttentionProjections(nn.Module):
     """LoRA-wrapped Q, K, V, O projections for one cross-attention block.
@@ -66,20 +68,27 @@ class CrossAttentionProjections(nn.Module):
 
     def forward(
         self,
-        h_r: Tensor,          # [B, d_lm]
-        goal: Tensor,          # [B, GOAL_DIM]
-        slot_state: Tensor,    # [B, NUM_SLOTS]
-        K_r: Tensor,           # [N, attn_dim]  (pre-projected or raw GNN emb)
-        V_r: Tensor,           # [N, attn_dim]
-    ) -> Tensor:
-        """Return updated h_{r+1}: [B, d_lm]."""
+        h_r: Tensor,                    # [B, d_lm]
+        goal: Tensor,                   # [B, GOAL_DIM]
+        slot_state: Tensor,             # [B, NUM_SLOTS]
+        K_r: Tensor,                    # [N, attn_dim]
+        V_r: Tensor,                    # [N, attn_dim]
+        node_mask: Optional[Tensor] = None,  # [N] bool — True = attend; None = attend all
+    ) -> Tuple[Tensor, Tensor]:
+        """Return (updated h_{r+1}, attn_weights): ([B, d_lm], [B, N])."""
         q_input = torch.cat([h_r, goal, slot_state], dim=-1)   # [B, Q_INPUT_DIM]
         Q = self.W_q(q_input)                                   # [B, attn_dim]
 
-        # K, V are pre-projected from GNN embeddings
-        attn_weights = torch.softmax(
-            Q @ K_r.T / self.scale, dim=-1
-        )                                                       # [B, N]
+        logits = Q @ K_r.T / self.scale                        # [B, N]
+
+        # Apply node pool mask: nodes outside the pool get -inf before softmax
+        if node_mask is not None:
+            # node_mask: [N] bool, True = allowed
+            mask_val = torch.zeros_like(logits)
+            mask_val[:, ~node_mask] = _NEG_INF
+            logits = logits + mask_val
+
+        attn_weights = torch.softmax(logits, dim=-1)           # [B, N]
 
         A = attn_weights @ V_r                                  # [B, attn_dim]
         h_new = self.norm(h_r + self.W_o(A))                   # [B, d_lm]
@@ -118,60 +127,82 @@ class RecurrentAttentionBlock(nn.Module):
 
     def forward(
         self,
-        h_init: Tensor,            # [1, d_lm]   LM hidden state entering this layer
-        goal: Tensor,              # [1, GOAL_DIM]
-        base_node_embeddings: Tensor,  # [N, GNN_HIDDEN_DIM]  (fixed, from GNN)
-        node_ids: List[str],
+        h_init: Tensor,
+        goal: Tensor,
+        graph_kv,                      # GraphMemoryKV (or Tensor for backward compat)
+        node_ids: Optional[List[str]] = None,
         r_max: Optional[int] = None,
         task_frame: Optional[dict] = None,
     ) -> Tuple[Tensor, LoopState, List[dict]]:
         """Run the recurrent loop.
+
+        Accepts either a GraphMemoryKV (preferred) or a raw [N, GNN_HIDDEN_DIM]
+        tensor (backward-compatible path used in tests).
 
         Returns:
             h_final: [1, d_lm] updated hidden state
             final_state: LoopState at exit
             loop_log: list of per-iteration log dicts for corpus
         """
+        from v5.subgraph import GraphMemoryKV
+
         r_max = r_max if r_max is not None else self.r_max
+
+        # Unpack GraphMemoryKV or fall back to raw tensor
+        if isinstance(graph_kv, GraphMemoryKV):
+            base_node_embeddings = graph_kv.node_embeddings   # [N, GNN_HIDDEN_DIM]
+            base_K = graph_kv.K                               # already projected
+            base_V = graph_kv.V
+            node_ids = node_ids or graph_kv.node_ids
+            # Select correct mask for this block (planning vs evidence)
+            if self.layer_id == 8:
+                node_mask = graph_kv.planning_mask             # [N] bool
+            else:
+                node_mask = graph_kv.evidence_mask             # [N] bool
+            # Pre-init invalidator flags from static graph structure
+            static_inv = graph_kv.invalidator_flags.unsqueeze(0)  # [1, N]
+        else:
+            # Raw tensor path (tests / pre-GraphMemoryKV callers)
+            base_node_embeddings = graph_kv
+            base_K = self.K_proj(base_node_embeddings)
+            base_V = self.V_proj(base_node_embeddings)
+            node_mask = None
+            static_inv = None
+
         N = base_node_embeddings.shape[0]
         device = h_init.device
 
-        # Pre-project base K, V (done once, outside loop)
-        base_K = self.K_proj(base_node_embeddings)   # [N, CROSS_ATTN_DIM]
-        base_V = self.V_proj(base_node_embeddings)   # [N, CROSS_ATTN_DIM]
-
         # Initialize loop state
+        init_inv = static_inv if static_inv is not None else torch.zeros(1, N, device=device)
         state = LoopState(
             h_r=h_init,
             slot_state_r=torch.zeros(1, _NUM_SLOTS, device=device),
             node_scores_r=torch.zeros(1, N, device=device),
             shortcut_validity_r=torch.zeros(1, 1, device=device),
             epistemic_confidence_r=torch.zeros(1, N, device=device),
-            invalidator_flags_r=torch.zeros(1, N, device=device),
+            invalidator_flags_r=init_inv,
             loop_idx=0,
         )
 
         loop_log: List[dict] = []
 
         for r in range(r_max):
-            # 1. Compute dynamic K/V overlay from current state
-            delta_K, delta_V = self.aux.overlay(state, N)   # [N, gnn_dim]
+            # 1. Dynamic K/V overlay from current loop state
+            delta_K, delta_V = self.aux.overlay(state, N)
+            K_r = base_K + self.K_proj(delta_K)
+            V_r = base_V + self.V_proj(delta_V)
 
-            # Project overlay to attn_dim and add to base
-            # delta_K/V are in gnn_dim; we project via K_proj/V_proj
-            K_r = base_K + self.K_proj(delta_K)             # [N, CROSS_ATTN_DIM]
-            V_r = base_V + self.V_proj(delta_V)             # [N, CROSS_ATTN_DIM]
-
-            # 2. Cross-attend and update hidden state
+            # 2. Cross-attend with node pool mask
             h_new, attn_weights = self.proj(
-                state.h_r, goal, state.slot_state_r, K_r, V_r
+                state.h_r, goal, state.slot_state_r, K_r, V_r,
+                node_mask=node_mask,
             )
 
-            # 3. Update loop state with new h and aux head predictions
+            # 3. Update loop state
             state = LoopState(
                 h_r=h_new,
                 slot_state_r=state.slot_state_r,
-                node_scores_r=attn_weights,         # [1, N] — attention weights as scores
+                node_scores_r=attn_weights,
                 shortcut_validity_r=state.shortcut_validity_r,
                 epistemic_confidence_r=state.epistemic_confidence_r,
                 invalidator_flags_r=state.invalidator_flags_r,
@@ -180,9 +211,9 @@ class RecurrentAttentionBlock(nn.Module):
             state = self.aux.update_state(state, base_node_embeddings)
 
             # 4. Log
-            loop_log.append(state.to_log_entry(node_ids, layer=self.layer_id))
+            loop_log.append(state.to_log_entry(node_ids or [], layer=self.layer_id))
 
-            # 5. Exit condition
+            # 5. Exit check
             should_exit, reason = should_exit_loop(state, r, r_max, task_frame)
             if should_exit:
                 state.exit_reason = reason
@@ -228,20 +259,20 @@ class V5AttentionAdapter(nn.Module):
         self,
         h: Tensor,
         goal: Tensor,
-        node_embeddings: Tensor,
-        node_ids: List[str],
+        graph_kv,                      # GraphMemoryKV or raw Tensor
+        node_ids: Optional[List[str]] = None,
         r_max: Optional[int] = None,
         task_frame: Optional[dict] = None,
     ) -> Tuple[Tensor, LoopState, List[dict]]:
-        return self.planning_block(h, goal, node_embeddings, node_ids, r_max, task_frame)
+        return self.planning_block(h, goal, graph_kv, node_ids, r_max, task_frame)
 
     def run_evidence(
         self,
         h: Tensor,
         goal: Tensor,
-        node_embeddings: Tensor,
-        node_ids: List[str],
+        graph_kv,                      # GraphMemoryKV or raw Tensor
+        node_ids: Optional[List[str]] = None,
         r_max: Optional[int] = None,
         task_frame: Optional[dict] = None,
     ) -> Tuple[Tensor, LoopState, List[dict]]:
-        return self.evidence_block(h, goal, node_embeddings, node_ids, r_max, task_frame)
+        return self.evidence_block(h, goal, graph_kv, node_ids, r_max, task_frame)
