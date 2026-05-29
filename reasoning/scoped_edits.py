@@ -130,6 +130,7 @@ def _patch_type_for(edit: Mapping[str, Any]) -> str:
             "solved_subgoal": "add_solved_subgoal",
             "reasoning_atom": "add_reasoning_atom",
             "control_rule": "add_control_rule",
+            "epistemic_state": "add_epistemic_state",
         }.get(node_type, f"add_{node_type or 'node'}")
     return f"unknown_{op or 'edit'}"
 
@@ -582,7 +583,7 @@ def _inherit_parent_validation(patches: Sequence[GraphEditPatch]) -> None:
 
 
 def _min_support_score(patch: GraphEditPatch) -> float:
-    if patch.patch_type in {"add_strategy", "add_control_rule"}:
+    if patch.patch_type in {"add_strategy", "add_control_rule", "add_epistemic_state"}:
         return 0.08
     if patch.patch_type in {"add_solved_subgoal", "add_reasoning_atom"}:
         return 0.10

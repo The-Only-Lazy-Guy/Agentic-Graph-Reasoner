@@ -590,6 +590,57 @@ def build_task_frame(question: str, *, task_family: Optional[TaskFamily] = None)
     )
 
 
+def _active_invalidators(
+    *,
+    graph: MemoryGraph,
+    selected_node_ids: Sequence[str],
+    question: str,
+    overlap_threshold: float = 0.10,
+) -> List[Tuple[str, str, float]]:
+    """Return (source_node_id, invalidator_node_id, overlap_score) for any
+    invalidated_by edge whose destination text overlaps the question.
+
+    Scoped to: edges with relation == "invalidated_by" originating from a
+    currently selected evidence node. The overlap threshold is intentionally
+    low; a stricter check would deny safe shortcuts on legitimate questions.
+    """
+    if not selected_node_ids:
+        return []
+    selected = set(selected_node_ids)
+    hits: List[Tuple[str, str, float]] = []
+    edges = getattr(graph, "edges", None) or []
+    for edge in edges:
+        try:
+            relation = getattr(edge, "relation", None) or (
+                edge.get("relation") if isinstance(edge, dict) else None
+            )
+        except Exception:
+            continue
+        if relation != "invalidated_by":
+            continue
+        src = getattr(edge, "src", None) or (
+            edge.get("src") if isinstance(edge, dict) else None
+        )
+        dst = getattr(edge, "dst", None) or (
+            edge.get("dst") if isinstance(edge, dict) else None
+        )
+        if not (src in selected and dst):
+            continue
+        dst_node = graph.nodes.get(dst)
+        if dst_node is None:
+            continue
+        condition_text = (dst_node.text or "") + " " + " ".join(
+            str(v) for v in (getattr(dst_node, "metadata", {}) or {}).values()
+            if isinstance(v, str)
+        )
+        if not condition_text.strip():
+            continue
+        score = _focused_overlap(question, condition_text, min_chars=4)
+        if score >= overlap_threshold:
+            hits.append((str(src), str(dst), float(score)))
+    return hits
+
+
 def run_micro_epistemic_controller(
     *,
     question: str,
@@ -668,6 +719,35 @@ def run_micro_epistemic_controller(
 
         _synthesize_missing_slots(task_frame, slot_values, slot_sources, selected_node_ids)
         if _required_slots_satisfied(task_frame, slot_values):
+            invalidator_hits = _active_invalidators(
+                graph=graph,
+                selected_node_ids=selected_node_ids,
+                question=question,
+            )
+            if invalidator_hits:
+                action_counts[MicroAction.QUERY.value] = action_counts.get(MicroAction.QUERY.value, 0) + 1
+                top = invalidator_hits[0]
+                detail = (
+                    "FINALIZE blocked by active invalidated_by edge: "
+                    f"{top[0]} --invalidated_by--> {top[1]} (overlap={top[2]:.2f}). "
+                    "Falling back to graph-tool loop."
+                )
+                micro_steps.append(MicroStepDecision(
+                    index=len(micro_steps) + 1,
+                    subgoal="invalidator_guard",
+                    subgoal_signature=f"{task_frame.task_signature}.invalidator_guard",
+                    action=MicroAction.QUERY,
+                    sufficient=False,
+                    filled_slots=list(slot_values.keys()),
+                    missing_slots=[
+                        f"invalidator_clearance:{nid}" for _, nid, _ in invalidator_hits
+                    ],
+                    evidence_node_ids=list(selected_node_ids),
+                    matched_node_id=None,
+                    detail=detail,
+                ))
+                controller_fallback_used = True
+                break
             action_counts[MicroAction.FINALIZE.value] = action_counts.get(MicroAction.FINALIZE.value, 0) + 1
             micro_steps.append(MicroStepDecision(
                 index=len(micro_steps) + 1,
@@ -792,6 +872,43 @@ Final user-facing answer.
 <explanation>
 One short paragraph about how the answer was grounded.
 </explanation>
+
+OPTIONAL: V5 graph patches
+==========================
+After the explanation, you may emit one or more <patch>{...}</patch> JSON
+blocks to record meta-reasoning about the answer. This is encouraged when
+the answer relies on a known shortcut, has conditions that would invalidate
+it, or requires specific task-frame slots.
+
+Allowed node types:
+  epistemic_state, solved_subgoal, strategy, claim, fact, reasoning_atom,
+  control_rule, failure_pattern
+Allowed edge relations:
+  epistemic_of, invalidated_by, requires_slot, transfers_to,
+  overlaps, entails, contradicts, leveraged, derived_from, related
+
+Most useful pattern -- attach an epistemic_state to the node you relied on:
+
+<patch>
+{"op": "add_node", "node_type": "epistemic_state",
+ "target_node_id": "<the_evidence_node_id_you_used>",
+ "status": "verified", "confidence": 0.9,
+ "support_level": "stored solved_subgoal + textbook fact",
+ "open_questions": [],
+ "known_risks": ["<condition under which this shortcut would mislead>"],
+ "invalidators": ["<specific question variant that would NOT be answered by this>"],
+ "last_verified_by": ["<evidence_node_id>", "<another_evidence_node_id>"]}
+</patch>
+
+To attach a slot requirement to a strategy node:
+<patch>
+{"op": "add_edge", "src": "<strategy_node_id>", "dst": "<slot_node_id>",
+ "relation": "requires_slot"}
+</patch>
+
+Edge endpoints must already exist in the graph OR be added by a sibling
+patch in the same response. Unknown endpoints are rejected.
+Skip patches entirely if you cannot ground them in the supplied evidence.
 """
 
 

@@ -21,7 +21,7 @@ import urllib.error
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from graph_core import MemoryGraph
 from anchor_retrieval import retrieve_anchors_v2
@@ -101,6 +101,7 @@ _TOOL_BLOCK_RE    = re.compile(r"<(?:tool|graph_action)>\s*(\{.*?\})\s*</(?:tool
 _ANSWER_BLOCK_RE  = re.compile(r"<answer>(.*?)</answer>", re.DOTALL)
 _PLAN_BLOCK_RE    = re.compile(r"<plan>(.*?)</plan>", re.DOTALL)
 _REPLAN_BLOCK_RE  = re.compile(r"<replan>(.*?)</replan>", re.DOTALL)
+_PATCH_BLOCK_RE   = re.compile(r"<patch>\s*(\{.*?\})\s*</patch>", re.DOTALL)
 # Thinking models (Qwen3-Thinking, etc.) wrap internal monologue in <think>
 _THINK_BLOCK_RE   = re.compile(r"<think>.*?</think>", re.DOTALL)
 
@@ -1314,6 +1315,165 @@ def parse_answer(text: str) -> Optional[str]:
     return m.group(1).strip() if m else None
 
 
+_V5_NODE_TYPES = {
+    "epistemic_state",
+    "solved_subgoal",
+    "strategy",
+    "claim",
+    "fact",
+    "reasoning_atom",
+    "control_rule",
+    "failure_pattern",
+}
+
+_V5_EDGE_RELATIONS = {
+    "epistemic_of",
+    "invalidated_by",
+    "requires_slot",
+    "transfers_to",
+    "overlaps",
+    "entails",
+    "contradicts",
+    "leveraged",
+    "derived_from",
+    "related",
+}
+
+
+def _synthesize_epistemic_text(target_node_id: str, confidence: Any,
+                                open_questions: Any, known_risks: Any) -> str:
+    parts = [f"Epistemic state for {target_node_id}"]
+    if isinstance(confidence, (int, float)):
+        parts.append(f"confidence={float(confidence):.2f}")
+    if isinstance(open_questions, list) and open_questions:
+        parts.append("open_questions=[" + "; ".join(str(q) for q in open_questions) + "]")
+    if isinstance(known_risks, list) and known_risks:
+        parts.append("known_risks=[" + "; ".join(str(r) for r in known_risks) + "]")
+    return " | ".join(parts)
+
+
+def extract_model_patches(
+    cot_log: Sequence[str],
+    *,
+    session_id: str,
+    graph_nodes: Optional[Set[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Pull <patch>{...}</patch> JSON blocks from assistant turns and convert
+    them into the same graph_edit op shape consumed by patches_from_graph_edits.
+
+    Supports add_node (epistemic_state, solved_subgoal, ...) and add_edge with
+    V5 relation types (invalidated_by, requires_slot, transfers_to, ...).
+    Silently drops malformed blocks; safe to call on any cot_log.
+    """
+    if graph_nodes is None:
+        graph_nodes = set()
+    edits: List[Dict[str, Any]] = []
+    seen_node_ids: Set[str] = set()
+    patch_idx = 0
+    for content in cot_log:
+        if not isinstance(content, str) or "<patch>" not in content:
+            continue
+        for m in _PATCH_BLOCK_RE.finditer(_visible(content)):
+            raw = m.group(1)
+            try:
+                obj = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            op = obj.get("op")
+            if op == "add_node":
+                node_type = obj.get("node_type")
+                if node_type not in _V5_NODE_TYPES:
+                    continue
+                target_node_id = obj.get("target_node_id") or obj.get("target")
+                explicit_id = obj.get("node_id") or obj.get("id")
+                if explicit_id:
+                    node_id = str(explicit_id)
+                else:
+                    patch_idx += 1
+                    base = target_node_id or node_type
+                    node_id = f"{node_type[:4]}_{session_id}_{patch_idx}_{str(base)[:20]}"
+                if node_id in seen_node_ids:
+                    continue
+                seen_node_ids.add(node_id)
+                text = obj.get("text") or ""
+                metadata = {
+                    "source_session": session_id,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "promotion_status": "session_local",
+                    "model_emitted_patch": True,
+                }
+                if target_node_id:
+                    metadata["target_node_id"] = str(target_node_id)
+                for k in ("confidence", "open_questions", "known_risks",
+                          "support_level", "invalidators", "last_verified_by",
+                          "requires_evidence_before_shortcut", "status",
+                          "task_family", "task_subtype", "question_mode",
+                          "valid_when", "invalid_when"):
+                    if k in obj:
+                        metadata[k] = obj[k]
+                evidence_ids = obj.get("evidence_node_ids")
+                if not isinstance(evidence_ids, list):
+                    evidence_ids = []
+                if target_node_id and str(target_node_id) in graph_nodes \
+                        and str(target_node_id) not in evidence_ids:
+                    evidence_ids = list(evidence_ids) + [str(target_node_id)]
+                metadata["evidence_node_ids"] = evidence_ids
+                if node_type == "epistemic_state" and not text:
+                    text = _synthesize_epistemic_text(
+                        str(target_node_id or ""),
+                        obj.get("confidence"),
+                        obj.get("open_questions"),
+                        obj.get("known_risks"),
+                    )
+                edits.append({
+                    "op": "add_node",
+                    "node_id": node_id,
+                    "node_type": node_type,
+                    "text": str(text),
+                    "metadata": metadata,
+                    "tier": "add",
+                })
+                if node_type == "epistemic_state" and target_node_id \
+                        and str(target_node_id) in graph_nodes:
+                    edits.append({
+                        "op": "add_edge",
+                        "src": node_id,
+                        "dst": str(target_node_id),
+                        "relation": "epistemic_of",
+                        "metadata": {
+                            "source_session": session_id,
+                            "model_emitted_patch": True,
+                        },
+                        "tier": "add",
+                    })
+            elif op == "add_edge":
+                src = obj.get("src")
+                dst = obj.get("dst")
+                relation = obj.get("relation")
+                if not (isinstance(src, str) and isinstance(dst, str)):
+                    continue
+                if relation not in _V5_EDGE_RELATIONS:
+                    continue
+                metadata = {
+                    "source_session": session_id,
+                    "model_emitted_patch": True,
+                }
+                if isinstance(obj.get("metadata"), dict):
+                    for k, v in obj["metadata"].items():
+                        metadata.setdefault(k, v)
+                edits.append({
+                    "op": "add_edge",
+                    "src": src,
+                    "dst": dst,
+                    "relation": relation,
+                    "metadata": metadata,
+                    "tier": "add",
+                })
+    return edits
+
+
 def execute_tool(tools: V4Tools, call: Dict[str, Any]) -> Dict[str, Any]:
     if "_parse_error" in call:
         return {"error": f"tool call JSON did not parse: {call.get('raw', '')[:120]}"}
@@ -2006,6 +2166,69 @@ The plan is a live scratchpad -- update it freely at any step.
 Mark subgoals done as you complete them:
   <tool>{"name": "mark_done", "args": {"index": 0}}</tool>
 
+━━━ GRAPH EDITS (OPTIONAL) ━━━
+
+You can emit graph edit patches inside your final response. Each patch is a
+single JSON object inside <patch>...</patch>. Patches go through scoped
+validation; well-grounded ones get applied, others are held for review.
+
+Node types you can add:
+  epistemic_state, solved_subgoal, strategy, claim, fact, reasoning_atom,
+  control_rule, failure_pattern
+
+Edge relations you can add:
+  epistemic_of, invalidated_by, requires_slot, transfers_to,
+  overlaps, entails, contradicts, leveraged, derived_from, related
+
+The most important V5 patch is `epistemic_state`. Use it when you have a
+belief about another node (status, confidence, what would invalidate it):
+
+<patch>
+{"op": "add_node", "node_type": "epistemic_state",
+ "target_node_id": "claim_dijkstra_negative_edge_invalid",
+ "status": "verified", "confidence": 0.94,
+ "support_level": "mechanistic + textbook fact",
+ "open_questions": [],
+ "known_risks": ["DAG shortest path may confuse the answer"],
+ "invalidators": ["question is about DAG-specific shortest path, not normal Dijkstra"],
+ "last_verified_by": ["fact_dijkstra_nonnegative", "reasoning_greedy_invariant"]}
+</patch>
+
+To say "this strategy/claim is unsafe under condition X" emit BOTH the
+condition node and an `invalidated_by` edge in the same response:
+
+<patch>
+{"op": "add_node", "node_id": "cond_dag_special_shortest_path",
+ "node_type": "claim",
+ "text": "Question is about DAG-specific shortest path, not general Dijkstra."}
+</patch>
+<patch>
+{"op": "add_edge", "src": "strategy_algorithm_applicability",
+ "dst": "cond_dag_special_shortest_path", "relation": "invalidated_by"}
+</patch>
+
+To say "this strategy needs these task-frame slots filled":
+
+<patch>
+{"op": "add_edge", "src": "strategy_algorithm_applicability",
+ "dst": "slot_verdict", "relation": "requires_slot"}
+</patch>
+
+To record an analogy ("structure X transfers to problem Y"):
+
+<patch>
+{"op": "add_edge", "src": "reasoning_atom_monotonic_invariant",
+ "dst": "application_parametric_search", "relation": "transfers_to"}
+</patch>
+
+Other common forms:
+<patch>
+{"op": "add_node", "node_type": "solved_subgoal", "node_id": "ssg_1", "text": "We found X"}
+</patch>
+
+Edge endpoints must exist in the graph or be added by a sibling patch in the
+same response. Edges to unknown nodes are rejected.
+
 DO NOT over-engineer simple questions. If the graph already contains the
 direct answer, read it and answer immediately. Do not create workspace
 objects, hypothesize, or expand neighbors unless the question actually
@@ -2167,6 +2390,35 @@ Example of a BAD answer:
   "No (dijkstra_requires_nonnegative_edge_weights). The algorithm
    fails (negative_edge_counterexample_test_apply)."
   <-- node IDs leak into the answer; user does not need these
+
+REQUIRED ON FINISH -- record what you learned about the graph
+=============================================================
+In the SAME response as your <answer>, also emit at least one <patch> block
+when you used a graph node to ground the answer or when your reasoning
+exposed a condition that would invalidate a shortcut.
+
+The minimum acceptable patch is an `epistemic_state` attached to the
+strongest evidence node you actually relied on (use a real node_id that
+appears in this session's reads):
+
+<patch>
+{"op": "add_node", "node_type": "epistemic_state",
+ "target_node_id": "<evidence_node_id_you_used>",
+ "status": "verified", "confidence": 0.9,
+ "support_level": "<one-line basis>",
+ "known_risks": ["<a condition under which this would mislead>"],
+ "invalidators": ["<a specific question variant that would NOT be answered>"]}
+</patch>
+
+If a clear invalidator/transfer/required-slot relation surfaced, also emit
+the corresponding <patch> with op=add_edge and a V5 relation
+(invalidated_by | requires_slot | transfers_to). Edge endpoints must
+already exist in the graph or be added by a sibling patch in this same
+response.
+
+Skip patches only when you genuinely could not ground them. Do not
+fabricate node_ids. Patches are validated and rejected when endpoints are
+unknown.
 
 All reasoning, plans, tool calls, and objects are private working memory.
 Only the <answer> block is shown to the user.
@@ -2393,7 +2645,7 @@ class V4OpencodeController:
 
     def __init__(
         self,
-        model: str = "google/gemini-2.5-flash",
+        model: str = "opencode/deepseek-v4-flash-free",
         server_url: Optional[str] = None,
         config_dir: Optional[str] = None,  # OPENCODE_CONFIG_DIR override (empty dir = no agents/AGENTS.md)
         variant: Optional[str] = None,
@@ -2679,7 +2931,7 @@ class V4GeminiController:
 
     def __init__(
         self,
-        model: str = "gemini-2.5-flash",
+        model: str = "opencode/deepseek-v4-flash-free",
         temperature: float = 0.4,
         max_output_tokens: int = 8192,
         timeout: float = 120.0,
@@ -3823,6 +4075,16 @@ def answer_query_v4(
                 graph=graph,
             )
         )
+        try:
+            model_patch_edits = extract_model_patches(
+                cot_log,
+                session_id=session_id,
+                graph_nodes=set(graph.nodes.keys()) if graph is not None else set(),
+            )
+            if model_patch_edits:
+                graph_edits_list.extend(model_patch_edits)
+        except Exception as e:
+            print(f"[answerer_v4] extract_model_patches failed: {e}")
         learning_report_dict = report.to_dict()
         learning_report_dict = report.to_dict()
         try:
@@ -4141,6 +4403,83 @@ def answer_query_v4(
         signature_graph_projection=signature_graph_projection,
         signature_live_bias=signature_live_bias,
     )
+    # V5 Trajectory extraction from opencode SQLite
+    try:
+        import os as _os_sqlite
+        import sqlite3
+        from reasoning.schemas import LoopStateLog
+
+        db_path = _os_sqlite.path.expanduser("~/.local/share/opencode/opencode.db")
+        if _os_sqlite.path.exists(db_path):
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            conn.row_factory = sqlite3.Row
+            
+            # Find messages
+            msgs = conn.execute("SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created ASC", (controller._session_id,)).fetchall()
+            loop_idx = 0
+            last_reasoning_nids = []
+            
+            for msg in msgs:
+                mdata = json.loads(msg["data"])
+                if mdata.get("role") == "assistant":
+                    parts = conn.execute("SELECT data FROM part WHERE message_id = ? ORDER BY time_created ASC", (msg["id"],)).fetchall()
+                    for p in parts:
+                        pdata = json.loads(p["data"])
+                        ptype = pdata.get("type")
+                        
+                        text = ""
+                        if ptype == "reasoning":
+                            text = pdata.get("reasoning", "") or pdata.get("text", "")
+                            # Native reasoning block
+                            import re
+                            last_reasoning_nids.extend([w for w in re.findall(r"[a-z0-9_]{4,}", text) if w in graph.nodes])
+                        elif ptype == "text":
+                            text = pdata.get("text", "")
+                            
+                        if "<reasoning>" in text:
+                            # Flash fallback text block
+                            import re
+                            try:
+                                reason_text = text.split("<reasoning>")[1].split("</reasoning>")[0]
+                                last_reasoning_nids.extend([w for w in re.findall(r"[a-z0-9_]{4,}", reason_text) if w in graph.nodes])
+                            except IndexError:
+                                pass
+                                
+                        if "<graph_action>" in text:
+                            import re
+                            actions = re.findall(r"<graph_action>(.*?)</graph_action>", text, re.DOTALL)
+                            for act in actions:
+                                try:
+                                    act_json = json.loads(act)
+                                    name = act_json.get("name")
+                                    if name in ("read_node", "search_nodes", "expand_neighbors"):
+                                        nid = act_json.get("args", {}).get("node_id")
+                                        
+                                        # Use latent thinking nids, otherwise fallback to the tool argument
+                                        unique_nids = list(set(last_reasoning_nids))
+                                        top_nodes = [[n, 1.0] for n in unique_nids] if unique_nids else []
+                                        if not top_nodes and nid:
+                                            top_nodes = [[nid, 1.0]]
+                                        
+                                        log = LoopStateLog(
+                                            layer=20,
+                                            loop=loop_idx,
+                                            top_nodes=top_nodes,
+                                            slot_state={"answer": "partial"},
+                                            shortcut_validity=0.5,
+                                            invalidator_flags={},
+                                            epistemic_confidence={n: 0.8 for n, _ in top_nodes},
+                                            exit_reason=None
+                                        )
+                                        _pkt.nodes_accessed_log.append(log.to_dict())
+                                        loop_idx += 1
+                                        last_reasoning_nids = []
+                                except Exception:
+                                    pass
+            conn.close()
+    except Exception as e:
+        print(f"Failed to extract SQLite trajectory: {e}")
+
     if collect_corpus and _pkt.finalized:
         try:
             append_session_to_corpus(
