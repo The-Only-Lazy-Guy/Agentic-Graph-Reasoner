@@ -1,0 +1,67 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Model caches (large binary files, do not commit)
+reasoning/cache/
+.hf_cache/
+*.safetensors
+*.bin
+*.gguf
+*.npz
+
+# Logs and output files
+*.log
+*.err.log
+*.out.log
+out_*.json
+*.jsonl
+
+# Temporary/scratch files
+_*.py
+patch*.py
+tmp*.py
+debug*.py
+update_mds.py
+migrate_to_v5.py
+
+# Compiled binaries
+*.exe
+*.o
+*.obj
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Pytest cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Graph data backups (large, keep locally only)
+reasoning/data/graph_backups/
+
+# Search / temp output
+search_out.txt
+user_msgs.txt
+live_bias_comparison_results.txt
+traverse_threshold_draft_edit_result.txt
