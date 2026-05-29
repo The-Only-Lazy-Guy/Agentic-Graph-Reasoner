@@ -124,62 +124,210 @@ This means the *same question* asked with different goals would produce differen
 
 ---
 
-## 6. Injection Points
+## 6. Injection Points — Recurrent Graph-Attention Blocks
 
-**Decision: Two injection points — Layer ~8 (plan pass) and Layer ~20 (evidence pass).**
+**Revised decision (2026-05-29): Single-pass injection upgraded to recurrent attention loops.**
 
-Qwen3-4B has 36 transformer layers.
+Instead of one cross-attention call at Layer 8 and one at Layer 20, each injection point runs a **recurrent loop** over the same fixed candidate subgraph. The GNN runs once; K and V are fixed. Only Q updates each iteration.
 
 ```
 Layer 0-7:   Token processing, early contextualization
-Layer 8:     ◄── INJECTION POINT 1: Goal-setting / planning pass
-Layer 9-19:  Reasoning integration
-Layer 20:    ◄── INJECTION POINT 2: Evidence retrieval pass
-Layer 21-35: Answer formation
+Layer 8:     ◄── BLOCK 1: Planning attention loop (R_plan iterations)
+Layer 9-19:  Reasoning integration with updated hidden state
+Layer 20:    ◄── BLOCK 2: Evidence attention loop (R_evidence iterations)
+Layer 21-35: Answer generation from solved reasoning state
 ```
 
-### Injection Point 1 — Layer 8: Plan Pass
+### Why recurrent loops instead of single passes?
 
-- **Node pool**: `StrategyNode`, `FailurePatternNode`, `ControlRuleNode`, `ReasoningChainNode`, `EpistemicStateNode` (when `status=uncertain` or `requires_evidence_before_shortcut=True`)
-- **Purpose**: At this early stage, the LM has processed the question but hasn't committed to a reasoning path. It attends broadly to *strategy*, *anti-pattern*, and *deductive chain* nodes to select an appropriate reasoning plan. Epistemic states with unresolved open questions surface here to pre-warn the model before it commits to a shortcut.
-- **Effect**: The retrieved strategy context is added to the hidden state, biasing subsequent layers toward the correct reasoning structure for this task family.
-- **Analogy**: "Before I start — what worked before? What traps should I avoid? What am I not yet certain about?"
+Research rationale (Saunshi et al., Looped Transformers; OuroLM/LoopLM):
+- A k-layer transformer looped L times can approach the performance of a kL-layer model on synthetic reasoning tasks (addition, p-hop induction, math)
+- Reasoning problems are naturally iterative — many require repeated application of the same attention computation to converge
+- Looped depth = more reasoning without more parameters or more graph I/O
 
-### Injection Point 2 — Layer 20: Evidence Pass
+Practical rationale for this system:
+- The graph is not passive RAG — it is an executable reasoning graph with typed nodes, epistemic states, and invalidation logic
+- A single attention shot cannot traverse the full semantic structure: strategy → failure_pattern → epistemic_state → invalidator → requires_slot in one pass
+- Multiple latent loops over fixed K, V are cheap (no GNN re-run, no JSON tool call) and deep
 
-- **Node pool**: `FactNode`, `ClaimNode`, `ApplicationNode`, `SolvedSubgoalNode`, `EpistemicStateNode` (when `status=verified` or `status=supported`)
-- **Purpose**: Mid-reasoning, the LM has partially formulated its approach. It queries for specific factual evidence AND the graph's belief-status on that evidence. A high-confidence `EpistemicStateNode` pointing to a `SolvedSubgoalNode` signals the model can safely shortcut. A low-confidence or invalidated one signals it must verify further.
-- **Effect**: The retrieved evidence + epistemic signal is added to the hidden state, providing both facts and confidence metadata before the model commits to an answer.
-- **Analogy**: "Given my plan — what does the graph say about this claim? And how confident is the graph in that answer?"
-
-### Why two different node pools?
-
-This naturally encodes the `plan → verify` reasoning structure that the V4 micro_controller enforces symbolically. V5 makes this structure *differentiable* and *learnable*.
-
-A model that correctly plans (Layer 8) but retrieves wrong evidence (Layer 20) is penalized by the trajectory reward. A model that retrieves wrong strategies but luckily finds correct facts still fails to generalize. Only complete trajectories are rewarded.
+**Critical distinction**: multiple latent loops ≠ multiple external graph retrievals.
+The candidate subgraph is retrieved once. The loops refine the attention distribution over it.
 
 ---
 
+### Block 1 — Layer 8: Planning Attention Loop
+
+**Node pool**: `StrategyNode`, `FailurePatternNode`, `ControlRuleNode`, `ReasoningChainNode`,
+`EpistemicStateNode` (when `status=uncertain` or `requires_evidence_before_shortcut=True`)
+
+**Loop count**: R_plan = 2–4 (adaptive; see §6.4)
+
+**Per-iteration update**:
+```python
+for r in range(R_plan):
+    Q_r    = W_q(concat(h_r, goal_vector, slot_state_r))  # goal-conditioned query
+    A_r    = softmax(Q_r @ K_graph.T / sqrt(d)) @ V_graph  # attend over fixed graph K,V
+    h_{r+1}         = layer_norm(h_r + W_o(A_r))           # update hidden state
+    slot_state_{r+1} = slot_head(h_{r+1})                  # track slot fill progress
+    node_scores_{r+1}= node_head(h_{r+1})                  # per-node selection scores
+```
+
+**What each loop iteration does (conceptually)**:
+```
+Loop 1: Identify task strategy — which StrategyNode matches this task family?
+Loop 2: Notice failure pattern — does any FailurePatternNode fire as a warning?
+Loop 3: Select required procedure — does the strategy require_slot anything?
+Loop 4: Decide shortcut safety — is the matching EpistemicStateNode verified?
+```
+
+**Analogy**: "Before I start — what worked before? What traps should I avoid? What am I not certain about? Can I shortcut?"
+
+---
+
+### Block 2 — Layer 20: Evidence Attention Loop
+
+**Node pool**: `FactNode`, `ClaimNode`, `ApplicationNode`, `SolvedSubgoalNode`,
+`EpistemicStateNode` (when `status=verified` or `status=supported`)
+
+**Loop count**: R_evidence = 2–6 (adaptive; see §6.4)
+
+**Per-iteration update**: same structure as Block 1, but attending over the evidence node pool.
+
+**What each loop iteration does (conceptually)**:
+```
+Loop 1: Read relevant fact nodes for the current hypothesis
+Loop 2: Connect fact to a matching SolvedSubgoalNode (is there a cached answer?)
+Loop 3: Check invalidator/caveat — does any invalidated_by edge fire?
+Loop 4: Fill missing slot from graph evidence
+Loop 5: Confirm epistemic_state confidence is high enough to finalize
+Loop 6: (If needed) resolve contradiction between two retrieved nodes
+```
+
+**Analogy**: "What does the graph say? How confident is it? Is the shortcut safe? What is still missing?"
+
+---
+
+### 6.3 Auxiliary Heads (trained alongside LoRA)
+
+Two small MLPs are trained jointly with the LoRA adapters:
+
+**`slot_head`** — reads h_r and predicts the current slot fill status:
+```python
+slot_state_r: Dict[slot_name, fill_confidence]  # e.g. {"verdict": 0.9, "caveat": 0.1}
+```
+Used to:
+- Drive the Q vector toward nodes that fill missing slots
+- Serve as the exit condition signal (all slots filled = can stop looping)
+- Log slot progression per iteration in `nodes_accessed_log`
+
+**`node_head`** — reads h_r and produces per-node attention logit adjustments:
+```python
+node_scores_r: Dict[node_id, score]  # additive bias on attention logits
+```
+Used to:
+- Track which specific nodes were most attended per iteration (corpus trajectory data)
+- Serve as the exit condition signal (stable node_scores = attention has converged)
+- Penalize nodes with active `invalidated_by` edges matching current context
+
+---
+
+### 6.4 Adaptive Loop Count
+
+Loop count R is not fixed — it adapts to task difficulty at inference time.
+
+| Task class | R_plan | R_evidence |
+|---|---|---|
+| Solved subgoal (cached, verified) | 1 | 1–2 |
+| Simple algorithm / direct judgment | 2 | 2–3 |
+| Multi-step reasoning / partial shortcut | 3 | 4–5 |
+| Hard / multi-hop / missing evidence | 4 | 5–6 |
+
+Task class is determined by the `micro_controller` at session start (from `task_family` and `question_mode`).
+
+---
+
+### 6.5 Exit Conditions
+
+Each block exits early if any of these conditions hold (checked after each loop iteration):
+
+```python
+def should_exit_loop(slot_state, node_scores, attention_entropy, loop_idx, R_max):
+    if loop_idx >= R_max:
+        return True  # hard cap
+    if all_slots_filled(slot_state, threshold=0.85):
+        return True  # task is fully specified
+    if attention_entropy(node_scores) < ENTROPY_THRESHOLD:
+        return True  # attention has converged (stable node selection)
+    if top_node_is_verified_shortcut(node_scores, graph):
+        return True  # high-confidence cached answer found
+    return False
+```
+
+---
+
+### 6.6 Three Operating Modes
+
+The system supports three operating modes, selected per-session by the micro_controller:
+
+| Mode | When | Description |
+|---|---|---|
+| **Fast** | Warm run, solved subgoal, simple question | 1 external retrieval + R=1–2 loops + generate |
+| **Standard** (default) | Most questions | 1 retrieval + R=2–6 loops + generate |
+| **Deep** | Multi-hop, missing evidence, high uncertainty | 1 retrieval + R_max loops + fallback external graph call if checker still fails |
+
+**Fallback to external graph call** only when, after R_max loops:
+```
+coverage < threshold
+OR contradiction_risk > threshold
+OR required_slot still missing
+OR attention_entropy still high
+OR top node is a ProcedureNode requiring execution
+```
+
+This is the V4 reasoning loop — it remains the fallback, not the default path.
+
+---
+
+### 6.7 Why not query once per token?
+
+During token generation, many tokens carry no reasoning load:
+```
+"Therefore,"  "however,"  "the main reason is"  "for example"
+```
+Querying the graph per-token is wasteful and noisy. The correct split is:
+
+```
+Before generation:  latent graph loops solve the reasoning state
+During generation:  LM verbalizes from the solved state
+During generation (fallback only): trigger explicit retrieval/procedure call
+```
+
+---
+
+
 ## 7. What Gets Trained
 
-**Decision: LoRA on cross-attention Q, K, V projection layers only + GNN weights.**
+**Decision: LoRA on cross-attention Q, K, V projection layers + GNN + auxiliary heads.**
 
 ```
-Base Qwen3-4B:          FROZEN (36 layers, ~4B params)
-Cross-attn Q projection: LoRA (r=16, α=32) ← trained
-Cross-attn K projection: LoRA (r=16, α=32) ← trained  
-Cross-attn V projection: LoRA (r=16, α=32) ← trained
+Base Qwen3-4B:           FROZEN (36 layers, ~4B params)
+Cross-attn Q projection: LoRA (r=16, α=32) at L8 + L20  ← trained
+Cross-attn K projection: LoRA (r=16, α=32) at L8 + L20  ← trained
+Cross-attn V projection: LoRA (r=16, α=32) at L8 + L20  ← trained
 GNN encoder:             Fully trained (small, ~10-50M params)
 Goal encoder (TaskFrame):Fully trained (MLP, ~1M params)
+slot_head:               Fully trained (MLP, ~0.5M params)  ← new (recurrent block)
+node_head:               Fully trained (MLP, ~0.5M params)  ← new (recurrent block)
 ```
 
-Estimated trainable parameters: **~5-20M** out of ~4B total. Approximately 0.25% of the model.
+Estimated trainable parameters: **~7-22M** out of ~4B total. Approximately 0.3% of the model.
 
 Why this scope:
 - The LM's core feed-forward and self-attention layers stay completely frozen → reasoning circuits are preserved
 - The LoRA on Q/K/V projections teaches the LM *how to form graph queries* without teaching it *what to think*
 - The GNN is fully trained because it needs to learn type-aware structural embeddings from scratch
-- Full LoRA across all attention layers risks destroying the base model's reasoning capability and would require massive compute
+- `slot_head` and `node_head` are small auxiliary MLPs that drive loop exit conditions and trajectory logging
+- Full LoRA across all attention layers risks destroying the base model's reasoning capability
 
 **The invariant**: After training, if you remove the graph entirely and zero out the cross-attention context vectors, the model should perform identically to the frozen base model on pure reasoning tasks. The graph improves performance; its absence doesn't degrade it.
 
