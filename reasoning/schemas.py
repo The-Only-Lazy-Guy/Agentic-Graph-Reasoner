@@ -41,31 +41,6 @@ NodeType = Literal[
     "control_rule",            # Persistent controller policy for a task family
     "signature_family",        # Family-level wrapper for related learned memory variants
     "signature_variant",       # Variant-level wrapper linked to a semantic memory node
-NodeType = Literal[
-    "fact",
-    "claim",
-    "example",
-    "summary",
-    "hub",
-    "bridge",
-    "hypothesis",
-    "application",
-    "procedure",
-    "failure_pattern",
-    "session_object",
-    "signal",                  # Phase 3A: meta-procedure observation persisted to subgraph
-    "activation_signal",       # Phase 3C: typed graph-activation observation
-    "task_frame_item",         # Phase 3C: prompt-frame item derived from activation signals
-    "session_gap",             # Phase 3C: session-scoped missing-context node
-    "session_bridge",          # Phase 3C: session-scoped provisional connector
-    "plan_node",               # Phase 3D: adaptive planning checkpoint
-    "plan_check",              # Phase 3D: deterministic/model-assisted plan validation result
-    "strategy",                # Proven reasoning recipe from a successful session
-    "solved_subgoal",          # Persistent reusable answer to a typed micro-subproblem
-    "reasoning_atom",          # Reusable reasoning fragment / explanation atom
-    "control_rule",            # Persistent controller policy for a task family
-    "signature_family",        # Family-level wrapper for related learned memory variants
-    "signature_variant",       # Variant-level wrapper linked to a semantic memory node
     "reasoning_chain",         # V5: Multi-hop deductive path (A→B→C logic) as a named reusable node
     "epistemic_state",         # V5: Belief-status node (how strongly known, what invalidates it)
 ]
@@ -699,4 +674,144 @@ class ReasoningChainNode:
             access_count=int(d.get("access_count", 0)),
             source_session_id=d.get("source_session_id", ""),
             chain_schema_version=int(d.get("chain_schema_version", 1)),
+        )
+
+
+
+# ---------------------------------------------------------------------------
+# V5: EpistemicStateNode
+# ---------------------------------------------------------------------------
+
+@dataclass
+class EpistemicStateNode:
+    """Stores the system belief status about a claim, subgoal, or reasoning path.
+
+    Answers:
+        - Do I know this?              -> status + confidence
+        - How strongly do I know this? -> support_level + last_verified_by
+        - What would make this false?  -> invalidators (natural language)
+        - What is still unresolved?    -> open_questions
+        - Can I safely shortcut?       -> requires_evidence_before_shortcut
+
+    Linked to its target node via an epistemic_of edge (see graph_relations.Rel.EPISTEMIC_OF).
+
+    GNN role:
+        - Layer 8: attended when status=uncertain or open_questions non-empty
+        - Layer 20: attended when status=verified or status=supported
+
+    Status values:
+        "verified"   - supported by mechanistic proof or multiple independent sources
+        "supported"  - consistent with available evidence but not fully proven
+        "uncertain"  - plausible but insufficient evidence
+        "disputed"   - conflicting evidence exists
+        "refuted"    - contradicted by reliable evidence
+        "pending"    - newly created, not yet evaluated
+    """
+    id: str
+    target_node_id: str
+    status: str = "pending"
+    confidence: float = 0.5
+    support_level: str = ""
+    last_verified_by: List[str] = field(default_factory=list)
+    open_questions: List[str] = field(default_factory=list)
+    known_risks: List[str] = field(default_factory=list)
+    invalidators: List[str] = field(default_factory=list)
+    requires_evidence_before_shortcut: bool = False
+    access_count: int = 0
+    source_session_id: str = ""
+    epistemic_schema_version: int = 1
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @staticmethod
+    def from_dict(d: Mapping[str, Any]) -> "EpistemicStateNode":
+        return EpistemicStateNode(
+            id=d["id"],
+            target_node_id=d.get("target_node_id", ""),
+            status=d.get("status", "pending"),
+            confidence=float(d.get("confidence", 0.5)),
+            support_level=d.get("support_level", ""),
+            last_verified_by=list(d.get("last_verified_by", [])),
+            open_questions=list(d.get("open_questions", [])),
+            known_risks=list(d.get("known_risks", [])),
+            invalidators=list(d.get("invalidators", [])),
+            requires_evidence_before_shortcut=bool(
+                d.get("requires_evidence_before_shortcut", False)
+            ),
+            access_count=int(d.get("access_count", 0)),
+            source_session_id=d.get("source_session_id", ""),
+            epistemic_schema_version=int(d.get("epistemic_schema_version", 1)),
+        )
+
+# ---------------------------------------------------------------------------
+# V5: LoopStateLog — per-iteration log entry for corpus + explainability
+# ---------------------------------------------------------------------------
+
+@dataclass
+class LoopStateLog:
+    """Structured log entry for one iteration of a recurrent graph-attention loop.
+
+    Captured at each iteration of Block 1 (Layer 8 planning) and Block 2
+    (Layer 20 evidence) loops. Appended to V4Packet.nodes_accessed_log.
+
+    Two purposes:
+        1. Corpus training data: Phase 16 uses per-loop node selections as
+           fine-grained trajectory supervision (which nodes should be attended
+           at loop r=1 vs r=3, how slot state evolves, when to exit).
+        2. Explainability: per-loop logs make the full attention trajectory
+           auditable without re-running the model.
+
+    Stored format: to_dict() is appended to nodes_accessed_log as a plain dict.
+    Reader can distinguish loop entries from simple node entries by checking
+    for the presence of "layer" and "loop" keys.
+
+    See V5_ARCHITECTURE.md §6.8 for the full format specification.
+    """
+    # Which transformer layer this loop is attached to (8 = planning, 20 = evidence).
+    layer: int
+
+    # Iteration index within this block (0-indexed).
+    loop: int
+
+    # Top-K nodes by attention logit, as [(node_id, score), ...] sorted descending.
+    # K is typically 3-5. Scores are softmax attention weights (not raw logits).
+    top_nodes: List[Any]  # List[Tuple[str, float]]
+
+    # Slot fill state at this iteration.
+    # Format: {slot_name: "filled" | "partial" | "missing"}
+    slot_state: Dict[str, str]
+
+    # Shortcut validity score for the top-ranked node (0.0-1.0).
+    # 0.0 = shortcut is unsafe / not applicable.
+    # 1.0 = shortcut is verified and safe to use.
+    shortcut_validity: float = 0.0
+
+    # Per-node invalidator flags for top nodes.
+    # Format: {node_id: bool} — True if an invalidated_by condition fired.
+    invalidator_flags: Dict[str, bool] = field(default_factory=dict)
+
+    # Per-node epistemic confidence for top nodes.
+    # Format: {node_id: float} — 0.0-1.0 belief in correctness of that node.
+    epistemic_confidence: Dict[str, float] = field(default_factory=dict)
+
+    # Why the loop exited at this iteration (None if still running).
+    # Valid values: None, "max_loops_reached", "all_conditions_met",
+    #               "shortcut_verified", "slots_filled_no_invalidators"
+    exit_reason: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @staticmethod
+    def from_dict(d: Mapping[str, Any]) -> "LoopStateLog":
+        return LoopStateLog(
+            layer=int(d.get("layer", 0)),
+            loop=int(d.get("loop", 0)),
+            top_nodes=list(d.get("top_nodes", [])),
+            slot_state=dict(d.get("slot_state", {})),
+            shortcut_validity=float(d.get("shortcut_validity", 0.0)),
+            invalidator_flags=dict(d.get("invalidator_flags", {})),
+            epistemic_confidence=dict(d.get("epistemic_confidence", {})),
+            exit_reason=d.get("exit_reason"),
         )

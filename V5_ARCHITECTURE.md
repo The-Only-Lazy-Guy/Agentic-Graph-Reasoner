@@ -164,12 +164,26 @@ The candidate subgraph is retrieved once. The loops refine the attention distrib
 
 **Per-iteration update**:
 ```python
+# GNN runs ONCE before the loop. base_K, base_V are fixed graph embeddings.
+base_K, base_V = GNN(graph_nodes, graph_edges)   # expensive, run once
+
 for r in range(R_plan):
+    # Dynamic K/V overlay: cheap per-loop state update (no GNN re-run)
+    # After loop r=1 the system knows: which shortcut is invalid, which
+    # failure pattern fired, which slot is filled. The overlay lets K/V
+    # reflect this working state without paying GNN re-encoding cost.
+    overlay_r   = state_overlay(slot_state_r, node_scores_r, epistemic_r, invalidator_flags_r)
+    K_r, V_r    = base_K + overlay_r.K, base_V + overlay_r.V
+
     Q_r    = W_q(concat(h_r, goal_vector, slot_state_r))  # goal-conditioned query
-    A_r    = softmax(Q_r @ K_graph.T / sqrt(d)) @ V_graph  # attend over fixed graph K,V
-    h_{r+1}         = layer_norm(h_r + W_o(A_r))           # update hidden state
-    slot_state_{r+1} = slot_head(h_{r+1})                  # track slot fill progress
-    node_scores_{r+1}= node_head(h_{r+1})                  # per-node selection scores
+    A_r    = softmax(Q_r @ K_r.T / sqrt(d)) @ V_r         # attend over updated K,V
+    h_{r+1}              = layer_norm(h_r + W_o(A_r))     # update hidden state
+    slot_state_{r+1}     = slot_head(h_{r+1})             # slot fill progress
+    node_scores_{r+1}    = node_head(h_{r+1})             # per-node selection logits
+    epistemic_r+1        = epistemic_head(h_{r+1})        # confidence per attended node
+    invalidator_flags_r+1= invalidator_head(h_{r+1})      # which invalidators fired
+    shortcut_validity_r+1= shortcut_head(h_{r+1})         # is current top shortcut safe?
+    log_loop_state(layer=8, loop=r, ...)                  # corpus + explainability log
 ```
 
 **What each loop iteration does (conceptually)**:
@@ -229,6 +243,57 @@ Used to:
 - Serve as the exit condition signal (stable node_scores = attention has converged)
 - Penalize nodes with active `invalidated_by` edges matching current context
 
+**`state_overlay_head`** — produces additive K, V deltas from loop state (no GNN re-run):
+```python
+overlay_r = state_overlay_head(
+    slot_state_r,         # which slots are filled (reduces attention on those nodes)
+    node_scores_r,        # which nodes were selected last loop (boosts continuity)
+    epistemic_r,          # epistemic confidence per node (boosts verified, suppresses uncertain)
+    invalidator_flags_r,  # which invalidators fired (strongly suppresses those nodes)
+)
+# K_r = base_K + overlay_r.K   (small additive delta, not a full re-encoding)
+# V_r = base_V + overlay_r.V
+```
+This gives the graph **working memory**: after loop 1 discovers an invalidator, loop 2
+automatically de-emphasizes that shortcut node without any external call.
+
+**`epistemic_head`** — reads h_r, predicts per-attended-node epistemic confidence:
+```python
+epistemic_r: Dict[node_id, confidence]  # 0.0–1.0 belief in each attended node's correctness
+```
+
+**`invalidator_head`** — reads h_r, predicts which invalidators have fired:
+```python
+invalidator_flags_r: Dict[node_id, bool]  # True if invalidated_by condition is active
+```
+
+**`shortcut_head`** — reads h_r, predicts whether the current top-ranked node is safe to shortcut:
+```python
+shortcut_validity_r: float  # 0.0 = unsafe, 1.0 = fully safe to shortcut
+```
+Used by the exit condition checker to gate shortcut-based early termination.
+
+---
+
+### 6.3b Full Loop State Variables
+
+The complete state propagated between iterations:
+
+```python
+@dataclass
+class LoopState:
+    h_r: Tensor                           # LM hidden state at current loop
+    slot_state_r: Dict[str, float]        # slot_name -> fill_confidence (0.0-1.0)
+    node_scores_r: Dict[str, float]       # node_id -> attention logit score
+    shortcut_validity_r: float            # 0.0-1.0: is top shortcut safe to use?
+    epistemic_confidence_r: Dict[str, float]  # node_id -> belief confidence
+    invalidator_flags_r: Dict[str, bool]  # node_id -> invalidator fired?
+    loop_idx: int                         # current iteration index
+    exit_reason: Optional[str]            # None if still running
+```
+
+These are logged per-iteration (see §6.8) and stored in `nodes_accessed_log` for corpus training.
+
 ---
 
 ### 6.4 Adaptive Loop Count
@@ -246,22 +311,55 @@ Task class is determined by the `micro_controller` at session start (from `task_
 
 ---
 
-### 6.5 Exit Conditions
+### 6.5 Exit Conditions — Compound Guard
 
-Each block exits early if any of these conditions hold (checked after each loop iteration):
+**Important**: exit must NOT trigger on attention stability alone. This prevents false convergence
+— the loop may stabilize on the wrong nodes.
+
+Exit requires ALL of the following to hold:
 
 ```python
-def should_exit_loop(slot_state, node_scores, attention_entropy, loop_idx, R_max):
+def should_exit_loop(state: LoopState, graph, loop_idx, R_max) -> Tuple[bool, str]:
+    # 1. Hard cap (always)
     if loop_idx >= R_max:
-        return True  # hard cap
-    if all_slots_filled(slot_state, threshold=0.85):
-        return True  # task is fully specified
-    if attention_entropy(node_scores) < ENTROPY_THRESHOLD:
-        return True  # attention has converged (stable node selection)
-    if top_node_is_verified_shortcut(node_scores, graph):
-        return True  # high-confidence cached answer found
-    return False
+        return True, "max_loops_reached"
+
+    # 2. Attention stability alone is NOT enough. Attention may have
+    #    converged on the wrong nodes (false convergence).
+    attention_stable = attention_entropy(state.node_scores_r) < ENTROPY_THRESHOLD
+
+    # 3. All slots must be filled with high confidence
+    slots_ok = all_slots_filled(state.slot_state_r, threshold=0.85)
+
+    # 4. No active invalidators on the top-ranked nodes
+    top_nodes = top_k_nodes(state.node_scores_r, k=3)
+    no_invalidators = not any(state.invalidator_flags_r.get(nid, False) for nid in top_nodes)
+
+    # 5. Epistemic confidence is high on top nodes
+    epistemic_ok = all(
+        state.epistemic_confidence_r.get(nid, 0.0) >= 0.70
+        for nid in top_nodes
+    )
+
+    # 6. If exiting via shortcut: require extra verification
+    if state.shortcut_validity_r > 0.85:
+        shortcut_node = top_nodes[0]
+        node = graph.nodes.get(shortcut_node)
+        preconditions_match = check_context_guard(node, current_task_frame)
+        no_deps_missing = check_dependencies(node, state.slot_state_r)
+        if preconditions_match and no_deps_missing and no_invalidators and epistemic_ok:
+            return True, "shortcut_verified"
+
+    # Full compound condition
+    if attention_stable and slots_ok and no_invalidators and epistemic_ok:
+        return True, "all_conditions_met"
+
+    return False, None
 ```
+
+**Why compound?** The loop may think slots are filled because attention stabilizes on a plausible-looking
+strategy node that actually has an active invalidator. Without checking invalidator_flags and epistemic
+confidence, the model would shortcut incorrectly. This is the primary failure mode of naive loop exit.
 
 ---
 
@@ -304,29 +402,91 @@ During generation (fallback only): trigger explicit retrieval/procedure call
 
 ---
 
+### 6.8 Per-Loop Logging (Corpus + Explainability)
+
+Every loop iteration appends a structured entry to `nodes_accessed_log`. This serves two purposes:
+1. **Training data**: Phase 16 uses per-loop node selections as fine-grained trajectory supervision
+2. **Explainability**: per-loop logs make the reasoning process auditable
+
+**Layer 8 (planning loop) log entry**:
+```json
+{
+  "layer": 8,
+  "loop": 2,
+  "top_nodes": [
+    ["failure_negative_edge_misconception", 0.31],
+    ["strategy_algorithm_applicability",    0.24],
+    ["epistemic_dijkstra_invalid",          0.19]
+  ],
+  "slot_state": {
+    "verdict":     "filled",
+    "reason":      "partial",
+    "alternative": "missing",
+    "caveat":      "missing"
+  },
+  "shortcut_validity": 0.12,
+  "invalidator_flags": {"strategy_algorithm_applicability": false},
+  "epistemic_confidence": {"epistemic_dijkstra_invalid": 0.94},
+  "exit_reason": null
+}
+```
+
+**Layer 20 (evidence loop) log entry** (final iteration):
+```json
+{
+  "layer": 20,
+  "loop": 4,
+  "top_nodes": [
+    ["fact_dijkstra_nonnegative",     0.36],
+    ["subgoal_dijkstra_negative_edge", 0.28],
+    ["fact_bellman_ford_neg_edges",    0.18]
+  ],
+  "slot_state": {
+    "verdict":     "filled",
+    "reason":      "filled",
+    "alternative": "filled",
+    "caveat":      "filled"
+  },
+  "shortcut_validity": 0.91,
+  "invalidator_flags": {},
+  "epistemic_confidence": {"subgoal_dijkstra_negative_edge": 0.94},
+  "exit_reason": "all_conditions_met"
+}
+```
+
+These entries are stored in `V4Packet.nodes_accessed_log` and written to the corpus `v5_trajectory.nodes_accessed_log` field by `distillation_corpus.py`.
+
+---
+
 
 ## 7. What Gets Trained
 
 **Decision: LoRA on cross-attention Q, K, V projection layers + GNN + auxiliary heads.**
 
 ```
-Base Qwen3-4B:           FROZEN (36 layers, ~4B params)
-Cross-attn Q projection: LoRA (r=16, α=32) at L8 + L20  ← trained
-Cross-attn K projection: LoRA (r=16, α=32) at L8 + L20  ← trained
-Cross-attn V projection: LoRA (r=16, α=32) at L8 + L20  ← trained
-GNN encoder:             Fully trained (small, ~10-50M params)
-Goal encoder (TaskFrame):Fully trained (MLP, ~1M params)
-slot_head:               Fully trained (MLP, ~0.5M params)  ← new (recurrent block)
-node_head:               Fully trained (MLP, ~0.5M params)  ← new (recurrent block)
+Base Qwen3-4B:            FROZEN (36 layers, ~4B params)
+Cross-attn Q projection:  LoRA (r=16, α=32) at L8 + L20  ← trained
+Cross-attn K projection:  LoRA (r=16, α=32) at L8 + L20  ← trained
+Cross-attn V projection:  LoRA (r=16, α=32) at L8 + L20  ← trained
+GNN encoder:              Fully trained (small, ~10-50M params)
+Goal encoder (TaskFrame): Fully trained (MLP, ~1M params)
+─────────────────────────────────────── Auxiliary heads (recurrent block) ─────
+slot_head:                Fully trained (MLP, ~0.5M)  — slot fill progress
+node_head:                Fully trained (MLP, ~0.5M)  — per-node attention logits
+state_overlay_head:       Fully trained (MLP, ~1M)    — dynamic K/V delta per loop
+epistemic_head:           Fully trained (MLP, ~0.5M)  — per-node belief confidence
+invalidator_head:         Fully trained (MLP, ~0.5M)  — which invalidators fired
+shortcut_head:            Fully trained (MLP, ~0.3M)  — shortcut safety gate
 ```
 
-Estimated trainable parameters: **~7-22M** out of ~4B total. Approximately 0.3% of the model.
+Estimated trainable parameters: **~10-26M** out of ~4B total. Approximately 0.35% of the model.
 
 Why this scope:
 - The LM's core feed-forward and self-attention layers stay completely frozen → reasoning circuits are preserved
 - The LoRA on Q/K/V projections teaches the LM *how to form graph queries* without teaching it *what to think*
 - The GNN is fully trained because it needs to learn type-aware structural embeddings from scratch
-- `slot_head` and `node_head` are small auxiliary MLPs that drive loop exit conditions and trajectory logging
+- Auxiliary heads are small MLPs: they drive the loop state, exit conditions, logging, and dynamic K/V overlay
+- `state_overlay_head` is the largest auxiliary head — it produces per-node K and V deltas from loop state
 - Full LoRA across all attention layers risks destroying the base model's reasoning capability
 
 **The invariant**: After training, if you remove the graph entirely and zero out the cross-attention context vectors, the model should perform identically to the frozen base model on pure reasoning tasks. The graph improves performance; its absence doesn't degrade it.
