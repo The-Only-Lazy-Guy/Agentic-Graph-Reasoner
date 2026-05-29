@@ -1,0 +1,226 @@
+"""Hook-based injection of V5AttentionAdapter into Qwen3-4B.
+
+Registers forward hooks on transformer block layers 8 and 20.
+Hook captures the hidden state, runs the recurrent attention block,
+returns updated hidden state. LM weights stay frozen.
+
+Usage:
+    adapter = V5AttentionAdapter()
+    gnn = RGCNEncoder()
+    goal_enc = GoalEncoder()
+    injector = GraphAttentionInjector(adapter, gnn, goal_enc)
+
+    # At inference time:
+    injector.prepare_session(graph, node_ids, text_embeddings, task_frame)
+    # Then load Qwen3 and call model.generate() — hooks fire automatically.
+    with injector.inject(model):
+        output = model.generate(input_ids, ...)
+
+    loop_logs = injector.get_loop_logs()  # per-iteration log entries
+"""
+from __future__ import annotations
+
+import contextlib
+from typing import Dict, List, Optional, Tuple
+
+import torch
+import torch.nn as nn
+from torch import Tensor
+
+from v5.cross_attention import V5AttentionAdapter
+from v5.gnn_encoder import GNN_HIDDEN_DIM, RGCNEncoder, GraphEncoderInputs, build_encoder_inputs
+from v5.goal_encoder import GoalEncoder, encode_task_frame
+from v5.loop_state import LoopState
+
+# Qwen3-4B: 36 transformer layers (0-indexed)
+PLANNING_LAYER = 8
+EVIDENCE_LAYER = 20
+
+
+class GraphAttentionInjector:
+    """Manages GNN pre-computation, hook registration, and loop log collection.
+
+    One injector instance per inference session. Call prepare_session() once
+    per question, then use inject() context manager during model.generate().
+    """
+
+    def __init__(
+        self,
+        adapter: V5AttentionAdapter,
+        gnn: RGCNEncoder,
+        goal_encoder: GoalEncoder,
+        device: Optional[torch.device] = None,
+    ):
+        self.adapter = adapter
+        self.gnn = gnn
+        self.goal_encoder = goal_encoder
+        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # Populated by prepare_session()
+        self._node_ids: List[str] = []
+        self._base_node_embeddings: Optional[Tensor] = None  # [N, GNN_HIDDEN_DIM]
+        self._goal: Optional[Tensor] = None                  # [1, GOAL_DIM]
+        self._task_frame: Optional[dict] = None
+        self._r_plan: int = 4
+        self._r_evidence: int = 6
+
+        # Populated during forward pass
+        self._loop_logs: List[dict] = []
+        self._plan_state: Optional[LoopState] = None
+        self._evid_state: Optional[LoopState] = None
+
+        self._hooks: List = []
+
+    def prepare_session(
+        self,
+        graph,
+        node_ids: List[str],
+        text_embeddings: Dict[str, List[float]],
+        task_frame: dict,
+        r_plan: int = 4,
+        r_evidence: int = 6,
+    ) -> None:
+        """Pre-compute GNN embeddings and goal vector for this session.
+
+        Args:
+            graph: MemoryGraph instance (subgraph already filtered to top-K)
+            node_ids: ordered node IDs in the subgraph
+            text_embeddings: {node_id: [768-float]} pre-computed BERT embeddings
+            task_frame: dict with task_family, question_mode, required_slots
+        """
+        self._node_ids = node_ids
+        self._task_frame = task_frame
+        self._r_plan = r_plan
+        self._r_evidence = r_evidence
+        self._loop_logs = []
+        self._plan_state = None
+        self._evid_state = None
+
+        encoder_inputs = build_encoder_inputs(graph, node_ids, text_embeddings, self.device)
+
+        self.gnn.eval()
+        with torch.no_grad():
+            self._base_node_embeddings = self.gnn(encoder_inputs)  # [N, GNN_HIDDEN_DIM]
+
+        self.goal_encoder.eval()
+        with torch.no_grad():
+            self._goal = encode_task_frame(task_frame, self.device, self.goal_encoder)  # [1, GOAL_DIM]
+
+    def _planning_hook(self, module, args, output):
+        """Forward hook for layer 8 (planning block)."""
+        if self._base_node_embeddings is None:
+            return output
+
+        # output is typically a tuple; hidden states are output[0]
+        if isinstance(output, tuple):
+            h = output[0]
+        else:
+            h = output
+
+        # Take the first token's hidden state as the reasoning anchor
+        # h shape: [B, seq_len, d_lm]
+        h_anchor = h[:, 0, :]   # [B, d_lm]
+
+        h_updated, state, logs = self.adapter.run_planning(
+            h=h_anchor,
+            goal=self._goal,
+            node_embeddings=self._base_node_embeddings,
+            node_ids=self._node_ids,
+            r_max=self._r_plan,
+            task_frame=self._task_frame,
+        )
+        self._plan_state = state
+        self._loop_logs.extend(logs)
+
+        # Inject updated h back into the first token position
+        h_new = h.clone()
+        h_new[:, 0, :] = h_updated
+        if isinstance(output, tuple):
+            return (h_new,) + output[1:]
+        return h_new
+
+    def _evidence_hook(self, module, args, output):
+        """Forward hook for layer 20 (evidence block)."""
+        if self._base_node_embeddings is None:
+            return output
+
+        if isinstance(output, tuple):
+            h = output[0]
+        else:
+            h = output
+
+        h_anchor = h[:, 0, :]   # [B, d_lm]
+
+        h_updated, state, logs = self.adapter.run_evidence(
+            h=h_anchor,
+            goal=self._goal,
+            node_embeddings=self._base_node_embeddings,
+            node_ids=self._node_ids,
+            r_max=self._r_evidence,
+            task_frame=self._task_frame,
+        )
+        self._evid_state = state
+        self._loop_logs.extend(logs)
+
+        h_new = h.clone()
+        h_new[:, 0, :] = h_updated
+        if isinstance(output, tuple):
+            return (h_new,) + output[1:]
+        return h_new
+
+    @contextlib.contextmanager
+    def inject(self, model: nn.Module):
+        """Context manager: register hooks, yield, then remove them."""
+        layer_modules = _get_transformer_layers(model)
+        if len(layer_modules) <= max(PLANNING_LAYER, EVIDENCE_LAYER):
+            raise ValueError(
+                f"Model has only {len(layer_modules)} transformer layers; "
+                f"expected >{max(PLANNING_LAYER, EVIDENCE_LAYER)}"
+            )
+
+        h_plan = layer_modules[PLANNING_LAYER].register_forward_hook(self._planning_hook)
+        h_evid = layer_modules[EVIDENCE_LAYER].register_forward_hook(self._evidence_hook)
+        self._hooks = [h_plan, h_evid]
+        try:
+            yield self
+        finally:
+            for h in self._hooks:
+                h.remove()
+            self._hooks = []
+
+    def get_loop_logs(self) -> List[dict]:
+        return list(self._loop_logs)
+
+    def get_fallback_needed(self) -> bool:
+        """True if evidence loop exited via max_loops with incomplete state."""
+        from v5.exit_condition import fallback_needed
+        if self._evid_state is None:
+            return False
+        return fallback_needed(self._evid_state)
+
+
+def _get_transformer_layers(model: nn.Module) -> List[nn.Module]:
+    """Locate the ordered list of transformer decoder blocks in Qwen3-4B.
+
+    Tries common attribute paths used by Hugging Face Qwen3 and other
+    decoder-only models. Raises ValueError if not found.
+    """
+    # Qwen3: model.model.layers
+    for attr_path in [
+        ("model", "layers"),
+        ("transformer", "h"),
+        ("gpt_neox", "layers"),
+        ("layers",),
+    ]:
+        m = model
+        try:
+            for attr in attr_path:
+                m = getattr(m, attr)
+            if isinstance(m, (nn.ModuleList, list)) and len(m) > 0:
+                return list(m)
+        except AttributeError:
+            continue
+    raise ValueError(
+        "Cannot locate transformer layer list in model. "
+        "Check _get_transformer_layers() for this model architecture."
+    )
