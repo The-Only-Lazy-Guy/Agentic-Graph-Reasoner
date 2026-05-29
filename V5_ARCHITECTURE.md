@@ -140,17 +140,17 @@ Layer 21-35: Answer formation
 
 ### Injection Point 1 — Layer 8: Plan Pass
 
-- **Node pool**: `StrategyNode`, `FailurePatternNode`, `ControlRuleNode`
-- **Purpose**: At this early stage, the LM has processed the question but hasn't committed to a reasoning path. It attends broadly to *strategy* and *anti-pattern* nodes to select an appropriate reasoning plan.
+- **Node pool**: `StrategyNode`, `FailurePatternNode`, `ControlRuleNode`, `ReasoningChainNode`, `EpistemicStateNode` (when `status=uncertain` or `requires_evidence_before_shortcut=True`)
+- **Purpose**: At this early stage, the LM has processed the question but hasn't committed to a reasoning path. It attends broadly to *strategy*, *anti-pattern*, and *deductive chain* nodes to select an appropriate reasoning plan. Epistemic states with unresolved open questions surface here to pre-warn the model before it commits to a shortcut.
 - **Effect**: The retrieved strategy context is added to the hidden state, biasing subsequent layers toward the correct reasoning structure for this task family.
-- **Analogy**: "Before I start — what worked before for problems like this? What traps should I avoid?"
+- **Analogy**: "Before I start — what worked before? What traps should I avoid? What am I not yet certain about?"
 
 ### Injection Point 2 — Layer 20: Evidence Pass
 
-- **Node pool**: `FactNode`, `ClaimNode`, `ApplicationNode`, `SolvedSubgoalNode`
-- **Purpose**: Mid-reasoning, the LM has partially formulated its approach. It now queries for specific factual evidence to support or refute its current hypothesis.
-- **Effect**: The retrieved evidence is added to the hidden state, providing verified facts from the graph before the model commits to an answer.
-- **Analogy**: "Given my plan — what does the graph actually say about this specific claim?"
+- **Node pool**: `FactNode`, `ClaimNode`, `ApplicationNode`, `SolvedSubgoalNode`, `EpistemicStateNode` (when `status=verified` or `status=supported`)
+- **Purpose**: Mid-reasoning, the LM has partially formulated its approach. It queries for specific factual evidence AND the graph's belief-status on that evidence. A high-confidence `EpistemicStateNode` pointing to a `SolvedSubgoalNode` signals the model can safely shortcut. A low-confidence or invalidated one signals it must verify further.
+- **Effect**: The retrieved evidence + epistemic signal is added to the hidden state, providing both facts and confidence metadata before the model commits to an answer.
+- **Analogy**: "Given my plan — what does the graph say about this claim? And how confident is the graph in that answer?"
 
 ### Why two different node pools?
 
@@ -315,7 +315,7 @@ These were explicitly deferred and must be revisited before Phase 16 begins:
 
 5. **Contrastive negative construction**: Exact algorithm for constructing hard negatives from the existing graph. Do we use `FailurePatternNode`s as ready-made negatives? → Resolve at Phase 16 data pipeline design.
 
-6. **Answer scoring function**: `answer_score()` in the reward function — is this LLM-judged (expensive), rule-based (fragile), or embedding similarity (cheap but noisy)? → Must decide before training.
+6. **Answer scoring function**: ~~Must decide before training~~ → **RESOLVED**: `reasoning/scoring.py` implements heuristic + embedding + LLM judge fallback. See `answer_score()` and `trajectory_reward()`.
 
 ---
 
@@ -330,4 +330,138 @@ To prevent scope creep:
 
 ---
 
-*Document authored: 2026-05-29. Revision required before Phase 16 begins.*
+## 13. Meta-Reasoning Control Layer (V5 Addition)
+
+> Proposed and approved 2026-05-29. Implemented in `reasoning/schemas.py` and `reasoning/graph_relations.py`.
+
+The graph previously stored *what is known*. This section adds *how confidently it is known*, *what invalidates it*, *what it requires*, and *where it transfers*.
+
+### Node Type: `epistemic_state`
+
+Stores the system's belief status about a claim, subgoal, or reasoning path.
+
+```json
+{
+  "id": "epi_dijkstra_negative_edge_001",
+  "type": "epistemic_state",
+  "target_node_id": "claim_dijkstra_negative_edge_invalid",
+  "status": "verified",
+  "confidence": 0.94,
+  "support_level": "mechanistic + textbook fact",
+  "open_questions": [],
+  "known_risks": ["Special DAG shortest path algorithms may confuse the answer"],
+  "invalidators": ["Question is about DAG-specific shortest path, not normal Dijkstra"],
+  "requires_evidence_before_shortcut": false,
+  "last_verified_by": ["fact_dijkstra_nonnegative", "reasoning_greedy_invariant"]
+}
+```
+
+**Why this is critical**: Without `epistemic_state`, the graph is a bag of confident-looking nodes. The model has no mechanism to distinguish:
+- A fact that has been mechanistically verified from a fact that was inferred once in one session
+- A shortcut that is always safe from one that fires only in specific conditions
+- A solved subgoal that can be reused from one that requires re-verification
+
+**GNN role**:
+- Attended to at **Layer 8** when `status=uncertain` or `open_questions` is non-empty → pre-warns the model before it commits to a shortcut
+- Attended to at **Layer 20** when `status=verified` or `status=supported` → signals the model can trust the nearby evidence nodes
+
+---
+
+### Edge Type: `invalidated_by`
+
+Connects a claim/strategy/shortcut to a condition that makes it unsafe.
+
+```
+claim: "Use Dijkstra for shortest path"
+  ──invalidated_by──>
+condition: "Graph has negative edges (not just negative cycles)"
+```
+
+**Semantics**: "This claim is UNSAFE to use when the condition described by the destination node is true."
+
+**GNN role**: During the Layer 20 evidence pass, if the model attends to a shortcut node AND that node has an active `invalidated_by` edge whose destination matches the current question context, the trajectory reward penalizes finalization without verification.
+
+**Enforcement**: `SolvedSubgoalNode` already has `valid_when` and `invalid_when` as text lists. `invalidated_by` edges make these first-class graph structure so the GNN can propagate the invalidation signal.
+
+---
+
+### Edge Type: `requires_slot`
+
+Connects a strategy/procedure/answer to required task-frame slots.
+
+```
+strategy_algorithm_applicability
+  ──requires_slot──> verdict
+  ──requires_slot──> reason
+  ──requires_slot──> alternative
+  ──requires_slot──> caveat
+```
+
+**Semantics**: "This strategy cannot produce a complete answer unless the named slot is filled."
+
+**Why graph structure instead of prompt instructions**: The GNN can propagate "missing slot" signals directly from the graph. When the model attends to a strategy node at Layer 8, the GNN also surfaces the `requires_slot` targets, telling the model what it must find before it can finalize — without relying on the system prompt to enumerate slot requirements.
+
+---
+
+### Edge Type: `transfers_to`
+
+Stores analogical transfer between reasoning structures and domains.
+
+```
+reasoning_atom: "monotonic invariant allows binary search"
+  ──transfers_to──>
+application: "parametric search"
+
+strategy: "rank via cumulative frequency"
+  ──transfers_to──>
+application: "Fenwick tree leaderboard design"
+```
+
+**Semantics**: "The reasoning structure of the source applies analogically to the problem described by the destination."
+
+**GNN role**: During the Layer 8 planning pass, if the model attends to a strategy node, the GNN also propagates through `transfers_to` edges to surface analogical candidates as secondary planning anchors. This enables cross-domain reasoning without the model needing to explicitly recognize the analogy from text alone.
+
+---
+
+### Full example with epistemic control flow
+
+**Question**: "Can I use Dijkstra if there are negative edges but no negative cycle?"
+
+**Graph activates**:
+```
+fact: Dijkstra requires non-negative weights
+failure_pattern: 'no negative cycle means Dijkstra works' (known misconception)
+reasoning_chain: negative edge → breaks greedy finalization → wrong answer
+epistemic_state: status=verified, confidence=0.94
+  ──invalidated_by──> condition: 'question is about DAG shortest path, not general Dijkstra'
+strategy_algorithm_applicability
+  ──requires_slot──> verdict
+  ──requires_slot──> reason
+  ──requires_slot──> alternative
+  ──requires_slot──> caveat
+```
+
+**Model concludes**:
+```
+verdict   = no
+reason    = greedy invariant breaks on negative edge
+alternative = Bellman-Ford / DAG shortest path if applicable
+caveat    = no negative cycle is sufficient for Bellman-Ford, not Dijkstra
+confidence  = high (epistemic_state verified)
+```
+
+This is better reasoning, not just better retrieval.
+
+---
+
+### Registry
+
+All valid edge relation types are defined in [`reasoning/graph_relations.py`](file:///E:/PROJECT/graph_v5/reasoning/graph_relations.py) with:
+- Full semantic documentation per relation
+- Numeric GNN type IDs (`RELATION_TYPE_ID` dict) — stable, append-only
+- Groupings: `PLANNING_PASS_RELATIONS`, `EVIDENCE_PASS_RELATIONS`, `NEGATIVE_RELATIONS`, `POSITIVE_RELATIONS`
+- Helper functions: `relation_type_id()`, `is_negative()`, `is_positive()`
+
+---
+
+*Document authored: 2026-05-29. Section 13 added 2026-05-29. Revision required before Phase 16 begins.*

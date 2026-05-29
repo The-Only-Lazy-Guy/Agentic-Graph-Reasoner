@@ -41,7 +41,33 @@ NodeType = Literal[
     "control_rule",            # Persistent controller policy for a task family
     "signature_family",        # Family-level wrapper for related learned memory variants
     "signature_variant",       # Variant-level wrapper linked to a semantic memory node
+NodeType = Literal[
+    "fact",
+    "claim",
+    "example",
+    "summary",
+    "hub",
+    "bridge",
+    "hypothesis",
+    "application",
+    "procedure",
+    "failure_pattern",
+    "session_object",
+    "signal",                  # Phase 3A: meta-procedure observation persisted to subgraph
+    "activation_signal",       # Phase 3C: typed graph-activation observation
+    "task_frame_item",         # Phase 3C: prompt-frame item derived from activation signals
+    "session_gap",             # Phase 3C: session-scoped missing-context node
+    "session_bridge",          # Phase 3C: session-scoped provisional connector
+    "plan_node",               # Phase 3D: adaptive planning checkpoint
+    "plan_check",              # Phase 3D: deterministic/model-assisted plan validation result
+    "strategy",                # Proven reasoning recipe from a successful session
+    "solved_subgoal",          # Persistent reusable answer to a typed micro-subproblem
+    "reasoning_atom",          # Reusable reasoning fragment / explanation atom
+    "control_rule",            # Persistent controller policy for a task family
+    "signature_family",        # Family-level wrapper for related learned memory variants
+    "signature_variant",       # Variant-level wrapper linked to a semantic memory node
     "reasoning_chain",         # V5: Multi-hop deductive path (A→B→C logic) as a named reusable node
+    "epistemic_state",         # V5: Belief-status node (how strongly known, what invalidates it)
 ]
 
 # CRUD operations on session-object state, captured in the audit log.
