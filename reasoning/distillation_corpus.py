@@ -39,7 +39,11 @@ if TYPE_CHECKING:
 DEFAULT_CORPUS_ROOT = Path("data/distillation_corpus")
 DEFAULT_CORPUS_FILE = "sessions.jsonl"
 
-CORPUS_SCHEMA_VERSION = 1
+# V1: SFT distillation fields (answer, trace, metrics)
+# V2: V5 cross-attention trajectory fields (nodes_accessed_log, node_type_breakdown,
+#     trajectory_reward_score). V2 is a strict superset of V1 — old readers
+#     that ignore unknown fields remain compatible.
+CORPUS_SCHEMA_VERSION = 2
 
 
 def _now_iso() -> str:
@@ -63,6 +67,16 @@ def _serialize_obj(obj: Any) -> Any:
     return obj
 
 
+def _build_node_type_counts(nodes_accessed_log: list) -> Dict[str, int]:
+    """Summarise nodes_accessed_log into a {node_type: count} dict."""
+    counts: Dict[str, int] = {}
+    for entry in nodes_accessed_log:
+        ntype = entry.get("node_type", "unknown") if isinstance(entry, dict) else "unknown"
+        counts[ntype] = counts.get(ntype, 0) + 1
+    return counts
+
+
+
 def packet_to_corpus_row(
     pkt: "V4Packet",
     graph: "MemoryGraph",
@@ -74,6 +88,10 @@ def packet_to_corpus_row(
 
     `controller_label` is a short tag like "opencode:big-pickle" so the
     trainer can stratify samples by model when needed.
+
+    V2 adds: v5_trajectory block with nodes_accessed_log, node_type_breakdown,
+    and trajectory_reward_score. These fields are None-safe: if graph is
+    unavailable or nodes_accessed_log is empty, fields are written as empty.
     """
     # Resolve anchor snippets so the row is self-contained (you can train on
     # it without re-loading the original graph).
@@ -169,10 +187,41 @@ def packet_to_corpus_row(
                 + (1 if pkt.plan_tree_summary else 0)
             ),
         },
+
+        # ── V5: cross-attention trajectory data (Schema V2) ──────────────────
+        # These fields are the primary supervision signal for training the
+        # GNN + LoRA cross-attention adapters in Phase 16.
+        "v5_trajectory": {
+            # Every node explicitly accessed during this session, in order.
+            # Format: [{"node_id": str, "node_type": str, "step": int, "reason": str}]
+            # Reasons: "anchor_retrieval", "tool_read", "shortcut",
+            #          "neighbor_expand", "subgoal_lookup"
+            "nodes_accessed_log": list(getattr(pkt, "nodes_accessed_log", []) or []),
+
+            # Summary: how many nodes of each type were accessed.
+            # Derived from nodes_accessed_log for fast filtering.
+            # Format: {"strategy": 2, "fact": 5, "failure_pattern": 1, ...}
+            "node_type_counts": _build_node_type_counts(
+                getattr(pkt, "nodes_accessed_log", []) or []
+            ),
+
+            # Trajectory reward score (0.0–1.0). Computed post-hoc using
+            # reasoning.scoring.trajectory_reward(). None if not yet scored.
+            # Phase 16 training pipeline fills this field in a separate pass.
+            "trajectory_reward_score": None,
+
+            # Whether this trajectory has been labelled as a high-quality
+            # training example (manually reviewed or auto-approved).
+            "approved_for_training": False,
+
+            # Schema version so Phase 16 pipeline can detect V1 vs V2 rows.
+            "corpus_schema_version": CORPUS_SCHEMA_VERSION,
+        },
     }
     if extra_metadata:
         row["extra"] = dict(extra_metadata)
     return row
+
 
 
 def append_session_to_corpus(

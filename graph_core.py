@@ -119,6 +119,19 @@ class Node:
     confidence: float = 0.5
     importance: float = 0.5
     metadata: Dict[str, Any] = field(default_factory=dict)
+    # ---------------------------------------------------------------------------
+    # V5 additions — used as GNN node features during cross-attention training
+    # ---------------------------------------------------------------------------
+    # How many times this node was successfully cited across all sessions.
+    # Incremented by post_processing at session end. Used as a learned importance
+    # prior by the GNN (high-access nodes get higher base attention weight).
+    access_count: int = 0
+    # Machine-readable applicability gate. Maps task-frame keys to required values.
+    # Example: {"task_family": "algorithm_applicability", "question_mode": "verify"}
+    # The GNN uses this to suppress attention on nodes whose context_guard does not
+    # match the current TaskFrame, preventing irrelevant retrieval.
+    # Empty dict means "always applicable" (no gate).
+    context_guard: Dict[str, Any] = field(default_factory=dict)
 
     @staticmethod
     def from_dict(d: Mapping[str, Any]) -> "Node":
@@ -129,6 +142,8 @@ class Node:
             confidence=float(d.get("confidence", 0.5)),
             importance=float(d.get("importance", 0.5)),
             metadata=dict(d.get("metadata", {}) or {}),
+            access_count=int(d.get("access_count", 0)),
+            context_guard=dict(d.get("context_guard", {}) or {}),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -143,6 +158,16 @@ class Edge:
     strength: float = 0.5
     directed: bool = True
     metadata: Dict[str, Any] = field(default_factory=dict)
+    # ---------------------------------------------------------------------------
+    # V5 addition — used as a GNN edge feature
+    # ---------------------------------------------------------------------------
+    # How certain we are that this relation is correct (epistemically).
+    # Distinct from `strength` (which measures relation weight/intensity):
+    #   strength=1.0, confidence=0.3 → strong but uncertain relation
+    #   strength=0.4, confidence=0.9 → weak but well-established relation
+    # Written by post_processing and judge_edits_batch. Default 1.0 (certain)
+    # for developer-authored edges; lower for LLM-inferred edges.
+    confidence: float = 1.0
 
     @staticmethod
     def from_dict(d: Mapping[str, Any]) -> "Edge":
@@ -153,6 +178,7 @@ class Edge:
             strength=float(d.get("strength", 0.5)),
             directed=bool(d.get("directed", True)),
             metadata=dict(d.get("metadata", {}) or {}),
+            confidence=float(d.get("confidence", 1.0)),
         )
 
     def to_dict(self) -> Dict[str, Any]:

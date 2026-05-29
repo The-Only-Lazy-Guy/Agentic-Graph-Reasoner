@@ -3005,6 +3005,15 @@ class V4Packet:
     signature_shadow_report: Dict[str, Any] = field(default_factory=dict)  # Phase 18
     signature_graph_projection: Dict[str, Any] = field(default_factory=dict)  # Phase 18
     signature_live_bias: Dict[str, Any] = field(default_factory=dict)  # Phase 19
+    # ---------------------------------------------------------------------------
+    # V5 additions — required for cross-attention trajectory training corpus
+    # ---------------------------------------------------------------------------
+    # Ordered log of every graph node explicitly accessed during this session.
+    # Each entry: {"node_id": str, "node_type": str, "step": int, "reason": str}
+    # where "reason" is one of: "anchor_retrieval", "tool_read", "shortcut",
+    # "neighbor_expand", "subgoal_lookup".
+    # This is the primary trajectory data for Layer-8 / Layer-20 supervision.
+    nodes_accessed_log: List[Dict[str, Any]] = field(default_factory=list)  # V5
 
 
 # ---------------------------------------------------------------------------

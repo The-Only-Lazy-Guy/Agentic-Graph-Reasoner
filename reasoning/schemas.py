@@ -41,6 +41,7 @@ NodeType = Literal[
     "control_rule",            # Persistent controller policy for a task family
     "signature_family",        # Family-level wrapper for related learned memory variants
     "signature_variant",       # Variant-level wrapper linked to a semantic memory node
+    "reasoning_chain",         # V5: Multi-hop deductive path (A→B→C logic) as a named reusable node
 ]
 
 # CRUD operations on session-object state, captured in the audit log.
@@ -594,4 +595,82 @@ class SessionSubgraph:
             step_count=int(d.get("step_count", 0)),
             started_at=d.get("started_at", ""),
             ended_at=d.get("ended_at"),
+        )
+
+
+# ---------------------------------------------------------------------------
+# V5: ReasoningChainNode
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ReasoningChainNode:
+    """A multi-hop deductive path captured as a named, reusable graph node.
+
+    Distinct from StrategyNode (which is a *recipe* for how to reason) and
+    SolvedSubgoalNode (which is a *cached answer* to a sub-problem).
+    A ReasoningChainNode captures the *logical structure* of a deduction:
+
+        premise_a  → (entails)  →  intermediate_b  → (entails)  →  conclusion_c
+
+    This makes multi-hop reasoning patterns reusable. If the same A→B→C chain
+    recurs across different questions, the model can attend to this node and
+    shortcut the full derivation.
+
+    GNN role:
+        - Attended to during the Layer 8 planning pass (provides deductive
+          scaffolding alongside StrategyNodes and FailurePatternNodes).
+        - Edges: chain_step edges (relation="chain_step", ordered by step_index)
+          connect this node to each intermediate fact/claim node.
+        - context_guard on the Node itself restricts attention to matching
+          task families.
+
+    Lifecycle:
+        Created by post_processing.extract_reasoning_chain() on successful
+        multi-step sessions (>= 2 graph reads that form an entailment path).
+        Requires human review (tier="review") before promotion to "supported".
+    """
+    id: str
+
+    # Human-readable description of the full deductive path.
+    chain_text: str
+
+    # Ordered list of node IDs that form the chain: [premise_id, step1_id, ..., conclusion_id]
+    # Minimum 2 nodes (premise + conclusion). Each consecutive pair must have an
+    # 'entails' or 'supports' edge in the main MemoryGraph.
+    chain_step_ids: List[str]
+
+    # The final conclusion stated as a standalone claim.
+    conclusion: str
+
+    # Domain keywords for TF-IDF retrieval matching (same role as StrategyNode.domain_keywords).
+    domain_keywords: List[str] = field(default_factory=list)
+
+    # Which task families this chain is valid for. Empty = all families.
+    applicable_task_families: List[str] = field(default_factory=list)
+
+    # Number of times this chain was successfully used across sessions.
+    # Incremented by post_processing at session end (same as Node.access_count).
+    access_count: int = 0
+
+    # Session that first produced this chain.
+    source_session_id: str = ""
+
+    # Schema version for forward-compatibility.
+    chain_schema_version: int = 1
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @staticmethod
+    def from_dict(d: Mapping[str, Any]) -> "ReasoningChainNode":
+        return ReasoningChainNode(
+            id=d["id"],
+            chain_text=d.get("chain_text", ""),
+            chain_step_ids=list(d.get("chain_step_ids", [])),
+            conclusion=d.get("conclusion", ""),
+            domain_keywords=list(d.get("domain_keywords", [])),
+            applicable_task_families=list(d.get("applicable_task_families", [])),
+            access_count=int(d.get("access_count", 0)),
+            source_session_id=d.get("source_session_id", ""),
+            chain_schema_version=int(d.get("chain_schema_version", 1)),
         )
