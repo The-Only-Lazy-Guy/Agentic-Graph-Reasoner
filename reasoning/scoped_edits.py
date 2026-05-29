@@ -292,6 +292,8 @@ class GraphEditPatch:
     )
 
     def to_dict(self) -> Dict[str, Any]:
+        payload_meta = self.payload.get("metadata")
+        meta: Dict[str, Any] = dict(payload_meta) if isinstance(payload_meta, dict) else {}
         return {
             "patch_id": self.patch_id,
             "patch_type": self.patch_type,
@@ -306,6 +308,7 @@ class GraphEditPatch:
             "source_session": self.source_session,
             "confidence": self.confidence,
             "risk_level": self.risk_level,
+            "metadata": meta,
             "payload": dict(self.payload),
             "raw_edit": dict(self.raw_edit),
             "validation": self.validation.to_dict(),
@@ -583,6 +586,10 @@ def _inherit_parent_validation(patches: Sequence[GraphEditPatch]) -> None:
 
 
 def _min_support_score(patch: GraphEditPatch) -> float:
+    payload_meta = patch.payload.get("metadata")
+    meta = payload_meta if isinstance(payload_meta, dict) else {}
+    if patch.patch_type == "add_epistemic_state" and meta.get("model_emitted_patch"):
+        return 0.05
     if patch.patch_type in {"add_strategy", "add_control_rule", "add_epistemic_state"}:
         return 0.08
     if patch.patch_type in {"add_solved_subgoal", "add_reasoning_atom"}:
