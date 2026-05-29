@@ -1,0 +1,1916 @@
+{
+  "metadata": {
+    "title": "Chemistry reasoning graph (gold, true summary semantics)",
+    "source_note": "Designed for reasoning supervision with atomic nodes, structural summary hubs, branching support patterns, explicit contradictions, quantitative formulas, and bridge nodes connecting chemistry to mathematical reasoning.",
+    "relation_convention": {
+      "part_of": "child hub or bridge node -> parent hub",
+      "example_of": "example -> concept",
+      "support": "evidence, mechanism, or prerequisite statement -> claim",
+      "contradict": "accepted or resolving claim -> false or competing claim",
+      "refine": "more specific statement -> broader statement",
+      "depend": "prerequisite concept -> dependent concept",
+      "cause": "cause or mechanism -> downstream effect"
+    },
+    "notes": [
+      "Hub nodes are structural containers only and are not summary nodes.",
+      "Summary nodes are reserved for compressed component-level abstractions created only after enough support exists to simplify a subgraph into one reusable node.",
+      "Ordinary claims are not attached to hubs by default; topical grouping lives in metadata.",
+      "Several false statements are intentionally retained with low confidence because they create useful resolve_conflict and update_node supervision.",
+      "Branching is preferred over a single narrow chain: many claims have multiple supports or multiple downstream consequences.",
+      "Bridge nodes connect structure-property, rate-energy, equilibrium-math, acid-base-logarithms, and quantitative chemistry."
+    ],
+    "gold_version": "v2_true_summary_semantics"
+  },
+  "nodes": [
+    {
+      "id": "chemistry_hub",
+      "text": "Chemistry studies matter, composition, structure, reactions, energy, and quantitative relationships.",
+      "node_type": "hub",
+      "confidence": 1.0,
+      "importance": 1.0,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "global"
+      }
+    },
+    {
+      "id": "structure_bonding_hub",
+      "text": "Chemical structure and bonding explain how atoms combine and how substances acquire properties.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "structure_bonding"
+      }
+    },
+    {
+      "id": "reactions_stoich_hub",
+      "text": "Reaction and stoichiometric reasoning connects balanced equations to quantitative prediction.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "reactions_stoich"
+      }
+    },
+    {
+      "id": "kinetics_equilibrium_hub",
+      "text": "Kinetics and equilibrium explain reaction speed, reversibility, and composition at equilibrium.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "kinetics_equilibrium"
+      }
+    },
+    {
+      "id": "acid_base_hub",
+      "text": "Acid-base chemistry tracks hydrogen-ion behavior, neutralization, and pH.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "acid_base"
+      }
+    },
+    {
+      "id": "thermodynamics_hub",
+      "text": "Thermochemistry studies heat transfer, bond energy, and enthalpy change in reactions.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "thermodynamics"
+      }
+    },
+    {
+      "id": "bridges_hub",
+      "text": "Bridge insights connect quantitative, structural, energetic, and equilibrium reasoning.",
+      "node_type": "hub",
+      "confidence": 0.98,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "bridges"
+      }
+    },
+    {
+      "id": "quantitative_conversion_bridge",
+      "text": "Balanced equations plus algebra connect mass, moles, particles, and gas quantities in quantitative chemistry.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "structure_property_bridge",
+      "text": "Bonding and intermolecular forces connect microscopic structure to macroscopic properties.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "energy_rate_bridge",
+      "text": "Activation energy controls reaction rate, while enthalpy change controls heat transfer; these are related but not the same quantity.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "equilibrium_math_bridge",
+      "text": "Equilibrium reasoning depends on ratios, exponents, and stoichiometric relationships rather than on vague balance alone.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "logarithmic_scale_bridge",
+      "text": "pH links chemistry to logarithmic mathematics because equal pH steps represent multiplicative concentration changes.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "atoms_rearranged_not_created",
+      "text": "In ordinary chemical reactions, atoms are rearranged rather than created or destroyed.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "reactions_stoich",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "balanced_equation_conserves_atoms",
+      "text": "A balanced chemical equation conserves the number of each type of atom.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "reactions_stoich",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "mole_is_counting_unit",
+      "text": "The mole is a counting unit for amount of substance.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "reactions_stoich",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "avogadro_constant_links_moles_particles",
+      "text": "One mole corresponds to approximately 6.022 × 10^23 entities.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "reactions_stoich",
+        "kind": "equation",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "molar_mass_allows_n_equals_m_over_M",
+      "text": "Molar mass allows the conversion n = m / M from mass to moles.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "reactions_stoich",
+        "kind": "equation",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "stoichiometric_coefficients_give_mole_ratios",
+      "text": "Stoichiometric coefficients in a balanced equation specify mole ratios between reactants and products.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "reactions_stoich",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "limiting_reactant_limits_product",
+      "text": "The limiting reactant determines the maximum amount of product that can form.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "reactions_stoich",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "excess_reactant_remains_after_completion",
+      "text": "When reactants are not supplied in exact stoichiometric proportion, an excess reactant remains after completion.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "reactions_stoich",
+        "kind": "consequence",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "ideal_gas_law_pv_equals_nrt",
+      "text": "For an ideal gas, PV = nRT.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "reactions_stoich",
+        "kind": "equation",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "kelvin_required_in_gas_calculations",
+      "text": "Gas-law temperature must be expressed on an absolute scale in kelvin.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "reactions_stoich",
+        "kind": "condition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "water_formation_example",
+      "text": "2H2 + O2 -> 2H2O is a standard example of a balanced equation conserving atoms.",
+      "node_type": "example",
+      "confidence": 0.97,
+      "importance": 0.8,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "reactions_stoich",
+        "kind": "example"
+      }
+    },
+    {
+      "id": "methane_combustion_example",
+      "text": "CH4 + 2O2 -> CO2 + 2H2O is a standard example used for stoichiometry and exothermic reaction reasoning.",
+      "node_type": "example",
+      "confidence": 0.97,
+      "importance": 0.83,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "reactions_stoich",
+        "kind": "example"
+      }
+    },
+    {
+      "id": "atoms_destroyed_in_reaction_false",
+      "text": "Atoms are destroyed during ordinary chemical reactions.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "reactions_stoich",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "valence_electrons_drive_bonding",
+      "text": "Valence electrons largely determine how atoms bond.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "structure_bonding",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "ionic_bond_involves_electron_transfer",
+      "text": "Ionic bonding is associated with electron transfer and electrostatic attraction between oppositely charged ions.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "structure_bonding",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "covalent_bond_involves_electron_sharing",
+      "text": "Covalent bonding involves shared electron pairs between atoms.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "structure_bonding",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "bond_polarity_depends_on_electronegativity_difference",
+      "text": "Bond polarity depends on the electronegativity difference between bonded atoms.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "structure_bonding",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "molecular_polarity_depends_on_bond_polarity_and_shape",
+      "text": "Molecular polarity depends on both bond polarity and molecular shape.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "structure_bonding",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "intermolecular_forces_affect_boiling_point_melting_point_and_solubility",
+      "text": "Intermolecular forces affect boiling point, melting point, and solubility.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "structure_bonding",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "hydrogen_bonding_can_raise_boiling_point",
+      "text": "Hydrogen bonding can raise boiling point relative to similar molecules lacking it.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "structure_bonding",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "nacl_conducts_when_molten_or_aqueous",
+      "text": "Sodium chloride conducts electricity when molten or dissolved because ions can move.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "structure_bonding",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "ionic_solids_conduct_as_solids_false",
+      "text": "Ionic solids conduct electricity well in the solid state because they already contain ions.",
+      "node_type": "claim",
+      "confidence": 0.04,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "structure_bonding",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "water_is_polar_example",
+      "text": "Water is a standard example of a polar molecule whose shape prevents dipole cancellation.",
+      "node_type": "example",
+      "confidence": 0.97,
+      "importance": 0.81,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "structure_bonding",
+        "kind": "example"
+      }
+    },
+    {
+      "id": "reaction_rate_depends_on_effective_collisions",
+      "text": "Reaction rate depends on the frequency of effective collisions between reactant particles.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "kinetics_equilibrium",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "higher_concentration_increases_collision_frequency",
+      "text": "Higher concentration can increase reaction rate by increasing collision frequency.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "kinetics_equilibrium",
+        "kind": "mechanism",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "higher_temperature_increases_fraction_above_activation_energy",
+      "text": "Higher temperature can increase reaction rate because a larger fraction of collisions exceed activation energy.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "kinetics_equilibrium",
+        "kind": "mechanism",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "catalyst_lowers_activation_energy",
+      "text": "A catalyst speeds a reaction by providing a lower-activation-energy pathway.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "kinetics_equilibrium",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "catalyst_speeds_forward_and_reverse_reactions",
+      "text": "A catalyst speeds both forward and reverse reactions rather than changing only one direction.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "kinetics_equilibrium",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "catalyst_changes_equilibrium_constant_false",
+      "text": "A catalyst changes the equilibrium constant by making the products more favorable.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "kinetics_equilibrium",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "dynamic_equilibrium_has_equal_forward_and_reverse_rates",
+      "text": "At dynamic equilibrium, forward and reverse reaction rates are equal even though reactions continue.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "kinetics_equilibrium",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "kc_equals_ratio_of_equilibrium_concentrations",
+      "text": "For many reactions, Kc is a ratio of equilibrium concentrations such as Kc = [products]^coeff / [reactants]^coeff.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "kinetics_equilibrium",
+        "kind": "equation",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "stoichiometric_coefficients_become_exponents_in_kc",
+      "text": "Stoichiometric coefficients become exponents in the equilibrium-constant expression.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "kinetics_equilibrium",
+        "kind": "equation_rule",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "changing_concentration_can_shift_equilibrium_position",
+      "text": "Changing concentration can shift equilibrium position as the system responds to the disturbance.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "kinetics_equilibrium",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "temperature_effect_on_equilibrium_depends_on_reaction_enthalpy",
+      "text": "The effect of temperature on equilibrium position depends on whether the forward reaction is endothermic or exothermic.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "kinetics_equilibrium",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "heating_an_exothermic_equilibrium_shifts_toward_reactants",
+      "text": "Heating an exothermic equilibrium tends to shift it toward reactants.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "kinetics_equilibrium",
+        "kind": "specific_case",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "heating_always_increases_product_yield_false",
+      "text": "Heating always increases product yield regardless of the reaction.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "kinetics_equilibrium",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "concentration_increases_rate_because_particles_move_faster_false",
+      "text": "Higher concentration increases rate mainly because particles move faster.",
+      "node_type": "claim",
+      "confidence": 0.06,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "kinetics_equilibrium",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "haber_process_example",
+      "text": "N2 + 3H2 <-> 2NH3 is a standard example for equilibrium, temperature effects, and stoichiometric exponents in Kc.",
+      "node_type": "example",
+      "confidence": 0.97,
+      "importance": 0.83,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "kinetics_equilibrium",
+        "kind": "example"
+      }
+    },
+    {
+      "id": "manganese_dioxide_catalyst_example",
+      "text": "Manganese dioxide catalyzing hydrogen peroxide decomposition is a standard catalyst example.",
+      "node_type": "example",
+      "confidence": 0.97,
+      "importance": 0.8,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "kinetics_equilibrium",
+        "kind": "example"
+      }
+    },
+    {
+      "id": "acids_increase_h3o_concentration",
+      "text": "Acids increase hydronium concentration in water or donate protons in acid-base reactions.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "acid_base",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "bases_increase_oh_or_accept_h",
+      "text": "Bases increase hydroxide concentration in water or accept protons in acid-base reactions.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "acid_base",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "ph_equals_negative_log10_h3o",
+      "text": "pH = -log10[H3O+].",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "acid_base",
+        "kind": "equation",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "tenfold_h3o_change_shifts_ph_by_one_unit",
+      "text": "A tenfold change in hydronium concentration changes pH by one unit.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "acid_base",
+        "kind": "logarithmic_consequence",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "neutral_solution_has_equal_h3o_and_oh",
+      "text": "A neutral solution has equal hydronium and hydroxide concentrations.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "acid_base",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "ph7_is_neutral_only_at_25c",
+      "text": "pH 7 is neutral specifically at 25°C, not as an unconditional rule for all temperatures.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "acid_base",
+        "kind": "temperature_condition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "ph7_is_always_neutral_false",
+      "text": "A solution with pH 7 is always neutral regardless of temperature.",
+      "node_type": "claim",
+      "confidence": 0.04,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "acid_base",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "strong_acid_ionizes_mostly_completely",
+      "text": "A strong acid ionizes mostly completely in water.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "acid_base",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "weak_acid_ionizes_only_partially",
+      "text": "A weak acid ionizes only partially in water.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "acid_base",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "equal_concentration_strong_acid_has_lower_ph_than_weak_acid",
+      "text": "At equal concentration, a strong acid usually has lower pH than a weak acid because it produces more hydronium.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "acid_base",
+        "kind": "comparison",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "acetic_acid_example",
+      "text": "Acetic acid is a standard example of a weak acid.",
+      "node_type": "example",
+      "confidence": 0.97,
+      "importance": 0.79,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "acid_base",
+        "kind": "example"
+      }
+    },
+    {
+      "id": "hcl_example",
+      "text": "Hydrochloric acid is a standard example of a strong acid.",
+      "node_type": "example",
+      "confidence": 0.97,
+      "importance": 0.79,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "acid_base",
+        "kind": "example"
+      }
+    },
+    {
+      "id": "breaking_bonds_requires_energy",
+      "text": "Breaking chemical bonds requires energy input.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "thermodynamics",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "forming_bonds_releases_energy",
+      "text": "Forming chemical bonds releases energy.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "thermodynamics",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "net_enthalpy_change_depends_on_balance_of_bond_breaking_and_bond_forming",
+      "text": "Overall enthalpy change depends on the balance between energy absorbed to break bonds and energy released to form bonds.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "thermodynamics",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "exothermic_reaction_releases_heat_to_surroundings",
+      "text": "An exothermic reaction releases heat to the surroundings.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "thermodynamics",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "endothermic_reaction_absorbs_heat_from_surroundings",
+      "text": "An endothermic reaction absorbs heat from the surroundings.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "thermodynamics",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "exothermic_is_not_the_same_as_fast",
+      "text": "Whether a reaction is exothermic does not by itself determine whether it is fast.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "thermodynamics",
+        "kind": "distinction",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "breaking_bonds_releases_energy_false",
+      "text": "Breaking bonds releases energy, so bond breaking is what directly makes reactions exothermic.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "thermodynamics",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "exothermic_reactions_are_always_fast_false",
+      "text": "Exothermic reactions are always fast because releasing heat makes them proceed quickly.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "thermodynamics",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "ammonium_nitrate_cold_pack_example",
+      "text": "Dissolving ammonium nitrate in a cold pack is a standard example of an endothermic process.",
+      "node_type": "example",
+      "confidence": 0.97,
+      "importance": 0.8,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "thermodynamics",
+        "kind": "example"
+      }
+    },
+    {
+      "id": "empirical_formula_uses_simplest_whole_number_mole_ratio",
+      "text": "An empirical formula represents the simplest whole-number mole ratio of elements in a compound.",
+      "node_type": "claim",
+      "confidence": 0.97,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "reactions_stoich",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "percent_yield_compares_actual_to_theoretical_product",
+      "text": "Percent yield compares actual product obtained with the theoretical maximum predicted from stoichiometry.",
+      "node_type": "claim",
+      "confidence": 0.97,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "reactions_stoich",
+        "kind": "equation",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "increasing_pressure_favors_fewer_gas_moles_at_equilibrium",
+      "text": "For gaseous equilibria, increasing pressure tends to favor the side with fewer moles of gas.",
+      "node_type": "claim",
+      "confidence": 0.97,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "kinetics_equilibrium",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "dilution_changes_ph_logarithmically_not_linearly",
+      "text": "Dilution changes hydronium concentration directly, but the pH response is logarithmic rather than linear.",
+      "node_type": "claim",
+      "confidence": 0.97,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "acid_base",
+        "kind": "logarithmic_consequence",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "symmetric_molecules_can_be_nonpolar_despite_polar_bonds",
+      "text": "A molecule can contain polar bonds yet still be nonpolar overall if its geometry causes bond dipoles to cancel.",
+      "node_type": "claim",
+      "confidence": 0.97,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "structure_bonding",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "empirical_formula_must_equal_molecular_formula_false",
+      "text": "An empirical formula must always be identical to the molecular formula.",
+      "node_type": "claim",
+      "confidence": 0.05,
+      "importance": 0.88,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "reactions_stoich",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "pressure_changes_equilibrium_constant_false",
+      "text": "Increasing pressure changes the equilibrium constant itself because the products become intrinsically more stable.",
+      "node_type": "claim",
+      "confidence": 0.04,
+      "importance": 0.91,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "kinetics_equilibrium",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "dilution_changes_ph_by_direct_subtraction_false",
+      "text": "If an acidic solution is diluted ten times, its pH increases by ten units because pH changes by direct subtraction.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "acid_base",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "polar_bonds_guarantee_polar_molecule_false",
+      "text": "Any molecule that contains polar bonds must be polar overall.",
+      "node_type": "claim",
+      "confidence": 0.04,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "structure_bonding",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "catalyst_is_consumed_stoichiometrically_false",
+      "text": "A catalyst is used up in stoichiometric proportion as the reaction proceeds, which is why it speeds the reaction.",
+      "node_type": "claim",
+      "confidence": 0.04,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "kinetics_equilibrium",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "carbon_dioxide_nonpolar_despite_polar_bonds_example",
+      "text": "Carbon dioxide is a standard example of a molecule with polar bonds that is nonpolar overall because its linear geometry causes dipole cancellation.",
+      "node_type": "example",
+      "confidence": 0.97,
+      "importance": 0.81,
+      "metadata": {
+        "topic": "chemistry",
+        "cluster": "structure_bonding",
+        "kind": "example"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "src": "structure_bonding_hub",
+      "dst": "chemistry_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "reactions_stoich_hub",
+      "dst": "chemistry_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "kinetics_equilibrium_hub",
+      "dst": "chemistry_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "acid_base_hub",
+      "dst": "chemistry_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "thermodynamics_hub",
+      "dst": "chemistry_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bridges_hub",
+      "dst": "chemistry_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "quantitative_conversion_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "structure_property_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "energy_rate_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "equilibrium_math_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "logarithmic_scale_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "atoms_rearranged_not_created",
+      "dst": "balanced_equation_conserves_atoms",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "water_formation_example",
+      "dst": "balanced_equation_conserves_atoms",
+      "relation": "example_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "balanced_equation_conserves_atoms",
+      "dst": "atoms_destroyed_in_reaction_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "balanced_equation_conserves_atoms",
+      "dst": "stoichiometric_coefficients_give_mole_ratios",
+      "relation": "support",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "avogadro_constant_links_moles_particles",
+      "dst": "mole_is_counting_unit",
+      "relation": "refine",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mole_is_counting_unit",
+      "dst": "quantitative_conversion_bridge",
+      "relation": "support",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "avogadro_constant_links_moles_particles",
+      "dst": "quantitative_conversion_bridge",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "molar_mass_allows_n_equals_m_over_M",
+      "dst": "quantitative_conversion_bridge",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "stoichiometric_coefficients_give_mole_ratios",
+      "dst": "quantitative_conversion_bridge",
+      "relation": "support",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ideal_gas_law_pv_equals_nrt",
+      "dst": "quantitative_conversion_bridge",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "balanced_equation_conserves_atoms",
+      "dst": "quantitative_conversion_bridge",
+      "relation": "support",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "kelvin_required_in_gas_calculations",
+      "dst": "ideal_gas_law_pv_equals_nrt",
+      "relation": "refine",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "stoichiometric_coefficients_give_mole_ratios",
+      "dst": "limiting_reactant_limits_product",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "molar_mass_allows_n_equals_m_over_M",
+      "dst": "limiting_reactant_limits_product",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "limiting_reactant_limits_product",
+      "dst": "excess_reactant_remains_after_completion",
+      "relation": "cause",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "methane_combustion_example",
+      "dst": "stoichiometric_coefficients_give_mole_ratios",
+      "relation": "example_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "valence_electrons_drive_bonding",
+      "dst": "ionic_bond_involves_electron_transfer",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "valence_electrons_drive_bonding",
+      "dst": "covalent_bond_involves_electron_sharing",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bond_polarity_depends_on_electronegativity_difference",
+      "dst": "molecular_polarity_depends_on_bond_polarity_and_shape",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "molecular_polarity_depends_on_bond_polarity_and_shape",
+      "dst": "intermolecular_forces_affect_boiling_point_melting_point_and_solubility",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "hydrogen_bonding_can_raise_boiling_point",
+      "dst": "intermolecular_forces_affect_boiling_point_melting_point_and_solubility",
+      "relation": "refine",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "water_is_polar_example",
+      "dst": "molecular_polarity_depends_on_bond_polarity_and_shape",
+      "relation": "example_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "water_is_polar_example",
+      "dst": "hydrogen_bonding_can_raise_boiling_point",
+      "relation": "example_of",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ionic_bond_involves_electron_transfer",
+      "dst": "nacl_conducts_when_molten_or_aqueous",
+      "relation": "support",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "nacl_conducts_when_molten_or_aqueous",
+      "dst": "ionic_solids_conduct_as_solids_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ionic_bond_involves_electron_transfer",
+      "dst": "structure_property_bridge",
+      "relation": "support",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "covalent_bond_involves_electron_sharing",
+      "dst": "structure_property_bridge",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "intermolecular_forces_affect_boiling_point_melting_point_and_solubility",
+      "dst": "structure_property_bridge",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "higher_concentration_increases_collision_frequency",
+      "dst": "reaction_rate_depends_on_effective_collisions",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "higher_temperature_increases_fraction_above_activation_energy",
+      "dst": "reaction_rate_depends_on_effective_collisions",
+      "relation": "support",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "catalyst_lowers_activation_energy",
+      "dst": "reaction_rate_depends_on_effective_collisions",
+      "relation": "support",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "manganese_dioxide_catalyst_example",
+      "dst": "catalyst_lowers_activation_energy",
+      "relation": "example_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "higher_concentration_increases_collision_frequency",
+      "dst": "concentration_increases_rate_because_particles_move_faster_false",
+      "relation": "contradict",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "catalyst_lowers_activation_energy",
+      "dst": "catalyst_speeds_forward_and_reverse_reactions",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "catalyst_speeds_forward_and_reverse_reactions",
+      "dst": "catalyst_changes_equilibrium_constant_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "stoichiometric_coefficients_become_exponents_in_kc",
+      "dst": "kc_equals_ratio_of_equilibrium_concentrations",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dynamic_equilibrium_has_equal_forward_and_reverse_rates",
+      "dst": "changing_concentration_can_shift_equilibrium_position",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "heating_an_exothermic_equilibrium_shifts_toward_reactants",
+      "dst": "temperature_effect_on_equilibrium_depends_on_reaction_enthalpy",
+      "relation": "refine",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "heating_an_exothermic_equilibrium_shifts_toward_reactants",
+      "dst": "heating_always_increases_product_yield_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "temperature_effect_on_equilibrium_depends_on_reaction_enthalpy",
+      "dst": "heating_always_increases_product_yield_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "haber_process_example",
+      "dst": "heating_an_exothermic_equilibrium_shifts_toward_reactants",
+      "relation": "example_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "haber_process_example",
+      "dst": "stoichiometric_coefficients_become_exponents_in_kc",
+      "relation": "example_of",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "stoichiometric_coefficients_give_mole_ratios",
+      "dst": "stoichiometric_coefficients_become_exponents_in_kc",
+      "relation": "support",
+      "strength": 0.91,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "kc_equals_ratio_of_equilibrium_concentrations",
+      "dst": "equilibrium_math_bridge",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "stoichiometric_coefficients_become_exponents_in_kc",
+      "dst": "equilibrium_math_bridge",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "stoichiometric_coefficients_give_mole_ratios",
+      "dst": "equilibrium_math_bridge",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "changing_concentration_can_shift_equilibrium_position",
+      "dst": "equilibrium_math_bridge",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "acids_increase_h3o_concentration",
+      "dst": "strong_acid_ionizes_mostly_completely",
+      "relation": "support",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "acids_increase_h3o_concentration",
+      "dst": "weak_acid_ionizes_only_partially",
+      "relation": "support",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "acids_increase_h3o_concentration",
+      "dst": "neutral_solution_has_equal_h3o_and_oh",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bases_increase_oh_or_accept_h",
+      "dst": "neutral_solution_has_equal_h3o_and_oh",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ph_equals_negative_log10_h3o",
+      "dst": "tenfold_h3o_change_shifts_ph_by_one_unit",
+      "relation": "support",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "neutral_solution_has_equal_h3o_and_oh",
+      "dst": "ph7_is_neutral_only_at_25c",
+      "relation": "refine",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ph7_is_neutral_only_at_25c",
+      "dst": "ph7_is_always_neutral_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ph_equals_negative_log10_h3o",
+      "dst": "logarithmic_scale_bridge",
+      "relation": "support",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "tenfold_h3o_change_shifts_ph_by_one_unit",
+      "dst": "logarithmic_scale_bridge",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "equal_concentration_strong_acid_has_lower_ph_than_weak_acid",
+      "dst": "logarithmic_scale_bridge",
+      "relation": "support",
+      "strength": 0.88,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "strong_acid_ionizes_mostly_completely",
+      "dst": "equal_concentration_strong_acid_has_lower_ph_than_weak_acid",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "weak_acid_ionizes_only_partially",
+      "dst": "equal_concentration_strong_acid_has_lower_ph_than_weak_acid",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "acetic_acid_example",
+      "dst": "weak_acid_ionizes_only_partially",
+      "relation": "example_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "hcl_example",
+      "dst": "strong_acid_ionizes_mostly_completely",
+      "relation": "example_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "breaking_bonds_requires_energy",
+      "dst": "net_enthalpy_change_depends_on_balance_of_bond_breaking_and_bond_forming",
+      "relation": "support",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "forming_bonds_releases_energy",
+      "dst": "net_enthalpy_change_depends_on_balance_of_bond_breaking_and_bond_forming",
+      "relation": "support",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "net_enthalpy_change_depends_on_balance_of_bond_breaking_and_bond_forming",
+      "dst": "exothermic_reaction_releases_heat_to_surroundings",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "net_enthalpy_change_depends_on_balance_of_bond_breaking_and_bond_forming",
+      "dst": "endothermic_reaction_absorbs_heat_from_surroundings",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "breaking_bonds_requires_energy",
+      "dst": "breaking_bonds_releases_energy_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "net_enthalpy_change_depends_on_balance_of_bond_breaking_and_bond_forming",
+      "dst": "exothermic_is_not_the_same_as_fast",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "catalyst_lowers_activation_energy",
+      "dst": "exothermic_is_not_the_same_as_fast",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "exothermic_is_not_the_same_as_fast",
+      "dst": "exothermic_reactions_are_always_fast_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "methane_combustion_example",
+      "dst": "exothermic_reaction_releases_heat_to_surroundings",
+      "relation": "example_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ammonium_nitrate_cold_pack_example",
+      "dst": "endothermic_reaction_absorbs_heat_from_surroundings",
+      "relation": "example_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "reaction_rate_depends_on_effective_collisions",
+      "dst": "energy_rate_bridge",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "catalyst_lowers_activation_energy",
+      "dst": "energy_rate_bridge",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "net_enthalpy_change_depends_on_balance_of_bond_breaking_and_bond_forming",
+      "dst": "energy_rate_bridge",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "exothermic_is_not_the_same_as_fast",
+      "dst": "energy_rate_bridge",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mole_is_counting_unit",
+      "dst": "empirical_formula_uses_simplest_whole_number_mole_ratio",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "molar_mass_allows_n_equals_m_over_M",
+      "dst": "empirical_formula_uses_simplest_whole_number_mole_ratio",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "empirical_formula_uses_simplest_whole_number_mole_ratio",
+      "dst": "empirical_formula_must_equal_molecular_formula_false",
+      "relation": "contradict",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "limiting_reactant_limits_product",
+      "dst": "percent_yield_compares_actual_to_theoretical_product",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "stoichiometric_coefficients_give_mole_ratios",
+      "dst": "percent_yield_compares_actual_to_theoretical_product",
+      "relation": "support",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "percent_yield_compares_actual_to_theoretical_product",
+      "dst": "quantitative_conversion_bridge",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dynamic_equilibrium_has_equal_forward_and_reverse_rates",
+      "dst": "increasing_pressure_favors_fewer_gas_moles_at_equilibrium",
+      "relation": "support",
+      "strength": 0.88,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "changing_concentration_can_shift_equilibrium_position",
+      "dst": "increasing_pressure_favors_fewer_gas_moles_at_equilibrium",
+      "relation": "support",
+      "strength": 0.86,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "haber_process_example",
+      "dst": "increasing_pressure_favors_fewer_gas_moles_at_equilibrium",
+      "relation": "example_of",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "increasing_pressure_favors_fewer_gas_moles_at_equilibrium",
+      "dst": "pressure_changes_equilibrium_constant_false",
+      "relation": "contradict",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ph_equals_negative_log10_h3o",
+      "dst": "dilution_changes_ph_logarithmically_not_linearly",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "tenfold_h3o_change_shifts_ph_by_one_unit",
+      "dst": "dilution_changes_ph_logarithmically_not_linearly",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dilution_changes_ph_logarithmically_not_linearly",
+      "dst": "dilution_changes_ph_by_direct_subtraction_false",
+      "relation": "contradict",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bond_polarity_depends_on_electronegativity_difference",
+      "dst": "symmetric_molecules_can_be_nonpolar_despite_polar_bonds",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "molecular_polarity_depends_on_bond_polarity_and_shape",
+      "dst": "symmetric_molecules_can_be_nonpolar_despite_polar_bonds",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "symmetric_molecules_can_be_nonpolar_despite_polar_bonds",
+      "dst": "polar_bonds_guarantee_polar_molecule_false",
+      "relation": "contradict",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "catalyst_speeds_forward_and_reverse_reactions",
+      "dst": "catalyst_is_consumed_stoichiometrically_false",
+      "relation": "contradict",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "carbon_dioxide_nonpolar_despite_polar_bonds_example",
+      "dst": "symmetric_molecules_can_be_nonpolar_despite_polar_bonds",
+      "relation": "example_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    }
+  ]
+}

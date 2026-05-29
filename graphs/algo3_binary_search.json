@@ -1,0 +1,124 @@
+{
+  "metadata": {
+    "topic": "computer_science",
+    "subtopic": "searching",
+    "language": "cpp",
+    "purpose": "graph-grounded reasoning for binary search on a sorted vector, with the overflow-mid misconception explicitly modeled and edge cases (empty, not-found, first/last) covered",
+    "version": 1
+  },
+  "nodes": [
+    {
+      "id": "searching_algorithms_hub",
+      "text": "Search algorithms over sorted arrays exploit ordering to achieve logarithmic time complexity. The two design dimensions are: how you compute the midpoint safely, and how you maintain the loop invariant about where the answer can still be.",
+      "node_type": "summary",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {"topic": "computer_science"}
+    },
+    {
+      "id": "binary_search_problem_definition",
+      "text": "Given a sorted std::vector<int> and a target value, return the index of the target if it exists, or a sentinel (typically -1) otherwise. Sorted order means a[i] <= a[i+1] for all valid i.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "computer_science"}
+    },
+    {
+      "id": "binary_search_inclusive_invariant",
+      "text": "Loop invariant for the inclusive form: if the target is in the vector, it is in the closed interval a[lo..hi]. Each iteration narrows the interval. Loop continues while lo <= hi.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "computer_science"}
+    },
+    {
+      "id": "binary_search_mid_overflow_safe",
+      "text": "Compute the midpoint as mid = lo + (hi - lo) / 2. This avoids signed-integer overflow because hi - lo is non-negative and bounded by the original hi, and lo + that quantity stays representable in the same int type.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "computer_science"}
+    },
+    {
+      "id": "binary_search_mid_naive_overflow_false",
+      "text": "MISCONCEPTION: 'mid = (lo + hi) / 2 is fine in C++.' This is unsafe in general. When lo and hi are both large positive ints (e.g. near INT_MAX/2), their sum exceeds INT_MAX and triggers signed-integer overflow, producing a negative or otherwise wrong mid and an out-of-bounds vector access. The lo + (hi - lo) / 2 form is the canonical safe equivalent.",
+      "node_type": "claim",
+      "confidence": 0.05,
+      "importance": 0.9,
+      "metadata": {"topic": "computer_science", "kind": "misconception"}
+    },
+    {
+      "id": "binary_search_three_way_branch",
+      "text": "Each iteration compares a[mid] to target and updates exactly one boundary: if a[mid] == target return mid; if a[mid] < target then lo = mid + 1; else hi = mid - 1. The +1 / -1 are required because the inclusive invariant excludes a[mid] from the next interval after the comparison.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {"topic": "computer_science"}
+    },
+    {
+      "id": "binary_search_not_found_returns_sentinel",
+      "text": "When the loop terminates with lo > hi without finding the target, the target is not present in the array. The conventional return value is -1.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.85,
+      "metadata": {"topic": "computer_science"}
+    },
+    {
+      "id": "binary_search_empty_array_handled_by_invariant",
+      "text": "An empty vector has size() == 0, so hi = static_cast<int>(size()) - 1 = -1 and the loop condition lo (=0) <= hi (=-1) is immediately false. The function returns -1 without dereferencing the vector. No separate empty-array check is needed when hi is initialized this way.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.85,
+      "metadata": {"topic": "computer_science"}
+    },
+    {
+      "id": "binary_search_first_element_termination",
+      "text": "If the target equals a[0], the loop converges with mid landing on 0 within O(log n) iterations regardless of array size. There is no off-by-one risk at the lower boundary because the inclusive invariant always keeps a[lo] reachable.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.75,
+      "metadata": {"topic": "computer_science"}
+    },
+    {
+      "id": "binary_search_last_element_termination",
+      "text": "If the target equals a[n-1], the loop converges with mid landing on n-1 within O(log n) iterations. Same argument as the first-element case applied to the upper boundary.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.75,
+      "metadata": {"topic": "computer_science"}
+    },
+    {
+      "id": "cpp_binary_search_apply",
+      "text": "Concrete C++ implementation of binary search on a sorted vector. Returns the index of target, or -1 if not present. Uses the overflow-safe midpoint and the inclusive [lo, hi] invariant.\n\n#include <vector>\n\nint binary_search(const std::vector<int>& a, int target) {\n    int lo = 0;\n    int hi = static_cast<int>(a.size()) - 1;\n    while (lo <= hi) {\n        int mid = lo + (hi - lo) / 2;\n        if (a[mid] == target) return mid;\n        if (a[mid] < target) lo = mid + 1;\n        else                 hi = mid - 1;\n    }\n    return -1;\n}",
+      "node_type": "example",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "computer_science", "language": "cpp"}
+    },
+    {
+      "id": "binary_search_complete_summary",
+      "text": "Binary search on a sorted std::vector<int>: inclusive [lo, hi] interval, overflow-safe midpoint mid = lo + (hi - lo) / 2, three-way branch with +1/-1 boundary updates, return mid on hit and -1 when lo > hi. Handles empty arrays automatically via hi = -1 initialization.",
+      "node_type": "summary",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {"topic": "computer_science"}
+    }
+  ],
+  "edges": [
+    {"src": "binary_search_problem_definition", "dst": "searching_algorithms_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {}},
+    {"src": "binary_search_inclusive_invariant", "dst": "binary_search_problem_definition", "relation": "support", "strength": 0.95, "directed": true, "metadata": {}},
+    {"src": "binary_search_three_way_branch", "dst": "binary_search_inclusive_invariant", "relation": "refine", "strength": 0.9, "directed": true, "metadata": {}},
+    {"src": "binary_search_mid_overflow_safe", "dst": "binary_search_inclusive_invariant", "relation": "support", "strength": 0.9, "directed": true, "metadata": {}},
+    {"src": "binary_search_mid_overflow_safe", "dst": "binary_search_mid_naive_overflow_false", "relation": "contradict", "strength": 0.99, "directed": true, "metadata": {}},
+    {"src": "binary_search_not_found_returns_sentinel", "dst": "binary_search_inclusive_invariant", "relation": "support", "strength": 0.85, "directed": true, "metadata": {}},
+    {"src": "binary_search_empty_array_handled_by_invariant", "dst": "binary_search_inclusive_invariant", "relation": "refine", "strength": 0.85, "directed": true, "metadata": {}},
+    {"src": "binary_search_first_element_termination", "dst": "binary_search_inclusive_invariant", "relation": "example_of", "strength": 0.8, "directed": true, "metadata": {}},
+    {"src": "binary_search_last_element_termination", "dst": "binary_search_inclusive_invariant", "relation": "example_of", "strength": 0.8, "directed": true, "metadata": {}},
+    {"src": "cpp_binary_search_apply", "dst": "binary_search_mid_overflow_safe", "relation": "example_of", "strength": 0.95, "directed": true, "metadata": {}},
+    {"src": "cpp_binary_search_apply", "dst": "binary_search_three_way_branch", "relation": "example_of", "strength": 0.95, "directed": true, "metadata": {}},
+    {"src": "cpp_binary_search_apply", "dst": "binary_search_empty_array_handled_by_invariant", "relation": "example_of", "strength": 0.9, "directed": true, "metadata": {}},
+    {"src": "cpp_binary_search_apply", "dst": "binary_search_not_found_returns_sentinel", "relation": "example_of", "strength": 0.9, "directed": true, "metadata": {}},
+    {"src": "binary_search_complete_summary", "dst": "searching_algorithms_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {}},
+    {"src": "binary_search_inclusive_invariant", "dst": "binary_search_complete_summary", "relation": "support", "strength": 0.9, "directed": true, "metadata": {}}
+  ]
+}

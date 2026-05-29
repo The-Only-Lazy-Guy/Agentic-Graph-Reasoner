@@ -1,0 +1,207 @@
+{
+  "metadata": {
+    "topic": "computer_science",
+    "subtopic": "linked_list_two_pointer",
+    "language": "cpp",
+    "purpose": "graph-grounded reasoning for Floyd's tortoise-and-hare cycle detection AND the second-phase find-cycle-start step, with the L = nC - d proof chain explicit and the meeting-point-is-cycle-start misconception modeled",
+    "version": 1
+  },
+  "nodes": [
+    {
+      "id": "linked_list_two_pointer_hub",
+      "text": "Two-pointer techniques on linked lists exploit the fact that two pointers moving at different speeds or from different starts traverse the structure at predictable relative offsets. The math of meeting points and relative distance is the load-bearing tool.",
+      "node_type": "summary",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "computer_science", "cluster": "linked_list"}
+    },
+    {
+      "id": "cycle_detection_hub",
+      "text": "Detecting a cycle in a singly linked list and finding the node where the cycle begins are two distinct sub-problems. Floyd's algorithm solves both in one O(n) time / O(1) space pass, using two phases governed by relative-distance arithmetic.",
+      "node_type": "summary",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {"topic": "computer_science", "cluster": "floyd"}
+    },
+    {
+      "id": "pointer_speed_to_meeting_bridge",
+      "text": "When two pointers traverse the same cyclic structure at different integer speeds starting from the same node, the difference in their positions modulo cycle length determines when and where they meet. This connects two-pointer technique to cycle-position arithmetic.",
+      "node_type": "bridge",
+      "confidence": 0.95,
+      "importance": 0.9,
+      "metadata": {"topic": "computer_science"}
+    },
+    {
+      "id": "linked_list_cycle_definition",
+      "text": "A linked list has a cycle when some node's next pointer eventually leads back to a previously visited node. Equivalently: traversal from the head never reaches nullptr.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.85,
+      "metadata": {"topic": "computer_science"}
+    },
+    {
+      "id": "floyd_phase1_setup",
+      "text": "Phase 1 (detection): place slow and fast at head. Each iteration, slow advances 1 step (slow = slow->next), fast advances 2 steps (fast = fast->next->next). Continue until either fast becomes nullptr (no cycle) or slow == fast (cycle detected).",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "computer_science"}
+    },
+    {
+      "id": "floyd_no_cycle_termination",
+      "text": "If at any point fast == nullptr or fast->next == nullptr, the list has no cycle. The algorithm returns nullptr to signal no cycle start exists.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.85,
+      "metadata": {"topic": "computer_science"}
+    },
+    {
+      "id": "floyd_must_meet_inside_cycle",
+      "text": "If a cycle exists, slow and fast are guaranteed to meet INSIDE the cycle (not before it). Reason: once slow enters the cycle, fast (moving twice as fast) is also in the cycle, and the relative-gap closes by 1 each step, so they meet within at most C iterations of slow being in the cycle.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {"topic": "computer_science"}
+    },
+    {
+      "id": "floyd_distance_notation",
+      "text": "Let L = distance from the head to the cycle start (length of the non-cyclic prefix). Let C = the cycle's length in nodes. Let d = distance from the cycle start to the meeting point, measured in the direction the pointers travel.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "computer_science"}
+    },
+    {
+      "id": "floyd_slow_walked_L_plus_d",
+      "text": "At the moment slow and fast meet, slow has taken exactly L + d steps from the head: L steps to reach the cycle start, then d more steps around the cycle to reach the meeting point.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {"topic": "computer_science"}
+    },
+    {
+      "id": "floyd_fast_walked_L_plus_d_plus_nC",
+      "text": "At the moment they meet, fast has taken exactly L + d + n*C steps for some positive integer n. The +n*C accounts for the n full extra cycle laps fast has completed while slow was catching up around the loop.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {"topic": "computer_science"}
+    },
+    {
+      "id": "floyd_double_speed_equation",
+      "text": "Fast moves at twice slow's speed, so when they meet fast has covered twice the distance slow has: 2*(L + d) = L + d + n*C. Simplifying: L + d = n*C, hence L = n*C - d.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "computer_science"}
+    },
+    {
+      "id": "floyd_L_equals_nC_minus_d_meaning",
+      "text": "The equation L = n*C - d says: walking L steps along the cycle (which is the same as walking n*C - d steps) starting from any point lands you exactly d steps before that starting point in the cycle. Specifically, starting from the meeting point and walking L steps lands you at the cycle start, because the meeting point is d steps past the cycle start.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "computer_science"}
+    },
+    {
+      "id": "floyd_phase2_setup",
+      "text": "Phase 2 (find cycle start): after detection, leave one pointer at the meeting point and reset the OTHER pointer to head. Advance BOTH pointers one step at a time. The node where they meet is the cycle start.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "computer_science"}
+    },
+    {
+      "id": "floyd_phase2_correctness_proof",
+      "text": "Why phase 2 works: the head pointer walks L steps to reach the cycle start. The meeting-point pointer walks the same L steps; by L = n*C - d this lands it at the cycle start (n-1 full laps then d steps before its starting position, which is d steps before the meeting point = the cycle start). They are both at the cycle start at the same step, so that is where they first meet.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "computer_science"}
+    },
+    {
+      "id": "floyd_o1_space_advantage",
+      "text": "Floyd's algorithm uses only two pointer variables regardless of list length, giving O(1) extra space. This is its primary advantage over hash-set-based cycle detection, which uses O(n) space.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.8,
+      "metadata": {"topic": "computer_science"}
+    },
+    {
+      "id": "floyd_meeting_point_is_cycle_start_false",
+      "text": "MISCONCEPTION: 'the node where slow and fast first meet IS the cycle start node, so return it directly.' This is wrong. The meeting point is generally d steps past the cycle start, where d depends on L mod C. Returning the meeting point directly produces the wrong answer for any list where L is not a multiple of C.",
+      "node_type": "claim",
+      "confidence": 0.05,
+      "importance": 0.9,
+      "metadata": {"topic": "computer_science", "kind": "misconception"}
+    },
+    {
+      "id": "floyd_hashset_only_solution_false",
+      "text": "MISCONCEPTION: 'just use a hash set of visited nodes; if you see a node twice, it is the cycle start, and the two-pointer math is unnecessary.' Hash-set detection works but uses O(n) extra space. The two-pointer method uses O(1) extra space, which is the whole point of Floyd's algorithm. Conflating them loses the space-complexity guarantee.",
+      "node_type": "claim",
+      "confidence": 0.1,
+      "importance": 0.7,
+      "metadata": {"topic": "computer_science", "kind": "misconception"}
+    },
+    {
+      "id": "cpp_floyd_cycle_start_apply",
+      "text": "Concrete C++ implementation of Floyd's two-phase algorithm. Returns the cycle-start node, or nullptr if no cycle exists.\n\nstruct ListNode { int val; ListNode* next; };\n\nListNode* detect_cycle_start(ListNode* head) {\n    // Phase 1: detect a cycle.\n    ListNode* slow = head;\n    ListNode* fast = head;\n    while (fast != nullptr && fast->next != nullptr) {\n        slow = slow->next;\n        fast = fast->next->next;\n        if (slow == fast) {\n            // Phase 2: find the cycle start.\n            ListNode* probe = head;\n            while (probe != slow) {\n                probe = probe->next;\n                slow  = slow->next;\n            }\n            return probe;\n        }\n    }\n    return nullptr;  // no cycle\n}",
+      "node_type": "example",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "computer_science", "language": "cpp"}
+    },
+    {
+      "id": "floyd_edge_case_empty_or_single_no_next",
+      "text": "Edge cases for cycle detection: head == nullptr returns nullptr (no list, no cycle). Single node with next == nullptr returns nullptr. Single node with next == head (self-loop) has cycle starting at head, and phase 1 detects slow == fast on the first iteration; phase 2 immediately finds probe == slow at head.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.7,
+      "metadata": {"topic": "computer_science"}
+    },
+    {
+      "id": "floyd_complete_summary",
+      "text": "Floyd's tortoise-and-hare with cycle-start detection is a two-phase O(n) time / O(1) space algorithm. Phase 1 uses slow/fast pointers at speeds 1 and 2; if they meet, a cycle exists. Phase 2 resets one pointer to head and advances both at speed 1; they meet at the cycle start by the identity L = n*C - d.",
+      "node_type": "summary",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "computer_science"}
+    }
+  ],
+  "edges": [
+    {"src": "cycle_detection_hub", "dst": "linked_list_two_pointer_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {}},
+    {"src": "pointer_speed_to_meeting_bridge", "dst": "linked_list_two_pointer_hub", "relation": "part_of", "strength": 0.9, "directed": true, "metadata": {}},
+
+    {"src": "linked_list_cycle_definition", "dst": "cycle_detection_hub", "relation": "support", "strength": 0.9, "directed": true, "metadata": {}},
+    {"src": "floyd_phase1_setup", "dst": "cycle_detection_hub", "relation": "support", "strength": 0.95, "directed": true, "metadata": {}},
+    {"src": "floyd_no_cycle_termination", "dst": "floyd_phase1_setup", "relation": "refine", "strength": 0.9, "directed": true, "metadata": {}},
+    {"src": "floyd_must_meet_inside_cycle", "dst": "floyd_phase1_setup", "relation": "support", "strength": 0.95, "directed": true, "metadata": {}},
+    {"src": "pointer_speed_to_meeting_bridge", "dst": "floyd_must_meet_inside_cycle", "relation": "support", "strength": 0.9, "directed": true, "metadata": {}},
+
+    {"src": "floyd_distance_notation", "dst": "floyd_phase1_setup", "relation": "support", "strength": 0.9, "directed": true, "metadata": {}},
+    {"src": "floyd_slow_walked_L_plus_d", "dst": "floyd_distance_notation", "relation": "support", "strength": 0.95, "directed": true, "metadata": {}},
+    {"src": "floyd_fast_walked_L_plus_d_plus_nC", "dst": "floyd_distance_notation", "relation": "support", "strength": 0.95, "directed": true, "metadata": {}},
+
+    {"src": "floyd_double_speed_equation", "dst": "floyd_slow_walked_L_plus_d", "relation": "support", "strength": 0.95, "directed": true, "metadata": {}},
+    {"src": "floyd_double_speed_equation", "dst": "floyd_fast_walked_L_plus_d_plus_nC", "relation": "support", "strength": 0.95, "directed": true, "metadata": {}},
+    {"src": "floyd_L_equals_nC_minus_d_meaning", "dst": "floyd_double_speed_equation", "relation": "support", "strength": 0.95, "directed": true, "metadata": {}},
+
+    {"src": "floyd_phase2_setup", "dst": "cycle_detection_hub", "relation": "support", "strength": 0.95, "directed": true, "metadata": {}},
+    {"src": "floyd_phase2_correctness_proof", "dst": "floyd_L_equals_nC_minus_d_meaning", "relation": "support", "strength": 0.95, "directed": true, "metadata": {}},
+    {"src": "floyd_phase2_correctness_proof", "dst": "floyd_phase2_setup", "relation": "support", "strength": 0.95, "directed": true, "metadata": {}},
+
+    {"src": "floyd_o1_space_advantage", "dst": "floyd_phase1_setup", "relation": "support", "strength": 0.8, "directed": true, "metadata": {}},
+
+    {"src": "floyd_phase2_correctness_proof", "dst": "floyd_meeting_point_is_cycle_start_false", "relation": "contradict", "strength": 0.99, "directed": true, "metadata": {}},
+    {"src": "floyd_o1_space_advantage", "dst": "floyd_hashset_only_solution_false", "relation": "contradict", "strength": 0.95, "directed": true, "metadata": {}},
+
+    {"src": "cpp_floyd_cycle_start_apply", "dst": "floyd_phase1_setup", "relation": "example_of", "strength": 0.95, "directed": true, "metadata": {}},
+    {"src": "cpp_floyd_cycle_start_apply", "dst": "floyd_phase2_setup", "relation": "example_of", "strength": 0.95, "directed": true, "metadata": {}},
+
+    {"src": "floyd_edge_case_empty_or_single_no_next", "dst": "floyd_phase1_setup", "relation": "refine", "strength": 0.85, "directed": true, "metadata": {}},
+
+    {"src": "floyd_complete_summary", "dst": "cycle_detection_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {}},
+    {"src": "floyd_phase1_setup", "dst": "floyd_complete_summary", "relation": "support", "strength": 0.9, "directed": true, "metadata": {}},
+    {"src": "floyd_phase2_correctness_proof", "dst": "floyd_complete_summary", "relation": "support", "strength": 0.9, "directed": true, "metadata": {}}
+  ]
+}

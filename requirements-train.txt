@@ -1,0 +1,27 @@
+# Minimal install for SFT training + eval + GGUF export on a rental GPU.
+# Tested target: RTX 4090 / A4000 / A100 with CUDA 12.x.
+# Install with:  pip install -r requirements-train.txt
+#
+# Note: unsloth bundles its own pinned versions of torch, transformers, trl,
+# peft, bitsandbytes, accelerate. Use the official unsloth install line for
+# the GPU + CUDA combo you're targeting, then layer the rest on top.
+
+# Core: unsloth (which pulls torch, transformers, trl, peft, bnb, accelerate).
+# Pick ONE of the install lines below based on your GPU; the others are stale.
+unsloth[cu121-ampere-torch240]
+# unsloth[cu121-torch240]                  # alternate
+# unsloth[colab-new]                       # colab
+
+# Used by _sft_prepare_data.py (already installed locally; needed on rental
+# if you re-run prep there).
+huggingface_hub>=0.20
+sentencepiece>=0.1.99
+tiktoken>=0.5
+protobuf>=4.21
+
+# Used by _sft_export_to_gguf.py — unsloth pulls llama.cpp tooling, but
+# pin the converter package explicitly to be safe.
+# (No explicit pin — unsloth ships llama.cpp converters via its extras.)
+
+# Light utilities used by our scripts.
+numpy>=1.24

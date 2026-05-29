@@ -1,0 +1,1565 @@
+{
+  "nodes": [
+    {
+      "id": "math_gold_hub",
+      "text": "Mathematics is the rigorous and universal study of structure, order, and relation that has evolved from counting, measuring, and describing the shapes of objects. It provides the foundational language for the sciences, relying entirely on logical deduction from established axioms to establish incontrovertible truths and expansive theoretical frameworks.",
+      "node_type": "hub",
+      "confidence": 1.0,
+      "importance": 1.0,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "global"
+      }
+    },
+    {
+      "id": "logic_set_hub",
+      "text": "Foundations of mathematics, including set theory and formal logic, establish the absolute basic rules of mathematical reasoning. They define what constitutes a valid proof, how infinite collections behave, and the absolute limits of formal systems.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "foundations"
+      }
+    },
+    {
+      "id": "algebra_hub",
+      "text": "Algebra abstracts arithmetic by using symbols to represent numbers and quantities in formulas and equations. It enables the formulation of general rules and the study of profound mathematical structures like groups, rings, vector spaces, and fields.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "algebra"
+      }
+    },
+    {
+      "id": "analysis_hub",
+      "text": "Calculus and Mathematical Analysis deal with continuous change, limits, and the rigorous definitions of differentiation and integration. This branch expands from the real number line to complex planes, allowing the precise modeling of continuous physical and geometric systems.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "analysis"
+      }
+    },
+    {
+      "id": "geometry_topo_hub",
+      "text": "Geometry and Topology study the properties of space. While geometry focuses on rigid shapes, sizes, relative positions, and the properties of localized space (like angles and distances), topology investigates properties that are preserved under continuous deformations, such as stretching and bending.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "geometry_topology"
+      }
+    },
+    {
+      "id": "number_theory_hub",
+      "text": "Number Theory is the pure mathematical study of integers and integer-valued functions. Often called 'The Queen of Mathematics,' it explores the fundamental properties of prime numbers, modular arithmetic, and Diophantine equations, forming the backbone of modern cryptography.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "number_theory"
+      }
+    },
+    {
+      "id": "prob_stat_hub",
+      "text": "Probability and Statistics encompass the mathematical study of randomness, uncertainty, and data interpretation. Probability models the likelihood of theoretical events, while statistics involves drawing rigorous conclusions from empirical data using those theoretical models.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "probability_statistics"
+      }
+    },
+    {
+      "id": "set_def",
+      "text": "Zermelo-Fraenkel set theory with the Axiom of Choice (ZFC) serves as the standard foundational basis for mathematics. It posits that every mathematical object can be modeled as a set, relying on axioms like Extensionality, Power Set, and Infinity to construct mathematical universes.",
+      "node_type": "explanation",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "foundations"
+      }
+    },
+    {
+      "id": "godel_incompleteness",
+      "text": "Gödel's First Incompleteness Theorem demonstrates that any consistent formal system sufficiently powerful to describe basic arithmetic contains statements that are true but unprovable within that system. This shattered the early 20th-century dream of finding a complete and consistent set of axioms for all mathematics.",
+      "node_type": "theorem",
+      "confidence": 0.99,
+      "importance": 0.99,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "foundations"
+      }
+    },
+    {
+      "id": "logic_false_claim",
+      "text": "Given enough time, every mathematical statement can be proven either completely true or completely false using a fixed set of axioms.",
+      "node_type": "claim",
+      "confidence": 0.05,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "foundations",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "infinity_sizes",
+      "text": "Cantor's Diagonal Argument proves that some infinities are strictly larger than others. For example, the set of real numbers is uncountably infinite, meaning it has a strictly greater cardinality than the countably infinite set of natural numbers.",
+      "node_type": "theorem",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "foundations"
+      }
+    },
+    {
+      "id": "linear_alg_systems",
+      "text": "Linear algebra is primarily concerned with vector spaces and linear mappings between those spaces. It provides the framework for solving systems of linear equations and is essential in nearly all areas of modern mathematics and computational physics.",
+      "node_type": "explanation",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "algebra"
+      }
+    },
+    {
+      "id": "group_theory_def",
+      "text": "A group is a set equipped with a single binary operation that satisfies four conditions: closure, associativity, identity, and invertibility. Group theory is the mathematical study of symmetry and governs conservation laws in theoretical physics.",
+      "node_type": "fact",
+      "confidence": 0.99,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "algebra"
+      }
+    },
+    {
+      "id": "fundamental_theorem_algebra",
+      "text": "The Fundamental Theorem of Algebra states that every non-constant single-variable polynomial with complex coefficients has at least one complex root. Consequently, a polynomial of degree $n$ has exactly $n$ complex roots, accounting for multiplicity.",
+      "node_type": "theorem",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "algebra"
+      }
+    },
+    {
+      "id": "matrix_mult_false",
+      "text": "Matrix multiplication works exactly like standard number multiplication, meaning the order of multiplication does not matter ($AB = BA$).",
+      "node_type": "claim",
+      "confidence": 0.01,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "algebra",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "eigenvalue_eq",
+      "text": "An eigenvector of a linear transformation is a non-zero vector that changes at most by a scalar factor when the transformation is applied. The defining relation is $Av = \\lambda v$, where $A$ is the matrix representing the transformation, $v$ is the eigenvector, and $\\lambda$ is the corresponding eigenvalue.",
+      "node_type": "equation",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "algebra"
+      }
+    },
+    {
+      "id": "limit_def",
+      "text": "The $(\\epsilon, \\delta)$-definition of a limit formalizes the notion of continuous approach. It states that $\\lim_{x \\to c} f(x) = L$ if, for every $\\epsilon > 0$, there exists a $\\delta > 0$ such that for all $x$, if $0 < |x - c| < \\delta$, then $|f(x) - L| < \\epsilon$.",
+      "node_type": "equation",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "analysis"
+      }
+    },
+    {
+      "id": "derivative_def",
+      "text": "The derivative represents the instantaneous rate of change of a function with respect to one of its variables. It is defined as the limit of the difference quotient: $f'(x) = \\lim_{h \\to 0} \\frac{f(x+h) - f(x)}{h}$.",
+      "node_type": "equation",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "analysis"
+      }
+    },
+    {
+      "id": "ftc",
+      "text": "The Fundamental Theorem of Calculus bridges differential and integral calculus. The first part states that the derivative of the integral of a function is the original function, effectively making integration and differentiation inverse operations: $\\frac{d}{dx} \\int_a^x f(t) dt = f(x)$.",
+      "node_type": "theorem",
+      "confidence": 0.99,
+      "importance": 0.99,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "analysis"
+      }
+    },
+    {
+      "id": "taylor_series",
+      "text": "A Taylor series is the representation of a function as an infinite sum of terms calculated from the values of its derivatives at a single point. It allows complex non-linear functions to be approximated by polynomials: $f(x) = \\sum_{n=0}^{\\infty} \\frac{f^{(n)}(a)}{n!} (x-a)^n$.",
+      "node_type": "equation",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "analysis"
+      }
+    },
+    {
+      "id": "complex_analysis_euler",
+      "text": "Euler's Identity, $e^{i\\pi} + 1 = 0$, is a profound theorem in complex analysis. It establishes a deep relationship between the fundamental mathematical constants $e, i, \\pi, 1,$ and $0$, emerging directly from the Taylor series expansions of exponential and trigonometric functions.",
+      "node_type": "equation",
+      "confidence": 0.99,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "analysis"
+      }
+    },
+    {
+      "id": "euclidean_postulates",
+      "text": "Euclidean geometry is built on five postulates. The first four define basic constructions (lines, circles, right angles), but the fifth—the Parallel Postulate—is structurally different and historically led to the discovery of entirely new geometrical spaces when modified.",
+      "node_type": "fact",
+      "confidence": 0.99,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "geometry_topology"
+      }
+    },
+    {
+      "id": "non_euclidean_geom",
+      "text": "By rejecting the Euclidean Parallel Postulate, mathematicians developed non-Euclidean geometries, such as spherical and hyperbolic geometry. In these spaces, the interior angles of a triangle do not sum to 180 degrees, a fact crucially utilized in Einstein's Theory of General Relativity.",
+      "node_type": "explanation",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "geometry_topology"
+      }
+    },
+    {
+      "id": "topology_def",
+      "text": "Topology is often called 'rubber-sheet geometry.' It studies the properties of a space that are preserved under continuous deformations, meaning tearing and gluing are forbidden, but stretching and bending are allowed. To a topologist, a coffee mug and a doughnut are equivalent (homeomorphic).",
+      "node_type": "explanation",
+      "confidence": 0.99,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "geometry_topology"
+      }
+    },
+    {
+      "id": "manifolds_def",
+      "text": "A manifold is a topological space that locally resembles Euclidean space near each point. For example, the surface of the Earth is a 2-dimensional spherical manifold; locally, to a person standing on it, it appears flat ($R^2$), even though its global structure is curved.",
+      "node_type": "explanation",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "geometry_topology"
+      }
+    },
+    {
+      "id": "poincare_conjecture",
+      "text": "The Poincaré Conjecture (now a theorem proved by Grigori Perelman) states that every simply connected, closed 3-manifold is homeomorphic to the 3-sphere. It was one of the Millennium Prize Problems and deeply connects to understanding the shape of the universe.",
+      "node_type": "theorem",
+      "confidence": 0.99,
+      "importance": 0.91,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "geometry_topology"
+      }
+    },
+    {
+      "id": "prime_number_def",
+      "text": "A prime number is a natural number greater than 1 that cannot be formed by multiplying two smaller natural numbers. Primes are the multiplicative building blocks of all integers.",
+      "node_type": "fact",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "number_theory"
+      }
+    },
+    {
+      "id": "fundamental_theorem_arithmetic",
+      "text": "The Fundamental Theorem of Arithmetic asserts that every integer greater than 1 is either a prime itself or can be factorized as a product of primes, and this prime factorization is unique up to the order of the factors.",
+      "node_type": "theorem",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "number_theory"
+      }
+    },
+    {
+      "id": "fermat_last_theorem",
+      "text": "Fermat's Last Theorem states that no three positive integers $a, b,$ and $c$ satisfy the equation $a^n + b^n = c^n$ for any integer value of $n$ strictly greater than 2. It remained unproved for over 350 years until Andrew Wiles provided a solution in 1994 using advanced algebraic geometry.",
+      "node_type": "fact",
+      "confidence": 0.99,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "number_theory"
+      }
+    },
+    {
+      "id": "riemann_hypothesis",
+      "text": "The Riemann Hypothesis is a profound open conjecture concerning the distribution of prime numbers. It proposes that all non-trivial zeros of the Riemann zeta function $\\zeta(s)$ lie on the critical line where the real part of $s$ equals $1/2$.",
+      "node_type": "claim",
+      "confidence": 0.9,
+      "importance": 0.99,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "number_theory"
+      }
+    },
+    {
+      "id": "prime_infinite_proof",
+      "text": "Euclid elegantly proved that there are infinitely many primes. The proof by contradiction assumes a finite list of all primes, multiplies them together, and adds 1; this new number must either be prime itself or be divisible by a prime not in the original list.",
+      "node_type": "explanation",
+      "confidence": 0.99,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "number_theory"
+      }
+    },
+    {
+      "id": "probability_axioms",
+      "text": "Kolmogorov established the rigorous foundation of modern probability theory using measure theory. The axioms state that the probability of any event is non-negative, the probability of the entire sample space is 1, and the probability of mutually exclusive events is the sum of their individual probabilities.",
+      "node_type": "fact",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "probability_statistics"
+      }
+    },
+    {
+      "id": "central_limit_theorem",
+      "text": "The Central Limit Theorem establishes that, in many situations, when independent random variables are added, their properly normalized sum tends toward a normal distribution (a bell curve) even if the original variables themselves are not normally distributed.",
+      "node_type": "theorem",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "probability_statistics"
+      }
+    },
+    {
+      "id": "bayes_theorem",
+      "text": "Bayes' Theorem mathematically describes the probability of an event, based on prior knowledge of conditions that might be related to the event. It is written as $P(A|B) = \\frac{P(B|A) P(A)}{P(B)}$, forming the basis of Bayesian inference and modern machine learning classifiers.",
+      "node_type": "equation",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "probability_statistics"
+      }
+    },
+    {
+      "id": "correlation_causation_false",
+      "text": "If two statistical variables exhibit a high correlation coefficient, it is a mathematical guarantee that one causes the other.",
+      "node_type": "claim",
+      "confidence": 0.01,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "probability_statistics",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "normal_distribution",
+      "text": "The normal distribution, characterized by its probability density function $f(x) = \\frac{1}{\\sigma \\sqrt{2\\pi}} e^{-\\frac{1}{2}(\\frac{x-\\mu}{\\sigma})^2}$, is paramount in statistics because of the Central Limit Theorem. It symmetric around its mean $\\mu$ and the spread is determined by standard deviation $\\sigma$.",
+      "node_type": "equation",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "probability_statistics"
+      }
+    },
+    {
+      "id": "bridge_math_physics",
+      "text": "Differential equations form the supreme bridge between mathematical analysis and physics. Laws of motion, fluid dynamics, and quantum mechanics are all expressed as relations involving continuously varying quantities and their rates of change in space and time.",
+      "node_type": "bridge",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "bridges"
+      }
+    },
+    {
+      "id": "bridge_algebra_compsci",
+      "text": "Linear algebra is the mathematical engine of modern computer science. It powers 3D graphics transformations, network graph representations, and provides the multidimensional tensor structures essential for deep learning neural networks.",
+      "node_type": "bridge",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "bridges"
+      }
+    },
+    {
+      "id": "bridge_number_theory_crypto",
+      "text": "Number theory moved from pure abstraction to immense practical utility via modern cryptography. The RSA encryption algorithm, securing internet communications globally, relies entirely on the computational difficulty of factoring the product of two extremely large prime numbers.",
+      "node_type": "bridge",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "bridges"
+      }
+    },
+    {
+      "id": "bridge_topology_physics",
+      "text": "Topology and differential geometry provide the stage for modern theoretical physics. General Relativity treats spacetime as a curved 4-dimensional Riemannian manifold, while String Theory requires multi-dimensional Calabi-Yau manifolds to make its mathematical machinery work.",
+      "node_type": "bridge",
+      "confidence": 0.98,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "bridges"
+      }
+    },
+    {
+      "id": "bridge_logic_compsci",
+      "text": "Mathematical logic and set theory gave birth to theoretical computer science. The formal definitions of computation, such as the Turing Machine, sprang directly from attempts to formalize mathematical provability, leading to the discovery of the Halting Problem.",
+      "node_type": "bridge",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "bridges"
+      }
+    },
+    {
+      "id": "proof_by_contradiction_method",
+      "text": "Proof by contradiction establishes a statement by assuming its negation and deriving an impossibility or inconsistency.",
+      "node_type": "proof_technique",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "foundations",
+        "kind": "proof_technique",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "continuum_hypothesis_independent_of_zfc",
+      "text": "Assuming the consistency of ZFC, the Continuum Hypothesis can neither be proved nor disproved from the axioms of ZFC.",
+      "node_type": "theorem",
+      "confidence": 0.97,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "foundations",
+        "kind": "independence_result",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "all_infinite_sets_same_size_false",
+      "text": "All infinite sets have exactly the same size, so countable and uncountable infinity are only linguistic distinctions.",
+      "node_type": "claim",
+      "confidence": 0.02,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "foundations",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "matrix_multiplication_generally_noncommutative",
+      "text": "Matrix multiplication is generally noncommutative, so AB and BA can differ or even have different meanings.",
+      "node_type": "fact",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "algebra",
+        "kind": "structural_fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "determinant_nonzero_implies_invertible",
+      "text": "For a square matrix over a field, a nonzero determinant is equivalent to invertibility.",
+      "node_type": "theorem",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "algebra",
+        "kind": "theorem",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "differentiable_implies_continuous",
+      "text": "Differentiability at a point implies continuity at that point, although the converse fails in general.",
+      "node_type": "theorem",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "analysis",
+        "kind": "theorem",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "continuous_implies_differentiable_false",
+      "text": "Every continuous function is differentiable, so continuity already guarantees a well-defined tangent everywhere.",
+      "node_type": "claim",
+      "confidence": 0.02,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "analysis",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "weierstrass_continuous_not_differentiable_example",
+      "text": "The Weierstrass function is a classical example of a function that is continuous everywhere and differentiable nowhere.",
+      "node_type": "example",
+      "confidence": 0.98,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "analysis",
+        "kind": "counterexample"
+      }
+    },
+    {
+      "id": "simply_connected_definition",
+      "text": "A space is simply connected when every loop in it can be continuously contracted to a point.",
+      "node_type": "definition",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "geometry_topology",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "local_euclidean_not_globally_flat",
+      "text": "A manifold can look Euclidean in small neighborhoods without being globally flat or globally equivalent to Euclidean space.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "geometry_topology",
+        "kind": "local_global_fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "prime_number_theorem",
+      "text": "The Prime Number Theorem states that the number of primes up to x is asymptotically x / log x.",
+      "node_type": "theorem",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "number_theory",
+        "kind": "theorem",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "goldbach_conjecture",
+      "text": "Goldbach's Conjecture proposes that every even integer greater than 2 can be written as the sum of two primes.",
+      "node_type": "conjecture",
+      "confidence": 0.66,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "number_theory",
+        "kind": "open_conjecture",
+        "status": "uncertain"
+      }
+    },
+    {
+      "id": "law_of_large_numbers",
+      "text": "The Law of Large Numbers says that sample averages converge to the expected value under suitable assumptions as the sample size grows.",
+      "node_type": "theorem",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "probability_statistics",
+        "kind": "theorem",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "open_questions_from_formal_limits_bridge",
+      "text": "Formal systems do not merely prove theorems; they also generate structured open questions and independence phenomena that limit what fixed axioms can decide.",
+      "node_type": "bridge",
+      "confidence": 0.98,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "smoothness_to_approximation_bridge",
+      "text": "Analysis connects local smoothness information to polynomial approximation, turning derivatives into usable global approximations and identities.",
+      "node_type": "bridge",
+      "confidence": 0.98,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "local_to_global_structure_bridge",
+      "text": "Geometry and topology repeatedly distinguish local behavior from global structure: local flatness or local contractibility does not determine the global shape by itself.",
+      "node_type": "bridge",
+      "confidence": 0.98,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "prime_distribution_conjecture_bridge",
+      "text": "Number theory links proved asymptotic laws for primes to deeper open conjectures about their fine distribution.",
+      "node_type": "bridge",
+      "confidence": 0.98,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "sampling_to_inference_bridge",
+      "text": "Probability theory connects axioms, repeated sampling, and conditional updating into a single language for inference under uncertainty.",
+      "node_type": "bridge",
+      "confidence": 0.98,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "foundations_limits_and_independence_summary",
+      "text": "Foundational mathematics studies what formal systems can express, what they cannot settle, and how infinite collections differ in size and structure.",
+      "node_type": "summary",
+      "confidence": 0.98,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "foundations",
+        "kind": "component_summary"
+      }
+    },
+    {
+      "id": "algebra_structure_and_spectral_summary",
+      "text": "Algebra organizes linear structure through matrices, determinants, eigenvectors, and noncommutative operations that govern when transformations can be inverted or decomposed.",
+      "node_type": "summary",
+      "confidence": 0.98,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "algebra",
+        "kind": "component_summary"
+      }
+    },
+    {
+      "id": "analysis_limit_smoothness_summary",
+      "text": "Analysis builds from limits to derivatives and then to approximation, showing how local smoothness controls continuity, integration, and polynomial expansions.",
+      "node_type": "summary",
+      "confidence": 0.98,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "analysis",
+        "kind": "component_summary"
+      }
+    },
+    {
+      "id": "geometry_local_global_summary",
+      "text": "Geometry and topology compare axiomatic, local, and global viewpoints on space, from Euclidean postulates to manifolds and simply connected 3-manifolds.",
+      "node_type": "summary",
+      "confidence": 0.98,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "geometry_topology",
+        "kind": "component_summary"
+      }
+    },
+    {
+      "id": "number_theory_primes_and_conjectures_summary",
+      "text": "Number theory combines proved structure about primes with open conjectures about their finer distribution and additive behavior.",
+      "node_type": "summary",
+      "confidence": 0.98,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "mathematics",
+        "cluster": "number_theory",
+        "kind": "component_summary"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "src": "logic_set_hub",
+      "dst": "math_gold_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "algebra_hub",
+      "dst": "math_gold_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "analysis_hub",
+      "dst": "math_gold_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "geometry_topo_hub",
+      "dst": "math_gold_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "number_theory_hub",
+      "dst": "math_gold_hub",
+      "relation": "part_of",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "prob_stat_hub",
+      "dst": "math_gold_hub",
+      "relation": "part_of",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "set_def",
+      "dst": "logic_set_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "godel_incompleteness",
+      "dst": "logic_set_hub",
+      "relation": "part_of",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "logic_false_claim",
+      "dst": "logic_set_hub",
+      "relation": "part_of",
+      "strength": 0.85,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "infinity_sizes",
+      "dst": "logic_set_hub",
+      "relation": "part_of",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "linear_alg_systems",
+      "dst": "algebra_hub",
+      "relation": "part_of",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "group_theory_def",
+      "dst": "algebra_hub",
+      "relation": "part_of",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "fundamental_theorem_algebra",
+      "dst": "algebra_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "matrix_mult_false",
+      "dst": "algebra_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "eigenvalue_eq",
+      "dst": "algebra_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "limit_def",
+      "dst": "analysis_hub",
+      "relation": "part_of",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "derivative_def",
+      "dst": "analysis_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ftc",
+      "dst": "analysis_hub",
+      "relation": "part_of",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "taylor_series",
+      "dst": "analysis_hub",
+      "relation": "part_of",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "complex_analysis_euler",
+      "dst": "analysis_hub",
+      "relation": "part_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "euclidean_postulates",
+      "dst": "geometry_topo_hub",
+      "relation": "part_of",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "non_euclidean_geom",
+      "dst": "geometry_topo_hub",
+      "relation": "part_of",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "topology_def",
+      "dst": "geometry_topo_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "manifolds_def",
+      "dst": "geometry_topo_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "poincare_conjecture",
+      "dst": "geometry_topo_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "prime_number_def",
+      "dst": "number_theory_hub",
+      "relation": "part_of",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "fundamental_theorem_arithmetic",
+      "dst": "number_theory_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "fermat_last_theorem",
+      "dst": "number_theory_hub",
+      "relation": "part_of",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "riemann_hypothesis",
+      "dst": "number_theory_hub",
+      "relation": "part_of",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "prime_infinite_proof",
+      "dst": "number_theory_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "probability_axioms",
+      "dst": "prob_stat_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "central_limit_theorem",
+      "dst": "prob_stat_hub",
+      "relation": "part_of",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bayes_theorem",
+      "dst": "prob_stat_hub",
+      "relation": "part_of",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "correlation_causation_false",
+      "dst": "prob_stat_hub",
+      "relation": "part_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "normal_distribution",
+      "dst": "prob_stat_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "godel_incompleteness",
+      "dst": "logic_false_claim",
+      "relation": "contradicts",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "set_def",
+      "dst": "infinity_sizes",
+      "relation": "supports",
+      "strength": 0.88,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "linear_alg_systems",
+      "dst": "matrix_mult_false",
+      "relation": "contradicts",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "eigenvalue_eq",
+      "dst": "linear_alg_systems",
+      "relation": "part_of",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "limit_def",
+      "dst": "derivative_def",
+      "relation": "supports",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "derivative_def",
+      "dst": "ftc",
+      "relation": "supports",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "derivative_def",
+      "dst": "taylor_series",
+      "relation": "supports",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "euclidean_postulates",
+      "dst": "non_euclidean_geom",
+      "relation": "related_to",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "topology_def",
+      "dst": "manifolds_def",
+      "relation": "supports",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "manifolds_def",
+      "dst": "poincare_conjecture",
+      "relation": "related_to",
+      "strength": 0.89,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "prime_number_def",
+      "dst": "fundamental_theorem_arithmetic",
+      "relation": "supports",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "prime_number_def",
+      "dst": "prime_infinite_proof",
+      "relation": "supports",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "prime_number_def",
+      "dst": "riemann_hypothesis",
+      "relation": "related_to",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "probability_axioms",
+      "dst": "bayes_theorem",
+      "relation": "supports",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "normal_distribution",
+      "dst": "central_limit_theorem",
+      "relation": "related_to",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "derivative_def",
+      "dst": "bridge_math_physics",
+      "relation": "supports",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "linear_alg_systems",
+      "dst": "bridge_algebra_compsci",
+      "relation": "supports",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "prime_number_def",
+      "dst": "bridge_number_theory_crypto",
+      "relation": "supports",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "manifolds_def",
+      "dst": "bridge_topology_physics",
+      "relation": "supports",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "godel_incompleteness",
+      "dst": "bridge_logic_compsci",
+      "relation": "related_to",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "proof_by_contradiction_method",
+      "dst": "prime_infinite_proof",
+      "relation": "supports",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "proof_by_contradiction_method",
+      "dst": "godel_incompleteness",
+      "relation": "related_to",
+      "strength": 0.86,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "godel_incompleteness",
+      "dst": "continuum_hypothesis_independent_of_zfc",
+      "relation": "related_to",
+      "strength": 0.91,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "infinity_sizes",
+      "dst": "continuum_hypothesis_independent_of_zfc",
+      "relation": "related_to",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "infinity_sizes",
+      "dst": "all_infinite_sets_same_size_false",
+      "relation": "contradicts",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "godel_incompleteness",
+      "dst": "open_questions_from_formal_limits_bridge",
+      "relation": "supports",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "continuum_hypothesis_independent_of_zfc",
+      "dst": "open_questions_from_formal_limits_bridge",
+      "relation": "supports",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "matrix_multiplication_generally_noncommutative",
+      "dst": "matrix_mult_false",
+      "relation": "contradicts",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "matrix_multiplication_generally_noncommutative",
+      "dst": "linear_alg_systems",
+      "relation": "supports",
+      "strength": 0.89,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "determinant_nonzero_implies_invertible",
+      "dst": "linear_alg_systems",
+      "relation": "supports",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "determinant_nonzero_implies_invertible",
+      "dst": "eigenvalue_eq",
+      "relation": "related_to",
+      "strength": 0.86,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "derivative_def",
+      "dst": "differentiable_implies_continuous",
+      "relation": "supports",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "differentiable_implies_continuous",
+      "dst": "ftc",
+      "relation": "supports",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "differentiable_implies_continuous",
+      "dst": "smoothness_to_approximation_bridge",
+      "relation": "supports",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "derivative_def",
+      "dst": "smoothness_to_approximation_bridge",
+      "relation": "supports",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "taylor_series",
+      "dst": "smoothness_to_approximation_bridge",
+      "relation": "supports",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "complex_analysis_euler",
+      "dst": "smoothness_to_approximation_bridge",
+      "relation": "supports",
+      "strength": 0.87,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "weierstrass_continuous_not_differentiable_example",
+      "dst": "continuous_implies_differentiable_false",
+      "relation": "contradicts",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "differentiable_implies_continuous",
+      "dst": "continuous_implies_differentiable_false",
+      "relation": "related_to",
+      "strength": 0.78,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "topology_def",
+      "dst": "simply_connected_definition",
+      "relation": "supports",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "simply_connected_definition",
+      "dst": "poincare_conjecture",
+      "relation": "supports",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "manifolds_def",
+      "dst": "local_euclidean_not_globally_flat",
+      "relation": "supports",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "non_euclidean_geom",
+      "dst": "local_euclidean_not_globally_flat",
+      "relation": "supports",
+      "strength": 0.89,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "manifolds_def",
+      "dst": "local_to_global_structure_bridge",
+      "relation": "supports",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "local_euclidean_not_globally_flat",
+      "dst": "local_to_global_structure_bridge",
+      "relation": "supports",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "poincare_conjecture",
+      "dst": "local_to_global_structure_bridge",
+      "relation": "supports",
+      "strength": 0.89,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "prime_number_def",
+      "dst": "prime_number_theorem",
+      "relation": "related_to",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "prime_infinite_proof",
+      "dst": "prime_number_theorem",
+      "relation": "related_to",
+      "strength": 0.88,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "prime_number_theorem",
+      "dst": "prime_distribution_conjecture_bridge",
+      "relation": "supports",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "riemann_hypothesis",
+      "dst": "prime_distribution_conjecture_bridge",
+      "relation": "supports",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "goldbach_conjecture",
+      "dst": "prime_distribution_conjecture_bridge",
+      "relation": "related_to",
+      "strength": 0.82,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "probability_axioms",
+      "dst": "law_of_large_numbers",
+      "relation": "supports",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "law_of_large_numbers",
+      "dst": "sampling_to_inference_bridge",
+      "relation": "supports",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bayes_theorem",
+      "dst": "sampling_to_inference_bridge",
+      "relation": "supports",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "central_limit_theorem",
+      "dst": "sampling_to_inference_bridge",
+      "relation": "supports",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "foundations_limits_and_independence_summary",
+      "dst": "logic_set_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "algebra_structure_and_spectral_summary",
+      "dst": "algebra_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "analysis_limit_smoothness_summary",
+      "dst": "analysis_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "geometry_local_global_summary",
+      "dst": "geometry_topo_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "number_theory_primes_and_conjectures_summary",
+      "dst": "number_theory_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "open_questions_from_formal_limits_bridge",
+      "dst": "math_gold_hub",
+      "relation": "related_to",
+      "strength": 0.7,
+      "directed": true,
+      "metadata": {
+        "note": "bridge anchored to global graph"
+      }
+    },
+    {
+      "src": "smoothness_to_approximation_bridge",
+      "dst": "math_gold_hub",
+      "relation": "related_to",
+      "strength": 0.7,
+      "directed": true,
+      "metadata": {
+        "note": "bridge anchored to global graph"
+      }
+    },
+    {
+      "src": "local_to_global_structure_bridge",
+      "dst": "math_gold_hub",
+      "relation": "related_to",
+      "strength": 0.7,
+      "directed": true,
+      "metadata": {
+        "note": "bridge anchored to global graph"
+      }
+    },
+    {
+      "src": "prime_distribution_conjecture_bridge",
+      "dst": "math_gold_hub",
+      "relation": "related_to",
+      "strength": 0.7,
+      "directed": true,
+      "metadata": {
+        "note": "bridge anchored to global graph"
+      }
+    },
+    {
+      "src": "sampling_to_inference_bridge",
+      "dst": "math_gold_hub",
+      "relation": "related_to",
+      "strength": 0.7,
+      "directed": true,
+      "metadata": {
+        "note": "bridge anchored to global graph"
+      }
+    }
+  ],
+  "metadata": {
+    "gold_version": "math1_theory_gold_v1",
+    "source_note": "Enhanced theory-heavy mathematics graph with conjectures, independence results, proof methods, and component summaries for controller supervision."
+  }
+}

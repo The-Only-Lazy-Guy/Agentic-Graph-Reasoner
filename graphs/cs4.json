@@ -1,0 +1,2499 @@
+{
+  "metadata": {
+    "title": "C++ DSA and math reasoning graph (long-chain, branching, testing-oriented)",
+    "source_note": "Designed for complex C++ reasoning with atomic nodes, structural summary hubs, theory-to-application transfer, long dependency chains, branching support, calculations, and explicit testing/debug hypotheses. Gold augmentation preserves the original graph and only adds clarifying theory, bridge, and summary nodes for long-chain supervision.",
+    "relation_convention": {
+      "part_of": "child hub or bridge node -> parent hub",
+      "example_of": "example or application -> concept or theory",
+      "support": "evidence, mechanism, stronger statement, or calculation -> claim",
+      "contradict": "accepted claim or stronger explanation -> false claim",
+      "refine": "more specific statement -> broader statement",
+      "depend": "prerequisite theory -> dependent method, application, or hypothesis",
+      "cause": "bug source, mechanism, or condition -> downstream effect"
+    },
+    "notes": [
+      "Summary nodes are structural only.",
+      "Ordinary claims use metadata for nuance rather than topic-heavy node types.",
+      "Hypothesis nodes near 0.5 confidence represent plausible debugging guesses rather than accepted truths.",
+      "Testing nodes are included on purpose so the graph can supervise debugging and validation behavior, not just fact recall.",
+      "Several branches reuse the same theory nodes so the graph supports create_bridge, resolve_conflict, update_node, and link_nodes."
+    ],
+    "gold_version": "v2_long_chain_hypothesis_branching"
+  },
+  "nodes": [
+    {
+      "id": "cpp_dsa_math_hub",
+      "text": "C++ problem solving combines discrete mathematics, data structures, algorithms, invariants, and testing.",
+      "node_type": "summary",
+      "confidence": 1.0,
+      "importance": 1.0,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "global",
+        "language": "cpp"
+      }
+    },
+    {
+      "id": "range_query_hub",
+      "text": "Range-query reasoning compares prefix sums, Fenwick trees, and segment trees under different update and query patterns.",
+      "node_type": "summary",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "range_queries",
+        "language": "cpp"
+      }
+    },
+    {
+      "id": "graph_algo_hub",
+      "text": "Graph-algorithm reasoning links graph structure and edge conditions to the correct shortest-path or DP method.",
+      "node_type": "summary",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "graph_algorithms",
+        "language": "cpp"
+      }
+    },
+    {
+      "id": "math_hub",
+      "text": "Mathematical reasoning supports logarithms, modular arithmetic, counting, and asymptotic analysis in C++ algorithms.",
+      "node_type": "summary",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "math",
+        "language": "cpp"
+      }
+    },
+    {
+      "id": "debug_testing_hub",
+      "text": "Debugging and testing compare competing bug hypotheses using counterexamples, brute force, and stress tests.",
+      "node_type": "summary",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "debug_testing",
+        "language": "cpp"
+      }
+    },
+    {
+      "id": "bridges_hub",
+      "text": "Bridge insights connect mathematical structure, algorithm choice, implementation details, and testing strategy.",
+      "node_type": "summary",
+      "confidence": 0.98,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "bridges",
+        "language": "cpp"
+      }
+    },
+    {
+      "id": "asymptotic_to_constraints_bridge",
+      "text": "Input constraints help determine whether O(1), O(log n), O(n), or O(n log n) methods are practical in C++.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "bridges",
+        "language": "cpp",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "invariants_to_updates_bridge",
+      "text": "A correct data-structure update rule preserves an invariant that makes later queries correct.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "bridges",
+        "language": "cpp",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "graph_model_to_algorithm_bridge",
+      "text": "The right graph algorithm depends on edge conditions such as unweighted, nonnegative weighted, or DAG structure.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "bridges",
+        "language": "cpp",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "testing_oracle_bridge",
+      "text": "Small brute-force solvers and targeted edge cases act as oracles that expose invariant and implementation mistakes.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "bridges",
+        "language": "cpp",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "prefix_sum_accumulates_prefix_totals",
+      "text": "A prefix-sum array stores cumulative totals so each prefix can be read in O(1).",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "range_queries",
+        "language": "cpp",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "range_sum_formula_prefix_r_minus_prefix_l_minus_1",
+      "text": "For inclusive indices, range sum(l, r) can be computed as pref[r] - pref[l - 1] when l > 0.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "range_queries",
+        "language": "cpp",
+        "kind": "formula",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "difference_array_marks_boundary_changes",
+      "text": "A difference array marks changes at boundaries and recovers final values through prefix accumulation.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "range_queries",
+        "language": "cpp",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "binary_representation_enables_lowbit_decomposition",
+      "text": "Binary representation lets x & -x isolate the least significant set bit of a positive integer.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "math",
+        "language": "cpp",
+        "kind": "bit_theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "fenwick_tree_stores_partial_sum_ranges",
+      "text": "A Fenwick tree stores overlapping partial sums whose sizes are guided by lowbit decomposition.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "range_queries",
+        "language": "cpp",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "fenwick_update_and_prefix_query_log_n",
+      "text": "Fenwick-tree updates and prefix queries both run in O(log n).",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "range_queries",
+        "language": "cpp",
+        "kind": "complexity",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "segment_tree_recursively_partitions_intervals",
+      "text": "A segment tree recursively partitions an interval into subsegments.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "range_queries",
+        "language": "cpp",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "segment_tree_merge_requires_associative_operation",
+      "text": "Segment-tree merging relies on an associative combine operation such as sum, min, max, or gcd.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "range_queries",
+        "language": "cpp",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "segment_tree_query_log_n",
+      "text": "Segment-tree range queries run in O(log n) for standard point-update, range-query use cases.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "range_queries",
+        "language": "cpp",
+        "kind": "complexity",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "prefix_sums_do_not_support_arbitrary_point_updates_o1",
+      "text": "A plain prefix-sum array does not support arbitrary point updates in O(1) while preserving O(1) range queries.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "range_queries",
+        "language": "cpp",
+        "kind": "constraint",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "prefix_sums_handle_point_updates_o1_false",
+      "text": "Prefix sums handle arbitrary point updates and arbitrary range-sum queries both in O(1).",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "range_queries",
+        "language": "cpp",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "fenwick_zero_index_same_formula_false",
+      "text": "Fenwick-tree code works unchanged with 0-based indexing if you keep the same lowbit loop formulas.",
+      "node_type": "claim",
+      "confidence": 0.04,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "range_queries",
+        "language": "cpp",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "static_range_sum_query_apply",
+      "text": "For many queries on a fixed array, prefix sums apply the range-sum formula efficiently in C++.",
+      "node_type": "application",
+      "confidence": 0.98,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "range_queries",
+        "language": "cpp",
+        "kind": "apply"
+      }
+    },
+    {
+      "id": "range_add_then_finalize_apply",
+      "text": "When many offline range additions are followed by one final reconstruction, a difference array is an appropriate C++ technique.",
+      "node_type": "application",
+      "confidence": 0.98,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "range_queries",
+        "language": "cpp",
+        "kind": "apply"
+      }
+    },
+    {
+      "id": "dynamic_point_update_sum_query_apply",
+      "text": "When values change online and prefix sums must be queried repeatedly, a Fenwick tree is a suitable C++ application.",
+      "node_type": "application",
+      "confidence": 0.98,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "range_queries",
+        "language": "cpp",
+        "kind": "apply"
+      }
+    },
+    {
+      "id": "range_max_with_updates_apply",
+      "text": "A segment tree applies interval partitioning and associative merges to support range maximum queries with updates.",
+      "node_type": "application",
+      "confidence": 0.98,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "range_queries",
+        "language": "cpp",
+        "kind": "apply"
+      }
+    },
+    {
+      "id": "bfs_expands_by_distance_layers",
+      "text": "Breadth-first search expands nodes layer by layer in order of edge count from the source.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "graph_algorithms",
+        "language": "cpp",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "bfs_gives_shortest_path_in_unweighted_graph",
+      "text": "BFS gives shortest-path distances in an unweighted graph.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "graph_algorithms",
+        "language": "cpp",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "dijkstra_requires_nonnegative_edge_weights",
+      "text": "Dijkstra's algorithm requires nonnegative edge weights for its greedy settlement logic to remain correct.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "graph_algorithms",
+        "language": "cpp",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "stale_priority_queue_entries_can_be_skipped",
+      "text": "In a standard C++ priority-queue implementation of Dijkstra, stale extracted entries can be skipped by checking the stored distance.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "graph_algorithms",
+        "language": "cpp",
+        "kind": "implementation_theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "dag_has_topological_order",
+      "text": "A directed acyclic graph has a topological ordering.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "graph_algorithms",
+        "language": "cpp",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "dag_dp_relaxes_along_topological_order",
+      "text": "Dynamic programming on a DAG can propagate values correctly along topological order.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "graph_algorithms",
+        "language": "cpp",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "bfs_on_weighted_graph_false",
+      "text": "BFS gives correct shortest paths on any positively weighted graph because it still explores outward from the source.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "graph_algorithms",
+        "language": "cpp",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "dijkstra_with_negative_edges_false",
+      "text": "Dijkstra remains correct with negative edges as long as there is no negative cycle.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "graph_algorithms",
+        "language": "cpp",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "shortest_path_grid_apply",
+      "text": "On a grid with unit move cost, BFS is a suitable C++ application for shortest path computation.",
+      "node_type": "application",
+      "confidence": 0.98,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "graph_algorithms",
+        "language": "cpp",
+        "kind": "apply"
+      }
+    },
+    {
+      "id": "road_network_nonnegative_apply",
+      "text": "On a graph with nonnegative travel times, Dijkstra is a suitable C++ application for shortest path computation.",
+      "node_type": "application",
+      "confidence": 0.98,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "graph_algorithms",
+        "language": "cpp",
+        "kind": "apply"
+      }
+    },
+    {
+      "id": "count_paths_in_dag_apply",
+      "text": "Counting paths in a DAG by propagating dp values in topological order is a suitable C++ application.",
+      "node_type": "application",
+      "confidence": 0.98,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "graph_algorithms",
+        "language": "cpp",
+        "kind": "apply"
+      }
+    },
+    {
+      "id": "logarithm_counts_repeated_halving_steps",
+      "text": "A logarithm measures how many repeated halvings or doublings are needed to cross a scale.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "math",
+        "language": "cpp",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "log2_of_about_one_million_is_about_twenty",
+      "text": "Because 2^20 = 1,048,576, log2(10^6) is about 20.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "math",
+        "language": "cpp",
+        "kind": "calculation",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "modular_addition_and_multiplication_preserve_remainders",
+      "text": "Modular addition and multiplication can be reduced by taking remainders along the way.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "math",
+        "language": "cpp",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "binary_exponentiation_uses_repeated_squaring",
+      "text": "Binary exponentiation computes a^e in O(log e) by repeated squaring and bit inspection.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "math",
+        "language": "cpp",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "fermat_inverse_requires_prime_mod_and_nonzero_a",
+      "text": "For prime mod p and a not divisible by p, a^(p-2) mod p gives the modular inverse of a.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "math",
+        "language": "cpp",
+        "kind": "formula",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "nCr_mod_using_factorials_and_inverses_apply",
+      "text": "Precomputing factorials and inverse factorials under a prime modulus applies modular arithmetic to fast nCr queries in C++.",
+      "node_type": "application",
+      "confidence": 0.98,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "math",
+        "language": "cpp",
+        "kind": "apply"
+      }
+    },
+    {
+      "id": "path_counts_mod_m_apply",
+      "text": "When counting many combinatorial objects or graph paths, taking results modulo M is a practical C++ application of modular arithmetic.",
+      "node_type": "application",
+      "confidence": 0.98,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "math",
+        "language": "cpp",
+        "kind": "apply"
+      }
+    },
+    {
+      "id": "sum_of_1e5_numbers_each_1e9_is_1e14",
+      "text": "The sum of 10^5 values each equal to 10^9 is 10^14, which exceeds 32-bit signed int range.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "math",
+        "language": "cpp",
+        "kind": "calculation",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "wa_may_be_one_index_bug_hyp",
+      "text": "A wrong answer in Fenwick or prefix code may come from mixing 0-based and 1-based indexing rules.",
+      "node_type": "hypothesis",
+      "confidence": 0.55,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "debug_testing",
+        "language": "cpp",
+        "kind": "hypothesis",
+        "status": "uncertain"
+      }
+    },
+    {
+      "id": "tle_may_come_from_using_segment_tree_when_prefix_sums_suffice_hyp",
+      "text": "A time-limit issue may come from using a heavier dynamic structure when the problem is actually static and prefix sums would suffice.",
+      "node_type": "hypothesis",
+      "confidence": 0.52,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "debug_testing",
+        "language": "cpp",
+        "kind": "hypothesis",
+        "status": "uncertain"
+      }
+    },
+    {
+      "id": "wrong_shortest_path_may_be_negative_edge_hyp",
+      "text": "A shortest-path bug may come from running Dijkstra on a graph that contains a negative edge.",
+      "node_type": "hypothesis",
+      "confidence": 0.57,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "debug_testing",
+        "language": "cpp",
+        "kind": "hypothesis",
+        "status": "uncertain"
+      }
+    },
+    {
+      "id": "overflow_may_need_long_long_hyp",
+      "text": "A suspiciously wrong sum or path count may come from 32-bit integer overflow and may require long long.",
+      "node_type": "hypothesis",
+      "confidence": 0.58,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "debug_testing",
+        "language": "cpp",
+        "kind": "hypothesis",
+        "status": "uncertain"
+      }
+    },
+    {
+      "id": "path_count_bug_may_need_mod_hyp",
+      "text": "A path-counting bug may come from forgetting to reduce values modulo M during accumulation.",
+      "node_type": "hypothesis",
+      "confidence": 0.54,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "debug_testing",
+        "language": "cpp",
+        "kind": "hypothesis",
+        "status": "uncertain"
+      }
+    },
+    {
+      "id": "small_bruteforce_crosscheck_apply",
+      "text": "A small brute-force solver can cross-check a complex C++ implementation on tiny random inputs.",
+      "node_type": "application",
+      "confidence": 0.98,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "debug_testing",
+        "language": "cpp",
+        "kind": "test_idea"
+      }
+    },
+    {
+      "id": "negative_edge_counterexample_test_apply",
+      "text": "Constructing a tiny graph with a negative edge is a targeted test idea for detecting misuse of Dijkstra.",
+      "node_type": "application",
+      "confidence": 0.98,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "debug_testing",
+        "language": "cpp",
+        "kind": "test_idea"
+      }
+    },
+    {
+      "id": "single_element_and_boundary_case_test_apply",
+      "text": "Testing n = 1, l = 0, or queries touching the array boundary is a practical idea for exposing off-by-one bugs.",
+      "node_type": "application",
+      "confidence": 0.98,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "debug_testing",
+        "language": "cpp",
+        "kind": "test_idea"
+      }
+    },
+    {
+      "id": "randomized_stress_test_apply",
+      "text": "Randomized stress testing compares the optimized solution against an oracle across many generated cases.",
+      "node_type": "application",
+      "confidence": 0.98,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "debug_testing",
+        "language": "cpp",
+        "kind": "test_idea"
+      }
+    },
+    {
+      "id": "fenwick_requires_consistent_indexing_protocol",
+      "text": "Fenwick-tree loops rely on a consistent indexing protocol; the classic lowbit formulas assume a 1-based internal representation unless the implementation is carefully transformed.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science",
+        "language": "cpp",
+        "cluster": "range_queries",
+        "kind": "implementation_theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "static_query_pattern_favors_prefix_sums",
+      "text": "When the array is static and the operation is invertible like sum, prefix sums are often simpler and more practical than heavier dynamic trees.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science",
+        "language": "cpp",
+        "cluster": "range_queries",
+        "kind": "structure_selection",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "bellman_ford_handles_negative_edges",
+      "text": "Bellman-Ford handles negative edge weights by repeated relaxation and can also reveal reachable negative cycles.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science",
+        "language": "cpp",
+        "cluster": "graph_algorithms",
+        "kind": "algorithm_choice",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "long_long_needed_for_large_accumulators",
+      "text": "If cumulative sums or path counts can exceed roughly 2e9, C++ code should use long long or another wider type for accumulation.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science",
+        "language": "cpp",
+        "cluster": "math",
+        "kind": "numeric_safety",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "modular_reduction_should_happen_during_accumulation",
+      "text": "In modular counting code, values should usually be reduced during accumulation so intermediate growth stays controlled and the recurrence remains in the intended residue class.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science",
+        "language": "cpp",
+        "cluster": "math",
+        "kind": "numeric_safety",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "segment_tree_handles_noninvertible_range_aggregates",
+      "text": "Segment trees are especially useful when the range operation is associative but not easily invertible from prefix data, such as range maximum.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science",
+        "language": "cpp",
+        "cluster": "range_queries",
+        "kind": "structure_selection",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "oracle_driven_debugging_separates_model_errors_from_code_errors",
+      "text": "Brute-force and targeted oracle tests help separate a wrong algorithmic model from a correct model with buggy indexing, updates, or implementation details.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science",
+        "language": "cpp",
+        "cluster": "debug_testing",
+        "kind": "debugging_principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "modulo_only_at_end_is_always_safe_false",
+      "text": "In C++ modular counting, it is always safe to postpone all modulo operations until the very end because intermediate values do not matter.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science",
+        "language": "cpp",
+        "cluster": "math",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "range_query_pattern_to_structure_choice_bridge",
+      "text": "Choosing among prefix sums, Fenwick trees, and segment trees depends on matching the query-update pattern and algebraic structure to the lightest correct tool.",
+      "node_type": "bridge",
+      "confidence": 0.98,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science",
+        "language": "cpp",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "negative_edge_diagnostics_to_algorithm_choice_bridge",
+      "text": "Negative-edge counterexamples connect debugging evidence to the algorithm-choice rule that separates BFS, Dijkstra, and Bellman-Ford.",
+      "node_type": "bridge",
+      "confidence": 0.98,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science",
+        "language": "cpp",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "numeric_bounds_to_type_and_modulus_bridge",
+      "text": "Numeric magnitude reasoning determines both when wider integer types are needed and when modular reduction must happen during accumulation.",
+      "node_type": "bridge",
+      "confidence": 0.98,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science",
+        "language": "cpp",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "oracle_tests_distinguish_logic_vs_implementation_bridge",
+      "text": "Oracle-style tests distinguish a wrong algorithmic idea from a correct idea implemented with indexing, update, or edge-case bugs.",
+      "node_type": "bridge",
+      "confidence": 0.98,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science",
+        "language": "cpp",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "log_scale_constraints_unify_structure_choices_bridge",
+      "text": "Logarithmic methods across trees, exponentiation, and graph routines are valuable only when their preconditions match the actual problem structure.",
+      "node_type": "bridge",
+      "confidence": 0.98,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science",
+        "language": "cpp",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "prefix_range_tools_and_indexing_summary",
+      "text": "Range-query work in C++ separates static prefix-based techniques from dynamic trees: correctness depends on the update/query pattern, and many bugs come from indexing or invariant mismatches rather than from the high-level formula alone.",
+      "node_type": "summary",
+      "confidence": 0.98,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science",
+        "language": "cpp",
+        "cluster": "range_queries",
+        "kind": "component_summary",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "graph_shortest_path_choice_and_counterexample_summary",
+      "text": "Shortest-path reasoning in C++ depends on graph structure: BFS fits unweighted graphs, Dijkstra needs nonnegative weights, Bellman-Ford handles negative edges, and targeted counterexamples expose when the wrong model was chosen.",
+      "node_type": "summary",
+      "confidence": 0.98,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science",
+        "language": "cpp",
+        "cluster": "graph_algorithms",
+        "kind": "component_summary",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "modular_counting_and_numeric_safety_summary",
+      "text": "Counting code in C++ mixes modular arithmetic, fast exponentiation, inverse formulas, and numeric-range checks: the main safety risks are overflow and forgetting to reduce values during accumulation.",
+      "node_type": "summary",
+      "confidence": 0.98,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science",
+        "language": "cpp",
+        "cluster": "math",
+        "kind": "component_summary",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "debugging_hypotheses_and_oracle_tests_summary",
+      "text": "This debugging component organizes multiple plausible hypotheses and resolves them with brute force, edge cases, and stress tests rather than with intuition alone.",
+      "node_type": "summary",
+      "confidence": 0.98,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science",
+        "language": "cpp",
+        "cluster": "debug_testing",
+        "kind": "component_summary",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "constraints_driven_structure_selection_summary",
+      "text": "Algorithm and data-structure choice in C++ is constraint-driven: asymptotic class, algebraic structure, graph conditions, and numeric limits jointly determine which method is simplest and correct.",
+      "node_type": "summary",
+      "confidence": 0.98,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science",
+        "language": "cpp",
+        "cluster": "bridges",
+        "kind": "component_summary",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "cpp_syntax_library_hub",
+      "text": "Canonical C++ syntax templates used in competitive programming and DSA work. The library covers numeric-safety idioms (long long, 1LL multiplication), bit tricks (lowbit), and full data-structure / algorithm templates (Fenwick tree, prefix sums, difference arrays, BFS on grids, Dijkstra, topological-order DP, modular factorial with inverses).",
+      "node_type": "summary",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "cpp_syntax",
+        "cluster": "cpp_library"
+      }
+    },
+    {
+      "id": "cpp_long_long_idiom",
+      "text": "Numeric-safety idiom: declare accumulators that can exceed roughly 2 * 10^9 as `long long`, and force long-long arithmetic in mixed expressions with the `1LL` literal so the multiplication promotes BOTH operands to 64-bit before computing.\n\nusing ll = long long;\nll sum = 0;\nsum += 1LL * a[i] * b[i];   // both a[i] and b[i] are promoted to long long first\nll big = (ll)x * y;          // explicit cast variant",
+      "node_type": "example",
+      "confidence": 1.0,
+      "importance": 0.85,
+      "metadata": {
+        "topic": "cpp_syntax",
+        "cluster": "cpp_library",
+        "language": "cpp"
+      }
+    },
+    {
+      "id": "cpp_lowbit_idiom",
+      "text": "Bit trick that extracts the lowest set bit of an integer: `i & -i`. It is the engine of Fenwick-tree index traversal because adding or subtracting the lowest set bit walks between a Fenwick node and its parent.\n\n// move toward larger indices (point update direction)\nfor (int i = idx; i <= n; i += i & -i) { /* ... */ }\n// move toward smaller indices (prefix query direction)\nfor (int i = idx; i > 0;  i -= i & -i) { /* ... */ }",
+      "node_type": "example",
+      "confidence": 1.0,
+      "importance": 0.8,
+      "metadata": {
+        "topic": "cpp_syntax",
+        "cluster": "cpp_library",
+        "language": "cpp"
+      }
+    },
+    {
+      "id": "cpp_fenwick_tree_template",
+      "text": "Fenwick (Binary Indexed Tree) supporting O(log n) point updates and O(log n) prefix-sum queries on an array of length n. Uses 1-based internal indexing; the wrapper accepts 0-based positions by adding 1 at the boundary.\n\n#include <vector>\nstruct Fenwick {\n    int n;\n    std::vector<long long> bit;\n    Fenwick(int n_) : n(n_), bit(n_ + 1, 0) {}\n    // point update: a[i] += delta   (i is 1-based)\n    void update(int i, long long delta) {\n        for (; i <= n; i += i & -i) bit[i] += delta;\n    }\n    // prefix sum a[1..i]\n    long long query(int i) {\n        long long s = 0;\n        for (; i > 0; i -= i & -i) s += bit[i];\n        return s;\n    }\n    // inclusive range sum a[l..r], 1-based\n    long long range(int l, int r) {\n        return query(r) - query(l - 1);\n    }\n};",
+      "node_type": "example",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "cpp_syntax",
+        "cluster": "cpp_library",
+        "language": "cpp"
+      }
+    },
+    {
+      "id": "cpp_static_prefix_sum_template",
+      "text": "Static prefix-sum array: O(n) build, O(1) range query, no updates. Use `long long` for the prefix array if individual values can be larger than ~10^4 and n is large.\n\n#include <vector>\nstd::vector<long long> pref(n + 1, 0);\nfor (int i = 0; i < n; ++i) pref[i + 1] = pref[i] + a[i];\nlong long range_sum = pref[r + 1] - pref[l];   // inclusive [l, r], both 0-based",
+      "node_type": "example",
+      "confidence": 1.0,
+      "importance": 0.85,
+      "metadata": {
+        "topic": "cpp_syntax",
+        "cluster": "cpp_library",
+        "language": "cpp"
+      }
+    },
+    {
+      "id": "cpp_difference_array_template",
+      "text": "Difference-array technique for many range-add updates followed by ONE final reconstruction: O(1) per add, O(n) at the end.\n\n#include <vector>\nstd::vector<long long> diff(n + 1, 0);\nauto add = [&](int l, int r, long long v) {   // inclusive [l, r], 0-based\n    diff[l]     += v;\n    diff[r + 1] -= v;\n};\n// ... apply many add() calls ...\nstd::vector<long long> a(n);\nlong long run = 0;\nfor (int i = 0; i < n; ++i) {\n    run += diff[i];\n    a[i] = run;\n}",
+      "node_type": "example",
+      "confidence": 1.0,
+      "importance": 0.85,
+      "metadata": {
+        "topic": "cpp_syntax",
+        "cluster": "cpp_library",
+        "language": "cpp"
+      }
+    },
+    {
+      "id": "cpp_bfs_grid_template",
+      "text": "BFS on a 4-connected grid, returning shortest-step distance from a single source. `-1` marks unreachable; `'#'` marks blocked cells.\n\n#include <vector>\n#include <queue>\n#include <utility>\nint H = grid.size(), W = grid[0].size();\nstd::vector<std::vector<int>> dist(H, std::vector<int>(W, -1));\nstd::queue<std::pair<int,int>> q;\nq.push({sr, sc});\ndist[sr][sc] = 0;\nconst int dr[4] = {-1, 1, 0, 0};\nconst int dc[4] = { 0, 0,-1, 1};\nwhile (!q.empty()) {\n    auto [r, c] = q.front(); q.pop();\n    for (int k = 0; k < 4; ++k) {\n        int nr = r + dr[k], nc = c + dc[k];\n        if (nr < 0 || nr >= H || nc < 0 || nc >= W) continue;\n        if (dist[nr][nc] != -1 || grid[nr][nc] == '#') continue;\n        dist[nr][nc] = dist[r][c] + 1;\n        q.push({nr, nc});\n    }\n}",
+      "node_type": "example",
+      "confidence": 1.0,
+      "importance": 0.85,
+      "metadata": {
+        "topic": "cpp_syntax",
+        "cluster": "cpp_library",
+        "language": "cpp"
+      }
+    },
+    {
+      "id": "cpp_dijkstra_priority_queue_template",
+      "text": "Dijkstra with a min-heap (std::priority_queue + std::greater). Works on graphs with non-negative edge weights. `adj[u]` is a vector of (neighbor, weight) pairs.\n\n#include <vector>\n#include <queue>\n#include <climits>\nusing P = std::pair<long long, int>;   // (distance, node)\nstd::vector<long long> dist(n, LLONG_MAX);\nstd::priority_queue<P, std::vector<P>, std::greater<P>> pq;\ndist[src] = 0;\npq.push({0, src});\nwhile (!pq.empty()) {\n    auto [d, u] = pq.top(); pq.pop();\n    if (d > dist[u]) continue;             // stale heap entry\n    for (auto [v, w] : adj[u]) {\n        if (d + w < dist[v]) {\n            dist[v] = d + w;\n            pq.push({dist[v], v});\n        }\n    }\n}",
+      "node_type": "example",
+      "confidence": 1.0,
+      "importance": 0.85,
+      "metadata": {
+        "topic": "cpp_syntax",
+        "cluster": "cpp_library",
+        "language": "cpp"
+      }
+    },
+    {
+      "id": "cpp_topological_dp_kahn_template",
+      "text": "Topological-order DP via Kahn's algorithm (BFS over zero-in-degree frontier). The example counts paths from `src` modulo MOD; replace the recurrence with whatever DP the problem needs.\n\n#include <vector>\n#include <queue>\nconst long long MOD = 1'000'000'007LL;\nstd::vector<int> indeg(n, 0);\nfor (int u = 0; u < n; ++u)\n    for (int v : adj[u]) ++indeg[v];\nstd::queue<int> q;\nfor (int u = 0; u < n; ++u)\n    if (indeg[u] == 0) q.push(u);\nstd::vector<long long> dp(n, 0);\ndp[src] = 1;\nwhile (!q.empty()) {\n    int u = q.front(); q.pop();\n    for (int v : adj[u]) {\n        dp[v] = (dp[v] + dp[u]) % MOD;\n        if (--indeg[v] == 0) q.push(v);\n    }\n}",
+      "node_type": "example",
+      "confidence": 1.0,
+      "importance": 0.85,
+      "metadata": {
+        "topic": "cpp_syntax",
+        "cluster": "cpp_library",
+        "language": "cpp"
+      }
+    },
+    {
+      "id": "cpp_modular_factorial_inverse_template",
+      "text": "Precompute factorials and inverse factorials modulo a prime so that nCr can be answered in O(1) per query. Inverse factorials are derived from the top down using the identity inv_fact[i] = inv_fact[i+1] * (i+1).\n\n#include <vector>\nconst long long MOD = 1'000'000'007LL;\nauto pw = [](long long a, long long e, long long m) {\n    long long r = 1 % m; a %= m;\n    while (e) {\n        if (e & 1) r = r * a % m;\n        a = a * a % m;\n        e >>= 1;\n    }\n    return r;\n};\nstd::vector<long long> fact(N + 1), inv_fact(N + 1);\nfact[0] = 1;\nfor (int i = 1; i <= N; ++i) fact[i] = fact[i - 1] * i % MOD;\ninv_fact[N] = pw(fact[N], MOD - 2, MOD);\nfor (int i = N - 1; i >= 0; --i)\n    inv_fact[i] = inv_fact[i + 1] * (i + 1) % MOD;\nauto nCr = [&](int n, int r) -> long long {\n    if (r < 0 || r > n) return 0;\n    return fact[n] * inv_fact[r] % MOD * inv_fact[n - r] % MOD;\n};",
+      "node_type": "example",
+      "confidence": 1.0,
+      "importance": 0.85,
+      "metadata": {
+        "topic": "cpp_syntax",
+        "cluster": "cpp_library",
+        "language": "cpp"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "src": "range_query_hub",
+      "dst": "cpp_dsa_math_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "graph_algo_hub",
+      "dst": "cpp_dsa_math_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "math_hub",
+      "dst": "cpp_dsa_math_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "debug_testing_hub",
+      "dst": "cpp_dsa_math_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bridges_hub",
+      "dst": "cpp_dsa_math_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "asymptotic_to_constraints_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "invariants_to_updates_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "graph_model_to_algorithm_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "testing_oracle_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "prefix_sum_accumulates_prefix_totals",
+      "dst": "range_sum_formula_prefix_r_minus_prefix_l_minus_1",
+      "relation": "support",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "range_sum_formula_prefix_r_minus_prefix_l_minus_1",
+      "dst": "static_range_sum_query_apply",
+      "relation": "depend",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "difference_array_marks_boundary_changes",
+      "dst": "range_add_then_finalize_apply",
+      "relation": "depend",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "prefix_sum_accumulates_prefix_totals",
+      "dst": "difference_array_marks_boundary_changes",
+      "relation": "depend",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "binary_representation_enables_lowbit_decomposition",
+      "dst": "fenwick_tree_stores_partial_sum_ranges",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "fenwick_tree_stores_partial_sum_ranges",
+      "dst": "fenwick_update_and_prefix_query_log_n",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "fenwick_update_and_prefix_query_log_n",
+      "dst": "dynamic_point_update_sum_query_apply",
+      "relation": "depend",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "segment_tree_recursively_partitions_intervals",
+      "dst": "segment_tree_query_log_n",
+      "relation": "support",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "segment_tree_merge_requires_associative_operation",
+      "dst": "segment_tree_query_log_n",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "segment_tree_query_log_n",
+      "dst": "range_max_with_updates_apply",
+      "relation": "depend",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "segment_tree_merge_requires_associative_operation",
+      "dst": "range_max_with_updates_apply",
+      "relation": "depend",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "prefix_sums_do_not_support_arbitrary_point_updates_o1",
+      "dst": "prefix_sums_handle_point_updates_o1_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "fenwick_tree_stores_partial_sum_ranges",
+      "dst": "fenwick_zero_index_same_formula_false",
+      "relation": "contradict",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "prefix_sum_accumulates_prefix_totals",
+      "dst": "invariants_to_updates_bridge",
+      "relation": "support",
+      "strength": 0.88,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "difference_array_marks_boundary_changes",
+      "dst": "invariants_to_updates_bridge",
+      "relation": "support",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "fenwick_tree_stores_partial_sum_ranges",
+      "dst": "invariants_to_updates_bridge",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "segment_tree_recursively_partitions_intervals",
+      "dst": "invariants_to_updates_bridge",
+      "relation": "support",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bfs_expands_by_distance_layers",
+      "dst": "bfs_gives_shortest_path_in_unweighted_graph",
+      "relation": "support",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bfs_gives_shortest_path_in_unweighted_graph",
+      "dst": "shortest_path_grid_apply",
+      "relation": "depend",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dijkstra_requires_nonnegative_edge_weights",
+      "dst": "road_network_nonnegative_apply",
+      "relation": "depend",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "stale_priority_queue_entries_can_be_skipped",
+      "dst": "road_network_nonnegative_apply",
+      "relation": "depend",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dag_has_topological_order",
+      "dst": "dag_dp_relaxes_along_topological_order",
+      "relation": "support",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dag_dp_relaxes_along_topological_order",
+      "dst": "count_paths_in_dag_apply",
+      "relation": "depend",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bfs_gives_shortest_path_in_unweighted_graph",
+      "dst": "bfs_on_weighted_graph_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dijkstra_requires_nonnegative_edge_weights",
+      "dst": "dijkstra_with_negative_edges_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bfs_gives_shortest_path_in_unweighted_graph",
+      "dst": "graph_model_to_algorithm_bridge",
+      "relation": "support",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dijkstra_requires_nonnegative_edge_weights",
+      "dst": "graph_model_to_algorithm_bridge",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dag_dp_relaxes_along_topological_order",
+      "dst": "graph_model_to_algorithm_bridge",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "logarithm_counts_repeated_halving_steps",
+      "dst": "log2_of_about_one_million_is_about_twenty",
+      "relation": "refine",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "log2_of_about_one_million_is_about_twenty",
+      "dst": "asymptotic_to_constraints_bridge",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "fenwick_update_and_prefix_query_log_n",
+      "dst": "asymptotic_to_constraints_bridge",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "segment_tree_query_log_n",
+      "dst": "asymptotic_to_constraints_bridge",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "range_sum_formula_prefix_r_minus_prefix_l_minus_1",
+      "dst": "asymptotic_to_constraints_bridge",
+      "relation": "support",
+      "strength": 0.86,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "modular_addition_and_multiplication_preserve_remainders",
+      "dst": "binary_exponentiation_uses_repeated_squaring",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "binary_exponentiation_uses_repeated_squaring",
+      "dst": "fermat_inverse_requires_prime_mod_and_nonzero_a",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "fermat_inverse_requires_prime_mod_and_nonzero_a",
+      "dst": "nCr_mod_using_factorials_and_inverses_apply",
+      "relation": "depend",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "modular_addition_and_multiplication_preserve_remainders",
+      "dst": "path_counts_mod_m_apply",
+      "relation": "depend",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dag_dp_relaxes_along_topological_order",
+      "dst": "path_counts_mod_m_apply",
+      "relation": "support",
+      "strength": 0.83,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "fenwick_tree_stores_partial_sum_ranges",
+      "dst": "wa_may_be_one_index_bug_hyp",
+      "relation": "depend",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "range_sum_formula_prefix_r_minus_prefix_l_minus_1",
+      "dst": "wa_may_be_one_index_bug_hyp",
+      "relation": "depend",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "fenwick_zero_index_same_formula_false",
+      "dst": "wa_may_be_one_index_bug_hyp",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "prefix_sum_accumulates_prefix_totals",
+      "dst": "tle_may_come_from_using_segment_tree_when_prefix_sums_suffice_hyp",
+      "relation": "support",
+      "strength": 0.82,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "segment_tree_query_log_n",
+      "dst": "tle_may_come_from_using_segment_tree_when_prefix_sums_suffice_hyp",
+      "relation": "support",
+      "strength": 0.76,
+      "directed": true,
+      "metadata": {
+        "note": "The hypothesis compares a heavier structure with a simpler valid option."
+      }
+    },
+    {
+      "src": "dijkstra_requires_nonnegative_edge_weights",
+      "dst": "wrong_shortest_path_may_be_negative_edge_hyp",
+      "relation": "depend",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dijkstra_with_negative_edges_false",
+      "dst": "wrong_shortest_path_may_be_negative_edge_hyp",
+      "relation": "support",
+      "strength": 0.82,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "sum_of_1e5_numbers_each_1e9_is_1e14",
+      "dst": "overflow_may_need_long_long_hyp",
+      "relation": "support",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "path_counts_mod_m_apply",
+      "dst": "path_count_bug_may_need_mod_hyp",
+      "relation": "depend",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "modular_addition_and_multiplication_preserve_remainders",
+      "dst": "path_count_bug_may_need_mod_hyp",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wa_may_be_one_index_bug_hyp",
+      "dst": "single_element_and_boundary_case_test_apply",
+      "relation": "cause",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wrong_shortest_path_may_be_negative_edge_hyp",
+      "dst": "negative_edge_counterexample_test_apply",
+      "relation": "cause",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "small_bruteforce_crosscheck_apply",
+      "dst": "testing_oracle_bridge",
+      "relation": "support",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "randomized_stress_test_apply",
+      "dst": "testing_oracle_bridge",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "single_element_and_boundary_case_test_apply",
+      "dst": "testing_oracle_bridge",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "negative_edge_counterexample_test_apply",
+      "dst": "testing_oracle_bridge",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wa_may_be_one_index_bug_hyp",
+      "dst": "small_bruteforce_crosscheck_apply",
+      "relation": "cause",
+      "strength": 0.86,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "tle_may_come_from_using_segment_tree_when_prefix_sums_suffice_hyp",
+      "dst": "randomized_stress_test_apply",
+      "relation": "cause",
+      "strength": 0.65,
+      "directed": true,
+      "metadata": {
+        "note": "Stress tests can confirm correctness before simplifying the data structure."
+      }
+    },
+    {
+      "src": "overflow_may_need_long_long_hyp",
+      "dst": "small_bruteforce_crosscheck_apply",
+      "relation": "cause",
+      "strength": 0.62,
+      "directed": true,
+      "metadata": {
+        "note": "Cross-checks can reveal where large-value cases diverge from expected results."
+      }
+    },
+    {
+      "src": "binary_representation_enables_lowbit_decomposition",
+      "dst": "fenwick_requires_consistent_indexing_protocol",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "fenwick_tree_stores_partial_sum_ranges",
+      "dst": "fenwick_requires_consistent_indexing_protocol",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "fenwick_requires_consistent_indexing_protocol",
+      "dst": "fenwick_zero_index_same_formula_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "fenwick_requires_consistent_indexing_protocol",
+      "dst": "wa_may_be_one_index_bug_hyp",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "prefix_sum_accumulates_prefix_totals",
+      "dst": "static_query_pattern_favors_prefix_sums",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "prefix_sums_do_not_support_arbitrary_point_updates_o1",
+      "dst": "static_query_pattern_favors_prefix_sums",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "static_query_pattern_favors_prefix_sums",
+      "dst": "tle_may_come_from_using_segment_tree_when_prefix_sums_suffice_hyp",
+      "relation": "support",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "static_query_pattern_favors_prefix_sums",
+      "dst": "asymptotic_to_constraints_bridge",
+      "relation": "support",
+      "strength": 0.88,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dijkstra_requires_nonnegative_edge_weights",
+      "dst": "bellman_ford_handles_negative_edges",
+      "relation": "support",
+      "strength": 0.86,
+      "directed": true,
+      "metadata": {
+        "note": "The limitation of Dijkstra motivates the alternative."
+      }
+    },
+    {
+      "src": "bellman_ford_handles_negative_edges",
+      "dst": "wrong_shortest_path_may_be_negative_edge_hyp",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bellman_ford_handles_negative_edges",
+      "dst": "graph_model_to_algorithm_bridge",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "sum_of_1e5_numbers_each_1e9_is_1e14",
+      "dst": "long_long_needed_for_large_accumulators",
+      "relation": "support",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "long_long_needed_for_large_accumulators",
+      "dst": "path_counts_mod_m_apply",
+      "relation": "support",
+      "strength": 0.78,
+      "directed": true,
+      "metadata": {
+        "note": "Path counting often needs both modular arithmetic and wider intermediate types."
+      }
+    },
+    {
+      "src": "modular_addition_and_multiplication_preserve_remainders",
+      "dst": "modular_reduction_should_happen_during_accumulation",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "modular_reduction_should_happen_during_accumulation",
+      "dst": "modulo_only_at_end_is_always_safe_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "modular_reduction_should_happen_during_accumulation",
+      "dst": "path_count_bug_may_need_mod_hyp",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "segment_tree_merge_requires_associative_operation",
+      "dst": "segment_tree_handles_noninvertible_range_aggregates",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "segment_tree_recursively_partitions_intervals",
+      "dst": "segment_tree_handles_noninvertible_range_aggregates",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "small_bruteforce_crosscheck_apply",
+      "dst": "oracle_driven_debugging_separates_model_errors_from_code_errors",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "randomized_stress_test_apply",
+      "dst": "oracle_driven_debugging_separates_model_errors_from_code_errors",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "oracle_driven_debugging_separates_model_errors_from_code_errors",
+      "dst": "testing_oracle_bridge",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "range_query_pattern_to_structure_choice_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "negative_edge_diagnostics_to_algorithm_choice_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "numeric_bounds_to_type_and_modulus_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "oracle_tests_distinguish_logic_vs_implementation_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "log_scale_constraints_unify_structure_choices_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "static_query_pattern_favors_prefix_sums",
+      "dst": "range_query_pattern_to_structure_choice_bridge",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "fenwick_update_and_prefix_query_log_n",
+      "dst": "range_query_pattern_to_structure_choice_bridge",
+      "relation": "support",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "segment_tree_handles_noninvertible_range_aggregates",
+      "dst": "range_query_pattern_to_structure_choice_bridge",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "range_query_pattern_to_structure_choice_bridge",
+      "dst": "asymptotic_to_constraints_bridge",
+      "relation": "support",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "negative_edge_counterexample_test_apply",
+      "dst": "negative_edge_diagnostics_to_algorithm_choice_bridge",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dijkstra_requires_nonnegative_edge_weights",
+      "dst": "negative_edge_diagnostics_to_algorithm_choice_bridge",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bellman_ford_handles_negative_edges",
+      "dst": "negative_edge_diagnostics_to_algorithm_choice_bridge",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "negative_edge_diagnostics_to_algorithm_choice_bridge",
+      "dst": "graph_model_to_algorithm_bridge",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "sum_of_1e5_numbers_each_1e9_is_1e14",
+      "dst": "numeric_bounds_to_type_and_modulus_bridge",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "long_long_needed_for_large_accumulators",
+      "dst": "numeric_bounds_to_type_and_modulus_bridge",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "modular_reduction_should_happen_during_accumulation",
+      "dst": "numeric_bounds_to_type_and_modulus_bridge",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "path_counts_mod_m_apply",
+      "dst": "numeric_bounds_to_type_and_modulus_bridge",
+      "relation": "support",
+      "strength": 0.88,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "oracle_driven_debugging_separates_model_errors_from_code_errors",
+      "dst": "oracle_tests_distinguish_logic_vs_implementation_bridge",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wa_may_be_one_index_bug_hyp",
+      "dst": "oracle_tests_distinguish_logic_vs_implementation_bridge",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wrong_shortest_path_may_be_negative_edge_hyp",
+      "dst": "oracle_tests_distinguish_logic_vs_implementation_bridge",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "oracle_tests_distinguish_logic_vs_implementation_bridge",
+      "dst": "testing_oracle_bridge",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "logarithm_counts_repeated_halving_steps",
+      "dst": "log_scale_constraints_unify_structure_choices_bridge",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "fenwick_update_and_prefix_query_log_n",
+      "dst": "log_scale_constraints_unify_structure_choices_bridge",
+      "relation": "support",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "segment_tree_query_log_n",
+      "dst": "log_scale_constraints_unify_structure_choices_bridge",
+      "relation": "support",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "binary_exponentiation_uses_repeated_squaring",
+      "dst": "log_scale_constraints_unify_structure_choices_bridge",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "log_scale_constraints_unify_structure_choices_bridge",
+      "dst": "asymptotic_to_constraints_bridge",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "prefix_range_tools_and_indexing_summary",
+      "dst": "range_query_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "prefix_sum_accumulates_prefix_totals",
+      "dst": "prefix_range_tools_and_indexing_summary",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "difference_array_marks_boundary_changes",
+      "dst": "prefix_range_tools_and_indexing_summary",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "fenwick_tree_stores_partial_sum_ranges",
+      "dst": "prefix_range_tools_and_indexing_summary",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "segment_tree_handles_noninvertible_range_aggregates",
+      "dst": "prefix_range_tools_and_indexing_summary",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "fenwick_requires_consistent_indexing_protocol",
+      "dst": "prefix_range_tools_and_indexing_summary",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "static_query_pattern_favors_prefix_sums",
+      "dst": "prefix_range_tools_and_indexing_summary",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "graph_shortest_path_choice_and_counterexample_summary",
+      "dst": "graph_algo_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bfs_gives_shortest_path_in_unweighted_graph",
+      "dst": "graph_shortest_path_choice_and_counterexample_summary",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dijkstra_requires_nonnegative_edge_weights",
+      "dst": "graph_shortest_path_choice_and_counterexample_summary",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bellman_ford_handles_negative_edges",
+      "dst": "graph_shortest_path_choice_and_counterexample_summary",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "negative_edge_counterexample_test_apply",
+      "dst": "graph_shortest_path_choice_and_counterexample_summary",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "graph_model_to_algorithm_bridge",
+      "dst": "graph_shortest_path_choice_and_counterexample_summary",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "modular_counting_and_numeric_safety_summary",
+      "dst": "math_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "modular_addition_and_multiplication_preserve_remainders",
+      "dst": "modular_counting_and_numeric_safety_summary",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "binary_exponentiation_uses_repeated_squaring",
+      "dst": "modular_counting_and_numeric_safety_summary",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "fermat_inverse_requires_prime_mod_and_nonzero_a",
+      "dst": "modular_counting_and_numeric_safety_summary",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "long_long_needed_for_large_accumulators",
+      "dst": "modular_counting_and_numeric_safety_summary",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "modular_reduction_should_happen_during_accumulation",
+      "dst": "modular_counting_and_numeric_safety_summary",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "debugging_hypotheses_and_oracle_tests_summary",
+      "dst": "debug_testing_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wa_may_be_one_index_bug_hyp",
+      "dst": "debugging_hypotheses_and_oracle_tests_summary",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wrong_shortest_path_may_be_negative_edge_hyp",
+      "dst": "debugging_hypotheses_and_oracle_tests_summary",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "overflow_may_need_long_long_hyp",
+      "dst": "debugging_hypotheses_and_oracle_tests_summary",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "small_bruteforce_crosscheck_apply",
+      "dst": "debugging_hypotheses_and_oracle_tests_summary",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "randomized_stress_test_apply",
+      "dst": "debugging_hypotheses_and_oracle_tests_summary",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "oracle_driven_debugging_separates_model_errors_from_code_errors",
+      "dst": "debugging_hypotheses_and_oracle_tests_summary",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "constraints_driven_structure_selection_summary",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "asymptotic_to_constraints_bridge",
+      "dst": "constraints_driven_structure_selection_summary",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "range_query_pattern_to_structure_choice_bridge",
+      "dst": "constraints_driven_structure_selection_summary",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "negative_edge_diagnostics_to_algorithm_choice_bridge",
+      "dst": "constraints_driven_structure_selection_summary",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "numeric_bounds_to_type_and_modulus_bridge",
+      "dst": "constraints_driven_structure_selection_summary",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "log_scale_constraints_unify_structure_choices_bridge",
+      "dst": "constraints_driven_structure_selection_summary",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cpp_long_long_idiom",
+      "dst": "cpp_syntax_library_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cpp_lowbit_idiom",
+      "dst": "cpp_syntax_library_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cpp_fenwick_tree_template",
+      "dst": "cpp_syntax_library_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cpp_static_prefix_sum_template",
+      "dst": "cpp_syntax_library_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cpp_difference_array_template",
+      "dst": "cpp_syntax_library_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cpp_bfs_grid_template",
+      "dst": "cpp_syntax_library_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cpp_dijkstra_priority_queue_template",
+      "dst": "cpp_syntax_library_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cpp_topological_dp_kahn_template",
+      "dst": "cpp_syntax_library_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cpp_modular_factorial_inverse_template",
+      "dst": "cpp_syntax_library_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cpp_long_long_idiom",
+      "dst": "cpp_fenwick_tree_template",
+      "relation": "depend",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cpp_lowbit_idiom",
+      "dst": "cpp_fenwick_tree_template",
+      "relation": "depend",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cpp_long_long_idiom",
+      "dst": "cpp_static_prefix_sum_template",
+      "relation": "depend",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cpp_long_long_idiom",
+      "dst": "cpp_difference_array_template",
+      "relation": "depend",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cpp_long_long_idiom",
+      "dst": "cpp_dijkstra_priority_queue_template",
+      "relation": "depend",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cpp_long_long_idiom",
+      "dst": "cpp_topological_dp_kahn_template",
+      "relation": "depend",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cpp_long_long_idiom",
+      "dst": "cpp_modular_factorial_inverse_template",
+      "relation": "depend",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cpp_long_long_idiom",
+      "dst": "long_long_needed_for_large_accumulators",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cpp_lowbit_idiom",
+      "dst": "fenwick_requires_consistent_indexing_protocol",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cpp_fenwick_tree_template",
+      "dst": "dynamic_point_update_sum_query_apply",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cpp_static_prefix_sum_template",
+      "dst": "static_range_sum_query_apply",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cpp_difference_array_template",
+      "dst": "range_add_then_finalize_apply",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cpp_bfs_grid_template",
+      "dst": "shortest_path_grid_apply",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cpp_dijkstra_priority_queue_template",
+      "dst": "road_network_nonnegative_apply",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cpp_topological_dp_kahn_template",
+      "dst": "count_paths_in_dag_apply",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cpp_modular_factorial_inverse_template",
+      "dst": "nCr_mod_using_factorials_and_inverses_apply",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    }
+  ]
+}

@@ -1,0 +1,1827 @@
+{
+  "metadata": {
+    "title": "Computer science reasoning graph (gold, true summary semantics)",
+    "source_note": "Designed for controller supervision with atomic CS/logic claims, branchy support, explicit misconceptions, cross-cluster bridges, and reserved summary semantics for component compression.",
+    "relation_convention": {
+      "part_of": "child hub or bridge node -> parent hub",
+      "example_of": "example -> concept",
+      "support": "evidence, mechanism, prerequisite, or refinement -> claim",
+      "contradict": "accepted or resolving claim -> false or competing claim",
+      "refine": "more specific statement -> broader statement",
+      "depend": "prerequisite concept -> dependent concept"
+    },
+    "notes": [
+      "Hub nodes are structural containers only and are not summary nodes.",
+      "Summary nodes are reserved for compressed component-level abstractions created only when a component can be sparsified into one reusable language node.",
+      "Ordinary claims are grouped by metadata cluster rather than by attaching every statement to a topic sentence.",
+      "False statements are intentionally retained with low confidence because they provide resolve_conflict and update_node supervision.",
+      "Branching is preferred over narrow chains: multiple supports, examples, and consequences are included where possible.",
+      "Bridge nodes connect logic, algorithms, computation, programming, and systems into reusable reasoning abstractions."
+    ],
+    "gold_version": "v2_true_summary_semantics"
+  },
+  "nodes": [
+    {
+      "id": "cs_logic_hub",
+      "text": "Computer science and logic study computation, reasoning, and formal systems.",
+      "node_type": "hub",
+      "confidence": 1.0,
+      "importance": 1.0,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "global"
+      }
+    },
+    {
+      "id": "logic_reasoning_hub",
+      "text": "Logic and reasoning study valid inference, proof, and formal language.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.99,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "logic_reasoning"
+      }
+    },
+    {
+      "id": "algorithms_hub",
+      "text": "Algorithms study step-by-step problem solving, correctness, and efficiency.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "algorithms"
+      }
+    },
+    {
+      "id": "computation_hub",
+      "text": "Theory of computation studies computability, reductions, and complexity classes.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "computation"
+      }
+    },
+    {
+      "id": "programming_hub",
+      "text": "Programming studies program structure, types, testing, and implementation behavior.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "programming"
+      }
+    },
+    {
+      "id": "systems_hub",
+      "text": "Systems study concurrency, resource coordination, and performance behavior.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "systems"
+      }
+    },
+    {
+      "id": "bridges_hub",
+      "text": "Bridge insights connect logic and computer science to verification, hardware, and security.",
+      "node_type": "hub",
+      "confidence": 0.98,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "bridges"
+      }
+    },
+    {
+      "id": "logical_validity_definition",
+      "text": "A valid argument preserves truth from premises to conclusion in every case.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "logic_reasoning",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "propositional_logic_connectives",
+      "text": "Propositional logic combines statements with connectives such as AND, OR, and NOT.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "logic_reasoning",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "predicate_logic_quantifiers",
+      "text": "Predicate logic adds variables and quantifiers such as ∀ and ∃.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "logic_reasoning",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "modus_ponens_rule",
+      "text": "From P and P→Q, modus ponens infers Q.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "logic_reasoning",
+        "kind": "inference_rule",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "proof_by_contradiction_rule",
+      "text": "Proof by contradiction derives impossibility by assuming the opposite of the target claim.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "logic_reasoning",
+        "kind": "proof_technique",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "induction_principle",
+      "text": "Mathematical induction proves a statement by establishing a base case and an inductive step.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "logic_reasoning",
+        "kind": "proof_technique",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "counterexample_refutes_universal",
+      "text": "A single counterexample disproves a universal claim.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "logic_reasoning",
+        "kind": "reasoning_principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "examples_prove_universal_false",
+      "text": "A few successful examples are enough to prove a universal statement.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "logic_reasoning",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "loop_invariant_definition",
+      "text": "A loop invariant is a property that remains true before and after each iteration.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "algorithms",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "binary_search_precondition_sorted",
+      "text": "Binary search requires the searchable sequence to be sorted.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "algorithms",
+        "kind": "precondition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "binary_search_correctness",
+      "text": "Binary search is correct when its invariant is maintained on a sorted sequence.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "algorithms",
+        "kind": "correctness_claim",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "binary_search_halves_interval",
+      "text": "Each binary search step discards half of the remaining search interval.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "algorithms",
+        "kind": "mechanism",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "big_o_growth",
+      "text": "Big-O notation bounds asymptotic growth up to constant factors.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "algorithms",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "binary_search_logarithmic",
+      "text": "Binary search runs in O(log n) comparisons.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "algorithms",
+        "kind": "complexity_claim",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "greedy_choice_property",
+      "text": "Greedy optimality requires a problem-specific justification such as a greedy-choice or exchange argument.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "algorithms",
+        "kind": "reasoning_principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "greedy_always_optimal_false",
+      "text": "A greedy algorithm always produces an optimal solution.",
+      "node_type": "claim",
+      "confidence": 0.02,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "algorithms",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "activity_selection_example",
+      "text": "Activity selection is a classic problem where a greedy strategy is optimal.",
+      "node_type": "example",
+      "confidence": 0.98,
+      "importance": 0.84,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "algorithms",
+        "kind": "example"
+      }
+    },
+    {
+      "id": "turing_machine_model",
+      "text": "A Turing machine is a standard abstract model of algorithmic computation.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "computation",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "halting_problem_undecidable",
+      "text": "No algorithm decides for every program and input whether that program halts.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.99,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "computation",
+        "kind": "theorem",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "polynomial_time_reduction",
+      "text": "A polynomial-time reduction transforms one problem into another while preserving efficient solvability implications.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "computation",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "sat_np_complete",
+      "text": "Boolean satisfiability is NP-complete.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "computation",
+        "kind": "theorem",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "decidable_not_efficient",
+      "text": "A problem can be decidable yet still be computationally infeasible at large scale.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "computation",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "all_computable_efficient_false",
+      "text": "Every computable problem can be solved efficiently.",
+      "node_type": "claim",
+      "confidence": 0.02,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "computation",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "static_type_checking",
+      "text": "Static type checking can rule out some classes of program error before execution.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "programming",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "testing_improves_confidence_not_proof",
+      "text": "Testing can reveal bugs and increase confidence, but it does not generally prove correctness.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "programming",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "passing_tests_proves_correctness_false",
+      "text": "If a program passes many tests, it is proven correct.",
+      "node_type": "claim",
+      "confidence": 0.02,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "programming",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "base_case_terminates_recursion",
+      "text": "A recursive definition needs a valid base case to avoid infinite descent.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "programming",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "concurrency_interleavings",
+      "text": "Concurrent execution introduces multiple possible interleavings of operations.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "systems",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "deadlock_four_conditions",
+      "text": "Deadlock requires mutual exclusion, hold-and-wait, no preemption, and circular wait.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "systems",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "dining_philosophers_example",
+      "text": "Dining philosophers is a standard example of potential deadlock.",
+      "node_type": "example",
+      "confidence": 0.98,
+      "importance": 0.84,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "systems",
+        "kind": "example"
+      }
+    },
+    {
+      "id": "cache_locality_effect",
+      "text": "Cache locality can strongly affect real program performance even when asymptotic complexity is unchanged.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "systems",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "parallelism_overhead_limit_speedup",
+      "text": "Synchronization, communication, and contention can limit parallel speedup.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "systems",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "parallelism_always_speeds_false",
+      "text": "Parallelism always makes a program faster.",
+      "node_type": "claim",
+      "confidence": 0.02,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "systems",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "boolean_logic_circuits_bridge",
+      "text": "Boolean logic provides the conceptual basis for digital circuit design.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "predicate_logic_verification_bridge",
+      "text": "Predicate logic underlies formal specification and program verification.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "induction_recursion_bridge",
+      "text": "Induction mirrors recursion and is central to proving recursive program correctness.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "complexity_crypto_bridge",
+      "text": "Modern cryptographic practice relies on problems believed to resist efficient solution.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "quantifier_order_changes_meaning",
+      "text": "Swapping quantifier order can change the meaning and truth conditions of a statement.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "logic_reasoning",
+        "kind": "reasoning_principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "quantifier_order_irrelevant_false",
+      "text": "The order of universal and existential quantifiers does not affect meaning.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "logic_reasoning",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "quantifier_order_owner_example",
+      "text": "The statements 'every process has some owner' and 'some owner owns every process' are not equivalent, illustrating quantifier-order sensitivity.",
+      "node_type": "example",
+      "confidence": 0.97,
+      "importance": 0.81,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "logic_reasoning",
+        "kind": "example"
+      }
+    },
+    {
+      "id": "initialization_maintenance_termination_invariant",
+      "text": "Loop-invariant proofs establish correctness by showing initialization, maintenance, and termination.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "algorithms",
+        "kind": "correctness_method",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "binary_search_interval_shrinks_to_empty_or_match",
+      "text": "Binary search terminates because each step strictly shrinks the remaining candidate interval until a match is found or the interval becomes empty.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "algorithms",
+        "kind": "termination_claim",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "bfs_shortest_path_unweighted",
+      "text": "Breadth-first search finds shortest paths in an unweighted graph because it explores vertices in nondecreasing distance layers.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "algorithms",
+        "kind": "correctness_claim",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "bfs_maze_example",
+      "text": "A maze modeled as an unweighted graph is a standard example where breadth-first search returns a shortest path in number of steps.",
+      "node_type": "example",
+      "confidence": 0.97,
+      "importance": 0.8,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "algorithms",
+        "kind": "example"
+      }
+    },
+    {
+      "id": "dynamic_programming_overlapping_and_optimal",
+      "text": "Dynamic programming is justified when subproblems overlap and optimal solutions can be composed from optimal subproblem solutions.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "algorithms",
+        "kind": "reasoning_principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "verifier_checks_certificate_np",
+      "text": "A decision problem is in NP if proposed solutions can be checked in polynomial time by a verifier.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "computation",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "p_subset_np",
+      "text": "Every problem in P is also in NP because a polynomial-time solver can serve as a polynomial-time verifier.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "computation",
+        "kind": "theorem",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "hardness_not_same_as_undecidability",
+      "text": "Computational hardness is different from undecidability: some hard problems are still decidable, while some undecidable problems are not merely hard but impossible to decide algorithmically in full generality.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "computation",
+        "kind": "distinction",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "quick_verification_implies_easy_solution_false",
+      "text": "If candidate solutions can be verified quickly, then the problem must also be easy to solve quickly.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "computation",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "types_and_tests_complement_each_other",
+      "text": "Static typing and testing are complementary: types rule out some classes of mistakes, while tests probe behaviors not guaranteed by the type system alone.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "programming",
+        "kind": "distinction",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "type_system_catches_all_bugs_false",
+      "text": "A static type system eliminates all meaningful program bugs.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "programming",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "recursion_correctness_needs_induction",
+      "text": "Recursive program correctness is commonly justified by induction on input size or input structure.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "programming",
+        "kind": "correctness_claim",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "race_condition_unsynchronized_shared_state",
+      "text": "Unsynchronized shared mutable state can create race conditions because observed behavior depends on execution interleaving order.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "systems",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "lock_ordering_breaks_circular_wait",
+      "text": "A consistent global lock ordering can prevent deadlock by breaking the circular-wait condition.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "systems",
+        "kind": "prevention",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "amdahl_law_serial_fraction_limits_speedup",
+      "text": "Amdahl's law shows that the serial fraction of a workload limits the maximum speedup obtainable from parallelization.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "systems",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "asymptotic_vs_actual_performance_bridge",
+      "text": "Asymptotic complexity and real performance are connected but not identical because constants, memory locality, and parallel overhead all matter in practice.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "verification_testing_bridge",
+      "text": "Program assurance spans a spectrum from testing for confidence to formal reasoning for proof, so verification and testing are related but distinct tools.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "reductions_hardness_bridge",
+      "text": "Reductions transfer hardness insight from one problem to another, connecting problem relationships to complexity classification.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "concurrency_correctness_bridge",
+      "text": "Reasoning about concurrent programs requires both logical correctness arguments and systems knowledge about interleavings, races, and deadlock conditions.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science_logic",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "src": "logic_reasoning_hub",
+      "dst": "cs_logic_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "algorithms_hub",
+      "dst": "cs_logic_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "computation_hub",
+      "dst": "cs_logic_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "programming_hub",
+      "dst": "cs_logic_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "systems_hub",
+      "dst": "cs_logic_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bridges_hub",
+      "dst": "cs_logic_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "logical_validity_definition",
+      "dst": "logic_reasoning_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "propositional_logic_connectives",
+      "dst": "logic_reasoning_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "predicate_logic_quantifiers",
+      "dst": "logic_reasoning_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "modus_ponens_rule",
+      "dst": "logic_reasoning_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "proof_by_contradiction_rule",
+      "dst": "logic_reasoning_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "induction_principle",
+      "dst": "logic_reasoning_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "counterexample_refutes_universal",
+      "dst": "logic_reasoning_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "examples_prove_universal_false",
+      "dst": "logic_reasoning_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "loop_invariant_definition",
+      "dst": "algorithms_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "binary_search_precondition_sorted",
+      "dst": "algorithms_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "binary_search_correctness",
+      "dst": "algorithms_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "binary_search_halves_interval",
+      "dst": "algorithms_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "big_o_growth",
+      "dst": "algorithms_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "binary_search_logarithmic",
+      "dst": "algorithms_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "greedy_choice_property",
+      "dst": "algorithms_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "greedy_always_optimal_false",
+      "dst": "algorithms_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "activity_selection_example",
+      "dst": "algorithms_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "turing_machine_model",
+      "dst": "computation_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "halting_problem_undecidable",
+      "dst": "computation_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "polynomial_time_reduction",
+      "dst": "computation_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "sat_np_complete",
+      "dst": "computation_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "decidable_not_efficient",
+      "dst": "computation_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "all_computable_efficient_false",
+      "dst": "computation_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "static_type_checking",
+      "dst": "programming_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "testing_improves_confidence_not_proof",
+      "dst": "programming_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "passing_tests_proves_correctness_false",
+      "dst": "programming_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "base_case_terminates_recursion",
+      "dst": "programming_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "concurrency_interleavings",
+      "dst": "systems_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "deadlock_four_conditions",
+      "dst": "systems_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dining_philosophers_example",
+      "dst": "systems_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cache_locality_effect",
+      "dst": "systems_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "parallelism_overhead_limit_speedup",
+      "dst": "systems_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "parallelism_always_speeds_false",
+      "dst": "systems_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "boolean_logic_circuits_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "predicate_logic_verification_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "induction_recursion_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "complexity_crypto_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "logical_validity_definition",
+      "dst": "modus_ponens_rule",
+      "relation": "support",
+      "strength": 0.91,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "predicate_logic_quantifiers",
+      "dst": "counterexample_refutes_universal",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "counterexample_refutes_universal",
+      "dst": "examples_prove_universal_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "loop_invariant_definition",
+      "dst": "binary_search_correctness",
+      "relation": "support",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "binary_search_precondition_sorted",
+      "dst": "binary_search_correctness",
+      "relation": "support",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "binary_search_halves_interval",
+      "dst": "binary_search_logarithmic",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "big_o_growth",
+      "dst": "binary_search_logarithmic",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "greedy_choice_property",
+      "dst": "greedy_always_optimal_false",
+      "relation": "contradict",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "activity_selection_example",
+      "dst": "greedy_choice_property",
+      "relation": "example_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "turing_machine_model",
+      "dst": "halting_problem_undecidable",
+      "relation": "support",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "proof_by_contradiction_rule",
+      "dst": "halting_problem_undecidable",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "polynomial_time_reduction",
+      "dst": "sat_np_complete",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "sat_np_complete",
+      "dst": "decidable_not_efficient",
+      "relation": "support",
+      "strength": 0.91,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "decidable_not_efficient",
+      "dst": "all_computable_efficient_false",
+      "relation": "contradict",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "testing_improves_confidence_not_proof",
+      "dst": "passing_tests_proves_correctness_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "base_case_terminates_recursion",
+      "dst": "induction_recursion_bridge",
+      "relation": "support",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "concurrency_interleavings",
+      "dst": "parallelism_overhead_limit_speedup",
+      "relation": "support",
+      "strength": 0.88,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dining_philosophers_example",
+      "dst": "deadlock_four_conditions",
+      "relation": "example_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "parallelism_overhead_limit_speedup",
+      "dst": "parallelism_always_speeds_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "propositional_logic_connectives",
+      "dst": "boolean_logic_circuits_bridge",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "predicate_logic_quantifiers",
+      "dst": "predicate_logic_verification_bridge",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "loop_invariant_definition",
+      "dst": "predicate_logic_verification_bridge",
+      "relation": "support",
+      "strength": 0.91,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "induction_principle",
+      "dst": "induction_recursion_bridge",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "decidable_not_efficient",
+      "dst": "complexity_crypto_bridge",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "quantifier_order_changes_meaning",
+      "dst": "logic_reasoning_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "quantifier_order_irrelevant_false",
+      "dst": "logic_reasoning_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "quantifier_order_owner_example",
+      "dst": "logic_reasoning_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "initialization_maintenance_termination_invariant",
+      "dst": "algorithms_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "binary_search_interval_shrinks_to_empty_or_match",
+      "dst": "algorithms_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bfs_shortest_path_unweighted",
+      "dst": "algorithms_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bfs_maze_example",
+      "dst": "algorithms_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dynamic_programming_overlapping_and_optimal",
+      "dst": "algorithms_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "verifier_checks_certificate_np",
+      "dst": "computation_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "p_subset_np",
+      "dst": "computation_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "hardness_not_same_as_undecidability",
+      "dst": "computation_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "quick_verification_implies_easy_solution_false",
+      "dst": "computation_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "types_and_tests_complement_each_other",
+      "dst": "programming_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "type_system_catches_all_bugs_false",
+      "dst": "programming_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "recursion_correctness_needs_induction",
+      "dst": "programming_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "race_condition_unsynchronized_shared_state",
+      "dst": "systems_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "lock_ordering_breaks_circular_wait",
+      "dst": "systems_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "amdahl_law_serial_fraction_limits_speedup",
+      "dst": "systems_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "asymptotic_vs_actual_performance_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "verification_testing_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "reductions_hardness_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "concurrency_correctness_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "predicate_logic_quantifiers",
+      "dst": "quantifier_order_changes_meaning",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "quantifier_order_owner_example",
+      "dst": "quantifier_order_changes_meaning",
+      "relation": "example_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "quantifier_order_changes_meaning",
+      "dst": "quantifier_order_irrelevant_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "loop_invariant_definition",
+      "dst": "initialization_maintenance_termination_invariant",
+      "relation": "support",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "binary_search_halves_interval",
+      "dst": "binary_search_interval_shrinks_to_empty_or_match",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "binary_search_interval_shrinks_to_empty_or_match",
+      "dst": "binary_search_logarithmic",
+      "relation": "support",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bfs_maze_example",
+      "dst": "bfs_shortest_path_unweighted",
+      "relation": "example_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "verifier_checks_certificate_np",
+      "dst": "p_subset_np",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "verifier_checks_certificate_np",
+      "dst": "quick_verification_implies_easy_solution_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "halting_problem_undecidable",
+      "dst": "hardness_not_same_as_undecidability",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "decidable_not_efficient",
+      "dst": "hardness_not_same_as_undecidability",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "static_type_checking",
+      "dst": "types_and_tests_complement_each_other",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "testing_improves_confidence_not_proof",
+      "dst": "types_and_tests_complement_each_other",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "types_and_tests_complement_each_other",
+      "dst": "type_system_catches_all_bugs_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "induction_principle",
+      "dst": "recursion_correctness_needs_induction",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "base_case_terminates_recursion",
+      "dst": "recursion_correctness_needs_induction",
+      "relation": "support",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "recursion_correctness_needs_induction",
+      "dst": "induction_recursion_bridge",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "concurrency_interleavings",
+      "dst": "race_condition_unsynchronized_shared_state",
+      "relation": "support",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "deadlock_four_conditions",
+      "dst": "lock_ordering_breaks_circular_wait",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "race_condition_unsynchronized_shared_state",
+      "dst": "concurrency_correctness_bridge",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "concurrency_interleavings",
+      "dst": "concurrency_correctness_bridge",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "deadlock_four_conditions",
+      "dst": "concurrency_correctness_bridge",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "big_o_growth",
+      "dst": "asymptotic_vs_actual_performance_bridge",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cache_locality_effect",
+      "dst": "asymptotic_vs_actual_performance_bridge",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "parallelism_overhead_limit_speedup",
+      "dst": "asymptotic_vs_actual_performance_bridge",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "static_type_checking",
+      "dst": "verification_testing_bridge",
+      "relation": "support",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "testing_improves_confidence_not_proof",
+      "dst": "verification_testing_bridge",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "predicate_logic_verification_bridge",
+      "dst": "verification_testing_bridge",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "polynomial_time_reduction",
+      "dst": "reductions_hardness_bridge",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "sat_np_complete",
+      "dst": "reductions_hardness_bridge",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "decidable_not_efficient",
+      "dst": "reductions_hardness_bridge",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    }
+  ]
+}

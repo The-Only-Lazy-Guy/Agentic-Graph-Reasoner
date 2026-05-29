@@ -1,0 +1,275 @@
+{
+  "metadata": {
+    "topic": "physics",
+    "subtopic": "quill_bonded_materials",
+    "fictional": true,
+    "version": 1,
+    "purpose": "Fictional domain. Quill-bonded materials have a cubic strain-energy density and a thermal-modulated bond strength. Solvable by reading the graph; no real-physics equivalent in pretraining."
+  },
+  "nodes": [
+    {
+      "id": "quill_materials_hub",
+      "text": "Quill-bonded matter is a fictional class of solids whose bond-energy density scales with the CUBE of strain (not the square, as in Hookean elasticity) and is modulated by temperature through the Quill thermal sensitivity. Fracture occurs when the bond-energy density exceeds a fixed critical value.",
+      "node_type": "summary",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "quill_physics"
+      }
+    },
+    {
+      "id": "quill_bond_energy_formula",
+      "text": "Bond-energy density: u_q = (K_q / 3) * epsilon^3 * (1 + chi_q * (T - T_ref)). Here epsilon is the strain (dimensionless), T is the temperature in kelvin, T_ref = 300 K is the reference temperature, K_q is the Quill modulus, and chi_q is the Quill thermal sensitivity.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "quill_physics"
+      }
+    },
+    {
+      "id": "quill_modulus_value",
+      "text": "Quill modulus: K_q = 3.0 * 10^12 Pa. This is a universal constant for all Quill-bonded materials in this framework.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "quill_physics"
+      }
+    },
+    {
+      "id": "quill_thermal_sensitivity_value",
+      "text": "Quill thermal sensitivity: chi_q = 4.0 * 10^(-3) per kelvin. The bond strength rises linearly with temperature above T_ref and falls linearly below it.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "quill_physics"
+      }
+    },
+    {
+      "id": "quill_fracture_threshold_value",
+      "text": "Critical bond-energy density for fracture: u_crit = 8.0 * 10^5 J/m^3. Fracture occurs when u_q >= u_crit; the material is safe when u_q < u_crit.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "quill_physics"
+      }
+    },
+    {
+      "id": "quill_cube_law_note",
+      "text": "Crucially, the strain enters as epsilon^3, NOT epsilon^2. Doubling the strain multiplies the bond-energy density by 8, not by 4. This makes Quill materials extremely sensitive to large strains.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "quill_physics"
+      }
+    },
+    {
+      "id": "quill_step1_compute_thermal_factor",
+      "text": "Step 1 (thermal factor): evaluate (1 + chi_q * (T - T_ref)) = (1 + 4.0e-3 * (T - 300)). At T = 300 K the factor is 1; at T = 400 K it is 1.4; at T = 250 K it is 0.8.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "quill_physics"
+      }
+    },
+    {
+      "id": "quill_step2_compute_energy_density",
+      "text": "Step 2 (bond energy density): substitute into u_q = (K_q/3) * epsilon^3 * thermal_factor. K_q/3 = 1.0 * 10^12 Pa. Evaluate epsilon^3 numerically first, then multiply by the thermal factor.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "quill_physics"
+      }
+    },
+    {
+      "id": "quill_step3_compare_to_threshold",
+      "text": "Step 3 (fracture decision): compare u_q to u_crit = 8.0e5 J/m^3. If u_q >= u_crit, the material fractures; otherwise it is safe at this strain and temperature.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "quill_physics"
+      }
+    },
+    {
+      "id": "quill_worked_example",
+      "text": "Worked example. Inputs: T = 300 K, epsilon = 0.008.\nStep 1: thermal factor = 1 + 4.0e-3 * (300 - 300) = 1.\nStep 2: u_q = (3.0e12 / 3) * (0.008)^3 * 1 = 1.0e12 * 5.12e-7 = 5.12 * 10^5 J/m^3.\nStep 3: 5.12e5 < 8.0e5, so no fracture.\nVerdict: SAFE.",
+      "node_type": "example",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "quill_physics"
+      }
+    },
+    {
+      "id": "treat_as_hookean_elastic_false",
+      "text": "MISCONCEPTION: 'use the Hookean formula u = (1/2) * E * epsilon^2 with E = K_q'. This is wrong twice over. (a) The strain enters as the CUBE in Quill materials, not the square. (b) Hookean elasticity has no temperature term; Quill bond strength depends on T through chi_q. Substituting Hooke gives an answer that is orders of magnitude off for moderate strains.",
+      "node_type": "claim",
+      "confidence": 0.05,
+      "importance": 0.85,
+      "metadata": {
+        "topic": "quill_physics",
+        "kind": "misconception"
+      }
+    },
+    {
+      "id": "quill_complete_summary",
+      "text": "Quill-bonded fracture analysis. Constants: K_q = 3.0e12 Pa, chi_q = 4.0e-3/K, T_ref = 300 K, u_crit = 8.0e5 J/m^3. Formula: u_q = (K_q/3) * epsilon^3 * (1 + chi_q * (T - T_ref)). Fracture iff u_q >= u_crit.",
+      "node_type": "summary",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "quill_physics"
+      }
+    },
+    {
+      "id": "temperature_solved_algebraically_equation_u_q_u_crit_promoted",
+      "text": "The temperature can be solved algebraically from the equation u_q = u_crit, using the known constants and fixed strain. This is valid because the model is deterministic and the formula is explicit.",
+      "node_type": "fact",
+      "confidence": 0.7,
+      "importance": 0.6,
+      "metadata": {
+        "provenance": "promoted_from_hypothesis_pool",
+        "pool_hypothesis_id": "h_1dabfbb77d",
+        "use_count_at_promotion": 3,
+        "promoted_at": "2026-05-19T08:13:41+00:00"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "src": "quill_bond_energy_formula",
+      "dst": "quill_materials_hub",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "quill_cube_law_note",
+      "dst": "quill_bond_energy_formula",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "quill_modulus_value",
+      "dst": "quill_bond_energy_formula",
+      "relation": "refine",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "quill_thermal_sensitivity_value",
+      "dst": "quill_bond_energy_formula",
+      "relation": "refine",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "quill_fracture_threshold_value",
+      "dst": "quill_materials_hub",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "quill_step1_compute_thermal_factor",
+      "dst": "quill_thermal_sensitivity_value",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "quill_step2_compute_energy_density",
+      "dst": "quill_bond_energy_formula",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "quill_step3_compare_to_threshold",
+      "dst": "quill_fracture_threshold_value",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "quill_step2_compute_energy_density",
+      "dst": "quill_step1_compute_thermal_factor",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "quill_step3_compare_to_threshold",
+      "dst": "quill_step2_compute_energy_density",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "quill_worked_example",
+      "dst": "quill_step1_compute_thermal_factor",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "quill_worked_example",
+      "dst": "quill_step2_compute_energy_density",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "quill_worked_example",
+      "dst": "quill_step3_compare_to_threshold",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "quill_bond_energy_formula",
+      "dst": "treat_as_hookean_elastic_false",
+      "relation": "contradict",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "quill_complete_summary",
+      "dst": "quill_materials_hub",
+      "relation": "part_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "quill_step3_compare_to_threshold",
+      "dst": "quill_complete_summary",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    }
+  ]
+}

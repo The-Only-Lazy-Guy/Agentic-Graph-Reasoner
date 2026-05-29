@@ -1,0 +1,1956 @@
+{
+  "nodes": [
+    {
+      "id": "phys_gold_hub",
+      "text": "Introductory physics links motion, force, energy, momentum, fields, heat, and waves into one coherent system of laws.",
+      "node_type": "summary",
+      "confidence": 0.99,
+      "importance": 1.0,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "global"
+      }
+    },
+    {
+      "id": "kin_hub",
+      "text": "Kinematics describes motion using displacement, velocity, acceleration, and time, without first asking what causes the motion.",
+      "node_type": "summary",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "kinematics"
+      }
+    },
+    {
+      "id": "kin_velocity_def",
+      "text": "Velocity is the rate of change of position: v = dx/dt.",
+      "node_type": "equation",
+      "confidence": 0.99,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "kinematics"
+      }
+    },
+    {
+      "id": "kin_accel_def",
+      "text": "Acceleration is the rate of change of velocity: a = dv/dt = d^2x/dt^2.",
+      "node_type": "equation",
+      "confidence": 0.99,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "kinematics"
+      }
+    },
+    {
+      "id": "kin_uniform_eq",
+      "text": "For constant acceleration, v = u + at.",
+      "node_type": "equation",
+      "confidence": 0.99,
+      "importance": 0.91,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "kinematics"
+      }
+    },
+    {
+      "id": "kin_displacement_eq",
+      "text": "For constant acceleration, s = ut + (1/2)at^2.",
+      "node_type": "equation",
+      "confidence": 0.99,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "kinematics"
+      }
+    },
+    {
+      "id": "kin_expl_consta",
+      "text": "These constant-acceleration equations work only when acceleration remains constant over the time interval being studied.",
+      "node_type": "explanation",
+      "confidence": 0.98,
+      "importance": 0.88,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "kinematics"
+      }
+    },
+    {
+      "id": "dyn_hub",
+      "text": "Dynamics explains why motion changes by connecting forces to acceleration and interactions.",
+      "node_type": "summary",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "dynamics"
+      }
+    },
+    {
+      "id": "dyn_newton1",
+      "text": "Newton's first law: if net force is zero, an object remains at rest or moves with constant velocity.",
+      "node_type": "fact",
+      "confidence": 0.99,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "dynamics"
+      }
+    },
+    {
+      "id": "dyn_newton2",
+      "text": "Newton's second law: the net force on an object equals mass times acceleration, ΣF = ma.",
+      "node_type": "equation",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "dynamics"
+      }
+    },
+    {
+      "id": "dyn_newton3",
+      "text": "Newton's third law: if object A exerts a force on object B, then B exerts an equal and opposite force on A.",
+      "node_type": "fact",
+      "confidence": 0.99,
+      "importance": 0.91,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "dynamics"
+      }
+    },
+    {
+      "id": "dyn_weight",
+      "text": "Near Earth's surface, weight is the gravitational force W = mg.",
+      "node_type": "equation",
+      "confidence": 0.99,
+      "importance": 0.89,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "dynamics"
+      }
+    },
+    {
+      "id": "dyn_friction",
+      "text": "Friction opposes relative motion or impending motion between surfaces and often converts mechanical energy into thermal energy.",
+      "node_type": "explanation",
+      "confidence": 0.98,
+      "importance": 0.87,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "dynamics"
+      }
+    },
+    {
+      "id": "dyn_false_force_motion",
+      "text": "An object must have a net force acting on it in order to keep moving at constant velocity.",
+      "node_type": "claim",
+      "confidence": 0.12,
+      "importance": 0.89,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "dynamics",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "energy_hub",
+      "text": "Energy methods track how systems store and transfer the ability to do work.",
+      "node_type": "summary",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "energy"
+      }
+    },
+    {
+      "id": "energy_work",
+      "text": "Work is the transfer of energy by a force acting through a displacement: W = F s cos(θ) for a constant force.",
+      "node_type": "equation",
+      "confidence": 0.99,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "energy"
+      }
+    },
+    {
+      "id": "energy_ke",
+      "text": "Kinetic energy is KE = (1/2)mv^2.",
+      "node_type": "equation",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "energy"
+      }
+    },
+    {
+      "id": "energy_pe",
+      "text": "Near Earth's surface, gravitational potential energy is U = mgh relative to a chosen reference level.",
+      "node_type": "equation",
+      "confidence": 0.99,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "energy"
+      }
+    },
+    {
+      "id": "energy_work_theorem",
+      "text": "The work-energy theorem states that net work equals change in kinetic energy: W_net = ΔKE.",
+      "node_type": "equation",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "energy"
+      }
+    },
+    {
+      "id": "energy_conservation",
+      "text": "If only conservative forces act, total mechanical energy remains constant: KE_i + U_i = KE_f + U_f.",
+      "node_type": "equation",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "energy"
+      }
+    },
+    {
+      "id": "energy_expl_reference",
+      "text": "Potential energy depends on the chosen zero level, but changes in potential energy determine physical predictions.",
+      "node_type": "explanation",
+      "confidence": 0.98,
+      "importance": 0.84,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "energy"
+      }
+    },
+    {
+      "id": "mom_hub",
+      "text": "Momentum methods are especially powerful for collisions, explosions, and short interaction times.",
+      "node_type": "summary",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "momentum"
+      }
+    },
+    {
+      "id": "mom_def",
+      "text": "Linear momentum is p = mv.",
+      "node_type": "equation",
+      "confidence": 0.99,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "momentum"
+      }
+    },
+    {
+      "id": "mom_impulse",
+      "text": "Impulse changes momentum: J = FΔt = Δp for constant force over a short interval.",
+      "node_type": "equation",
+      "confidence": 0.99,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "momentum"
+      }
+    },
+    {
+      "id": "mom_conservation",
+      "text": "In an isolated system, total momentum is conserved: Σp_before = Σp_after.",
+      "node_type": "equation",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "momentum"
+      }
+    },
+    {
+      "id": "mom_collision_expl",
+      "text": "Momentum is conserved in all isolated collisions, while kinetic energy is conserved only in elastic collisions.",
+      "node_type": "explanation",
+      "confidence": 0.98,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "momentum"
+      }
+    },
+    {
+      "id": "mom_false_kealways",
+      "text": "Kinetic energy is conserved in every collision.",
+      "node_type": "claim",
+      "confidence": 0.11,
+      "importance": 0.87,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "momentum",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "em_hub",
+      "text": "Electromagnetism explains electric forces, fields, potential, current flow, and magnetic effects.",
+      "node_type": "summary",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "electromagnetism"
+      }
+    },
+    {
+      "id": "em_coulomb",
+      "text": "Coulomb's law gives the electric force magnitude between point charges: F = k|q1q2|/r^2.",
+      "node_type": "equation",
+      "confidence": 0.99,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "electromagnetism"
+      }
+    },
+    {
+      "id": "em_field_def",
+      "text": "Electric field is force per unit charge: E = F/q.",
+      "node_type": "equation",
+      "confidence": 0.99,
+      "importance": 0.91,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "electromagnetism"
+      }
+    },
+    {
+      "id": "em_potential_def",
+      "text": "Potential difference is work per unit charge: V = W/q.",
+      "node_type": "equation",
+      "confidence": 0.99,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "electromagnetism"
+      }
+    },
+    {
+      "id": "em_ohm",
+      "text": "Ohm's law for an ohmic conductor is V = IR.",
+      "node_type": "equation",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "electromagnetism"
+      }
+    },
+    {
+      "id": "em_power",
+      "text": "Electrical power can be written as P = IV = I^2R = V^2/R.",
+      "node_type": "equation",
+      "confidence": 0.99,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "electromagnetism"
+      }
+    },
+    {
+      "id": "em_induction",
+      "text": "A changing magnetic flux can induce an emf, which is the basis of electromagnetic induction.",
+      "node_type": "fact",
+      "confidence": 0.98,
+      "importance": 0.88,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "electromagnetism"
+      }
+    },
+    {
+      "id": "em_false_battery",
+      "text": "A battery always provides the same current no matter what resistance is connected.",
+      "node_type": "claim",
+      "confidence": 0.14,
+      "importance": 0.86,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "electromagnetism",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "thermo_hub",
+      "text": "Thermodynamics studies heat, temperature, internal energy, work, and entropy.",
+      "node_type": "summary",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "thermodynamics"
+      }
+    },
+    {
+      "id": "thermo_firstlaw",
+      "text": "The first law of thermodynamics is ΔU = Q - W, where Q is heat added to the system and W is work done by the system.",
+      "node_type": "equation",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "thermodynamics"
+      }
+    },
+    {
+      "id": "thermo_temp_meaning",
+      "text": "Temperature is related to average microscopic kinetic behavior, whereas heat is energy transferred because of a temperature difference.",
+      "node_type": "explanation",
+      "confidence": 0.98,
+      "importance": 0.91,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "thermodynamics"
+      }
+    },
+    {
+      "id": "thermo_entropy",
+      "text": "In an isolated system, entropy tends to increase until equilibrium is reached.",
+      "node_type": "fact",
+      "confidence": 0.98,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "thermodynamics"
+      }
+    },
+    {
+      "id": "thermo_idealgas",
+      "text": "For an ideal gas, PV = nRT.",
+      "node_type": "equation",
+      "confidence": 0.99,
+      "importance": 0.91,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "thermodynamics"
+      }
+    },
+    {
+      "id": "thermo_false_same",
+      "text": "Heat and temperature are the same thing.",
+      "node_type": "claim",
+      "confidence": 0.08,
+      "importance": 0.88,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "thermodynamics",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "wave_hub",
+      "text": "Wave physics explains oscillations, propagation, interference, and the behavior of light and sound.",
+      "node_type": "summary",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "waves"
+      }
+    },
+    {
+      "id": "wave_speed",
+      "text": "Wave speed obeys v = fλ.",
+      "node_type": "equation",
+      "confidence": 0.99,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "waves"
+      }
+    },
+    {
+      "id": "wave_superposition",
+      "text": "When waves overlap, the resulting displacement is the sum of the individual displacements.",
+      "node_type": "fact",
+      "confidence": 0.98,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "waves"
+      }
+    },
+    {
+      "id": "wave_sound_medium",
+      "text": "Sound waves require a material medium, but electromagnetic waves can travel through vacuum.",
+      "node_type": "fact",
+      "confidence": 0.99,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "waves"
+      }
+    },
+    {
+      "id": "wave_refraction",
+      "text": "Refraction occurs because wave speed changes when a wave enters a new medium.",
+      "node_type": "explanation",
+      "confidence": 0.98,
+      "importance": 0.88,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "waves"
+      }
+    },
+    {
+      "id": "wave_false_soundvacuum",
+      "text": "Sound can travel through a vacuum.",
+      "node_type": "claim",
+      "confidence": 0.07,
+      "importance": 0.86,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "waves",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "bridge_energy_thermo",
+      "text": "Mechanical energy and thermodynamics are linked because non-conservative work often appears as thermal energy.",
+      "node_type": "bridge",
+      "confidence": 0.97,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "bridges"
+      }
+    },
+    {
+      "id": "bridge_em_waves",
+      "text": "Light is an electromagnetic wave, linking optics directly to electric and magnetic theory.",
+      "node_type": "bridge",
+      "confidence": 0.99,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "bridges"
+      }
+    },
+    {
+      "id": "bridge_force_momentum",
+      "text": "Force connects to momentum through time: since F = dp/dt, a force sustained over time produces impulse.",
+      "node_type": "bridge",
+      "confidence": 0.98,
+      "importance": 0.91,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "bridges"
+      }
+    },
+    {
+      "id": "dyn_net_force_vector_sum",
+      "text": "The net force is the vector sum of all individual forces acting on an object.",
+      "node_type": "principle",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "dynamics",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "mom_impulse_momentum_theorem",
+      "text": "The impulse-momentum theorem states that the net impulse on an object equals its change in momentum.",
+      "node_type": "theorem",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "momentum",
+        "kind": "theorem",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "thermo_internal_energy_state_function",
+      "text": "Internal energy is a state function, so its change depends only on the initial and final thermodynamic states, not on the path between them.",
+      "node_type": "principle",
+      "confidence": 0.99,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "thermodynamics",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "thermo_second_law_directionality",
+      "text": "The second law of thermodynamics gives a preferred direction to spontaneous processes by requiring total entropy not to decrease in an isolated system.",
+      "node_type": "law",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "thermodynamics",
+        "kind": "law",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "wave_frequency_fixed_at_boundary",
+      "text": "When a wave enters a new medium, its frequency stays fixed by the source while wavelength changes with speed.",
+      "node_type": "principle",
+      "confidence": 0.99,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "waves",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "wave_false_frequency_changes_in_refraction",
+      "text": "When light refracts into a new medium, its frequency changes because the speed changes.",
+      "node_type": "claim",
+      "confidence": 0.08,
+      "importance": 0.86,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "waves",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "bridge_kinematics_dynamics_acceleration",
+      "text": "Acceleration is the bridge between kinematics and dynamics: kinematics describes it from motion, while dynamics explains it through net force.",
+      "node_type": "bridge",
+      "confidence": 0.98,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "bridge_force_energy_momentum_unification",
+      "text": "Force, work, and impulse are complementary views of interaction: the same force can change motion through acceleration, transfer energy through work, and change momentum through impulse.",
+      "node_type": "bridge",
+      "confidence": 0.98,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "bridge_micro_macro_thermo",
+      "text": "Thermodynamics links microscopic particle motion to macroscopic variables like temperature, pressure, and internal energy.",
+      "node_type": "bridge",
+      "confidence": 0.98,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "bridge_field_wave_unification",
+      "text": "Electromagnetic waves unify electric and magnetic ideas by showing that changing fields can propagate through space as light.",
+      "node_type": "bridge",
+      "confidence": 0.98,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "bridge_joule_heating_energy_transfer",
+      "text": "Electrical energy transfer in resistive circuits often appears macroscopically as thermal energy, linking circuit power to thermodynamic heating.",
+      "node_type": "bridge",
+      "confidence": 0.97,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "kinematics_equations_summary",
+      "text": "Kinematics summarizes motion through position, velocity, acceleration, and the constant-acceleration equations that connect them.",
+      "node_type": "summary",
+      "confidence": 0.98,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "kinematics",
+        "kind": "component_summary"
+      }
+    },
+    {
+      "id": "dynamics_force_laws_summary",
+      "text": "Dynamics explains motion change by combining net force, Newton's laws, weight, and friction into one force-based framework.",
+      "node_type": "summary",
+      "confidence": 0.98,
+      "importance": 0.91,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "dynamics",
+        "kind": "component_summary"
+      }
+    },
+    {
+      "id": "energy_methods_summary",
+      "text": "Energy methods track work, kinetic energy, potential energy, and conservation principles to predict motion without following every force in detail.",
+      "node_type": "summary",
+      "confidence": 0.98,
+      "importance": 0.91,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "energy",
+        "kind": "component_summary"
+      }
+    },
+    {
+      "id": "momentum_collision_summary",
+      "text": "Momentum methods unify impulse, momentum conservation, and collision analysis, especially when forces act briefly or internally.",
+      "node_type": "summary",
+      "confidence": 0.98,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "momentum",
+        "kind": "component_summary"
+      }
+    },
+    {
+      "id": "electromagnetism_core_summary",
+      "text": "Electromagnetism combines electric force, field, potential, circuit relations, and induction into one theory of charge and current.",
+      "node_type": "summary",
+      "confidence": 0.98,
+      "importance": 0.91,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "electromagnetism",
+        "kind": "component_summary"
+      }
+    },
+    {
+      "id": "thermo_wave_principles_summary",
+      "text": "Thermodynamics and wave theory both encode directionality and propagation through structural laws: entropy guides spontaneous change, while wave relations govern transmission and refraction.",
+      "node_type": "summary",
+      "confidence": 0.97,
+      "importance": 0.89,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "cross_cluster",
+        "kind": "component_summary"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "src": "kin_hub",
+      "dst": "phys_gold_hub",
+      "relation": "part_of",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dyn_hub",
+      "dst": "phys_gold_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "energy_hub",
+      "dst": "phys_gold_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mom_hub",
+      "dst": "phys_gold_hub",
+      "relation": "part_of",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "em_hub",
+      "dst": "phys_gold_hub",
+      "relation": "part_of",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "thermo_hub",
+      "dst": "phys_gold_hub",
+      "relation": "part_of",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wave_hub",
+      "dst": "phys_gold_hub",
+      "relation": "part_of",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "kin_velocity_def",
+      "dst": "kin_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "kin_accel_def",
+      "dst": "kin_hub",
+      "relation": "part_of",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "kin_uniform_eq",
+      "dst": "kin_hub",
+      "relation": "part_of",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "kin_displacement_eq",
+      "dst": "kin_hub",
+      "relation": "part_of",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "kin_expl_consta",
+      "dst": "kin_hub",
+      "relation": "part_of",
+      "strength": 0.89,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dyn_newton1",
+      "dst": "dyn_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dyn_newton2",
+      "dst": "dyn_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dyn_newton3",
+      "dst": "dyn_hub",
+      "relation": "part_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dyn_weight",
+      "dst": "dyn_hub",
+      "relation": "part_of",
+      "strength": 0.89,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dyn_friction",
+      "dst": "dyn_hub",
+      "relation": "part_of",
+      "strength": 0.88,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dyn_false_force_motion",
+      "dst": "dyn_hub",
+      "relation": "part_of",
+      "strength": 0.85,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "energy_work",
+      "dst": "energy_hub",
+      "relation": "part_of",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "energy_ke",
+      "dst": "energy_hub",
+      "relation": "part_of",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "energy_pe",
+      "dst": "energy_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "energy_work_theorem",
+      "dst": "energy_hub",
+      "relation": "part_of",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "energy_conservation",
+      "dst": "energy_hub",
+      "relation": "part_of",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "energy_expl_reference",
+      "dst": "energy_hub",
+      "relation": "part_of",
+      "strength": 0.85,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mom_def",
+      "dst": "mom_hub",
+      "relation": "part_of",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mom_impulse",
+      "dst": "mom_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mom_conservation",
+      "dst": "mom_hub",
+      "relation": "part_of",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mom_collision_expl",
+      "dst": "mom_hub",
+      "relation": "part_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mom_false_kealways",
+      "dst": "mom_hub",
+      "relation": "part_of",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "em_coulomb",
+      "dst": "em_hub",
+      "relation": "part_of",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "em_field_def",
+      "dst": "em_hub",
+      "relation": "part_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "em_potential_def",
+      "dst": "em_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "em_ohm",
+      "dst": "em_hub",
+      "relation": "part_of",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "em_power",
+      "dst": "em_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "em_induction",
+      "dst": "em_hub",
+      "relation": "part_of",
+      "strength": 0.89,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "em_false_battery",
+      "dst": "em_hub",
+      "relation": "part_of",
+      "strength": 0.83,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "thermo_firstlaw",
+      "dst": "thermo_hub",
+      "relation": "part_of",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "thermo_temp_meaning",
+      "dst": "thermo_hub",
+      "relation": "part_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "thermo_entropy",
+      "dst": "thermo_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "thermo_idealgas",
+      "dst": "thermo_hub",
+      "relation": "part_of",
+      "strength": 0.91,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "thermo_false_same",
+      "dst": "thermo_hub",
+      "relation": "part_of",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wave_speed",
+      "dst": "wave_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wave_superposition",
+      "dst": "wave_hub",
+      "relation": "part_of",
+      "strength": 0.91,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wave_sound_medium",
+      "dst": "wave_hub",
+      "relation": "part_of",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wave_refraction",
+      "dst": "wave_hub",
+      "relation": "part_of",
+      "strength": 0.88,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wave_false_soundvacuum",
+      "dst": "wave_hub",
+      "relation": "part_of",
+      "strength": 0.83,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "kin_accel_def",
+      "dst": "dyn_newton2",
+      "relation": "supports",
+      "strength": 0.86,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dyn_newton1",
+      "dst": "dyn_false_force_motion",
+      "relation": "contradicts",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dyn_weight",
+      "dst": "dyn_newton2",
+      "relation": "supports",
+      "strength": 0.87,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dyn_friction",
+      "dst": "bridge_energy_thermo",
+      "relation": "supports",
+      "strength": 0.86,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "energy_work",
+      "dst": "energy_work_theorem",
+      "relation": "supports",
+      "strength": 0.91,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "energy_ke",
+      "dst": "energy_work_theorem",
+      "relation": "supports",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "energy_pe",
+      "dst": "energy_conservation",
+      "relation": "supports",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dyn_newton2",
+      "dst": "energy_work_theorem",
+      "relation": "related_to",
+      "strength": 0.72,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mom_def",
+      "dst": "bridge_force_momentum",
+      "relation": "supports",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mom_impulse",
+      "dst": "bridge_force_momentum",
+      "relation": "supports",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dyn_newton2",
+      "dst": "bridge_force_momentum",
+      "relation": "supports",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mom_false_kealways",
+      "dst": "mom_collision_expl",
+      "relation": "contradicts",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "em_coulomb",
+      "dst": "em_field_def",
+      "relation": "supports",
+      "strength": 0.83,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "em_field_def",
+      "dst": "em_potential_def",
+      "relation": "related_to",
+      "strength": 0.81,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "em_ohm",
+      "dst": "em_power",
+      "relation": "supports",
+      "strength": 0.85,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "em_false_battery",
+      "dst": "em_ohm",
+      "relation": "contradicts",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "thermo_temp_meaning",
+      "dst": "thermo_false_same",
+      "relation": "contradicts",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "thermo_firstlaw",
+      "dst": "bridge_energy_thermo",
+      "relation": "supports",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "energy_conservation",
+      "dst": "bridge_energy_thermo",
+      "relation": "related_to",
+      "strength": 0.79,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wave_speed",
+      "dst": "wave_refraction",
+      "relation": "supports",
+      "strength": 0.79,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wave_sound_medium",
+      "dst": "wave_false_soundvacuum",
+      "relation": "contradicts",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "em_induction",
+      "dst": "bridge_em_waves",
+      "relation": "related_to",
+      "strength": 0.68,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bridge_em_waves",
+      "dst": "wave_hub",
+      "relation": "supports",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bridge_em_waves",
+      "dst": "em_hub",
+      "relation": "supports",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dyn_net_force_vector_sum",
+      "dst": "dyn_newton2",
+      "relation": "supports",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dyn_newton1",
+      "dst": "dyn_net_force_vector_sum",
+      "relation": "refine",
+      "strength": 0.88,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "kin_accel_def",
+      "dst": "bridge_kinematics_dynamics_acceleration",
+      "relation": "supports",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dyn_newton2",
+      "dst": "bridge_kinematics_dynamics_acceleration",
+      "relation": "supports",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dyn_net_force_vector_sum",
+      "dst": "bridge_kinematics_dynamics_acceleration",
+      "relation": "supports",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mom_def",
+      "dst": "mom_impulse_momentum_theorem",
+      "relation": "supports",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mom_impulse",
+      "dst": "mom_impulse_momentum_theorem",
+      "relation": "refine",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mom_impulse_momentum_theorem",
+      "dst": "bridge_force_momentum",
+      "relation": "supports",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mom_impulse_momentum_theorem",
+      "dst": "bridge_force_energy_momentum_unification",
+      "relation": "supports",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dyn_newton2",
+      "dst": "bridge_force_energy_momentum_unification",
+      "relation": "supports",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "energy_work_theorem",
+      "dst": "bridge_force_energy_momentum_unification",
+      "relation": "supports",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "thermo_internal_energy_state_function",
+      "dst": "thermo_firstlaw",
+      "relation": "supports",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "thermo_second_law_directionality",
+      "dst": "thermo_entropy",
+      "relation": "supports",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "thermo_temp_meaning",
+      "dst": "bridge_micro_macro_thermo",
+      "relation": "supports",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "thermo_idealgas",
+      "dst": "bridge_micro_macro_thermo",
+      "relation": "supports",
+      "strength": 0.88,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "thermo_internal_energy_state_function",
+      "dst": "bridge_micro_macro_thermo",
+      "relation": "supports",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "thermo_firstlaw",
+      "dst": "bridge_joule_heating_energy_transfer",
+      "relation": "supports",
+      "strength": 0.83,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "em_power",
+      "dst": "bridge_joule_heating_energy_transfer",
+      "relation": "supports",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dyn_friction",
+      "dst": "bridge_joule_heating_energy_transfer",
+      "relation": "supports",
+      "strength": 0.8,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wave_frequency_fixed_at_boundary",
+      "dst": "wave_refraction",
+      "relation": "supports",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wave_frequency_fixed_at_boundary",
+      "dst": "wave_false_frequency_changes_in_refraction",
+      "relation": "contradicts",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wave_sound_medium",
+      "dst": "bridge_field_wave_unification",
+      "relation": "supports",
+      "strength": 0.72,
+      "directed": true,
+      "metadata": {
+        "note": "Contrasting sound with electromagnetic waves helps clarify why light can propagate in vacuum."
+      }
+    },
+    {
+      "src": "bridge_em_waves",
+      "dst": "bridge_field_wave_unification",
+      "relation": "supports",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "em_induction",
+      "dst": "bridge_field_wave_unification",
+      "relation": "supports",
+      "strength": 0.88,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "kin_velocity_def",
+      "dst": "kinematics_equations_summary",
+      "relation": "supports",
+      "strength": 0.8,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "kin_accel_def",
+      "dst": "kinematics_equations_summary",
+      "relation": "supports",
+      "strength": 0.8,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "kin_uniform_eq",
+      "dst": "kinematics_equations_summary",
+      "relation": "supports",
+      "strength": 0.8,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "kin_displacement_eq",
+      "dst": "kinematics_equations_summary",
+      "relation": "supports",
+      "strength": 0.8,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "kin_expl_consta",
+      "dst": "kinematics_equations_summary",
+      "relation": "supports",
+      "strength": 0.8,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dyn_newton1",
+      "dst": "dynamics_force_laws_summary",
+      "relation": "supports",
+      "strength": 0.8,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dyn_net_force_vector_sum",
+      "dst": "dynamics_force_laws_summary",
+      "relation": "supports",
+      "strength": 0.8,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dyn_newton2",
+      "dst": "dynamics_force_laws_summary",
+      "relation": "supports",
+      "strength": 0.8,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dyn_weight",
+      "dst": "dynamics_force_laws_summary",
+      "relation": "supports",
+      "strength": 0.8,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dyn_friction",
+      "dst": "dynamics_force_laws_summary",
+      "relation": "supports",
+      "strength": 0.8,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "energy_work",
+      "dst": "energy_methods_summary",
+      "relation": "supports",
+      "strength": 0.8,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "energy_ke",
+      "dst": "energy_methods_summary",
+      "relation": "supports",
+      "strength": 0.8,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "energy_pe",
+      "dst": "energy_methods_summary",
+      "relation": "supports",
+      "strength": 0.8,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "energy_work_theorem",
+      "dst": "energy_methods_summary",
+      "relation": "supports",
+      "strength": 0.8,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "energy_conservation",
+      "dst": "energy_methods_summary",
+      "relation": "supports",
+      "strength": 0.8,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mom_def",
+      "dst": "momentum_collision_summary",
+      "relation": "supports",
+      "strength": 0.8,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mom_impulse_momentum_theorem",
+      "dst": "momentum_collision_summary",
+      "relation": "supports",
+      "strength": 0.8,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mom_conservation",
+      "dst": "momentum_collision_summary",
+      "relation": "supports",
+      "strength": 0.8,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mom_collision_expl",
+      "dst": "momentum_collision_summary",
+      "relation": "supports",
+      "strength": 0.8,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "em_coulomb",
+      "dst": "electromagnetism_core_summary",
+      "relation": "supports",
+      "strength": 0.8,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "em_field_def",
+      "dst": "electromagnetism_core_summary",
+      "relation": "supports",
+      "strength": 0.8,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "em_potential_def",
+      "dst": "electromagnetism_core_summary",
+      "relation": "supports",
+      "strength": 0.8,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "em_ohm",
+      "dst": "electromagnetism_core_summary",
+      "relation": "supports",
+      "strength": 0.8,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "em_power",
+      "dst": "electromagnetism_core_summary",
+      "relation": "supports",
+      "strength": 0.8,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "em_induction",
+      "dst": "electromagnetism_core_summary",
+      "relation": "supports",
+      "strength": 0.8,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "thermo_firstlaw",
+      "dst": "thermo_wave_principles_summary",
+      "relation": "supports",
+      "strength": 0.74,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "thermo_second_law_directionality",
+      "dst": "thermo_wave_principles_summary",
+      "relation": "supports",
+      "strength": 0.74,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wave_speed",
+      "dst": "thermo_wave_principles_summary",
+      "relation": "supports",
+      "strength": 0.74,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wave_refraction",
+      "dst": "thermo_wave_principles_summary",
+      "relation": "supports",
+      "strength": 0.74,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wave_frequency_fixed_at_boundary",
+      "dst": "thermo_wave_principles_summary",
+      "relation": "supports",
+      "strength": 0.74,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bridge_kinematics_dynamics_acceleration",
+      "dst": "phys_gold_hub",
+      "relation": "part_of",
+      "strength": 0.7,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bridge_force_energy_momentum_unification",
+      "dst": "phys_gold_hub",
+      "relation": "part_of",
+      "strength": 0.7,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bridge_micro_macro_thermo",
+      "dst": "phys_gold_hub",
+      "relation": "part_of",
+      "strength": 0.7,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bridge_field_wave_unification",
+      "dst": "phys_gold_hub",
+      "relation": "part_of",
+      "strength": 0.7,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bridge_joule_heating_energy_transfer",
+      "dst": "phys_gold_hub",
+      "relation": "part_of",
+      "strength": 0.7,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "kinematics_equations_summary",
+      "dst": "phys_gold_hub",
+      "relation": "part_of",
+      "strength": 0.7,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dynamics_force_laws_summary",
+      "dst": "phys_gold_hub",
+      "relation": "part_of",
+      "strength": 0.7,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "energy_methods_summary",
+      "dst": "phys_gold_hub",
+      "relation": "part_of",
+      "strength": 0.7,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "momentum_collision_summary",
+      "dst": "phys_gold_hub",
+      "relation": "part_of",
+      "strength": 0.7,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "electromagnetism_core_summary",
+      "dst": "phys_gold_hub",
+      "relation": "part_of",
+      "strength": 0.7,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "thermo_wave_principles_summary",
+      "dst": "phys_gold_hub",
+      "relation": "part_of",
+      "strength": 0.7,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dyn_net_force_vector_sum",
+      "dst": "dyn_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mom_impulse_momentum_theorem",
+      "dst": "mom_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "thermo_internal_energy_state_function",
+      "dst": "thermo_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "thermo_second_law_directionality",
+      "dst": "thermo_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wave_frequency_fixed_at_boundary",
+      "dst": "wave_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wave_false_frequency_changes_in_refraction",
+      "dst": "wave_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "kinematics_equations_summary",
+      "dst": "kin_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dynamics_force_laws_summary",
+      "dst": "dyn_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "energy_methods_summary",
+      "dst": "energy_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "momentum_collision_summary",
+      "dst": "mom_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "electromagnetism_core_summary",
+      "dst": "em_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    }
+  ],
+  "metadata": {
+    "title": "Physics theory graph (gold, theory-first revision)",
+    "source_note": "Built from the uploaded introductory physics graph and extended for theory-first controller supervision with sharper law/principle structure, misconception resolution, bridge nodes, and component-summary nodes.",
+    "notes": [
+      "This gold revision emphasizes laws, principles, and cross-theory structure more than concrete applications.",
+      "Several new nodes make implicit theory links explicit, especially net force, impulse-momentum, internal energy, the second law, and refraction-frequency reasoning.",
+      "Bridge nodes were added to support theory transfer across kinematics, dynamics, energy, momentum, electromagnetism, thermodynamics, and waves.",
+      "Summary nodes are included to supervise summarize_cluster compression once local subgraphs become mature."
+    ]
+  }
+}

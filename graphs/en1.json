@@ -1,0 +1,464 @@
+{
+  "metadata": {
+    "title": "Computer engineering software development reasoning graph",
+    "source_note": "Small mixed-knowledge graph for software development guidance, implementation practice, and applied engineering reasoning.",
+    "relation_convention": {
+      "part_of": "child node -> parent hub",
+      "example_of": "example -> concept",
+      "support": "evidence, mechanism, prerequisite, or refinement -> claim",
+      "contradict": "accepted claim -> false or competing claim",
+      "refine": "more specific statement -> broader statement",
+      "depend": "prerequisite concept -> dependent concept"
+    }
+  },
+  "nodes": [
+    {
+      "id": "software_engineering_hub",
+      "text": "Software engineering studies how to design, build, test, deploy, and maintain reliable software systems.",
+      "node_type": "hub",
+      "confidence": 1.0,
+      "importance": 1.0,
+      "metadata": { "topic": "software_engineering", "cluster": "global" }
+    },
+    {
+      "id": "requirements_hub",
+      "text": "Requirements define what the software should do and the constraints it must satisfy.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": { "topic": "software_engineering", "cluster": "requirements" }
+    },
+    {
+      "id": "architecture_hub",
+      "text": "Architecture organizes the system into components, interfaces, and responsibilities.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": { "topic": "software_engineering", "cluster": "architecture" }
+    },
+    {
+      "id": "implementation_hub",
+      "text": "Implementation turns design into working code using clear structure and maintainable patterns.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": { "topic": "software_engineering", "cluster": "implementation" }
+    },
+    {
+      "id": "testing_hub",
+      "text": "Testing checks behavior, reduces risk, and increases confidence in changes.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": { "topic": "software_engineering", "cluster": "testing" }
+    },
+    {
+      "id": "performance_hub",
+      "text": "Performance study includes time, memory, responsiveness, and scalability.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": { "topic": "software_engineering", "cluster": "performance" }
+    },
+    {
+      "id": "security_hub",
+      "text": "Security protects software from misuse, data exposure, and unsafe behavior.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": { "topic": "software_engineering", "cluster": "security" }
+    },
+    {
+      "id": "workflow_hub",
+      "text": "Workflow covers version control, code review, automation, and deployment practices.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": { "topic": "software_engineering", "cluster": "workflow" }
+    },
+    {
+      "id": "bridges_hub",
+      "text": "Bridge ideas connect abstract engineering knowledge to practical development decisions.",
+      "node_type": "hub",
+      "confidence": 0.98,
+      "importance": 0.96,
+      "metadata": { "topic": "software_engineering", "cluster": "bridges" }
+    },
+
+    {
+      "id": "clear_requirements_reduce_rework",
+      "text": "Clear requirements reduce rework because the team can build toward a shared target.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": { "topic": "software_engineering", "cluster": "requirements", "kind": "fact", "status": "accepted" }
+    },
+    {
+      "id": "requirements_should_include_constraints",
+      "text": "Requirements should include functional goals and constraints such as latency, memory, security, and platform.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": { "topic": "software_engineering", "cluster": "requirements", "kind": "guideline", "status": "accepted" }
+    },
+    {
+      "id": "prototype_validates_unclear_requirements",
+      "text": "A prototype can help validate unclear requirements before full implementation.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.94,
+      "metadata": { "topic": "software_engineering", "cluster": "requirements", "kind": "practice", "status": "accepted" }
+    },
+    {
+      "id": "more_features_is_always_better_false",
+      "text": "Adding more features always improves the product.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.95,
+      "metadata": { "topic": "software_engineering", "cluster": "requirements", "kind": "misconception", "polarity": "false" }
+    },
+
+    {
+      "id": "separation_of_concerns",
+      "text": "Separation of concerns reduces coupling and makes systems easier to maintain.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": { "topic": "software_engineering", "cluster": "architecture", "kind": "principle", "status": "accepted" }
+    },
+    {
+      "id": "interfaces_define_contracts",
+      "text": "Interfaces define contracts between components and limit implementation dependence.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": { "topic": "software_engineering", "cluster": "architecture", "kind": "fact", "status": "accepted" }
+    },
+    {
+      "id": "modularity_supports_parallel_work",
+      "text": "Modular design supports parallel development because different team members can work on separate components.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.95,
+      "metadata": { "topic": "software_engineering", "cluster": "architecture", "kind": "practice", "status": "accepted" }
+    },
+    {
+      "id": "architecture_is_only_diagram_false",
+      "text": "Architecture is just a diagram and does not affect implementation.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.95,
+      "metadata": { "topic": "software_engineering", "cluster": "architecture", "kind": "misconception", "polarity": "false" }
+    },
+
+    {
+      "id": "small_functions_are_easier_to_test",
+      "text": "Small functions are easier to test, understand, and reuse.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": { "topic": "software_engineering", "cluster": "implementation", "kind": "guideline", "status": "accepted" }
+    },
+    {
+      "id": "readable_code_matters",
+      "text": "Readable code matters because software is usually maintained longer than it is initially written.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": { "topic": "software_engineering", "cluster": "implementation", "kind": "fact", "status": "accepted" }
+    },
+    {
+      "id": "types_and_checks_prevent_some_bugs",
+      "text": "Types and explicit checks can prevent some classes of bugs before runtime.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": { "topic": "software_engineering", "cluster": "implementation", "kind": "fact", "status": "accepted" }
+    },
+    {
+      "id": "complex_code_is_always_more_powerful_false",
+      "text": "More complex code is always more powerful and therefore better.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.95,
+      "metadata": { "topic": "software_engineering", "cluster": "implementation", "kind": "misconception", "polarity": "false" }
+    },
+
+    {
+      "id": "unit_tests_check_small_behaviors",
+      "text": "Unit tests check small behaviors in isolation.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": { "topic": "software_engineering", "cluster": "testing", "kind": "definition", "status": "accepted" }
+    },
+    {
+      "id": "integration_tests_check_component_interaction",
+      "text": "Integration tests check whether components work together correctly.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": { "topic": "software_engineering", "cluster": "testing", "kind": "definition", "status": "accepted" }
+    },
+    {
+      "id": "tests_do_not_prove_full_correctness",
+      "text": "Tests increase confidence, but they usually do not prove full correctness.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": { "topic": "software_engineering", "cluster": "testing", "kind": "fact", "status": "accepted" }
+    },
+    {
+      "id": "testing_everything_manually_is_best_false",
+      "text": "Testing everything manually is the best long-term strategy.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.94,
+      "metadata": { "topic": "software_engineering", "cluster": "testing", "kind": "misconception", "polarity": "false" }
+    },
+
+    {
+      "id": "big_o_guides_scaling",
+      "text": "Big-O analysis helps predict how algorithms scale as input size grows.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": { "topic": "software_engineering", "cluster": "performance", "kind": "principle", "status": "accepted" }
+    },
+    {
+      "id": "profiling_finds_real_bottlenecks",
+      "text": "Profiling finds actual bottlenecks better than guessing.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": { "topic": "software_engineering", "cluster": "performance", "kind": "practice", "status": "accepted" }
+    },
+    {
+      "id": "optimization_before_measurement_false",
+      "text": "Optimization should always be done before measurement.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.95,
+      "metadata": { "topic": "software_engineering", "cluster": "performance", "kind": "misconception", "polarity": "false" }
+    },
+
+    {
+      "id": "validate_inputs_prevents_bad_data",
+      "text": "Input validation prevents invalid data from entering the system.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": { "topic": "software_engineering", "cluster": "security", "kind": "practice", "status": "accepted" }
+    },
+    {
+      "id": "least_privilege_limits_damage",
+      "text": "Least privilege limits damage when a component or account is compromised.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": { "topic": "software_engineering", "cluster": "security", "kind": "principle", "status": "accepted" }
+    },
+    {
+      "id": "security_by_obscurity_false",
+      "text": "Security by obscurity is enough to protect a system.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.95,
+      "metadata": { "topic": "software_engineering", "cluster": "security", "kind": "misconception", "polarity": "false" }
+    },
+
+    {
+      "id": "version_control_tracks_history",
+      "text": "Version control tracks history and makes collaboration safer.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": { "topic": "software_engineering", "cluster": "workflow", "kind": "fact", "status": "accepted" }
+    },
+    {
+      "id": "code_review_catches_mistakes",
+      "text": "Code review catches mistakes and spreads knowledge across the team.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": { "topic": "software_engineering", "cluster": "workflow", "kind": "practice", "status": "accepted" }
+    },
+    {
+      "id": "automation_reduces_repetitive_risk",
+      "text": "Automation reduces repetitive manual risk in testing and deployment.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": { "topic": "software_engineering", "cluster": "workflow", "kind": "practice", "status": "accepted" }
+    },
+    {
+      "id": "deploying_without_checks_is_faster_false",
+      "text": "Deploying without checks is always the fastest and best approach.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.94,
+      "metadata": { "topic": "software_engineering", "cluster": "workflow", "kind": "misconception", "polarity": "false" }
+    },
+
+    {
+      "id": "web_app_example",
+      "text": "A web app with login, database access, and API endpoints is a typical real-world software system.",
+      "node_type": "example",
+      "confidence": 0.98,
+      "importance": 0.85,
+      "metadata": { "topic": "software_engineering", "cluster": "implementation", "kind": "example" }
+    },
+    {
+      "id": "ci_pipeline_example",
+      "text": "A CI pipeline that runs tests on every push is a practical workflow example.",
+      "node_type": "example",
+      "confidence": 0.98,
+      "importance": 0.84,
+      "metadata": { "topic": "software_engineering", "cluster": "workflow", "kind": "example" }
+    },
+    {
+      "id": "input_validation_example",
+      "text": "Rejecting empty passwords and malformed emails is a simple input-validation example.",
+      "node_type": "example",
+      "confidence": 0.97,
+      "importance": 0.8,
+      "metadata": { "topic": "software_engineering", "cluster": "security", "kind": "example" }
+    },
+
+    {
+      "id": "requirements_to_architecture_bridge",
+      "text": "Requirements shape architecture because constraints influence component design.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": { "topic": "software_engineering", "cluster": "bridges", "kind": "bridge_insight", "status": "accepted" }
+    },
+    {
+      "id": "architecture_to_implementation_bridge",
+      "text": "Architecture guides implementation by defining boundaries, interfaces, and responsibilities.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": { "topic": "software_engineering", "cluster": "bridges", "kind": "bridge_insight", "status": "accepted" }
+    },
+    {
+      "id": "implementation_to_testing_bridge",
+      "text": "Implementation choices affect testability, so simpler code is easier to verify.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": { "topic": "software_engineering", "cluster": "bridges", "kind": "bridge_insight", "status": "accepted" }
+    },
+    {
+      "id": "testing_to_quality_bridge",
+      "text": "Testing supports quality, but quality also depends on design, security, and maintainability.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": { "topic": "software_engineering", "cluster": "bridges", "kind": "bridge_insight", "status": "accepted" }
+    },
+    {
+      "id": "performance_to_design_bridge",
+      "text": "Performance issues often require design changes, not only code micro-optimizations.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": { "topic": "software_engineering", "cluster": "bridges", "kind": "bridge_insight", "status": "accepted" }
+    },
+    {
+      "id": "security_to_workflow_bridge",
+      "text": "Security improves when it is built into workflow through review, checks, and automated testing.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": { "topic": "software_engineering", "cluster": "bridges", "kind": "bridge_insight", "status": "accepted" }
+    }
+  ],
+  "edges": [
+    { "src": "requirements_hub", "dst": "software_engineering_hub", "relation": "part_of", "strength": 0.98, "directed": true, "metadata": {} },
+    { "src": "architecture_hub", "dst": "software_engineering_hub", "relation": "part_of", "strength": 0.98, "directed": true, "metadata": {} },
+    { "src": "implementation_hub", "dst": "software_engineering_hub", "relation": "part_of", "strength": 0.98, "directed": true, "metadata": {} },
+    { "src": "testing_hub", "dst": "software_engineering_hub", "relation": "part_of", "strength": 0.98, "directed": true, "metadata": {} },
+    { "src": "performance_hub", "dst": "software_engineering_hub", "relation": "part_of", "strength": 0.98, "directed": true, "metadata": {} },
+    { "src": "security_hub", "dst": "software_engineering_hub", "relation": "part_of", "strength": 0.98, "directed": true, "metadata": {} },
+    { "src": "workflow_hub", "dst": "software_engineering_hub", "relation": "part_of", "strength": 0.98, "directed": true, "metadata": {} },
+    { "src": "bridges_hub", "dst": "software_engineering_hub", "relation": "part_of", "strength": 0.98, "directed": true, "metadata": {} },
+
+    { "src": "clear_requirements_reduce_rework", "dst": "requirements_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+    { "src": "requirements_should_include_constraints", "dst": "requirements_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+    { "src": "prototype_validates_unclear_requirements", "dst": "requirements_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+    { "src": "more_features_is_always_better_false", "dst": "requirements_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+
+    { "src": "separation_of_concerns", "dst": "architecture_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+    { "src": "interfaces_define_contracts", "dst": "architecture_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+    { "src": "modularity_supports_parallel_work", "dst": "architecture_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+    { "src": "architecture_is_only_diagram_false", "dst": "architecture_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+
+    { "src": "small_functions_are_easier_to_test", "dst": "implementation_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+    { "src": "readable_code_matters", "dst": "implementation_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+    { "src": "types_and_checks_prevent_some_bugs", "dst": "implementation_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+    { "src": "complex_code_is_always_more_powerful_false", "dst": "implementation_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+
+    { "src": "unit_tests_check_small_behaviors", "dst": "testing_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+    { "src": "integration_tests_check_component_interaction", "dst": "testing_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+    { "src": "tests_do_not_prove_full_correctness", "dst": "testing_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+    { "src": "testing_everything_manually_is_best_false", "dst": "testing_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+
+    { "src": "big_o_guides_scaling", "dst": "performance_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+    { "src": "profiling_finds_real_bottlenecks", "dst": "performance_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+    { "src": "optimization_before_measurement_false", "dst": "performance_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+
+    { "src": "validate_inputs_prevents_bad_data", "dst": "security_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+    { "src": "least_privilege_limits_damage", "dst": "security_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+    { "src": "security_by_obscurity_false", "dst": "security_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+
+    { "src": "version_control_tracks_history", "dst": "workflow_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+    { "src": "code_review_catches_mistakes", "dst": "workflow_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+    { "src": "automation_reduces_repetitive_risk", "dst": "workflow_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+    { "src": "deploying_without_checks_is_faster_false", "dst": "workflow_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+
+    { "src": "web_app_example", "dst": "implementation_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+    { "src": "ci_pipeline_example", "dst": "workflow_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+    { "src": "input_validation_example", "dst": "security_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+
+    { "src": "requirements_to_architecture_bridge", "dst": "bridges_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+    { "src": "architecture_to_implementation_bridge", "dst": "bridges_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+    { "src": "implementation_to_testing_bridge", "dst": "bridges_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+    { "src": "testing_to_quality_bridge", "dst": "bridges_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+    { "src": "performance_to_design_bridge", "dst": "bridges_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+    { "src": "security_to_workflow_bridge", "dst": "bridges_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {} },
+
+    { "src": "clear_requirements_reduce_rework", "dst": "requirements_should_include_constraints", "relation": "support", "strength": 0.96, "directed": true, "metadata": {} },
+    { "src": "prototype_validates_unclear_requirements", "dst": "clear_requirements_reduce_rework", "relation": "support", "strength": 0.9, "directed": true, "metadata": {} },
+    { "src": "clear_requirements_reduce_rework", "dst": "more_features_is_always_better_false", "relation": "contradict", "strength": 0.99, "directed": true, "metadata": {} },
+
+    { "src": "separation_of_concerns", "dst": "interfaces_define_contracts", "relation": "support", "strength": 0.95, "directed": true, "metadata": {} },
+    { "src": "interfaces_define_contracts", "dst": "modularity_supports_parallel_work", "relation": "support", "strength": 0.9, "directed": true, "metadata": {} },
+    { "src": "modularity_supports_parallel_work", "dst": "architecture_is_only_diagram_false", "relation": "contradict", "strength": 0.98, "directed": true, "metadata": {} },
+
+    { "src": "readable_code_matters", "dst": "small_functions_are_easier_to_test", "relation": "support", "strength": 0.94, "directed": true, "metadata": {} },
+    { "src": "small_functions_are_easier_to_test", "dst": "types_and_checks_prevent_some_bugs", "relation": "support", "strength": 0.9, "directed": true, "metadata": {} },
+    { "src": "readable_code_matters", "dst": "complex_code_is_always_more_powerful_false", "relation": "contradict", "strength": 0.98, "directed": true, "metadata": {} },
+
+    { "src": "unit_tests_check_small_behaviors", "dst": "tests_do_not_prove_full_correctness", "relation": "support", "strength": 0.95, "directed": true, "metadata": {} },
+    { "src": "integration_tests_check_component_interaction", "dst": "tests_do_not_prove_full_correctness", "relation": "support", "strength": 0.95, "directed": true, "metadata": {} },
+    { "src": "tests_do_not_prove_full_correctness", "dst": "testing_everything_manually_is_best_false", "relation": "contradict", "strength": 0.98, "directed": true, "metadata": {} },
+
+    { "src": "big_o_guides_scaling", "dst": "profiling_finds_real_bottlenecks", "relation": "support", "strength": 0.88, "directed": true, "metadata": {} },
+    { "src": "profiling_finds_real_bottlenecks", "dst": "optimization_before_measurement_false", "relation": "contradict", "strength": 0.99, "directed": true, "metadata": {} },
+
+    { "src": "validate_inputs_prevents_bad_data", "dst": "least_privilege_limits_damage", "relation": "support", "strength": 0.9, "directed": true, "metadata": {} },
+    { "src": "least_privilege_limits_damage", "dst": "security_by_obscurity_false", "relation": "contradict", "strength": 0.98, "directed": true, "metadata": {} },
+
+    { "src": "version_control_tracks_history", "dst": "code_review_catches_mistakes", "relation": "support", "strength": 0.94, "directed": true, "metadata": {} },
+    { "src": "code_review_catches_mistakes", "dst": "automation_reduces_repetitive_risk", "relation": "support", "strength": 0.88, "directed": true, "metadata": {} },
+    { "src": "automation_reduces_repetitive_risk", "dst": "deploying_without_checks_is_faster_false", "relation": "contradict", "strength": 0.98, "directed": true, "metadata": {} },
+
+    { "src": "requirements_should_include_constraints", "dst": "requirements_to_architecture_bridge", "relation": "support", "strength": 0.97, "directed": true, "metadata": {} },
+    { "src": "separation_of_concerns", "dst": "architecture_to_implementation_bridge", "relation": "support", "strength": 0.97, "directed": true, "metadata": {} },
+    { "src": "small_functions_are_easier_to_test", "dst": "implementation_to_testing_bridge", "relation": "support", "strength": 0.97, "directed": true, "metadata": {} },
+    { "src": "tests_do_not_prove_full_correctness", "dst": "testing_to_quality_bridge", "relation": "support", "strength": 0.96, "directed": true, "metadata": {} },
+    { "src": "profiling_finds_real_bottlenecks", "dst": "performance_to_design_bridge", "relation": "support", "strength": 0.96, "directed": true, "metadata": {} },
+    { "src": "code_review_catches_mistakes", "dst": "security_to_workflow_bridge", "relation": "support", "strength": 0.95, "directed": true, "metadata": {} }
+  ]
+}

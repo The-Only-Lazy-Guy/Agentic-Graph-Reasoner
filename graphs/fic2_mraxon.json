@@ -1,0 +1,228 @@
+{
+  "metadata": {
+    "topic": "biology",
+    "subtopic": "mraxon_phelp_dynamics",
+    "fictional": true,
+    "version": 1,
+    "purpose": "Fictional predator-prey ecology with non-Lotka-Volterra dynamics (sqrt(M) coupling in the interaction). Equilibrium analysis requires solving a 2-equation algebraic system."
+  },
+  "nodes": [
+    {
+      "id": "mraxon_phelp_hub",
+      "text": "Mraxon (predators) and Phelps (prey) populations interact via a non-standard kinetic law in which the per-prey predation rate scales with sqrt(M), not M. The system has logistic prey growth and linear predator decay, but the nonlinear coupling produces a non-trivial equilibrium that requires solving a 2-equation algebraic system.",
+      "node_type": "summary",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "mraxon_biology"
+      }
+    },
+    {
+      "id": "mraxon_phelp_dpdt_formula",
+      "text": "Phelp population rate: dP/dt = r_p * P * (1 - P / K_p) - alpha * P * sqrt(M). Logistic growth minus predation. P is prey count, M is predator count.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "mraxon_biology"
+      }
+    },
+    {
+      "id": "mraxon_phelp_dmdt_formula",
+      "text": "Mraxon population rate: dM/dt = beta * alpha * P * sqrt(M) - mu * M. Mraxon gain mass from predation (efficiency factor beta) and decay linearly with death rate mu.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "mraxon_biology"
+      }
+    },
+    {
+      "id": "mraxon_constants",
+      "text": "Constants for this ecosystem: r_p = 0.5 /year (Phelp intrinsic growth), K_p = 1000 (Phelp carrying capacity), alpha = 0.01 (predation coefficient), beta = 0.2 (Mraxon conversion efficiency), mu = 0.05 /year (Mraxon mortality).",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "mraxon_biology"
+      }
+    },
+    {
+      "id": "mraxon_equilibrium_definition",
+      "text": "An equilibrium is a (P*, M*) pair where both dP/dt = 0 and dM/dt = 0 simultaneously. We solve the two equations as an algebraic system; the nonlinear sqrt(M) makes substitution the cleanest approach.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "mraxon_biology"
+      }
+    },
+    {
+      "id": "mraxon_step1_solve_dmdt_zero",
+      "text": "Step 1 (predator equilibrium): dM/dt = 0 gives beta * alpha * P * sqrt(M) = mu * M. Dividing by sqrt(M) yields sqrt(M) = (beta * alpha / mu) * P, equivalently sqrt(M*) = (beta * alpha / mu) * P*.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "mraxon_biology"
+      }
+    },
+    {
+      "id": "mraxon_step2_solve_dpdt_zero",
+      "text": "Step 2 (prey equilibrium): dP/dt = 0 gives r_p * (1 - P / K_p) = alpha * sqrt(M). Solve for sqrt(M): sqrt(M*) = (r_p / alpha) * (1 - P* / K_p).",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "mraxon_biology"
+      }
+    },
+    {
+      "id": "mraxon_step3_substitute_and_solve",
+      "text": "Step 3 (combine and solve for P*): set the two expressions for sqrt(M*) equal. (beta * alpha / mu) * P* = (r_p / alpha) * (1 - P* / K_p). Multiply out: P* = (r_p * mu / (beta * alpha^2)) * (1 - P* / K_p). Collect P* terms: P* * (1 + r_p * mu / (beta * alpha^2 * K_p)) = r_p * mu / (beta * alpha^2). Then P* = (r_p * mu / (beta * alpha^2)) / (1 + r_p * mu / (beta * alpha^2 * K_p)). Plug P* back into Step 1 to get M*.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "mraxon_biology"
+      }
+    },
+    {
+      "id": "mraxon_worked_example",
+      "text": "Worked example with the constants r_p=0.5, K_p=1000, alpha=0.01, beta=0.2, mu=0.05.\nIntermediate: r_p * mu / (beta * alpha^2) = (0.5 * 0.05) / (0.2 * 0.0001) = 0.025 / 0.00002 = 1250.\nThen P* = 1250 / (1 + 1250 / 1000) = 1250 / 2.25 = 555.56.\nFrom Step 1: sqrt(M*) = (0.2 * 0.01 / 0.05) * 555.56 = 0.04 * 555.56 = 22.22, so M* = 22.22^2 = 493.83.\nFinal equilibrium: P* ~ 555.6, M* ~ 493.8.",
+      "node_type": "example",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "mraxon_biology"
+      }
+    },
+    {
+      "id": "use_lotka_volterra_linear_false",
+      "text": "MISCONCEPTION: 'this is just Lotka-Volterra, use dP/dt = r*P - a*P*M (linear in M) and dM/dt = b*a*P*M - mu*M.' This ignores the sqrt(M) coupling that defines Mraxon-Phelp dynamics. Lotka-Volterra equilibrium is P* = mu/(b*a), M* = r/a, which would give P* = 25 and M* = 50 with these constants - both off by orders of magnitude from the correct (555.6, 493.8).",
+      "node_type": "claim",
+      "confidence": 0.05,
+      "importance": 0.85,
+      "metadata": {
+        "topic": "mraxon_biology",
+        "kind": "misconception"
+      }
+    },
+    {
+      "id": "mraxon_complete_summary",
+      "text": "Mraxon-Phelp equilibrium. With sqrt(M) coupling, set both rates to zero, substitute to eliminate M, solve for P* algebraically, then recover M*. For r_p=0.5, K_p=1000, alpha=0.01, beta=0.2, mu=0.05 the canonical equilibrium is P* ~ 555.6, M* ~ 493.8.",
+      "node_type": "summary",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "mraxon_biology"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "src": "mraxon_phelp_dpdt_formula",
+      "dst": "mraxon_phelp_hub",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mraxon_phelp_dmdt_formula",
+      "dst": "mraxon_phelp_hub",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mraxon_constants",
+      "dst": "mraxon_phelp_dpdt_formula",
+      "relation": "refine",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mraxon_constants",
+      "dst": "mraxon_phelp_dmdt_formula",
+      "relation": "refine",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mraxon_equilibrium_definition",
+      "dst": "mraxon_phelp_hub",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mraxon_step1_solve_dmdt_zero",
+      "dst": "mraxon_phelp_dmdt_formula",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mraxon_step2_solve_dpdt_zero",
+      "dst": "mraxon_phelp_dpdt_formula",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mraxon_step3_substitute_and_solve",
+      "dst": "mraxon_step1_solve_dmdt_zero",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mraxon_step3_substitute_and_solve",
+      "dst": "mraxon_step2_solve_dpdt_zero",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mraxon_worked_example",
+      "dst": "mraxon_step3_substitute_and_solve",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mraxon_phelp_dpdt_formula",
+      "dst": "use_lotka_volterra_linear_false",
+      "relation": "contradict",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mraxon_complete_summary",
+      "dst": "mraxon_phelp_hub",
+      "relation": "part_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mraxon_step3_substitute_and_solve",
+      "dst": "mraxon_complete_summary",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    }
+  ]
+}

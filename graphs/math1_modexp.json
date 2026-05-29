@@ -1,0 +1,128 @@
+{
+  "metadata": {
+    "topic": "mathematics",
+    "subtopic": "modular_arithmetic",
+    "language": "none",
+    "purpose": "graph-grounded reasoning for computing 7^100 mod 13 by hand using Fermat's little theorem and squaring. No code _apply node — tests reasoning-only protocol value.",
+    "version": 1
+  },
+  "nodes": [
+    {
+      "id": "modular_arithmetic_hub",
+      "text": "Modular arithmetic computes integer remainders under a fixed modulus. The two tools that turn a large exponentiation into a tractable hand computation are (a) Fermat's little theorem, which collapses exponents modulo p-1 when p is prime, and (b) repeated squaring, which reduces O(n) multiplications to O(log n).",
+      "node_type": "summary",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "mathematics"}
+    },
+    {
+      "id": "fermat_little_theorem_statement",
+      "text": "Fermat's little theorem: if p is a prime number and a is an integer not divisible by p, then a^(p-1) is congruent to 1 modulo p. Symbolically: a^(p-1) ≡ 1 (mod p).",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "mathematics"}
+    },
+    {
+      "id": "fermat_applies_to_13_and_7",
+      "text": "13 is prime, and 7 is not divisible by 13, so Fermat's little theorem applies with p = 13 and a = 7. This gives 7^12 ≡ 1 (mod 13), which is the key identity for collapsing 7^100.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "mathematics"}
+    },
+    {
+      "id": "exponent_decomposition_100_as_8_12_plus_4",
+      "text": "Decompose the exponent 100 into a multiple of 12 plus a small remainder: 100 = 8 × 12 + 4. This is the integer division 100 ÷ 12 = 8 remainder 4. The 8×12 = 96 factor will collapse to 1 via Fermat's, leaving only 7^4 to compute.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "mathematics"}
+    },
+    {
+      "id": "exponent_law_separates_product_exponents",
+      "text": "For any base a and integer exponents m and n, the law a^(m+n) = a^m · a^n holds. So 7^100 = 7^(96 + 4) = 7^96 · 7^4. Further, a^(mn) = (a^m)^n gives 7^96 = (7^12)^8.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {"topic": "mathematics"}
+    },
+    {
+      "id": "collapse_7pow96_to_1_mod_13",
+      "text": "Combining the exponent law with Fermat's: 7^96 = (7^12)^8 ≡ 1^8 = 1 (mod 13). Therefore 7^100 = 7^96 · 7^4 ≡ 1 · 7^4 = 7^4 (mod 13). The large-exponent problem has collapsed to computing 7^4 mod 13.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "mathematics"}
+    },
+    {
+      "id": "squaring_step_7_squared_mod_13_equals_10",
+      "text": "Compute 7^2 = 49 by hand. Reduce mod 13: 49 = 3 × 13 + 10, so 7^2 ≡ 10 (mod 13). Reduce after each squaring step to keep intermediate values small.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "mathematics"}
+    },
+    {
+      "id": "squaring_step_7_fourth_mod_13_equals_9",
+      "text": "Compute 7^4 = (7^2)^2 ≡ 10^2 = 100 (mod 13). Reduce 100 mod 13: 100 = 7 × 13 + 9, so 7^4 ≡ 9 (mod 13). This is the final reduction needed.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "mathematics"}
+    },
+    {
+      "id": "final_answer_7pow100_mod_13_equals_9",
+      "text": "Combining: 7^100 ≡ 7^4 ≡ 9 (mod 13). The final numeric answer is 9.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 1.0,
+      "metadata": {"topic": "mathematics"}
+    },
+    {
+      "id": "repeated_squaring_principle",
+      "text": "Repeated squaring (binary exponentiation) computes a^n using O(log n) multiplications instead of O(n). Each squaring doubles the achievable exponent: a, a^2, a^4, a^8, ..., and you combine selected squares whose exponents sum to n. Reducing modulo the modulus after each squaring keeps values bounded.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.85,
+      "metadata": {"topic": "mathematics"}
+    },
+    {
+      "id": "direct_7pow100_then_mod_false",
+      "text": "MISCONCEPTION: 'compute 7^100 directly as a giant integer and then take mod 13.' 7^100 is roughly 3 × 10^84, far beyond what any hand computation or 64-bit integer can hold without overflow. The whole point of modular arithmetic + Fermat's + squaring is to never form the giant intermediate value. Always reduce mod 13 after each multiplication or squaring.",
+      "node_type": "claim",
+      "confidence": 0.05,
+      "importance": 0.85,
+      "metadata": {"topic": "mathematics", "kind": "misconception"}
+    },
+    {
+      "id": "modexp_complete_summary",
+      "text": "To compute 7^100 mod 13 by hand: Fermat's little theorem gives 7^12 ≡ 1 (mod 13) because 13 is prime and 7 is coprime to 13. Decomposing 100 = 8×12 + 4 collapses 7^100 to 7^4 mod 13. Two squarings (7^2 = 49 ≡ 10, then 10^2 = 100 ≡ 9) give the final answer 9.",
+      "node_type": "summary",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "mathematics"}
+    }
+  ],
+  "edges": [
+    {"src": "fermat_little_theorem_statement", "dst": "modular_arithmetic_hub", "relation": "support", "strength": 0.95, "directed": true, "metadata": {}},
+    {"src": "repeated_squaring_principle", "dst": "modular_arithmetic_hub", "relation": "support", "strength": 0.9, "directed": true, "metadata": {}},
+
+    {"src": "fermat_applies_to_13_and_7", "dst": "fermat_little_theorem_statement", "relation": "example_of", "strength": 0.95, "directed": true, "metadata": {}},
+    {"src": "exponent_decomposition_100_as_8_12_plus_4", "dst": "fermat_applies_to_13_and_7", "relation": "support", "strength": 0.9, "directed": true, "metadata": {}},
+    {"src": "exponent_law_separates_product_exponents", "dst": "exponent_decomposition_100_as_8_12_plus_4", "relation": "support", "strength": 0.9, "directed": true, "metadata": {}},
+    {"src": "collapse_7pow96_to_1_mod_13", "dst": "exponent_law_separates_product_exponents", "relation": "support", "strength": 0.95, "directed": true, "metadata": {}},
+    {"src": "collapse_7pow96_to_1_mod_13", "dst": "fermat_applies_to_13_and_7", "relation": "support", "strength": 0.95, "directed": true, "metadata": {}},
+
+    {"src": "squaring_step_7_squared_mod_13_equals_10", "dst": "repeated_squaring_principle", "relation": "example_of", "strength": 0.9, "directed": true, "metadata": {}},
+    {"src": "squaring_step_7_fourth_mod_13_equals_9", "dst": "squaring_step_7_squared_mod_13_equals_10", "relation": "support", "strength": 0.95, "directed": true, "metadata": {}},
+
+    {"src": "final_answer_7pow100_mod_13_equals_9", "dst": "collapse_7pow96_to_1_mod_13", "relation": "support", "strength": 0.95, "directed": true, "metadata": {}},
+    {"src": "final_answer_7pow100_mod_13_equals_9", "dst": "squaring_step_7_fourth_mod_13_equals_9", "relation": "support", "strength": 0.95, "directed": true, "metadata": {}},
+
+    {"src": "repeated_squaring_principle", "dst": "direct_7pow100_then_mod_false", "relation": "contradict", "strength": 0.95, "directed": true, "metadata": {}},
+
+    {"src": "modexp_complete_summary", "dst": "modular_arithmetic_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {}},
+    {"src": "final_answer_7pow100_mod_13_equals_9", "dst": "modexp_complete_summary", "relation": "support", "strength": 0.9, "directed": true, "metadata": {}}
+  ]
+}

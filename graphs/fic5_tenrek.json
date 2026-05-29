@@ -1,0 +1,272 @@
+{
+  "metadata": {
+    "topic": "physics",
+    "subtopic": "tenrek_dispersion",
+    "fictional": true,
+    "version": 1,
+    "purpose": "Fictional dispersion relation. Group velocity requires differentiating omega(k) symbolically and evaluating at the requested wavenumber. Phase velocity is direct."
+  },
+  "nodes": [
+    {
+      "id": "tenrek_dispersion_hub",
+      "text": "Tenrek wave packets propagate in a fictional dispersive medium where the angular frequency depends on the wavenumber through a sqrt(1 + (k * lambda_t)^2) factor on top of the linear c_t * k term. This produces a group velocity and a phase velocity that differ as soon as the wavenumber approaches 1/lambda_t.",
+      "node_type": "summary",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "tenrek_physics"
+      }
+    },
+    {
+      "id": "tenrek_dispersion_relation",
+      "text": "Tenrek dispersion: omega(k) = c_t * k * sqrt(1 + (k * lambda_t)^2). Here k is the wavenumber (1/m), omega is the angular frequency (1/s), c_t is the Tenrek base velocity, and lambda_t is the Tenrek length scale.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "tenrek_physics"
+      }
+    },
+    {
+      "id": "tenrek_base_velocity_value",
+      "text": "Tenrek base velocity: c_t = 3.0 * 10^8 m/s. This is the long-wavelength limit (k * lambda_t << 1, sqrt(1 + ...) -> 1) of both the phase and group velocities.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "tenrek_physics"
+      }
+    },
+    {
+      "id": "tenrek_length_scale_value",
+      "text": "Tenrek length scale: lambda_t = 1.0 * 10^(-6) m. Dispersion becomes significant when k is comparable to 1 / lambda_t = 10^6 m^(-1).",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "tenrek_physics"
+      }
+    },
+    {
+      "id": "tenrek_phase_velocity_formula",
+      "text": "Phase velocity: v_p = omega / k = c_t * sqrt(1 + (k * lambda_t)^2). Direct substitution into the dispersion relation; no differentiation needed.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "tenrek_physics"
+      }
+    },
+    {
+      "id": "tenrek_group_velocity_formula",
+      "text": "Group velocity: v_g = d(omega) / d(k). Carrying out the derivative on omega = c_t * k * sqrt(1 + (k*lambda_t)^2) and simplifying gives v_g = c_t * (1 + 2 * (k*lambda_t)^2) / sqrt(1 + (k*lambda_t)^2).",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "tenrek_physics"
+      }
+    },
+    {
+      "id": "tenrek_derivative_derivation",
+      "text": "Derivative derivation. Let x = (k * lambda_t)^2 so omega = c_t * k * sqrt(1 + x). Using product rule with dx/dk = 2 * k * lambda_t^2: d(omega)/dk = c_t * sqrt(1+x) + c_t * k * (lambda_t^2 * k) / sqrt(1+x) = c_t * (1+x)/sqrt(1+x) + c_t * x / sqrt(1+x) = c_t * (1 + 2x) / sqrt(1+x). Substituting x back gives the v_g formula.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "tenrek_physics"
+      }
+    },
+    {
+      "id": "tenrek_step1_evaluate_x",
+      "text": "Step 1: compute x = (k * lambda_t)^2 for the requested wavenumber. Track powers of ten carefully because k is typically 10^5 to 10^7 and lambda_t is 10^(-6); x ranges from 0.01 to 100.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "tenrek_physics"
+      }
+    },
+    {
+      "id": "tenrek_step2_compute_phase",
+      "text": "Step 2: v_p = c_t * sqrt(1 + x). Plug in numerically. At k * lambda_t = 1 (x = 1), v_p = c_t * sqrt(2) ~ 4.24 * 10^8 m/s.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "tenrek_physics"
+      }
+    },
+    {
+      "id": "tenrek_step3_compute_group",
+      "text": "Step 3: v_g = c_t * (1 + 2x) / sqrt(1 + x). Plug in numerically. At k * lambda_t = 1 (x = 1), v_g = c_t * 3 / sqrt(2) ~ 6.36 * 10^8 m/s.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "tenrek_physics"
+      }
+    },
+    {
+      "id": "tenrek_worked_example",
+      "text": "Worked example with k = 0.5 * 10^6 m^(-1) (so k * lambda_t = 0.5, x = 0.25).\nStep 1: x = 0.25.\nStep 2: v_p = 3.0e8 * sqrt(1.25) = 3.0e8 * 1.118 = 3.354 * 10^8 m/s.\nStep 3: v_g = 3.0e8 * (1 + 0.5) / sqrt(1.25) = 3.0e8 * 1.5 / 1.118 = 4.025 * 10^8 m/s.\nNote v_g > v_p in this regime, consistent with anomalous dispersion.",
+      "node_type": "example",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "tenrek_physics"
+      }
+    },
+    {
+      "id": "tenrek_phase_equals_group_false",
+      "text": "MISCONCEPTION: 'group velocity always equals phase velocity, so v_g = omega/k.' This is true only for linear dispersion omega = c * k. The Tenrek dispersion has a nonlinear sqrt(1 + (k*lambda_t)^2) factor that splits v_g from v_p whenever k * lambda_t is not negligible. Treating them as equal gives v_g off by 50 percent or more in the dispersive regime.",
+      "node_type": "claim",
+      "confidence": 0.05,
+      "importance": 0.85,
+      "metadata": {
+        "topic": "tenrek_physics",
+        "kind": "misconception"
+      }
+    },
+    {
+      "id": "tenrek_complete_summary",
+      "text": "Tenrek wave packet velocities. Constants: c_t = 3.0e8 m/s, lambda_t = 1.0e-6 m. Compute x = (k*lambda_t)^2. Then v_p = c_t * sqrt(1 + x) and v_g = c_t * (1 + 2x) / sqrt(1 + x). They coincide only when x -> 0.",
+      "node_type": "summary",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "tenrek_physics"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "src": "tenrek_dispersion_relation",
+      "dst": "tenrek_dispersion_hub",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "tenrek_base_velocity_value",
+      "dst": "tenrek_dispersion_relation",
+      "relation": "refine",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "tenrek_length_scale_value",
+      "dst": "tenrek_dispersion_relation",
+      "relation": "refine",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "tenrek_phase_velocity_formula",
+      "dst": "tenrek_dispersion_relation",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "tenrek_group_velocity_formula",
+      "dst": "tenrek_dispersion_relation",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "tenrek_derivative_derivation",
+      "dst": "tenrek_group_velocity_formula",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "tenrek_step1_evaluate_x",
+      "dst": "tenrek_dispersion_relation",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "tenrek_step2_compute_phase",
+      "dst": "tenrek_phase_velocity_formula",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "tenrek_step3_compute_group",
+      "dst": "tenrek_group_velocity_formula",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "tenrek_step2_compute_phase",
+      "dst": "tenrek_step1_evaluate_x",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "tenrek_step3_compute_group",
+      "dst": "tenrek_step1_evaluate_x",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "tenrek_worked_example",
+      "dst": "tenrek_step2_compute_phase",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "tenrek_worked_example",
+      "dst": "tenrek_step3_compute_group",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "tenrek_group_velocity_formula",
+      "dst": "tenrek_phase_equals_group_false",
+      "relation": "contradict",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "tenrek_complete_summary",
+      "dst": "tenrek_dispersion_hub",
+      "relation": "part_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "tenrek_step3_compute_group",
+      "dst": "tenrek_complete_summary",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    }
+  ]
+}

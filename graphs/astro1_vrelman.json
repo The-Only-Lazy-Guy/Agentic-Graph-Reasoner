@@ -1,0 +1,322 @@
+{
+  "metadata": {
+    "topic": "astronomy",
+    "subtopic": "vrelman_skarnholm_dynamics",
+    "language": "math",
+    "purpose": "ENTIRELY FICTIONAL knowledge graph for stress-testing whether the answerer can solve a problem whose formulas are not in the model's pretraining data. The Vrelman effect, Skarnholm equivalence, and all named constants are made up. The math is internally consistent so the problem has a single correct numerical answer derivable only by reading the graph.",
+    "version": 1,
+    "fictional": true
+  },
+  "nodes": [
+    {
+      "id": "vrelman_skarnholm_dynamics_hub",
+      "text": "Vrelman-Skarnholm dynamics describes the slow orbital decay of bound stellar clusters under the combined influence of Vrelman radiation pressure (a non-gravitational drag that scales with cluster mass and orientation) and Skarnholm equivalence (which sets the stability boundary). Time-to-collapse problems are solved in three steps: compute the Vrelman flux, then the orbital decay rate, then divide separation by decay rate.",
+      "node_type": "summary",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "astronomy"
+      }
+    },
+    {
+      "id": "vrelman_flux_formula",
+      "text": "Vrelman flux on a stellar cluster: Phi_V = kappa_v * M * sin^2(theta) / r^2. Here M is the total cluster mass (kg), r is the separation (meters), theta is the cluster orientation angle relative to the galactic plane (degrees), and kappa_v is the Vrelman coupling constant. The flux has units of W/m^2.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 1.0,
+      "metadata": {
+        "topic": "astronomy"
+      }
+    },
+    {
+      "id": "vrelman_coupling_constant_value",
+      "text": "Vrelman coupling constant: kappa_v = 1.0 * 10^(-3) W*m^2 / (kg*sr). This constant is determined by the galactic medium's photon scattering properties and is treated as a universal constant for problems in Vrelman-Skarnholm dynamics.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "astronomy"
+      }
+    },
+    {
+      "id": "vrelman_orientation_angle_convention",
+      "text": "Orientation angle theta is measured between the cluster's principal axis and the galactic plane, in degrees. Only sin^2(theta) appears in the flux formula, so theta = 30 degrees gives sin^2(30) = 0.25 and theta = 90 degrees (cluster perpendicular to galactic plane) gives sin^2(90) = 1.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.85,
+      "metadata": {
+        "topic": "astronomy"
+      }
+    },
+    {
+      "id": "orbital_decay_rate_formula",
+      "text": "Orbital decay rate under Vrelman pressure: |dr/dt| = alpha_v * Phi_V * r^3 / (G * M^2). Here Phi_V is the Vrelman flux (computed above), r is the current separation, M is the total cluster mass, G is Newton's gravitational constant, and alpha_v is the Vrelman absorption coefficient. The decay rate has units of m/s.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 1.0,
+      "metadata": {
+        "topic": "astronomy"
+      }
+    },
+    {
+      "id": "vrelman_absorption_coefficient_value",
+      "text": "Vrelman absorption coefficient: alpha_v = 1.0 * 10^(-8) m^2*kg*s^2 / W. This is a fixed coefficient describing how efficiently a stellar cluster's mass distribution absorbs Vrelman radiation pressure and converts it into orbital decay.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "astronomy"
+      }
+    },
+    {
+      "id": "gravitational_constant_value",
+      "text": "Newton's gravitational constant: G = 6.67 * 10^(-11) N*m^2/kg^2. This is the only standard physical constant that appears in Vrelman-Skarnholm dynamics; the other constants (kappa_v, alpha_v) are specific to the Vrelman framework.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "astronomy"
+      }
+    },
+    {
+      "id": "time_to_collapse_formula",
+      "text": "Time-to-collapse: tau = r / |dr/dt|. Because Vrelman decay rates are extremely small (the constants kappa_v and alpha_v conspire to give |dr/dt| in the 10^(-15) to 10^(-20) m/s range for typical galactic clusters), tau values are typically on the order of 10^30 seconds, far longer than the current age of the universe (~4 * 10^17 s).",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 1.0,
+      "metadata": {
+        "topic": "astronomy"
+      }
+    },
+    {
+      "id": "skarnholm_stability_boundary",
+      "text": "Skarnholm equivalence: a cluster is in the slow-decay regime (the Vrelman-Skarnholm dynamics above apply) only when Phi_V < rho_galactic * c^2 * 10^(-20), where rho_galactic ~ 10^(-22) kg/m^3 is the mean galactic mass density. Above this boundary, the cluster enters a fast-collapse phase governed by different physics not covered here.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.7,
+      "metadata": {
+        "topic": "astronomy"
+      }
+    },
+    {
+      "id": "solution_step1_compute_flux",
+      "text": "Solution step 1 (compute Vrelman flux): substitute M, r, and theta into Phi_V = kappa_v * M * sin^2(theta) / r^2. Always evaluate sin^2(theta) numerically first (e.g. sin^2(30 deg) = 0.25), then plug in M and r. Result has units W/m^2.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "astronomy"
+      }
+    },
+    {
+      "id": "solution_step2_compute_decay_rate",
+      "text": "Solution step 2 (compute orbital decay rate): substitute the Phi_V you just computed, the same r and M, and G = 6.67e-11 into |dr/dt| = alpha_v * Phi_V * r^3 / (G * M^2). The r^3 and M^2 are large numbers; track the powers of ten carefully. Result has units m/s and will be very small (negative would be the signed rate; |dr/dt| is the magnitude).",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "astronomy"
+      }
+    },
+    {
+      "id": "solution_step3_compute_collapse_time",
+      "text": "Solution step 3 (compute time-to-collapse): tau = r / |dr/dt|. Take the original separation r and divide by the magnitude of the decay rate from step 2. Result has units seconds. Expect a number in the 10^30 range for typical galactic-scale inputs.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "astronomy"
+      }
+    },
+    {
+      "id": "worked_example_canonical",
+      "text": "Worked example. Inputs: r = 1.0 * 10^15 m, M = 1.0 * 10^30 kg, theta = 30 degrees.\n\nStep 1 (flux):\n  sin^2(30 deg) = 0.25\n  Phi_V = (1.0e-3) * (1.0e30) * 0.25 / (1.0e15)^2\n        = (1.0e-3) * (1.0e30) * 0.25 / (1.0e30)\n        = 0.25 * 1.0e-3\n        = 2.5 * 10^(-4) W/m^2\n\nStep 2 (decay rate):\n  |dr/dt| = (1.0e-8) * (2.5e-4) * (1.0e15)^3 / ((6.67e-11) * (1.0e30)^2)\n          = (1.0e-8) * (2.5e-4) * (1.0e45) / ((6.67e-11) * (1.0e60))\n          = (2.5e-12) * (1.0e45) / (6.67e49)\n          = (2.5e33) / (6.67e49)\n          = 3.748 * 10^(-17) m/s\n\nStep 3 (time):\n  tau = (1.0e15) / (3.748e-17)\n      = 2.668 * 10^(31) s\n\nFinal answer: tau ~ 2.67 * 10^31 seconds.",
+      "node_type": "example",
+      "confidence": 1.0,
+      "importance": 1.0,
+      "metadata": {
+        "topic": "astronomy"
+      }
+    },
+    {
+      "id": "treat_as_kepler_only_false",
+      "text": "MISCONCEPTION: 'this is just a Kepler-third-law problem; use T^2 = (4 pi^2 / GM) * a^3 to find the period and call that the collapse time.' This is wrong. Kepler's third law gives the orbital period of a bound system in pure gravity; it has nothing to do with Vrelman radiation pressure or orbital DECAY. The decay time tau is not an orbital period. Applying Kepler's law here gives a number that is orders of magnitude off and answers a different question entirely.",
+      "node_type": "claim",
+      "confidence": 0.05,
+      "importance": 0.85,
+      "metadata": {
+        "topic": "astronomy",
+        "kind": "misconception"
+      }
+    },
+    {
+      "id": "vrelman_skarnholm_complete_summary",
+      "text": "Vrelman-Skarnholm time-to-collapse, all in one place. Constants: kappa_v = 1.0e-3, alpha_v = 1.0e-8, G = 6.67e-11. Step 1: Phi_V = kappa_v * M * sin^2(theta) / r^2. Step 2: |dr/dt| = alpha_v * Phi_V * r^3 / (G * M^2). Step 3: tau = r / |dr/dt|. For r=1e15, M=1e30, theta=30 deg, the canonical answer is tau ~ 2.67 * 10^31 s.",
+      "node_type": "summary",
+      "confidence": 1.0,
+      "importance": 1.0,
+      "metadata": {
+        "topic": "astronomy"
+      }
+    },
+    {
+      "id": "time_collapse_increases_mass_decay_rate_promoted",
+      "text": "The time-to-collapse increases with mass because the decay rate |dr/dt| scales as 1/M^2 (from the denominator), while the flux Phi_V scales linearly with M. The net effect is that the decay rate decreases with increasing mass, leading to longer collapse times. This is supported by the full expression for |dr/dt|, which includes M in both numerator and denominator, with the M^2 in the denominator dominating.",
+      "node_type": "fact",
+      "confidence": 0.7,
+      "importance": 0.6,
+      "metadata": {
+        "provenance": "promoted_from_hypothesis_pool",
+        "pool_hypothesis_id": "h_5eefa819ad",
+        "use_count_at_promotion": 3,
+        "promoted_at": "2026-05-19T08:13:41+00:00"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "src": "vrelman_flux_formula",
+      "dst": "vrelman_skarnholm_dynamics_hub",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "orbital_decay_rate_formula",
+      "dst": "vrelman_skarnholm_dynamics_hub",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "time_to_collapse_formula",
+      "dst": "vrelman_skarnholm_dynamics_hub",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "vrelman_coupling_constant_value",
+      "dst": "vrelman_flux_formula",
+      "relation": "refine",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "vrelman_orientation_angle_convention",
+      "dst": "vrelman_flux_formula",
+      "relation": "refine",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "vrelman_absorption_coefficient_value",
+      "dst": "orbital_decay_rate_formula",
+      "relation": "refine",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "gravitational_constant_value",
+      "dst": "orbital_decay_rate_formula",
+      "relation": "refine",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "solution_step1_compute_flux",
+      "dst": "vrelman_flux_formula",
+      "relation": "example_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "solution_step2_compute_decay_rate",
+      "dst": "orbital_decay_rate_formula",
+      "relation": "example_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "solution_step3_compute_collapse_time",
+      "dst": "time_to_collapse_formula",
+      "relation": "example_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "solution_step2_compute_decay_rate",
+      "dst": "solution_step1_compute_flux",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "solution_step3_compute_collapse_time",
+      "dst": "solution_step2_compute_decay_rate",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "worked_example_canonical",
+      "dst": "solution_step1_compute_flux",
+      "relation": "example_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "worked_example_canonical",
+      "dst": "solution_step2_compute_decay_rate",
+      "relation": "example_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "worked_example_canonical",
+      "dst": "solution_step3_compute_collapse_time",
+      "relation": "example_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "time_to_collapse_formula",
+      "dst": "treat_as_kepler_only_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "skarnholm_stability_boundary",
+      "dst": "vrelman_skarnholm_dynamics_hub",
+      "relation": "refine",
+      "strength": 0.7,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "vrelman_skarnholm_complete_summary",
+      "dst": "vrelman_skarnholm_dynamics_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    }
+  ]
+}

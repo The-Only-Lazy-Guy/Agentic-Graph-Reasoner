@@ -1,0 +1,1500 @@
+{
+  "metadata": {
+    "title": "C++ reasoning graph (gold, true summary semantics, uncertainty-aware debugging)",
+    "source_note": "Designed for C++ reasoning supervision with accepted claims, applications, low-confidence debugging hypotheses, and explicit contradiction structure. Structural hubs are not summary nodes; summary nodes are reserved for later component compression.",
+    "relation_convention": {
+      "part_of": "child hub or bridge node -> parent hub",
+      "example_of": "example or application -> concept or theory",
+      "support": "evidence, mechanism, or stronger statement -> claim",
+      "contradict": "accepted claim or stronger explanation -> false or weaker claim",
+      "refine": "more specific statement -> broader statement",
+      "depend": "prerequisite theory -> dependent application or hypothesis",
+      "cause": "mechanism or bug source -> downstream effect"
+    },
+    "notes": [
+      "Hub nodes are structural containers only and are not summary nodes.",
+      "Summary nodes are reserved for compressed language-level abstractions created after a component becomes mature enough to sparsify.",
+      "Hypothesis nodes intentionally keep mid confidence to represent plausible debugging guesses that still need evidence.",
+      "Several applications depend on theory nodes so the graph teaches theory-to-code transfer rather than isolated facts.",
+      "Some natural edges are intentionally omitted so link_nodes and create_bridge supervision remain meaningful."
+    ]
+  },
+  "nodes": [
+    {
+      "id": "cpp_hub",
+      "text": "C++ combines low-level control, abstractions, templates, resource management, and performance-oriented programming.",
+      "node_type": "hub",
+      "confidence": 1.0,
+      "importance": 1.0,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "global",
+        "language": "cpp"
+      }
+    },
+    {
+      "id": "algorithms_hub",
+      "text": "C++ algorithm reasoning involves invariants, search spaces, iterator categories, and asymptotic analysis.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "algorithms",
+        "language": "cpp"
+      }
+    },
+    {
+      "id": "lifetime_hub",
+      "text": "C++ lifetime reasoning involves ownership, RAII, invalidation, and undefined behavior.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "lifetime",
+        "language": "cpp"
+      }
+    },
+    {
+      "id": "performance_hub",
+      "text": "C++ performance reasoning combines asymptotic complexity, allocation behavior, copying cost, and cache locality.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "performance",
+        "language": "cpp"
+      }
+    },
+    {
+      "id": "debugging_hub",
+      "text": "C++ debugging often compares multiple plausible causes before confirming one with assertions, sanitizers, or measurement.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "debugging",
+        "language": "cpp"
+      }
+    },
+    {
+      "id": "bridges_hub",
+      "text": "Bridge insights connect theory, implementation, debugging, and performance in C++.",
+      "node_type": "hub",
+      "confidence": 0.98,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "bridges",
+        "language": "cpp"
+      }
+    },
+    {
+      "id": "invariant_to_code_bridge",
+      "text": "Algorithm invariants explain why branch updates in C++ code remain correct across iterations.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "bridges",
+        "language": "cpp",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "ownership_to_safety_bridge",
+      "text": "Ownership models explain when C++ code is safe from leaks, double frees, and dangling access.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "bridges",
+        "language": "cpp",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "complexity_to_measurement_bridge",
+      "text": "Asymptotic complexity predicts scaling, but real C++ performance also depends on constants, allocation, and cache behavior.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "bridges",
+        "language": "cpp",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "binary_search_requires_sorted_range",
+      "text": "Binary search requires the searched range to be sorted under the comparison being used.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "algorithms",
+        "language": "cpp",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "half_open_interval_invariant",
+      "text": "A half-open interval invariant such as [l, r) helps make binary-search updates consistent.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "algorithms",
+        "language": "cpp",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "midpoint_formula_avoids_overflow",
+      "text": "Using mid = l + (r - l) / 2 avoids overflow that can occur in (l + r) / 2.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "algorithms",
+        "language": "cpp",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "binary_search_halves_search_space",
+      "text": "Each correct binary-search step discards about half of the remaining search space.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "algorithms",
+        "language": "cpp",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "binary_search_logarithmic_bound",
+      "text": "Binary search takes O(log n) comparisons; a common upper-bound intuition is comparisons <= ceil(log2(n)) + 1.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "algorithms",
+        "language": "cpp",
+        "kind": "math_link",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "lower_bound_returns_first_not_less",
+      "text": "std::lower_bound returns the first position whose value is not less than the target.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "algorithms",
+        "language": "cpp",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "binary_search_unsorted_ok_false",
+      "text": "Binary search still works on an unsorted vector if you probe enough midpoints.",
+      "node_type": "claim",
+      "confidence": 0.04,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "algorithms",
+        "language": "cpp",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "manual_binary_search_apply",
+      "text": "A manual C++ binary search over std::vector<int> applies a sorted-range precondition, an interval invariant, and midpoint arithmetic.",
+      "node_type": "application",
+      "confidence": 0.98,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "algorithms",
+        "language": "cpp",
+        "kind": "apply"
+      }
+    },
+    {
+      "id": "lower_bound_sorted_vector_apply",
+      "text": "Calling std::lower_bound(v.begin(), v.end(), x) on a sorted vector applies binary-search theory without hand-written branching.",
+      "node_type": "application",
+      "confidence": 0.98,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "algorithms",
+        "language": "cpp",
+        "kind": "apply"
+      }
+    },
+    {
+      "id": "million_elements_log20_apply",
+      "text": "For n = 1,048,576 = 2^20, binary search needs only about 20 comparison layers, illustrating the log2(n) bound.",
+      "node_type": "application",
+      "confidence": 0.97,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "algorithms",
+        "language": "cpp",
+        "kind": "apply_math"
+      }
+    },
+    {
+      "id": "sortedness_assert_apply",
+      "text": "Checking std::is_sorted before binary search is an application of the sorted-range theory to debugging.",
+      "node_type": "application",
+      "confidence": 0.97,
+      "importance": 0.89,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "algorithms",
+        "language": "cpp",
+        "kind": "apply_debug"
+      }
+    },
+    {
+      "id": "wrong_answer_may_be_unsorted_input_hyp",
+      "text": "A wrong-answer bug in binary search may come from violating the sorted-range precondition.",
+      "node_type": "hypothesis",
+      "confidence": 0.55,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "debugging",
+        "language": "cpp",
+        "kind": "hypothesis",
+        "status": "uncertain"
+      }
+    },
+    {
+      "id": "wrong_answer_may_be_boundary_update_hyp",
+      "text": "A wrong-answer bug in binary search may come from inconsistent boundary updates that break the chosen interval invariant.",
+      "node_type": "hypothesis",
+      "confidence": 0.52,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "debugging",
+        "language": "cpp",
+        "kind": "hypothesis",
+        "status": "uncertain"
+      }
+    },
+    {
+      "id": "mid_overflow_may_be_bug_hyp",
+      "text": "A binary-search failure on very large indices may come from midpoint overflow.",
+      "node_type": "hypothesis",
+      "confidence": 0.48,
+      "importance": 0.88,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "debugging",
+        "language": "cpp",
+        "kind": "hypothesis",
+        "status": "uncertain"
+      }
+    },
+    {
+      "id": "raii_releases_resource_on_scope_exit",
+      "text": "RAII ties resource release to object lifetime so cleanup happens automatically at scope exit.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "lifetime",
+        "language": "cpp",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "unique_ptr_models_unique_ownership",
+      "text": "std::unique_ptr models exclusive ownership of a dynamically managed object.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "lifetime",
+        "language": "cpp",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "move_semantics_transfer_resources",
+      "text": "Move semantics transfer resources without the full cost of an owning deep copy when types support efficient moves.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "lifetime",
+        "language": "cpp",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "vector_reallocation_invalidates_refs_ptrs_iters",
+      "text": "Growing a std::vector can reallocate storage and invalidate pointers, references, and iterators into its elements.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "lifetime",
+        "language": "cpp",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "dangling_reference_is_undefined_behavior",
+      "text": "Accessing an object through a dangling reference or pointer is undefined behavior.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "lifetime",
+        "language": "cpp",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "return_ref_to_local_false",
+      "text": "Returning a reference to a local variable is safe because the stack memory often still contains the value for a while.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "lifetime",
+        "language": "cpp",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "unique_ptr_file_wrapper_apply",
+      "text": "A file-handle wrapper whose destructor closes the file applies RAII to resource cleanup.",
+      "node_type": "application",
+      "confidence": 0.98,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "lifetime",
+        "language": "cpp",
+        "kind": "apply"
+      }
+    },
+    {
+      "id": "move_into_vector_apply",
+      "text": "Using vec.push_back(std::move(s)) applies move semantics to avoid copying a large std::string when possible.",
+      "node_type": "application",
+      "confidence": 0.98,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "lifetime",
+        "language": "cpp",
+        "kind": "apply"
+      }
+    },
+    {
+      "id": "crash_after_push_back_may_be_invalidation_hyp",
+      "text": "A crash that appears after vector growth may come from using a pointer or reference that was invalidated by reallocation.",
+      "node_type": "hypothesis",
+      "confidence": 0.56,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "debugging",
+        "language": "cpp",
+        "kind": "hypothesis",
+        "status": "uncertain"
+      }
+    },
+    {
+      "id": "string_view_to_temporary_may_dangle_hyp",
+      "text": "A corrupted string readout may come from a std::string_view referring to a temporary string that no longer exists.",
+      "node_type": "hypothesis",
+      "confidence": 0.51,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "debugging",
+        "language": "cpp",
+        "kind": "hypothesis",
+        "status": "uncertain"
+      }
+    },
+    {
+      "id": "vector_contiguous_storage_is_cache_friendly",
+      "text": "std::vector stores elements contiguously, which often improves cache locality during sequential access.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "performance",
+        "language": "cpp",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "linked_list_pointer_chasing_hurts_cache",
+      "text": "Pointer chasing in linked structures can reduce cache efficiency even when asymptotic complexity looks acceptable.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "performance",
+        "language": "cpp",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "reserve_reduces_reallocations",
+      "text": "Calling vector::reserve can reduce repeated reallocations during growth.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "performance",
+        "language": "cpp",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "pass_const_ref_avoids_large_copy",
+      "text": "Passing a large std::string by const reference can avoid a copy when a function only needs read access.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "performance",
+        "language": "cpp",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "unordered_map_average_o1_lookup",
+      "text": "std::unordered_map lookup is typically O(1) on average under a reasonable hash distribution.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "performance",
+        "language": "cpp",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "unordered_map_worst_case_not_constant",
+      "text": "std::unordered_map lookup is not guaranteed O(1) in the worst case.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "performance",
+        "language": "cpp",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "unordered_map_always_o1_false",
+      "text": "std::unordered_map is always constant time, so collisions and rehashing are never relevant.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "performance",
+        "language": "cpp",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "vector_scan_apply",
+      "text": "Scanning a large vector often applies contiguous-storage and cache-locality theory better than scanning a linked list node by node.",
+      "node_type": "application",
+      "confidence": 0.97,
+      "importance": 0.91,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "performance",
+        "language": "cpp",
+        "kind": "apply"
+      }
+    },
+    {
+      "id": "reserve_then_push_apply",
+      "text": "Calling reserve before many push_back operations applies allocation theory to reduce reallocation cost.",
+      "node_type": "application",
+      "confidence": 0.98,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "performance",
+        "language": "cpp",
+        "kind": "apply"
+      }
+    },
+    {
+      "id": "copy_overhead_may_dominate_hyp",
+      "text": "A slowdown in a string-heavy function may come from repeated pass-by-value copies rather than from the core algorithm alone.",
+      "node_type": "hypothesis",
+      "confidence": 0.53,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "debugging",
+        "language": "cpp",
+        "kind": "hypothesis",
+        "status": "uncertain"
+      }
+    },
+    {
+      "id": "hash_slowdown_may_come_from_rehash_or_collisions_hyp",
+      "text": "A hash-table slowdown may come from rehashing or poor collision behavior rather than from key lookup syntax itself.",
+      "node_type": "hypothesis",
+      "confidence": 0.5,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "computer_science",
+        "cluster": "debugging",
+        "language": "cpp",
+        "kind": "hypothesis",
+        "status": "uncertain"
+      }
+    },
+    {
+      "id": "comparator_consistency_required_for_binary_search",
+      "text": "Binary search and std::lower_bound require the range to be ordered under the same comparator used during searching.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science",
+        "language": "cpp",
+        "cluster": "algorithms",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "mixed_interval_scheme_causes_off_by_one",
+      "text": "Mixing closed [l, r] and half-open [l, r) update rules can create off-by-one bugs even when midpoint arithmetic itself is correct.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science",
+        "language": "cpp",
+        "cluster": "algorithms",
+        "kind": "correctness_mechanism",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "comparator_mismatch_may_explain_wrong_answer_hyp",
+      "text": "A wrong answer from std::lower_bound or manual binary search may come from sorting under one comparator and searching under another.",
+      "node_type": "hypothesis",
+      "confidence": 0.52,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science",
+        "language": "cpp",
+        "cluster": "debugging",
+        "kind": "hypothesis",
+        "status": "uncertain"
+      }
+    },
+    {
+      "id": "string_view_is_nonowning_lifetime_bound",
+      "text": "std::string_view does not own characters, so its safety depends entirely on the lifetime of the referenced character sequence.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science",
+        "language": "cpp",
+        "cluster": "lifetime",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "moved_from_object_valid_but_unspecified",
+      "text": "After a move, an object remains valid for destruction and reassignment, but much of its previous value should be treated as unspecified.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science",
+        "language": "cpp",
+        "cluster": "lifetime",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "use_after_move_may_cause_logic_bug_hyp",
+      "text": "A surprising empty string, missing payload, or reused stale state may come from reading an object after its contents were moved away.",
+      "node_type": "hypothesis",
+      "confidence": 0.53,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "computer_science",
+        "language": "cpp",
+        "cluster": "debugging",
+        "kind": "hypothesis",
+        "status": "uncertain"
+      }
+    },
+    {
+      "id": "reserve_only_delays_future_reallocation",
+      "text": "Calling reserve can postpone vector reallocation, but invalidation can still occur later once growth exceeds the reserved capacity.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science",
+        "language": "cpp",
+        "cluster": "lifetime",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "emplace_back_can_avoid_extra_temporary",
+      "text": "emplace_back can construct an element in place and may avoid an extra temporary compared with inserting a separately constructed object.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science",
+        "language": "cpp",
+        "cluster": "performance",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "load_factor_and_rehash_explain_hash_slowdown",
+      "text": "Hash-table slowdowns often come from load factor growth, rehashing, or poor hash distribution rather than from lookup syntax alone.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science",
+        "language": "cpp",
+        "cluster": "performance",
+        "kind": "theory",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "address_sanitizer_reports_invalid_memory_access",
+      "text": "AddressSanitizer can provide concrete evidence for use-after-free, out-of-bounds access, and some stack or lifetime mistakes.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science",
+        "language": "cpp",
+        "cluster": "debugging",
+        "kind": "tooling",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "benchmark_in_debug_build_may_mislead_hyp",
+      "text": "A disappointing microbenchmark result may come from measuring an unoptimized debug build instead of the release-like configuration that actually matters.",
+      "node_type": "hypothesis",
+      "confidence": 0.51,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "computer_science",
+        "language": "cpp",
+        "cluster": "debugging",
+        "kind": "hypothesis",
+        "status": "uncertain"
+      }
+    },
+    {
+      "id": "release_measurement_should_match_deployed_build",
+      "text": "Performance measurements are more representative when compiler optimizations, allocator behavior, and build settings resemble the deployed build.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science",
+        "language": "cpp",
+        "cluster": "performance",
+        "kind": "measurement_principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "interval_discipline_connects_proof_and_debugging",
+      "text": "A consistent interval discipline connects proof-oriented invariants to practical off-by-one debugging in C++ search code.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science",
+        "language": "cpp",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "sanitizers_turn_memory_hypotheses_into_evidence",
+      "text": "Sanitizers turn memory-safety hypotheses into testable evidence instead of leaving debugging at the level of guesswork.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science",
+        "language": "cpp",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "src": "algorithms_hub",
+      "dst": "cpp_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "lifetime_hub",
+      "dst": "cpp_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "performance_hub",
+      "dst": "cpp_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "debugging_hub",
+      "dst": "cpp_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bridges_hub",
+      "dst": "cpp_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "invariant_to_code_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ownership_to_safety_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "complexity_to_measurement_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "binary_search_requires_sorted_range",
+      "dst": "binary_search_unsorted_ok_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "binary_search_halves_search_space",
+      "dst": "binary_search_logarithmic_bound",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "binary_search_requires_sorted_range",
+      "dst": "manual_binary_search_apply",
+      "relation": "depend",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "half_open_interval_invariant",
+      "dst": "manual_binary_search_apply",
+      "relation": "depend",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "midpoint_formula_avoids_overflow",
+      "dst": "manual_binary_search_apply",
+      "relation": "depend",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "binary_search_requires_sorted_range",
+      "dst": "lower_bound_sorted_vector_apply",
+      "relation": "depend",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "lower_bound_returns_first_not_less",
+      "dst": "lower_bound_sorted_vector_apply",
+      "relation": "depend",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "binary_search_logarithmic_bound",
+      "dst": "million_elements_log20_apply",
+      "relation": "depend",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "binary_search_requires_sorted_range",
+      "dst": "sortedness_assert_apply",
+      "relation": "depend",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "binary_search_requires_sorted_range",
+      "dst": "wrong_answer_may_be_unsorted_input_hyp",
+      "relation": "depend",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "half_open_interval_invariant",
+      "dst": "wrong_answer_may_be_boundary_update_hyp",
+      "relation": "depend",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "midpoint_formula_avoids_overflow",
+      "dst": "mid_overflow_may_be_bug_hyp",
+      "relation": "depend",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "manual_binary_search_apply",
+      "dst": "invariant_to_code_bridge",
+      "relation": "support",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "half_open_interval_invariant",
+      "dst": "invariant_to_code_bridge",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "binary_search_logarithmic_bound",
+      "dst": "invariant_to_code_bridge",
+      "relation": "support",
+      "strength": 0.88,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "raii_releases_resource_on_scope_exit",
+      "dst": "unique_ptr_models_unique_ownership",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "unique_ptr_models_unique_ownership",
+      "dst": "unique_ptr_file_wrapper_apply",
+      "relation": "depend",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "raii_releases_resource_on_scope_exit",
+      "dst": "unique_ptr_file_wrapper_apply",
+      "relation": "depend",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "move_semantics_transfer_resources",
+      "dst": "move_into_vector_apply",
+      "relation": "depend",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "vector_reallocation_invalidates_refs_ptrs_iters",
+      "dst": "crash_after_push_back_may_be_invalidation_hyp",
+      "relation": "depend",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dangling_reference_is_undefined_behavior",
+      "dst": "crash_after_push_back_may_be_invalidation_hyp",
+      "relation": "depend",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dangling_reference_is_undefined_behavior",
+      "dst": "string_view_to_temporary_may_dangle_hyp",
+      "relation": "depend",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dangling_reference_is_undefined_behavior",
+      "dst": "return_ref_to_local_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "raii_releases_resource_on_scope_exit",
+      "dst": "ownership_to_safety_bridge",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "unique_ptr_models_unique_ownership",
+      "dst": "ownership_to_safety_bridge",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dangling_reference_is_undefined_behavior",
+      "dst": "ownership_to_safety_bridge",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "vector_reallocation_invalidates_refs_ptrs_iters",
+      "dst": "ownership_to_safety_bridge",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "vector_contiguous_storage_is_cache_friendly",
+      "dst": "vector_scan_apply",
+      "relation": "depend",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "linked_list_pointer_chasing_hurts_cache",
+      "dst": "vector_scan_apply",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "reserve_reduces_reallocations",
+      "dst": "reserve_then_push_apply",
+      "relation": "depend",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "pass_const_ref_avoids_large_copy",
+      "dst": "copy_overhead_may_dominate_hyp",
+      "relation": "depend",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "move_semantics_transfer_resources",
+      "dst": "copy_overhead_may_dominate_hyp",
+      "relation": "depend",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "unordered_map_average_o1_lookup",
+      "dst": "hash_slowdown_may_come_from_rehash_or_collisions_hyp",
+      "relation": "depend",
+      "strength": 0.89,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "unordered_map_worst_case_not_constant",
+      "dst": "hash_slowdown_may_come_from_rehash_or_collisions_hyp",
+      "relation": "depend",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "reserve_reduces_reallocations",
+      "dst": "hash_slowdown_may_come_from_rehash_or_collisions_hyp",
+      "relation": "support",
+      "strength": 0.72,
+      "directed": true,
+      "metadata": {
+        "note": "Reserving is one practical response when repeated rehash or growth is suspected."
+      }
+    },
+    {
+      "src": "unordered_map_worst_case_not_constant",
+      "dst": "unordered_map_always_o1_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "vector_contiguous_storage_is_cache_friendly",
+      "dst": "complexity_to_measurement_bridge",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "linked_list_pointer_chasing_hurts_cache",
+      "dst": "complexity_to_measurement_bridge",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "pass_const_ref_avoids_large_copy",
+      "dst": "complexity_to_measurement_bridge",
+      "relation": "support",
+      "strength": 0.91,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "reserve_reduces_reallocations",
+      "dst": "complexity_to_measurement_bridge",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "binary_search_logarithmic_bound",
+      "dst": "complexity_to_measurement_bridge",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "comparator_consistency_required_for_binary_search",
+      "dst": "algorithms_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mixed_interval_scheme_causes_off_by_one",
+      "dst": "algorithms_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "string_view_is_nonowning_lifetime_bound",
+      "dst": "lifetime_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "moved_from_object_valid_but_unspecified",
+      "dst": "lifetime_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "reserve_only_delays_future_reallocation",
+      "dst": "lifetime_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "emplace_back_can_avoid_extra_temporary",
+      "dst": "performance_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "load_factor_and_rehash_explain_hash_slowdown",
+      "dst": "performance_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "release_measurement_should_match_deployed_build",
+      "dst": "performance_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "comparator_mismatch_may_explain_wrong_answer_hyp",
+      "dst": "debugging_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "use_after_move_may_cause_logic_bug_hyp",
+      "dst": "debugging_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "address_sanitizer_reports_invalid_memory_access",
+      "dst": "debugging_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "benchmark_in_debug_build_may_mislead_hyp",
+      "dst": "debugging_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "interval_discipline_connects_proof_and_debugging",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "sanitizers_turn_memory_hypotheses_into_evidence",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "binary_search_requires_sorted_range",
+      "dst": "comparator_consistency_required_for_binary_search",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "lower_bound_returns_first_not_less",
+      "dst": "comparator_consistency_required_for_binary_search",
+      "relation": "support",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "half_open_interval_invariant",
+      "dst": "mixed_interval_scheme_causes_off_by_one",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "midpoint_formula_avoids_overflow",
+      "dst": "mixed_interval_scheme_causes_off_by_one",
+      "relation": "support",
+      "strength": 0.82,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "comparator_consistency_required_for_binary_search",
+      "dst": "comparator_mismatch_may_explain_wrong_answer_hyp",
+      "relation": "depend",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "moved_from_object_valid_but_unspecified",
+      "dst": "use_after_move_may_cause_logic_bug_hyp",
+      "relation": "depend",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "string_view_is_nonowning_lifetime_bound",
+      "dst": "dangling_reference_is_undefined_behavior",
+      "relation": "support",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "moved_from_object_valid_but_unspecified",
+      "dst": "move_into_vector_apply",
+      "relation": "support",
+      "strength": 0.83,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "emplace_back_can_avoid_extra_temporary",
+      "dst": "move_into_vector_apply",
+      "relation": "support",
+      "strength": 0.86,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "reserve_only_delays_future_reallocation",
+      "dst": "vector_reallocation_invalidates_refs_ptrs_iters",
+      "relation": "refine",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "load_factor_and_rehash_explain_hash_slowdown",
+      "dst": "hash_slowdown_may_come_from_rehash_or_collisions_hyp",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "address_sanitizer_reports_invalid_memory_access",
+      "dst": "sanitizers_turn_memory_hypotheses_into_evidence",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "crash_after_push_back_may_be_invalidation_hyp",
+      "dst": "sanitizers_turn_memory_hypotheses_into_evidence",
+      "relation": "support",
+      "strength": 0.78,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "release_measurement_should_match_deployed_build",
+      "dst": "benchmark_in_debug_build_may_mislead_hyp",
+      "relation": "depend",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "release_measurement_should_match_deployed_build",
+      "dst": "complexity_to_measurement_bridge",
+      "relation": "support",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "benchmark_in_debug_build_may_mislead_hyp",
+      "dst": "complexity_to_measurement_bridge",
+      "relation": "support",
+      "strength": 0.78,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mixed_interval_scheme_causes_off_by_one",
+      "dst": "interval_discipline_connects_proof_and_debugging",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "half_open_interval_invariant",
+      "dst": "interval_discipline_connects_proof_and_debugging",
+      "relation": "support",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wrong_answer_may_be_boundary_update_hyp",
+      "dst": "interval_discipline_connects_proof_and_debugging",
+      "relation": "support",
+      "strength": 0.8,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dangling_reference_is_undefined_behavior",
+      "dst": "string_view_is_nonowning_lifetime_bound",
+      "relation": "support",
+      "strength": 0.72,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "moved_from_object_valid_but_unspecified",
+      "dst": "move_semantics_transfer_resources",
+      "relation": "refine",
+      "strength": 0.83,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "load_factor_and_rehash_explain_hash_slowdown",
+      "dst": "unordered_map_always_o1_false",
+      "relation": "contradict",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "metadata": {},
+  "nodes": [
+    {
+      "id": "sig_1",
+      "text": "Use a segment tree for range queries",
+      "node_type": "claim",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {}
+    },
+    {
+      "id": "sig_2",
+      "text": "Handle all-negative arrays by returning max element",
+      "node_type": "claim",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {}
+    },
+    {
+      "id": "sig_3",
+      "text": "Use long long for overflow safety",
+      "node_type": "claim",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {}
+    },
+    {
+      "id": "concept_a",
+      "text": "Segment tree stores sum, prefix, suffix, best",
+      "node_type": "concept",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {}
+    }
+  ],
+  "edges": [
+    {
+      "src": "sig_1",
+      "dst": "concept_a",
+      "relation": "supports",
+      "strength": 0.6,
+      "directed": true,
+      "metadata": {}
+    }
+  ]
+}

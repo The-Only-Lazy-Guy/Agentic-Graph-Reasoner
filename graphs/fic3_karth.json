@@ -1,0 +1,218 @@
+{
+  "metadata": {
+    "topic": "cryptography",
+    "subtopic": "karth_cipher",
+    "fictional": true,
+    "version": 1,
+    "purpose": "Fictional cipher with two-step encryption: alphabet shift + 4-character block reversal. Decryption requires applying the inverse operations in reverse order."
+  },
+  "nodes": [
+    {
+      "id": "karth_cipher_hub",
+      "text": "The Karth cipher is a fictional two-stage cipher used for short messages. Encryption applies a fixed forward letter shift then reverses every consecutive 4-letter block. Decryption MUST reverse both operations in opposite order: first un-reverse the blocks, then shift letters backward. Skipping the block step turns Karth into a plain Caesar cipher and produces wrong plaintext for any message of length >= 4.",
+      "node_type": "summary",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "karth_crypto"
+      }
+    },
+    {
+      "id": "karth_step1_letter_shift",
+      "text": "Karth step 1 (forward shift): each plaintext letter is shifted +7 positions in the alphabet, modulo 26. Case is preserved. Non-letters pass through unchanged. Example mapping: A->H, M->T, Z->G.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "karth_crypto"
+      }
+    },
+    {
+      "id": "karth_step2_block_reversal",
+      "text": "Karth step 2 (block reversal): the shifted text is split into consecutive 4-character blocks from the left. Each FULL block of 4 is reversed in place. A trailing block of fewer than 4 characters is left in original order. Example: 'OLSSV' splits to 'OLSS' + 'V'; the first block reverses to 'SSLO' and the final result is 'SSLOV'.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "karth_crypto"
+      }
+    },
+    {
+      "id": "karth_decrypt_step1_unreverse_blocks",
+      "text": "Decrypt step 1 (un-reverse blocks): apply the SAME block-reversal procedure to the ciphertext. Reversing twice restores the original order within each full 4-character block, because reversal is its own inverse. The trailing partial block is again untouched.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "karth_crypto"
+      }
+    },
+    {
+      "id": "karth_decrypt_step2_inverse_shift",
+      "text": "Decrypt step 2 (inverse shift): each letter is shifted -7 positions in the alphabet (equivalently +19), modulo 26. Case preserved. Example mapping: H->A, T->M, G->Z.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "karth_crypto"
+      }
+    },
+    {
+      "id": "karth_decrypt_order_matters",
+      "text": "The order is fixed: when decrypting, you MUST un-reverse the blocks FIRST and then apply the inverse shift. Doing the shift first (then trying to un-reverse) does not commute and yields the wrong plaintext for any message of length >= 4.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "karth_crypto"
+      }
+    },
+    {
+      "id": "karth_worked_example_short",
+      "text": "Worked example (3-letter message, no block reversal applies). Encrypt 'DOG':\nStep 1 (+7 shift): D->K, O->V, G->N. Intermediate = 'KVN'.\nStep 2 (block reversal): only 3 chars, no full block, so 'KVN' unchanged.\nCiphertext = 'KVN'.\n\nDecrypt 'KVN':\nStep 1 (un-reverse blocks): no full block, so 'KVN' unchanged.\nStep 2 (-7 shift): K->D, V->O, N->G.\nPlaintext = 'DOG'.",
+      "node_type": "example",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "karth_crypto"
+      }
+    },
+    {
+      "id": "karth_worked_example_long",
+      "text": "Worked example (5-letter message, exercises block reversal). Encrypt 'HELLO':\nStep 1 (+7 shift): H->O, E->L, L->S, L->S, O->V. Intermediate = 'OLSSV'.\nStep 2 (block reversal): split into 'OLSS' + 'V'. Reverse the full block: 'OLSS' -> 'SSLO'. Trailing 'V' unchanged.\nCiphertext = 'SSLOV'.\n\nDecrypt 'SSLOV':\nStep 1 (un-reverse blocks): split 'SSLO' + 'V'. Reverse 'SSLO' -> 'OLSS'. Trailing 'V' unchanged. Intermediate = 'OLSSV'.\nStep 2 (-7 shift): O->H, L->E, S->L, S->L, V->O.\nPlaintext = 'HELLO'.",
+      "node_type": "example",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "karth_crypto"
+      }
+    },
+    {
+      "id": "karth_is_just_caesar_false",
+      "text": "MISCONCEPTION: 'Karth is just a Caesar cipher with shift 7; ignore the block step.' This is wrong for any message of length >= 4. Applying only the inverse shift to 'SSLOV' gives 'LLSEO', not 'HELLO'. The block-reversal step is structural; skipping it destroys the plaintext.",
+      "node_type": "claim",
+      "confidence": 0.05,
+      "importance": 0.85,
+      "metadata": {
+        "topic": "karth_crypto",
+        "kind": "misconception"
+      }
+    },
+    {
+      "id": "karth_complete_summary",
+      "text": "Karth cipher: encrypt = (shift +7) then (reverse every 4-char block). Decrypt = (un-reverse every 4-char block) then (shift -7). Order matters; reversal is self-inverse; trailing partial blocks are untouched.",
+      "node_type": "summary",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "karth_crypto"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "src": "karth_step1_letter_shift",
+      "dst": "karth_cipher_hub",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "karth_step2_block_reversal",
+      "dst": "karth_cipher_hub",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "karth_decrypt_step1_unreverse_blocks",
+      "dst": "karth_step2_block_reversal",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "karth_decrypt_step2_inverse_shift",
+      "dst": "karth_step1_letter_shift",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "karth_decrypt_order_matters",
+      "dst": "karth_decrypt_step1_unreverse_blocks",
+      "relation": "refine",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "karth_worked_example_short",
+      "dst": "karth_step1_letter_shift",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "karth_worked_example_short",
+      "dst": "karth_decrypt_step2_inverse_shift",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "karth_worked_example_long",
+      "dst": "karth_step2_block_reversal",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "karth_worked_example_long",
+      "dst": "karth_decrypt_step1_unreverse_blocks",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "karth_worked_example_long",
+      "dst": "karth_decrypt_order_matters",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "karth_decrypt_order_matters",
+      "dst": "karth_is_just_caesar_false",
+      "relation": "contradict",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "karth_complete_summary",
+      "dst": "karth_cipher_hub",
+      "relation": "part_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "karth_worked_example_long",
+      "dst": "karth_complete_summary",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    }
+  ]
+}

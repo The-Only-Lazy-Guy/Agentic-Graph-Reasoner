@@ -1,0 +1,177 @@
+{
+  "metadata": {
+    "topic": "systems",
+    "subtopic": "python_webserver_performance",
+    "language": "python",
+    "purpose": "graph-grounded reasoning for triaging high-latency / low-CPU / queueing symptoms on a sync-worker Python web server (Flask + gunicorn). Multi-domain factual chaining: worker model, blocking downstream, observability tools, common misconceptions.",
+    "version": 1
+  },
+  "nodes": [
+    {
+      "id": "webserver_perf_hub",
+      "text": "Web server latency triage starts from a simple invariant: a request spends time either being processed (CPU work) or waiting (blocked on something else). High latency with low CPU means the time is being spent waiting, not computing. Identifying what the server is waiting for is the entire diagnosis.",
+      "node_type": "summary",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "systems"}
+    },
+    {
+      "id": "sync_worker_model",
+      "text": "Sync workers (the default for Flask under gunicorn with the 'sync' worker class) handle exactly one request at a time per worker process. A worker is busy from the moment it accepts a request until it returns the response, including any time the request spends blocked waiting on a downstream call. Concurrency is bounded by the number of worker processes.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "systems"}
+    },
+    {
+      "id": "async_worker_model",
+      "text": "Async workers (gunicorn with gevent / eventlet, or an ASGI server like uvicorn) cooperatively multiplex many in-flight requests on a single OS thread. When one request blocks on I/O, the worker switches to another. Throughput under I/O-bound load is much higher than sync workers for the same memory budget.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.85,
+      "metadata": {"topic": "systems"}
+    },
+    {
+      "id": "request_queue_when_workers_busy",
+      "text": "When all N worker processes are busy and a new request arrives, the request is accepted by the OS socket backlog (or by gunicorn's pending queue) but is not handed to a worker until one frees up. Queue depth visible at the load balancer or in gunicorn's logs grows as long as request arrival rate exceeds the service rate.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "systems"}
+    },
+    {
+      "id": "cpu_low_when_workers_blocked_insight",
+      "text": "Critical insight: with sync workers, low CPU utilization does NOT mean the server has spare capacity. If all N workers are blocked waiting on a downstream call, the CPU does nothing while the workers wait, so utilization appears low. Concurrency is saturated even though CPU is idle. The bottleneck is worker availability, not CPU.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 1.0,
+      "metadata": {"topic": "systems"}
+    },
+    {
+      "id": "low_cpu_means_no_bottleneck_false",
+      "text": "MISCONCEPTION: 'low CPU usage means the server has plenty of capacity, so the bottleneck must be elsewhere on the box (disk, network).' This conflates CPU utilization with concurrency utilization. On a sync-worker Python server, workers blocked on a downstream call hold concurrency slots while consuming no CPU. Low CPU + queueing requests is the textbook signature of worker exhaustion blocked on something downstream.",
+      "node_type": "claim",
+      "confidence": 0.05,
+      "importance": 1.0,
+      "metadata": {"topic": "systems", "kind": "misconception"}
+    },
+    {
+      "id": "common_blocking_downstream_calls",
+      "text": "Common things a Flask sync worker blocks on, in rough order of how often they cause this symptom: (1) database queries, especially unindexed or large joins; (2) external HTTP API calls without an aggressive timeout; (3) blocking locks on shared resources; (4) blocking file I/O on slow storage. The shared feature is: an off-CPU wait that the worker is required to ride out.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "systems"}
+    },
+    {
+      "id": "diagnostic_check_workers_busy",
+      "text": "Check whether workers are actually busy: count active gunicorn worker PIDs with ps aux | grep gunicorn, count requests in flight via gunicorn's --statsd-* or /metrics endpoint if enabled, look at load balancer's pending-request count. If all workers show RUNNING state but CPU is low, they are blocked on I/O.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {"topic": "systems"}
+    },
+    {
+      "id": "diagnostic_profile_blocking_call",
+      "text": "Once worker exhaustion is confirmed, profile what the workers are blocked on. py-spy dump --pid <gunicorn_worker_pid> shows the live Python stack frame of each blocked worker, usually pointing directly at the slow downstream call (e.g. cursor.execute, requests.get, file.read). Application-level request timing logs (per-route p50/p95/p99) reveal the same information.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "systems"}
+    },
+    {
+      "id": "diagnostic_check_downstream_health",
+      "text": "If profiling points to a specific downstream (e.g. PostgreSQL), check that downstream's health: pg_stat_activity for long-running queries and lock waits, target HTTP API's latency / error rate, NFS or disk I/O queue depth. Often the upstream Python symptom is just an echo of a downstream slowness.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.85,
+      "metadata": {"topic": "systems"}
+    },
+    {
+      "id": "remedy_increase_workers_when_io_bound",
+      "text": "Short-term remedy for I/O-bound saturation: increase the number of sync workers. Rough rule of thumb: workers = (target_concurrency) provided each worker's memory footprint times the worker count fits in RAM. This buys time but is not unbounded.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.8,
+      "metadata": {"topic": "systems"}
+    },
+    {
+      "id": "remedy_switch_to_async_workers",
+      "text": "Structural remedy for high-concurrency I/O-bound workloads: switch from sync workers to async (gunicorn -k gevent or uvicorn). One async worker handles hundreds of concurrent I/O-blocked requests on a single OS thread, since blocked requests yield to ready ones. Requires the application's I/O calls be cooperatively yieldable (gevent's monkey-patch or asyncio-native libraries).",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.85,
+      "metadata": {"topic": "systems"}
+    },
+    {
+      "id": "remedy_fix_downstream",
+      "text": "Most durable remedy: fix the downstream slowness directly. Add the missing database index, set timeouts on external HTTP calls, cache responses, batch requests. This reduces per-request blocking time, which reduces concurrent-blocked-worker count, which reduces queue depth. Treats the cause rather than the symptom.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {"topic": "systems"}
+    },
+    {
+      "id": "increase_workers_unbounded_false",
+      "text": "MISCONCEPTION: 'just keep raising worker count until queueing stops.' Each sync worker holds its own Python interpreter and process memory (typically 100-500 MB depending on imports), and competes for the same downstream resource that was already the bottleneck. Beyond a point, more workers makes downstream contention worse and exhausts RAM. The right ceiling is the downstream's capacity, not arbitrary.",
+      "node_type": "claim",
+      "confidence": 0.1,
+      "importance": 0.85,
+      "metadata": {"topic": "systems", "kind": "misconception"}
+    },
+    {
+      "id": "python_gil_brief_note",
+      "text": "Python's GIL serializes CPU-bound Python bytecode within a single process, but it RELEASES during blocking I/O calls (sockets, file reads, C-extension waits). So the GIL is rarely the dominant cause of low-CPU-high-latency on a sync-worker Flask server: the worker is blocked on syscalls or downstream I/O, with the GIL already released and another worker process could be running. Mentioning the GIL as the bottleneck here is usually a misdiagnosis.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.75,
+      "metadata": {"topic": "systems"}
+    },
+    {
+      "id": "triage_priority_order_first_workers_then_downstream_then_arch",
+      "text": "Triage priority order for the symptom (high latency, ~5% CPU, ~10% bandwidth, requests queueing, Flask + sync workers): (1) verify worker exhaustion via ps and gunicorn stats; (2) profile what the workers are blocked on via py-spy and per-route timing, then check the implicated downstream; (3) decide between increase-workers, fix-downstream, and async-migration as the structural fix. The order goes 'confirm the diagnosis -> find the cause -> pick a remedy.'",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "systems"}
+    },
+    {
+      "id": "webserver_triage_complete_summary",
+      "text": "On a Flask + sync-worker server with high latency, low CPU, low bandwidth, and queueing requests, the bottleneck is almost always worker exhaustion: all N workers are blocked on a slow downstream call, so concurrency is saturated even though CPU is idle. Triage order: (1) confirm workers busy and blocked, (2) profile to find the blocking call and check its downstream, (3) pick a remedy from fix-downstream / raise-workers / switch-to-async. The 'low CPU means no bottleneck' intuition is wrong here.",
+      "node_type": "summary",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "systems"}
+    }
+  ],
+  "edges": [
+    {"src": "sync_worker_model", "dst": "webserver_perf_hub", "relation": "support", "strength": 0.95, "directed": true, "metadata": {}},
+    {"src": "async_worker_model", "dst": "webserver_perf_hub", "relation": "support", "strength": 0.85, "directed": true, "metadata": {}},
+    {"src": "request_queue_when_workers_busy", "dst": "sync_worker_model", "relation": "refine", "strength": 0.95, "directed": true, "metadata": {}},
+    {"src": "cpu_low_when_workers_blocked_insight", "dst": "sync_worker_model", "relation": "support", "strength": 0.95, "directed": true, "metadata": {}},
+    {"src": "cpu_low_when_workers_blocked_insight", "dst": "request_queue_when_workers_busy", "relation": "support", "strength": 0.95, "directed": true, "metadata": {}},
+
+    {"src": "cpu_low_when_workers_blocked_insight", "dst": "low_cpu_means_no_bottleneck_false", "relation": "contradict", "strength": 0.99, "directed": true, "metadata": {}},
+
+    {"src": "common_blocking_downstream_calls", "dst": "cpu_low_when_workers_blocked_insight", "relation": "refine", "strength": 0.9, "directed": true, "metadata": {}},
+    {"src": "python_gil_brief_note", "dst": "common_blocking_downstream_calls", "relation": "support", "strength": 0.7, "directed": true, "metadata": {}},
+
+    {"src": "diagnostic_check_workers_busy", "dst": "cpu_low_when_workers_blocked_insight", "relation": "example_of", "strength": 0.9, "directed": true, "metadata": {}},
+    {"src": "diagnostic_profile_blocking_call", "dst": "common_blocking_downstream_calls", "relation": "example_of", "strength": 0.9, "directed": true, "metadata": {}},
+    {"src": "diagnostic_check_downstream_health", "dst": "diagnostic_profile_blocking_call", "relation": "refine", "strength": 0.85, "directed": true, "metadata": {}},
+
+    {"src": "remedy_increase_workers_when_io_bound", "dst": "request_queue_when_workers_busy", "relation": "support", "strength": 0.8, "directed": true, "metadata": {}},
+    {"src": "remedy_switch_to_async_workers", "dst": "async_worker_model", "relation": "support", "strength": 0.85, "directed": true, "metadata": {}},
+    {"src": "remedy_fix_downstream", "dst": "common_blocking_downstream_calls", "relation": "support", "strength": 0.9, "directed": true, "metadata": {}},
+
+    {"src": "remedy_fix_downstream", "dst": "increase_workers_unbounded_false", "relation": "contradict", "strength": 0.9, "directed": true, "metadata": {}},
+
+    {"src": "triage_priority_order_first_workers_then_downstream_then_arch", "dst": "diagnostic_check_workers_busy", "relation": "support", "strength": 0.95, "directed": true, "metadata": {}},
+    {"src": "triage_priority_order_first_workers_then_downstream_then_arch", "dst": "diagnostic_profile_blocking_call", "relation": "support", "strength": 0.95, "directed": true, "metadata": {}},
+    {"src": "triage_priority_order_first_workers_then_downstream_then_arch", "dst": "remedy_fix_downstream", "relation": "support", "strength": 0.85, "directed": true, "metadata": {}},
+
+    {"src": "webserver_triage_complete_summary", "dst": "webserver_perf_hub", "relation": "part_of", "strength": 0.95, "directed": true, "metadata": {}},
+    {"src": "triage_priority_order_first_workers_then_downstream_then_arch", "dst": "webserver_triage_complete_summary", "relation": "support", "strength": 0.9, "directed": true, "metadata": {}},
+    {"src": "cpu_low_when_workers_blocked_insight", "dst": "webserver_triage_complete_summary", "relation": "support", "strength": 0.9, "directed": true, "metadata": {}}
+  ]
+}

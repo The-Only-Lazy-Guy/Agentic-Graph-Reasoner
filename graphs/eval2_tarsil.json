@@ -1,0 +1,107 @@
+{
+  "metadata": {
+    "topic": "cs",
+    "subtopic": "tarsil_cipher",
+    "fictional": true,
+    "version": 1,
+    "purpose": "HELD-OUT EVAL graph. The Tarsil cipher is a fictional 3-letter validation procedure with letter-weighted scoring and a three-way branch on the weighted sum. Decide whether a candidate string is Tarsil-valid. Solvable from the graph; no real-cipher equivalent in pretraining."
+  },
+  "nodes": [
+    {
+      "id": "tarsil_hub",
+      "text": "The Tarsil cipher is a fictional validation procedure that takes a 3-letter input drawn from {A, B, C, D, E} and decides whether it is Tarsil-valid. Each letter has a fixed Tarsil weight (a prime number); the weighted sum is then classified into one of three outputs by deterministic branching rules.",
+      "node_type": "summary",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "tarsil_cipher"}
+    },
+    {
+      "id": "tarsil_alphabet",
+      "text": "Tarsil weight table (the only allowed letters and their fixed weights): A -> 2, B -> 5, C -> 7, D -> 11, E -> 13. Any input containing a letter outside {A, B, C, D, E} is rejected immediately as ILL-FORMED before any further computation.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {"topic": "tarsil_cipher"}
+    },
+    {
+      "id": "tarsil_weighted_sum_formula",
+      "text": "Weighted sum: W = w1 * 1 + w2 * 2 + w3 * 3, where w1, w2, w3 are the Tarsil weights of the first, second, and third letters respectively. Note the POSITIONAL multipliers 1, 2, 3 — the third position carries the largest weight.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {"topic": "tarsil_cipher"}
+    },
+    {
+      "id": "tarsil_branch_rules",
+      "text": "Branch on W (evaluate in order; first match wins):\n  Rule A: if W mod 9 == 0, output ACCEPT-PRIME.\n  Rule B: else if W is even, output ACCEPT-EVEN.\n  Rule C: else (W is odd and W mod 9 != 0), output REJECT.\nThese three rules partition every possible W exhaustively.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {"topic": "tarsil_cipher"}
+    },
+    {
+      "id": "tarsil_step1_lookup_weights",
+      "text": "Step 1 (lookup): map each input letter to its Tarsil weight via the alphabet table. Stop early with ILL-FORMED if any letter is not in {A, B, C, D, E}.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {"topic": "tarsil_cipher"}
+    },
+    {
+      "id": "tarsil_step2_weighted_sum",
+      "text": "Step 2 (weighted sum): compute W = w1 * 1 + w2 * 2 + w3 * 3. The positional multipliers are FIXED at 1, 2, 3 and do not depend on the input.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {"topic": "tarsil_cipher"}
+    },
+    {
+      "id": "tarsil_step3_apply_branch",
+      "text": "Step 3 (branch): apply Rule A, Rule B, Rule C in order against W. The first rule whose condition holds determines the output: ACCEPT-PRIME, ACCEPT-EVEN, or REJECT.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {"topic": "tarsil_cipher"}
+    },
+    {
+      "id": "tarsil_worked_example",
+      "text": "Worked example. Input: ABC.\nStep 1: w1=2 (A), w2=5 (B), w3=7 (C). All in alphabet; not ill-formed.\nStep 2: W = 2*1 + 5*2 + 7*3 = 2 + 10 + 21 = 33.\nStep 3: 33 mod 9 = 6 (Rule A fails); 33 is odd (Rule B fails); Rule C applies.\nOutput: REJECT.",
+      "node_type": "example",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "tarsil_cipher"}
+    },
+    {
+      "id": "treat_letters_as_alphabet_position_false",
+      "text": "MISCONCEPTION: 'use the alphabet position of each letter as its weight (A=1, B=2, C=3, ...)'. This is wrong. The Tarsil weights are FIXED PRIMES (A=2, B=5, C=7, D=11, E=13), not alphabet positions. Substituting alphabet positions yields a completely different W and so the wrong branch.",
+      "node_type": "claim",
+      "confidence": 0.05,
+      "importance": 0.85,
+      "metadata": {"topic": "tarsil_cipher", "kind": "misconception"}
+    },
+    {
+      "id": "tarsil_complete_summary",
+      "text": "Tarsil-validation procedure. Alphabet: A=2, B=5, C=7, D=11, E=13 (primes, fixed). Formula: W = w1*1 + w2*2 + w3*3. Output by branch: Rule A (W mod 9 == 0) -> ACCEPT-PRIME; Rule B (W even, Rule A failed) -> ACCEPT-EVEN; Rule C (otherwise) -> REJECT. Any letter outside the alphabet -> ILL-FORMED.",
+      "node_type": "summary",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "tarsil_cipher"}
+    }
+  ],
+  "edges": [
+    {"src": "tarsil_alphabet", "dst": "tarsil_hub", "relation": "support", "strength": 0.92, "directed": true, "metadata": {}},
+    {"src": "tarsil_weighted_sum_formula", "dst": "tarsil_hub", "relation": "support", "strength": 0.92, "directed": true, "metadata": {}},
+    {"src": "tarsil_branch_rules", "dst": "tarsil_hub", "relation": "support", "strength": 0.92, "directed": true, "metadata": {}},
+    {"src": "tarsil_step1_lookup_weights", "dst": "tarsil_alphabet", "relation": "example_of", "strength": 0.92, "directed": true, "metadata": {}},
+    {"src": "tarsil_step2_weighted_sum", "dst": "tarsil_weighted_sum_formula", "relation": "example_of", "strength": 0.92, "directed": true, "metadata": {}},
+    {"src": "tarsil_step3_apply_branch", "dst": "tarsil_branch_rules", "relation": "example_of", "strength": 0.92, "directed": true, "metadata": {}},
+    {"src": "tarsil_step2_weighted_sum", "dst": "tarsil_step1_lookup_weights", "relation": "support", "strength": 0.92, "directed": true, "metadata": {}},
+    {"src": "tarsil_step3_apply_branch", "dst": "tarsil_step2_weighted_sum", "relation": "support", "strength": 0.92, "directed": true, "metadata": {}},
+    {"src": "tarsil_worked_example", "dst": "tarsil_step1_lookup_weights", "relation": "example_of", "strength": 0.92, "directed": true, "metadata": {}},
+    {"src": "tarsil_worked_example", "dst": "tarsil_step2_weighted_sum", "relation": "example_of", "strength": 0.92, "directed": true, "metadata": {}},
+    {"src": "tarsil_worked_example", "dst": "tarsil_step3_apply_branch", "relation": "example_of", "strength": 0.92, "directed": true, "metadata": {}},
+    {"src": "tarsil_alphabet", "dst": "treat_letters_as_alphabet_position_false", "relation": "contradict", "strength": 0.92, "directed": true, "metadata": {}},
+    {"src": "tarsil_complete_summary", "dst": "tarsil_hub", "relation": "part_of", "strength": 0.92, "directed": true, "metadata": {}},
+    {"src": "tarsil_step3_apply_branch", "dst": "tarsil_complete_summary", "relation": "support", "strength": 0.92, "directed": true, "metadata": {}}
+  ]
+}

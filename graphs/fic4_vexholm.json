@@ -1,0 +1,228 @@
+{
+  "metadata": {
+    "topic": "economics",
+    "subtopic": "vex_holm_auction",
+    "fictional": true,
+    "version": 1,
+    "purpose": "Fictional uniform-price auction. Clearing price is the maximum of (median of bid weights) and (1.2 times the smallest reserve). Allocation by threshold inclusion."
+  },
+  "nodes": [
+    {
+      "id": "vexholm_auction_hub",
+      "text": "The Vex-Holm clearing auction is a fictional uniform-price mechanism. Each bidder declares a Vex coefficient v_i (their bid weight) and a Holm reserve h_i (the minimum price at which they remain willing to participate). The market clears at a single price P that all winning bidders pay.",
+      "node_type": "summary",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "vexholm_econ"
+      }
+    },
+    {
+      "id": "vexholm_clearing_price_rule",
+      "text": "Clearing price rule: P = max(median(v_1, ..., v_n), 1.2 * min(h_1, ..., h_n)). The median ensures the price reflects the typical bid weight; the Holm-reserve floor (1.2 times the smallest reserve) protects the auctioneer from pricing at a level where the most price-sensitive bidder would refuse.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "vexholm_econ"
+      }
+    },
+    {
+      "id": "vexholm_winner_rule",
+      "text": "Allocation: bidder i is a winner if and only if v_i >= P (greater than or equal to, NOT strict). Ties are accepted as wins. All winners pay the same clearing price P (uniform pricing); the bidder's own v_i does not enter the price they actually pay.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "vexholm_econ"
+      }
+    },
+    {
+      "id": "vexholm_median_definition",
+      "text": "Median of an odd-length list of n values is the middle value after sorting in ascending order. For five sorted values v_(1) <= v_(2) <= v_(3) <= v_(4) <= v_(5), the median is v_(3). For even-length lists, the median is the average of the two middle values.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "vexholm_econ"
+      }
+    },
+    {
+      "id": "vexholm_holm_floor_meaning",
+      "text": "The 1.2 * min(h_i) term is a safety floor, not a typical bind. In most auctions the median of v dominates and the floor is irrelevant. The floor only matters when bidders' reserves are unusually high relative to their bid weights.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "vexholm_econ"
+      }
+    },
+    {
+      "id": "vexholm_step1_collect_v_h",
+      "text": "Step 1 (collect): list all (v_i, h_i) pairs. Sort the v's for the median. Identify min(h_i).",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "vexholm_econ"
+      }
+    },
+    {
+      "id": "vexholm_step2_compute_clearing_price",
+      "text": "Step 2 (price): compute the median of the v's. Compute 1.2 * min(h_i). The clearing price P is the maximum of these two numbers.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "vexholm_econ"
+      }
+    },
+    {
+      "id": "vexholm_step3_decide_winners",
+      "text": "Step 3 (winners): scan the (v_i, h_i) list. Every bidder with v_i >= P is a winner. Every winner pays P (the same uniform price). Report both the clearing price and the winner set.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "vexholm_econ"
+      }
+    },
+    {
+      "id": "vexholm_worked_example",
+      "text": "Worked example. Five bidders: A=(45, 28), B=(72, 55), C=(38, 22), D=(85, 65), E=(55, 33).\nStep 1: sorted v values are 38, 45, 55, 72, 85. min(h) = 22.\nStep 2: median(v) = 55. 1.2 * 22 = 26.4. Clearing price P = max(55, 26.4) = 55.\nStep 3: winners are bidders with v_i >= 55: B(72), D(85), E(55). All three pay 55.\nResult: P = 55, winners = {B, D, E}, total revenue = 3 * 55 = 165.",
+      "node_type": "example",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "vexholm_econ"
+      }
+    },
+    {
+      "id": "vexholm_use_mean_not_median_false",
+      "text": "MISCONCEPTION: 'use the MEAN of v_i instead of the median.' This is wrong by the Vex-Holm specification. Substituting the mean changes the clearing price (often by several percent) and can shift the winner set. For the worked example, mean(v) = (45+72+38+85+55)/5 = 59, which would change the price from 55 to 59 and exclude bidder E. The mechanism is defined on the median, not the mean.",
+      "node_type": "claim",
+      "confidence": 0.05,
+      "importance": 0.85,
+      "metadata": {
+        "topic": "vexholm_econ",
+        "kind": "misconception"
+      }
+    },
+    {
+      "id": "vexholm_complete_summary",
+      "text": "Vex-Holm clearing auction. Inputs: list of (v_i, h_i) per bidder. Price: P = max(median(v), 1.2 * min(h)). Allocation: every i with v_i >= P wins, all paying P. Median (NOT mean), inclusive threshold, uniform price.",
+      "node_type": "summary",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "vexholm_econ"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "src": "vexholm_clearing_price_rule",
+      "dst": "vexholm_auction_hub",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "vexholm_winner_rule",
+      "dst": "vexholm_auction_hub",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "vexholm_median_definition",
+      "dst": "vexholm_clearing_price_rule",
+      "relation": "refine",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "vexholm_holm_floor_meaning",
+      "dst": "vexholm_clearing_price_rule",
+      "relation": "refine",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "vexholm_step1_collect_v_h",
+      "dst": "vexholm_clearing_price_rule",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "vexholm_step2_compute_clearing_price",
+      "dst": "vexholm_clearing_price_rule",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "vexholm_step3_decide_winners",
+      "dst": "vexholm_winner_rule",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "vexholm_step2_compute_clearing_price",
+      "dst": "vexholm_step1_collect_v_h",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "vexholm_step3_decide_winners",
+      "dst": "vexholm_step2_compute_clearing_price",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "vexholm_worked_example",
+      "dst": "vexholm_step3_decide_winners",
+      "relation": "example_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "vexholm_clearing_price_rule",
+      "dst": "vexholm_use_mean_not_median_false",
+      "relation": "contradict",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "vexholm_complete_summary",
+      "dst": "vexholm_auction_hub",
+      "relation": "part_of",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "vexholm_step3_decide_winners",
+      "dst": "vexholm_complete_summary",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    }
+  ]
+}

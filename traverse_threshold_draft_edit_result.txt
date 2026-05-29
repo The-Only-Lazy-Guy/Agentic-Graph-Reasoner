@@ -1,0 +1,2257 @@
+python traverse_threshold_draft_edit.py --task-jsonl artifacts/holdout/proposer_holdout.jsonl --controller-mode unified_predictor --unified-checkpoint out_unified_v1_scale10k_v2/best_unified_v1.pt --cand-emb-cache artifacts/spec_emb_cache/holdout_cand.npz --mem-emb-cache artifacts/spec_emb_cache/holdout_mem.npz
+{
+    "config": {
+        "task_jsonl": "artifacts/holdout/proposer_holdout.jsonl",
+        "max_rows": 10,
+        "controller_mode": "unified_predictor",
+        "unified_checkpoint": "out_unified_v1_scale10k_v2/best_unified_v1.pt",
+        "cand_emb_cache": "artifacts/spec_emb_cache/holdout_cand.npz",
+        "mem_emb_cache": "artifacts/spec_emb_cache/holdout_mem.npz",
+        "anchor_threshold": 0.1,
+        "traverse_threshold": 0.45,
+        "create_threshold": 0.28,
+        "merge_create_threshold": 0.62,
+        "cover_threshold": 0.45,
+        "attach_threshold": 0.35,
+        "link_edit_threshold": 0.55,
+        "top_k_anchors": 8,
+        "max_steps": 24,
+        "max_visited": 64,
+        "max_draft_nodes": 8,
+        "save_json": ""
+    },
+    "summary": {
+        "overall": {
+            "n": 10,
+            "n_target_rows": 7,
+            "avg_steps": 2.2,
+            "avg_visited_nodes": 2.3,
+            "avg_goal_nodes": 2.2,
+            "avg_draft_nodes": 2.2,
+            "avg_extra_nodes": 0.0,
+            "avg_draft_edges": 1.0,
+            "avg_goal_edges": 1.0,
+            "avg_extra_edges": 0.0,
+            "avg_draft_attachments": 1.3,
+            "avg_goal_attachments": 1.3,
+            "avg_extra_attachments": 0.4,
+            "synthesis_used_rate": 0.0,
+            "session_node_recall": 1.0,
+            "session_node_precision": 1.0,
+            "session_edge_recall": 1.0,
+            "session_edge_precision": 1.0,
+            "attachment_recall": 1.0,
+            "attachment_precision": 1.0,
+            "covered_recall": 0.0,
+            "covered_precision": 0.8,
+            "covered_complete_rate": 0.0,
+            "predictor_session_node_recall": null,
+            "predictor_session_node_precision": null,
+            "predictor_session_edge_recall": null,
+            "predictor_session_edge_precision": null,
+            "predictor_attachment_recall": null,
+            "predictor_attachment_precision": null,
+            "predictor_covered_recall": null,
+            "predictor_covered_precision": null,
+            "predictor_task_complete_proxy_rate": 0.0,
+            "predictor_task_complete_strict_rate": 0.0,
+            "predictor_commit_type_accuracy": 0.0,
+            "task_complete_proxy_rate": 0.8,
+            "task_complete_strict_rate": 0.8,
+            "extra_node_rate": 0.0,
+            "false_edge_rate": 0.0,
+            "false_attachment_rate": 0.0,
+            "cover_hit_rate": 0.2857142857142857,
+            "attachment_hit_rate": 0.8571428571428571
+        },
+        "by_task": {
+            "covered_long_signal": {
+                "n": 2,
+                "n_target_rows": 2,
+                "avg_steps": 3.0,
+                "avg_visited_nodes": 2.0,
+                "avg_goal_nodes": 3.0,
+                "avg_draft_nodes": 3.0,
+                "avg_extra_nodes": 0.0,
+                "avg_draft_edges": 1.0,
+                "avg_goal_edges": 1.0,
+                "avg_extra_edges": 0.0,
+                "avg_draft_attachments": 3.0,
+                "avg_goal_attachments": 3.0,
+                "avg_extra_attachments": 2.0,
+                "synthesis_used_rate": 0.0,
+                "session_node_recall": 1.0,
+                "session_node_precision": 1.0,
+                "session_edge_recall": 1.0,
+                "session_edge_precision": 1.0,
+                "attachment_recall": 1.0,
+                "attachment_precision": 1.0,
+                "covered_recall": 0.0,
+                "covered_precision": 0.0,
+                "covered_complete_rate": 0.0,
+                "predictor_session_node_recall": null,
+                "predictor_session_node_precision": null,
+                "predictor_session_edge_recall": null,
+                "predictor_session_edge_precision": null,
+                "predictor_attachment_recall": null,
+                "predictor_attachment_precision": null,
+                "predictor_covered_recall": null,
+                "predictor_covered_precision": null,
+                "predictor_task_complete_proxy_rate": 0.0,
+                "predictor_task_complete_strict_rate": 0.0,
+                "predictor_commit_type_accuracy": 0.0,
+                "task_complete_proxy_rate": 0.0,
+                "task_complete_strict_rate": 0.0,
+                "extra_node_rate": 0.0,
+                "false_edge_rate": 0.0,
+                "false_attachment_rate": 0.0,
+                "cover_hit_rate": 1.0,
+                "attachment_hit_rate": 0.5
+            },
+            "long_decompose": {
+                "n": 3,
+                "n_target_rows": 0,
+                "avg_steps": 3.0,
+                "avg_visited_nodes": 3.3333333333333335,
+                "avg_goal_nodes": 3.0,
+                "avg_draft_nodes": 3.0,
+                "avg_extra_nodes": 0.0,
+                "avg_draft_edges": 2.0,
+                "avg_goal_edges": 2.0,
+                "avg_extra_edges": 0.0,
+                "avg_draft_attachments": 0.0,
+                "avg_goal_attachments": 0.0,
+                "avg_extra_attachments": 0.0,
+                "synthesis_used_rate": 0.0,
+                "session_node_recall": 1.0,
+                "session_node_precision": 1.0,
+                "session_edge_recall": 1.0,
+                "session_edge_precision": 1.0,
+                "attachment_recall": null,
+                "attachment_precision": 1.0,
+                "covered_recall": null,
+                "covered_precision": 1.0,
+                "covered_complete_rate": null,
+                "predictor_session_node_recall": null,
+                "predictor_session_node_precision": null,
+                "predictor_session_edge_recall": null,
+                "predictor_session_edge_precision": null,
+                "predictor_attachment_recall": null,
+                "predictor_attachment_precision": null,
+                "predictor_covered_recall": null,
+                "predictor_covered_precision": null,
+                "predictor_task_complete_proxy_rate": 0.0,
+                "predictor_task_complete_strict_rate": 0.0,
+                "predictor_commit_type_accuracy": 0.0,
+                "task_complete_proxy_rate": 1.0,
+                "task_complete_strict_rate": 1.0,
+                "extra_node_rate": 0.0,
+                "false_edge_rate": 0.0,
+                "false_attachment_rate": 0.0,
+                "cover_hit_rate": null,
+                "attachment_hit_rate": null
+            },
+            "mixed_add_link": {
+                "n": 3,
+                "n_target_rows": 3,
+                "avg_steps": 1.0,
+                "avg_visited_nodes": 1.0,
+                "avg_goal_nodes": 1.0,
+                "avg_draft_nodes": 1.0,
+                "avg_extra_nodes": 0.0,
+                "avg_draft_edges": 0.0,
+                "avg_goal_edges": 0.0,
+                "avg_extra_edges": 0.0,
+                "avg_draft_attachments": 1.0,
+                "avg_goal_attachments": 1.0,
+                "avg_extra_attachments": 0.0,
+                "synthesis_used_rate": 0.0,
+                "session_node_recall": 1.0,
+                "session_node_precision": 1.0,
+                "session_edge_recall": null,
+                "session_edge_precision": 1.0,
+                "attachment_recall": 1.0,
+                "attachment_precision": 1.0,
+                "covered_recall": null,
+                "covered_precision": 1.0,
+                "covered_complete_rate": null,
+                "predictor_session_node_recall": null,
+                "predictor_session_node_precision": null,
+                "predictor_session_edge_recall": null,
+                "predictor_session_edge_precision": null,
+                "predictor_attachment_recall": null,
+                "predictor_attachment_precision": null,
+                "predictor_covered_recall": null,
+                "predictor_covered_precision": null,
+                "predictor_task_complete_proxy_rate": 0.0,
+                "predictor_task_complete_strict_rate": 0.0,
+                "predictor_commit_type_accuracy": 0.0,
+                "task_complete_proxy_rate": 1.0,
+                "task_complete_strict_rate": 1.0,
+                "extra_node_rate": 0.0,
+                "false_edge_rate": 0.0,
+                "false_attachment_rate": 0.0,
+                "cover_hit_rate": 0.0,
+                "attachment_hit_rate": 1.0
+            },
+            "multi_region_attach": {
+                "n": 2,
+                "n_target_rows": 2,
+                "avg_steps": 2.0,
+                "avg_visited_nodes": 3.0,
+                "avg_goal_nodes": 2.0,
+                "avg_draft_nodes": 2.0,
+                "avg_extra_nodes": 0.0,
+                "avg_draft_edges": 1.0,
+                "avg_goal_edges": 1.0,
+                "avg_extra_edges": 0.0,
+                "avg_draft_attachments": 2.0,
+                "avg_goal_attachments": 2.0,
+                "avg_extra_attachments": 0.0,
+                "synthesis_used_rate": 0.0,
+                "session_node_recall": 1.0,
+                "session_node_precision": 1.0,
+                "session_edge_recall": 1.0,
+                "session_edge_precision": 1.0,
+                "attachment_recall": 1.0,
+                "attachment_precision": 1.0,
+                "covered_recall": null,
+                "covered_precision": 1.0,
+                "covered_complete_rate": null,
+                "predictor_session_node_recall": null,
+                "predictor_session_node_precision": null,
+                "predictor_session_edge_recall": null,
+                "predictor_session_edge_precision": null,
+                "predictor_attachment_recall": null,
+                "predictor_attachment_precision": null,
+                "predictor_covered_recall": null,
+                "predictor_covered_precision": null,
+                "predictor_task_complete_proxy_rate": 0.0,
+                "predictor_task_complete_strict_rate": 0.0,
+                "predictor_commit_type_accuracy": 0.0,
+                "task_complete_proxy_rate": 1.0,
+                "task_complete_strict_rate": 1.0,
+                "extra_node_rate": 0.0,
+                "false_edge_rate": 0.0,
+                "false_attachment_rate": 0.0,
+                "cover_hit_rate": 0.0,
+                "attachment_hit_rate": 1.0
+            }
+        }
+    },
+    "results": [
+        {
+            "id": "holdout::covered_long_signal::01_easy",
+            "task_type": "covered_long_signal",
+            "target_memory_ids": [
+                "charges_create_electric_field",
+                "heat_energy_transfer"
+            ],
+            "covered_hit_count": 2,
+            "attachment_hit_count": 2,
+            "anchors": [],
+            "visited_nodes": [
+                {
+                    "id": "heat_energy_transfer",
+                    "score": 1.0,
+                    "text": "Heat is energy transferred because of a temperature difference.",
+                    "node_type": "claim"
+                },
+                {
+                    "id": "charges_create_electric_field",
+                    "score": 1.0,
+                    "text": "Electric charges create electric fields.",
+                    "node_type": "claim"
+                }
+            ],
+            "draft_session_nodes": [
+                {
+                    "id": "draft_s0",
+                    "text": "Heat is energy transferred because of a temperature difference.",
+                    "source_memory_id": "heat_energy_transfer",
+                    "span_id": "span_1",
+                    "span_kind": "item",
+                    "node_type": "concept",
+                    "created_step": 0,
+                    "create_score": 1.0,
+                    "source_memory_ids": [
+                        "heat_energy_transfer"
+                    ],
+                    "is_bridge": false,
+                    "goal_session_name": "covered_0",
+                    "covered_by": "heat_energy_transfer"
+                },
+                {
+                    "id": "draft_s1",
+                    "text": "Heat is energy transferred because of a temperature difference.; Electric charges create electric fields.",
+                    "source_memory_id": "heat_energy_transfer",
+                    "span_id": "span_0",
+                    "span_kind": "full",
+                    "node_type": "bridge",
+                    "created_step": 1,
+                    "create_score": 1.0,
+                    "source_memory_ids": [
+                        "heat_energy_transfer",
+                        "charges_create_electric_field"
+                    ],
+                    "is_bridge": true,
+                    "goal_session_name": "covered_1",
+                    "covered_by": null
+                },
+                {
+                    "id": "draft_s2",
+                    "text": "Heat is energy transferred because of a temperature difference.; Electric charges create electric fields.",
+                    "source_memory_id": "charges_create_electric_field",
+                    "span_id": "span_0",
+                    "span_kind": "full",
+                    "node_type": "concept",
+                    "created_step": 2,
+                    "create_score": 1.0,
+                    "source_memory_ids": [
+                        "charges_create_electric_field"
+                    ],
+                    "is_bridge": false,
+                    "goal_session_name": "unused_2",
+                    "covered_by": "charges_create_electric_field"
+                }
+            ],
+            "draft_session_edges": [
+                {
+                    "src": "draft_s0",
+                    "dst": "draft_s1",
+                    "relation": "support",
+                    "created_step": 3,
+                    "score": 1.0
+                }
+            ],
+            "draft_attachments": [
+                {
+                    "session_id": "draft_s2",
+                    "memory_id": "charges_create_electric_field",
+                    "relation": "covered_by",
+                    "kind": "cover",
+                    "created_step": 4,
+                    "score": 1.0
+                },
+                {
+                    "session_id": "draft_s0",
+                    "memory_id": "heat_energy_transfer",
+                    "relation": "covered_by",
+                    "kind": "cover",
+                    "created_step": 5,
+                    "score": 1.0
+                },
+                {
+                    "session_id": "draft_s1",
+                    "memory_id": "heat_energy_transfer",
+                    "relation": "related",
+                    "kind": "attach",
+                    "created_step": 6,
+                    "score": 1.0
+                },
+                {
+                    "session_id": "draft_s1",
+                    "memory_id": "charges_create_electric_field",
+                    "relation": "related",
+                    "kind": "attach",
+                    "created_step": 7,
+                    "score": 1.0
+                }
+            ],
+            "trace": [
+                {
+                    "step": 0,
+                    "node_id": "heat_energy_transfer",
+                    "from_node_id": null,
+                    "node_score": 1.0,
+                    "node_text": "Heat is energy transferred because of a temperature difference.",
+                    "events": [
+                        {
+                            "action": "CREATE_SESSION_NODE",
+                            "session_id": "draft_s0",
+                            "source_memory_id": "heat_energy_transfer",
+                            "goal_session_name": "covered_0",
+                            "span_id": "span_1",
+                            "text": "Heat is energy transferred because of a temperature difference.",
+                            "score": 1.0,
+                            "kind": "goal_executor"
+                        }
+                    ],
+                    "draft_state": {
+                        "session_nodes": 1,
+                        "session_edges": 0,
+                        "attachments": 0
+                    }
+                },
+                {
+                    "step": 1,
+                    "node_id": "heat_energy_transfer",
+                    "from_node_id": null,
+                    "node_score": 1.0,
+                    "node_text": "Heat is energy transferred because of a temperature difference.; Electric charges create electric fields.",
+                    "events": [
+                        {
+                            "action": "CREATE_SESSION_NODE",
+                            "session_id": "draft_s1",
+                            "source_memory_id": "heat_energy_transfer",
+                            "goal_session_name": "covered_1",
+                            "span_id": "span_0",
+                            "text": "Heat is energy transferred because of a temperature difference.; Electric charges create electric fields.",
+                            "score": 1.0,
+                            "kind": "goal_executor"
+                        }
+                    ],
+                    "draft_state": {
+                        "session_nodes": 2,
+                        "session_edges": 0,
+                        "attachments": 0
+                    }
+                },
+                {
+                    "step": 2,
+                    "node_id": "charges_create_electric_field",
+                    "from_node_id": null,
+                    "node_score": 1.0,
+                    "node_text": "Heat is energy transferred because of a temperature difference.; Electric charges create electric fields.",
+                    "events": [
+                        {
+                            "action": "CREATE_SESSION_NODE",
+                            "session_id": "draft_s2",
+                            "source_memory_id": "charges_create_electric_field",
+                            "goal_session_name": "unused_2",
+                            "span_id": "span_0",
+                            "text": "Heat is energy transferred because of a temperature difference.; Electric charges create electric fields.",
+                            "score": 1.0,
+                            "kind": "goal_executor"
+                        }
+                    ],
+                    "draft_state": {
+                        "session_nodes": 3,
+                        "session_edges": 0,
+                        "attachments": 0
+                    }
+                }
+            ],
+            "postprocess_events": [
+                {
+                    "action": "LINK_SESSION_NODES",
+                    "src_session_id": "draft_s0",
+                    "dst_session_id": "draft_s1",
+                    "relation": "support",
+                    "backing_memory_relation": null,
+                    "score": 1.0,
+                    "kind": "goal_executor"
+                },
+                {
+                    "action": "MARK_COVERED",
+                    "session_id": "draft_s2",
+                    "memory_id": "charges_create_electric_field",
+                    "score": 1.0,
+                    "kind": "goal_executor"
+                },
+                {
+                    "action": "MARK_COVERED",
+                    "session_id": "draft_s0",
+                    "memory_id": "heat_energy_transfer",
+                    "score": 1.0,
+                    "kind": "goal_executor"
+                },
+                {
+                    "action": "PROPOSE_LINK_SESSION_TO_MEMORY",
+                    "session_id": "draft_s1",
+                    "memory_id": "heat_energy_transfer",
+                    "relation": "related",
+                    "score": 1.0,
+                    "kind": "goal_executor"
+                },
+                {
+                    "action": "PROPOSE_LINK_SESSION_TO_MEMORY",
+                    "session_id": "draft_s1",
+                    "memory_id": "charges_create_electric_field",
+                    "relation": "related",
+                    "score": 1.0,
+                    "kind": "goal_executor"
+                }
+            ],
+            "synthesis_used": false,
+            "unresolved_add_sessions_after": [],
+            "rejected_edges": [],
+            "steps": 3,
+            "controller_mode": "executor",
+            "signal": "Heat is energy transferred because of a temperature difference.; Electric charges create electric fields.",
+            "goal_session_node_count": 3,
+            "session_node_match_count": 3,
+            "session_node_recall": 1.0,
+            "session_node_precision": 1.0,
+            "extra_node_count": 0,
+            "extra_node_rate": 0.0,
+            "goal_session_edge_count": 1,
+            "session_edge_match_count": 1,
+            "session_edge_recall": 1.0,
+            "session_edge_precision": 1.0,
+            "extra_edge_count": 0,
+            "false_edge_rate": 0.0,
+            "goal_attachment_count": 2,
+            "attachment_match_count": 2,
+            "attachment_recall": 1.0,
+            "attachment_precision": 1.0,
+            "extra_attachment_count": 0,
+            "false_attachment_rate": 0.0,
+            "goal_cover_count": 2,
+            "covered_match_count": 0,
+            "covered_recall": 0.0,
+            "covered_precision": 0.0,
+            "extra_cover_count": 2,
+            "covered_complete": false,
+            "task_complete_proxy": false,
+            "task_complete_strict": false,
+            "matched_goal_to_draft": {
+                "covered_0": "draft_s0",
+                "covered_1": "draft_s1",
+                "unused_2": "draft_s2"
+            },
+            "matched_goal_scores": {
+                "covered_0": 1.0,
+                "covered_1": 1.0,
+                "unused_2": 1.0
+            }
+        },
+        {
+            "id": "holdout::covered_long_signal::02_medium",
+            "task_type": "covered_long_signal",
+            "target_memory_ids": [
+                "current_rate_of_charge_flow",
+                "electric_power_relation"
+            ],
+            "covered_hit_count": 2,
+            "attachment_hit_count": 0,
+            "anchors": [],
+            "visited_nodes": [
+                {
+                    "id": "current_rate_of_charge_flow",
+                    "score": 1.0,
+                    "text": "Electric current is the rate of flow of electric charge.",
+                    "node_type": "claim"
+                },
+                {
+                    "id": "electric_power_relation",
+                    "score": 1.0,
+                    "text": "Electrical power in a circuit can be expressed as P = IV, relating energy transfer rate to current and potential difference.",
+                    "node_type": "equation"
+                }
+            ],
+            "draft_session_nodes": [
+                {
+                    "id": "draft_s0",
+                    "text": "Electric current is the rate of flow of electric charge.",
+                    "source_memory_id": "current_rate_of_charge_flow",
+                    "span_id": "span_2",
+                    "span_kind": "item",
+                    "node_type": "concept",
+                    "created_step": 0,
+                    "create_score": 1.0,
+                    "source_memory_ids": [
+                        "current_rate_of_charge_flow",
+                        "electric_power_relation"
+                    ],
+                    "is_bridge": false,
+                    "goal_session_name": "covered_0",
+                    "covered_by": null
+                },
+                {
+                    "id": "draft_s1",
+                    "text": "Electric charges create electric fields.; Electric current is the rate of flow of electric charge.; Electrical power in a circuit can be expressed as P = IV, relating energy transfer rate to current and potential difference.",
+                    "source_memory_id": "current_rate_of_charge_flow",
+                    "span_id": "span_0",
+                    "span_kind": "full",
+                    "node_type": "concept",
+                    "created_step": 1,
+                    "create_score": 1.0,
+                    "source_memory_ids": [
+                        "current_rate_of_charge_flow"
+                    ],
+                    "is_bridge": false,
+                    "goal_session_name": "covered_1",
+                    "covered_by": "current_rate_of_charge_flow"
+                },
+                {
+                    "id": "draft_s2",
+                    "text": "Electrical power in a circuit can be expressed as P = IV, relating energy transfer rate to current and potential difference.",
+                    "source_memory_id": "electric_power_relation",
+                    "span_id": "span_3",
+                    "span_kind": "item",
+                    "node_type": "concept",
+                    "created_step": 2,
+                    "create_score": 1.0,
+                    "source_memory_ids": [
+                        "electric_power_relation"
+                    ],
+                    "is_bridge": false,
+                    "goal_session_name": "covered_2",
+                    "covered_by": "electric_power_relation"
+                }
+            ],
+            "draft_session_edges": [
+                {
+                    "src": "draft_s0",
+                    "dst": "draft_s1",
+                    "relation": "support",
+                    "created_step": 3,
+                    "score": 1.0
+                }
+            ],
+            "draft_attachments": [
+                {
+                    "session_id": "draft_s1",
+                    "memory_id": "current_rate_of_charge_flow",
+                    "relation": "covered_by",
+                    "kind": "cover",
+                    "created_step": 4,
+                    "score": 1.0
+                },
+                {
+                    "session_id": "draft_s2",
+                    "memory_id": "electric_power_relation",
+                    "relation": "covered_by",
+                    "kind": "cover",
+                    "created_step": 5,
+                    "score": 1.0
+                }
+            ],
+            "trace": [
+                {
+                    "step": 0,
+                    "node_id": "current_rate_of_charge_flow",
+                    "from_node_id": null,
+                    "node_score": 1.0,
+                    "node_text": "Electric current is the rate of flow of electric charge.",
+                    "events": [
+                        {
+                            "action": "CREATE_SESSION_NODE",
+                            "session_id": "draft_s0",
+                            "source_memory_id": "current_rate_of_charge_flow",
+                            "goal_session_name": "covered_0",
+                            "span_id": "span_2",
+                            "text": "Electric current is the rate of flow of electric charge.",
+                            "score": 1.0,
+                            "kind": "goal_executor"
+                        }
+                    ],
+                    "draft_state": {
+                        "session_nodes": 1,
+                        "session_edges": 0,
+                        "attachments": 0
+                    }
+                },
+                {
+                    "step": 1,
+                    "node_id": "current_rate_of_charge_flow",
+                    "from_node_id": null,
+                    "node_score": 1.0,
+                    "node_text": "Electric charges create electric fields.; Electric current is the rate of flow of electric charge.; Electrical power in a circuit can be expressed as P = IV, relating energy transfer rate to current and potential difference.",
+                    "events": [
+                        {
+                            "action": "CREATE_SESSION_NODE",
+                            "session_id": "draft_s1",
+                            "source_memory_id": "current_rate_of_charge_flow",
+                            "goal_session_name": "covered_1",
+                            "span_id": "span_0",
+                            "text": "Electric charges create electric fields.; Electric current is the rate of flow of electric charge.; Electrical power in a circuit can be expressed as P = IV, relating energy transfer rate to current and potential difference.",
+                            "score": 1.0,
+                            "kind": "goal_executor"
+                        }
+                    ],
+                    "draft_state": {
+                        "session_nodes": 2,
+                        "session_edges": 0,
+                        "attachments": 0
+                    }
+                },
+                {
+                    "step": 2,
+                    "node_id": "electric_power_relation",
+                    "from_node_id": null,
+                    "node_score": 1.0,
+                    "node_text": "Electrical power in a circuit can be expressed as P = IV, relating energy transfer rate to current and potential difference.",
+                    "events": [
+                        {
+                            "action": "CREATE_SESSION_NODE",
+                            "session_id": "draft_s2",
+                            "source_memory_id": "electric_power_relation",
+                            "goal_session_name": "covered_2",
+                            "span_id": "span_3",
+                            "text": "Electrical power in a circuit can be expressed as P = IV, relating energy transfer rate to current and potential difference.",
+                            "score": 1.0,
+                            "kind": "goal_executor"
+                        }
+                    ],
+                    "draft_state": {
+                        "session_nodes": 3,
+                        "session_edges": 0,
+                        "attachments": 0
+                    }
+                }
+            ],
+            "postprocess_events": [
+                {
+                    "action": "LINK_SESSION_NODES",
+                    "src_session_id": "draft_s0",
+                    "dst_session_id": "draft_s1",
+                    "relation": "support",
+                    "backing_memory_relation": null,
+                    "score": 1.0,
+                    "kind": "goal_executor"
+                },
+                {
+                    "action": "MARK_COVERED",
+                    "session_id": "draft_s1",
+                    "memory_id": "current_rate_of_charge_flow",
+                    "score": 1.0,
+                    "kind": "goal_executor"
+                },
+                {
+                    "action": "MARK_COVERED",
+                    "session_id": "draft_s2",
+                    "memory_id": "electric_power_relation",
+                    "score": 1.0,
+                    "kind": "goal_executor"
+                }
+            ],
+            "synthesis_used": false,
+            "unresolved_add_sessions_after": [],
+            "rejected_edges": [],
+            "steps": 3,
+            "controller_mode": "executor",
+            "signal": "Electric charges create electric fields.; Electric current is the rate of flow of electric charge.; Electrical power in a circuit can be expressed as P = IV, relating energy transfer rate to current and potential difference.",
+            "goal_session_node_count": 3,
+            "session_node_match_count": 3,
+            "session_node_recall": 1.0,
+            "session_node_precision": 1.0,
+            "extra_node_count": 0,
+            "extra_node_rate": 0.0,
+            "goal_session_edge_count": 1,
+            "session_edge_match_count": 1,
+            "session_edge_recall": 1.0,
+            "session_edge_precision": 1.0,
+            "extra_edge_count": 0,
+            "false_edge_rate": 0.0,
+            "goal_attachment_count": 0,
+            "attachment_match_count": 0,
+            "attachment_recall": null,
+            "attachment_precision": 1.0,
+            "extra_attachment_count": 0,
+            "false_attachment_rate": 0.0,
+            "goal_cover_count": 2,
+            "covered_match_count": 0,
+            "covered_recall": 0.0,
+            "covered_precision": 0.0,
+            "extra_cover_count": 2,
+            "covered_complete": false,
+            "task_complete_proxy": false,
+            "task_complete_strict": false,
+            "matched_goal_to_draft": {
+                "covered_0": "draft_s0",
+                "covered_1": "draft_s1",
+                "covered_2": "draft_s2"
+            },
+            "matched_goal_scores": {
+                "covered_0": 1.0,
+                "covered_1": 1.0,
+                "covered_2": 1.0
+            }
+        },
+        {
+            "id": "holdout::long_decompose::03_easy",
+            "task_type": "long_decompose",
+            "target_memory_ids": [],
+            "covered_hit_count": 0,
+            "attachment_hit_count": 0,
+            "anchors": [],
+            "visited_nodes": [
+                {
+                    "id": "visible_light_electromagnetic_wave",
+                    "score": 1.0,
+                    "text": "Visible light is an electromagnetic wave.",
+                    "node_type": "claim"
+                },
+                {
+                    "id": "wave_medium_contrast_bridge",
+                    "score": 1.0,
+                    "text": "Comparing sound and light reveals a deep wave distinction: mechanical waves require matter to oscillate, while electromagnetic waves can self-propagate through vacuum.",
+                    "node_type": "bridge"
+                },
+                {
+                    "id": "sound_requires_material_medium",
+                    "score": 1.0,
+                    "text": "Sound waves require a material medium to propagate.",
+                    "node_type": "claim"
+                },
+                {
+                    "id": "electromagnetic_waves_propagate_in_vacuum",
+                    "score": 1.0,
+                    "text": "Electromagnetic waves can propagate through a vacuum and do not require a material medium.",
+                    "node_type": "claim"
+                }
+            ],
+            "draft_session_nodes": [
+                {
+                    "id": "draft_s0",
+                    "text": "Light travels at a finite speed in vacuum.",
+                    "source_memory_id": "visible_light_electromagnetic_wave",
+                    "span_id": "span_1",
+                    "span_kind": "clause",
+                    "node_type": "concept",
+                    "created_step": 0,
+                    "create_score": 1.0,
+                    "source_memory_ids": [
+                        "visible_light_electromagnetic_wave",
+                        "wave_medium_contrast_bridge"
+                    ],
+                    "is_bridge": false,
+                    "goal_session_name": "s0",
+                    "covered_by": null
+                },
+                {
+                    "id": "draft_s1",
+                    "text": "Sound requires a medium to propagate.",
+                    "source_memory_id": "sound_requires_material_medium",
+                    "span_id": "span_2",
+                    "span_kind": "clause",
+                    "node_type": "concept",
+                    "created_step": 1,
+                    "create_score": 1.0,
+                    "source_memory_ids": [
+                        "sound_requires_material_medium",
+                        "electromagnetic_waves_propagate_in_vacuum"
+                    ],
+                    "is_bridge": false,
+                    "goal_session_name": "s1",
+                    "covered_by": null
+                },
+                {
+                    "id": "draft_s2",
+                    "text": "Sound requires a medium to propagate.",
+                    "source_memory_id": "sound_requires_material_medium",
+                    "span_id": "span_2",
+                    "span_kind": "clause",
+                    "node_type": "concept",
+                    "created_step": 2,
+                    "create_score": 1.0,
+                    "source_memory_ids": [
+                        "sound_requires_material_medium",
+                        "electromagnetic_waves_propagate_in_vacuum"
+                    ],
+                    "is_bridge": false,
+                    "goal_session_name": "unused_2",
+                    "covered_by": null
+                }
+            ],
+            "draft_session_edges": [
+                {
+                    "src": "draft_s1",
+                    "dst": "draft_s2",
+                    "relation": "support",
+                    "created_step": 3,
+                    "score": 1.0
+                },
+                {
+                    "src": "draft_s0",
+                    "dst": "draft_s1",
+                    "relation": "support",
+                    "created_step": 4,
+                    "score": 1.0
+                }
+            ],
+            "draft_attachments": [],
+            "trace": [
+                {
+                    "step": 0,
+                    "node_id": "visible_light_electromagnetic_wave",
+                    "from_node_id": null,
+                    "node_score": 1.0,
+                    "node_text": "Light travels at a finite speed in vacuum.",
+                    "events": [
+                        {
+                            "action": "CREATE_SESSION_NODE",
+                            "session_id": "draft_s0",
+                            "source_memory_id": "visible_light_electromagnetic_wave",
+                            "goal_session_name": "s0",
+                            "span_id": "span_1",
+                            "text": "Light travels at a finite speed in vacuum.",
+                            "score": 1.0,
+                            "kind": "goal_executor"
+                        }
+                    ],
+                    "draft_state": {
+                        "session_nodes": 1,
+                        "session_edges": 0,
+                        "attachments": 0
+                    }
+                },
+                {
+                    "step": 1,
+                    "node_id": "sound_requires_material_medium",
+                    "from_node_id": null,
+                    "node_score": 1.0,
+                    "node_text": "Sound requires a medium to propagate.",
+                    "events": [
+                        {
+                            "action": "CREATE_SESSION_NODE",
+                            "session_id": "draft_s1",
+                            "source_memory_id": "sound_requires_material_medium",
+                            "goal_session_name": "s1",
+                            "span_id": "span_2",
+                            "text": "Sound requires a medium to propagate.",
+                            "score": 1.0,
+                            "kind": "goal_executor"
+                        }
+                    ],
+                    "draft_state": {
+                        "session_nodes": 2,
+                        "session_edges": 0,
+                        "attachments": 0
+                    }
+                },
+                {
+                    "step": 2,
+                    "node_id": "sound_requires_material_medium",
+                    "from_node_id": null,
+                    "node_score": 1.0,
+                    "node_text": "Sound requires a medium to propagate.",
+                    "events": [
+                        {
+                            "action": "CREATE_SESSION_NODE",
+                            "session_id": "draft_s2",
+                            "source_memory_id": "sound_requires_material_medium",
+                            "goal_session_name": "unused_2",
+                            "span_id": "span_2",
+                            "text": "Sound requires a medium to propagate.",
+                            "score": 1.0,
+                            "kind": "goal_executor"
+                        }
+                    ],
+                    "draft_state": {
+                        "session_nodes": 3,
+                        "session_edges": 0,
+                        "attachments": 0
+                    }
+                }
+            ],
+            "postprocess_events": [
+                {
+                    "action": "LINK_SESSION_NODES",
+                    "src_session_id": "draft_s1",
+                    "dst_session_id": "draft_s2",
+                    "relation": "support",
+                    "backing_memory_relation": null,
+                    "score": 1.0,
+                    "kind": "goal_executor"
+                },
+                {
+                    "action": "LINK_SESSION_NODES",
+                    "src_session_id": "draft_s0",
+                    "dst_session_id": "draft_s1",
+                    "relation": "support",
+                    "backing_memory_relation": null,
+                    "score": 1.0,
+                    "kind": "goal_executor"
+                }
+            ],
+            "synthesis_used": false,
+            "unresolved_add_sessions_after": [],
+            "rejected_edges": [],
+            "steps": 3,
+            "controller_mode": "executor",
+            "signal": "Light travels at a finite speed in vacuum.; Sound requires a medium to propagate.",
+            "goal_session_node_count": 3,
+            "session_node_match_count": 3,
+            "session_node_recall": 1.0,
+            "session_node_precision": 1.0,
+            "extra_node_count": 0,
+            "extra_node_rate": 0.0,
+            "goal_session_edge_count": 2,
+            "session_edge_match_count": 2,
+            "session_edge_recall": 1.0,
+            "session_edge_precision": 1.0,
+            "extra_edge_count": 0,
+            "false_edge_rate": 0.0,
+            "goal_attachment_count": 0,
+            "attachment_match_count": 0,
+            "attachment_recall": null,
+            "attachment_precision": 1.0,
+            "extra_attachment_count": 0,
+            "false_attachment_rate": 0.0,
+            "goal_cover_count": 0,
+            "covered_match_count": 0,
+            "covered_recall": null,
+            "covered_precision": 1.0,
+            "extra_cover_count": 0,
+            "covered_complete": false,
+            "task_complete_proxy": true,
+            "task_complete_strict": true,
+            "matched_goal_to_draft": {
+                "s0": "draft_s0",
+                "s1": "draft_s1",
+                "unused_2": "draft_s2"
+            },
+            "matched_goal_scores": {
+                "s0": 1.0,
+                "s1": 1.0,
+                "unused_2": 1.0
+            }
+        },
+        {
+            "id": "holdout::long_decompose::04_medium",
+            "task_type": "long_decompose",
+            "target_memory_ids": [],
+            "covered_hit_count": 0,
+            "attachment_hit_count": 0,
+            "anchors": [],
+            "visited_nodes": [
+                {
+                    "id": "newton_second_law",
+                    "score": 1.0,
+                    "text": "Newton's second law states that net force equals mass times acceleration.",
+                    "node_type": "claim"
+                },
+                {
+                    "id": "first_law_thermodynamics",
+                    "score": 1.0,
+                    "text": "The first law of thermodynamics states that energy is conserved as heat and work are exchanged.",
+                    "node_type": "claim"
+                },
+                {
+                    "id": "momentum_definition",
+                    "score": 1.0,
+                    "text": "Momentum equals mass times velocity.",
+                    "node_type": "claim"
+                }
+            ],
+            "draft_session_nodes": [
+                {
+                    "id": "draft_s0",
+                    "text": "Newton's first law states that an object at rest stays at rest.",
+                    "source_memory_id": "newton_second_law",
+                    "span_id": "span_1",
+                    "span_kind": "clause",
+                    "node_type": "concept",
+                    "created_step": 0,
+                    "create_score": 1.0,
+                    "source_memory_ids": [
+                        "newton_second_law",
+                        "first_law_thermodynamics"
+                    ],
+                    "is_bridge": false,
+                    "goal_session_name": "s0",
+                    "covered_by": null
+                },
+                {
+                    "id": "draft_s1",
+                    "text": "Newton's second law states that force equals mass times acceleration.",
+                    "source_memory_id": "newton_second_law",
+                    "span_id": "span_2",
+                    "span_kind": "clause",
+                    "node_type": "concept",
+                    "created_step": 1,
+                    "create_score": 1.0,
+                    "source_memory_ids": [
+                        "newton_second_law",
+                        "momentum_definition"
+                    ],
+                    "is_bridge": false,
+                    "goal_session_name": "s1",
+                    "covered_by": null
+                },
+                {
+                    "id": "draft_s2",
+                    "text": "Newton's third law states that every action has an equal and opposite reaction.",
+                    "source_memory_id": "newton_second_law",
+                    "span_id": "span_3",
+                    "span_kind": "clause",
+                    "node_type": "concept",
+                    "created_step": 2,
+                    "create_score": 1.0,
+                    "source_memory_ids": [
+                        "newton_second_law",
+                        "first_law_thermodynamics"
+                    ],
+                    "is_bridge": false,
+                    "goal_session_name": "s2",
+                    "covered_by": null
+                }
+            ],
+            "draft_session_edges": [
+                {
+                    "src": "draft_s0",
+                    "dst": "draft_s1",
+                    "relation": "depend",
+                    "created_step": 3,
+                    "score": 1.0
+                },
+                {
+                    "src": "draft_s1",
+                    "dst": "draft_s2",
+                    "relation": "contradict",
+                    "created_step": 4,
+                    "score": 1.0
+                }
+            ],
+            "draft_attachments": [],
+            "trace": [
+                {
+                    "step": 0,
+                    "node_id": "newton_second_law",
+                    "from_node_id": null,
+                    "node_score": 1.0,
+                    "node_text": "Newton's first law states that an object at rest stays at rest.",
+                    "events": [
+                        {
+                            "action": "CREATE_SESSION_NODE",
+                            "session_id": "draft_s0",
+                            "source_memory_id": "newton_second_law",
+                            "goal_session_name": "s0",
+                            "span_id": "span_1",
+                            "text": "Newton's first law states that an object at rest stays at rest.",
+                            "score": 1.0,
+                            "kind": "goal_executor"
+                        }
+                    ],
+                    "draft_state": {
+                        "session_nodes": 1,
+                        "session_edges": 0,
+                        "attachments": 0
+                    }
+                },
+                {
+                    "step": 1,
+                    "node_id": "newton_second_law",
+                    "from_node_id": null,
+                    "node_score": 1.0,
+                    "node_text": "Newton's second law states that force equals mass times acceleration.",
+                    "events": [
+                        {
+                            "action": "CREATE_SESSION_NODE",
+                            "session_id": "draft_s1",
+                            "source_memory_id": "newton_second_law",
+                            "goal_session_name": "s1",
+                            "span_id": "span_2",
+                            "text": "Newton's second law states that force equals mass times acceleration.",
+                            "score": 1.0,
+                            "kind": "goal_executor"
+                        }
+                    ],
+                    "draft_state": {
+                        "session_nodes": 2,
+                        "session_edges": 0,
+                        "attachments": 0
+                    }
+                },
+                {
+                    "step": 2,
+                    "node_id": "newton_second_law",
+                    "from_node_id": null,
+                    "node_score": 1.0,
+                    "node_text": "Newton's third law states that every action has an equal and opposite reaction.",
+                    "events": [
+                        {
+                            "action": "CREATE_SESSION_NODE",
+                            "session_id": "draft_s2",
+                            "source_memory_id": "newton_second_law",
+                            "goal_session_name": "s2",
+                            "span_id": "span_3",
+                            "text": "Newton's third law states that every action has an equal and opposite reaction.",
+                            "score": 1.0,
+                            "kind": "goal_executor"
+                        }
+                    ],
+                    "draft_state": {
+                        "session_nodes": 3,
+                        "session_edges": 0,
+                        "attachments": 0
+                    }
+                }
+            ],
+            "postprocess_events": [
+                {
+                    "action": "LINK_SESSION_NODES",
+                    "src_session_id": "draft_s0",
+                    "dst_session_id": "draft_s1",
+                    "relation": "depend",
+                    "backing_memory_relation": null,
+                    "score": 1.0,
+                    "kind": "goal_executor"
+                },
+                {
+                    "action": "LINK_SESSION_NODES",
+                    "src_session_id": "draft_s1",
+                    "dst_session_id": "draft_s2",
+                    "relation": "contradict",
+                    "backing_memory_relation": null,
+                    "score": 1.0,
+                    "kind": "goal_executor"
+                }
+            ],
+            "synthesis_used": false,
+            "unresolved_add_sessions_after": [],
+            "rejected_edges": [],
+            "steps": 3,
+            "controller_mode": "executor",
+            "signal": "Newton's first law states that an object at rest stays at rest.; Newton's second law states that force equals mass times acceleration.; Newton's third law states that every action has an equal and opposite reaction.",
+            "goal_session_node_count": 3,
+            "session_node_match_count": 3,
+            "session_node_recall": 1.0,
+            "session_node_precision": 1.0,
+            "extra_node_count": 0,
+            "extra_node_rate": 0.0,
+            "goal_session_edge_count": 2,
+            "session_edge_match_count": 2,
+            "session_edge_recall": 1.0,
+            "session_edge_precision": 1.0,
+            "extra_edge_count": 0,
+            "false_edge_rate": 0.0,
+            "goal_attachment_count": 0,
+            "attachment_match_count": 0,
+            "attachment_recall": null,
+            "attachment_precision": 1.0,
+            "extra_attachment_count": 0,
+            "false_attachment_rate": 0.0,
+            "goal_cover_count": 0,
+            "covered_match_count": 0,
+            "covered_recall": null,
+            "covered_precision": 1.0,
+            "extra_cover_count": 0,
+            "covered_complete": false,
+            "task_complete_proxy": true,
+            "task_complete_strict": true,
+            "matched_goal_to_draft": {
+                "s0": "draft_s0",
+                "s1": "draft_s1",
+                "s2": "draft_s2"
+            },
+            "matched_goal_scores": {
+                "s0": 1.0,
+                "s1": 1.0,
+                "s2": 1.0
+            }
+        },
+        {
+            "id": "holdout::long_decompose::05_hard",
+            "task_type": "long_decompose",
+            "target_memory_ids": [],
+            "covered_hit_count": 0,
+            "attachment_hit_count": 0,
+            "anchors": [],
+            "visited_nodes": [
+                {
+                    "id": "momentum_definition",
+                    "score": 1.0,
+                    "text": "Momentum equals mass times velocity.",
+                    "node_type": "claim"
+                },
+                {
+                    "id": "work_energy_theorem",
+                    "score": 1.0,
+                    "text": "The net work done on an object equals the change in its kinetic energy.",
+                    "node_type": "theorem"
+                },
+                {
+                    "id": "impulse_changes_momentum",
+                    "score": 1.0,
+                    "text": "Impulse equals the change in momentum, so a net force acting over a time interval changes a system's momentum.",
+                    "node_type": "theorem"
+                }
+            ],
+            "draft_session_nodes": [
+                {
+                    "id": "draft_s0",
+                    "text": "Momentum is the product of an object's mass and its velocity.",
+                    "source_memory_id": "momentum_definition",
+                    "span_id": "span_3",
+                    "span_kind": "clause",
+                    "node_type": "concept",
+                    "created_step": 0,
+                    "create_score": 1.0,
+                    "source_memory_ids": [
+                        "momentum_definition",
+                        "work_energy_theorem"
+                    ],
+                    "is_bridge": false,
+                    "goal_session_name": "s0",
+                    "covered_by": null
+                },
+                {
+                    "id": "draft_s1",
+                    "text": "Acceleration describes how fast velocity changes over time.",
+                    "source_memory_id": "impulse_changes_momentum",
+                    "span_id": "span_2",
+                    "span_kind": "clause",
+                    "node_type": "concept",
+                    "created_step": 1,
+                    "create_score": 1.0,
+                    "source_memory_ids": [
+                        "impulse_changes_momentum",
+                        "momentum_definition"
+                    ],
+                    "is_bridge": false,
+                    "goal_session_name": "s1",
+                    "covered_by": null
+                },
+                {
+                    "id": "draft_s2",
+                    "text": "Acceleration describes how fast velocity changes over time.",
+                    "source_memory_id": "impulse_changes_momentum",
+                    "span_id": "span_2",
+                    "span_kind": "clause",
+                    "node_type": "concept",
+                    "created_step": 2,
+                    "create_score": 1.0,
+                    "source_memory_ids": [
+                        "impulse_changes_momentum",
+                        "momentum_definition"
+                    ],
+                    "is_bridge": false,
+                    "goal_session_name": "s2",
+                    "covered_by": null
+                }
+            ],
+            "draft_session_edges": [
+                {
+                    "src": "draft_s1",
+                    "dst": "draft_s2",
+                    "relation": "part_of",
+                    "created_step": 3,
+                    "score": 1.0
+                },
+                {
+                    "src": "draft_s0",
+                    "dst": "draft_s1",
+                    "relation": "support",
+                    "created_step": 4,
+                    "score": 1.0
+                }
+            ],
+            "draft_attachments": [],
+            "trace": [
+                {
+                    "step": 0,
+                    "node_id": "momentum_definition",
+                    "from_node_id": null,
+                    "node_score": 1.0,
+                    "node_text": "Momentum is the product of an object's mass and its velocity.",
+                    "events": [
+                        {
+                            "action": "CREATE_SESSION_NODE",
+                            "session_id": "draft_s0",
+                            "source_memory_id": "momentum_definition",
+                            "goal_session_name": "s0",
+                            "span_id": "span_3",
+                            "text": "Momentum is the product of an object's mass and its velocity.",
+                            "score": 1.0,
+                            "kind": "goal_executor"
+                        }
+                    ],
+                    "draft_state": {
+                        "session_nodes": 1,
+                        "session_edges": 0,
+                        "attachments": 0
+                    }
+                },
+                {
+                    "step": 1,
+                    "node_id": "impulse_changes_momentum",
+                    "from_node_id": null,
+                    "node_score": 1.0,
+                    "node_text": "Acceleration describes how fast velocity changes over time.",
+                    "events": [
+                        {
+                            "action": "CREATE_SESSION_NODE",
+                            "session_id": "draft_s1",
+                            "source_memory_id": "impulse_changes_momentum",
+                            "goal_session_name": "s1",
+                            "span_id": "span_2",
+                            "text": "Acceleration describes how fast velocity changes over time.",
+                            "score": 1.0,
+                            "kind": "goal_executor"
+                        }
+                    ],
+                    "draft_state": {
+                        "session_nodes": 2,
+                        "session_edges": 0,
+                        "attachments": 0
+                    }
+                },
+                {
+                    "step": 2,
+                    "node_id": "impulse_changes_momentum",
+                    "from_node_id": null,
+                    "node_score": 1.0,
+                    "node_text": "Acceleration describes how fast velocity changes over time.",
+                    "events": [
+                        {
+                            "action": "CREATE_SESSION_NODE",
+                            "session_id": "draft_s2",
+                            "source_memory_id": "impulse_changes_momentum",
+                            "goal_session_name": "s2",
+                            "span_id": "span_2",
+                            "text": "Acceleration describes how fast velocity changes over time.",
+                            "score": 1.0,
+                            "kind": "goal_executor"
+                        }
+                    ],
+                    "draft_state": {
+                        "session_nodes": 3,
+                        "session_edges": 0,
+                        "attachments": 0
+                    }
+                }
+            ],
+            "postprocess_events": [
+                {
+                    "action": "LINK_SESSION_NODES",
+                    "src_session_id": "draft_s1",
+                    "dst_session_id": "draft_s2",
+                    "relation": "part_of",
+                    "backing_memory_relation": "depend",
+                    "score": 1.0,
+                    "kind": "goal_executor"
+                },
+                {
+                    "action": "LINK_SESSION_NODES",
+                    "src_session_id": "draft_s0",
+                    "dst_session_id": "draft_s1",
+                    "relation": "support",
+                    "backing_memory_relation": "depend",
+                    "score": 1.0,
+                    "kind": "goal_executor"
+                }
+            ],
+            "synthesis_used": false,
+            "unresolved_add_sessions_after": [],
+            "rejected_edges": [],
+            "steps": 3,
+            "controller_mode": "executor",
+            "signal": "Velocity describes how fast an object moves and in which direction.; Acceleration describes how fast velocity changes over time.; Momentum is the product of an object's mass and its velocity.",
+            "goal_session_node_count": 3,
+            "session_node_match_count": 3,
+            "session_node_recall": 1.0,
+            "session_node_precision": 1.0,
+            "extra_node_count": 0,
+            "extra_node_rate": 0.0,
+            "goal_session_edge_count": 2,
+            "session_edge_match_count": 2,
+            "session_edge_recall": 1.0,
+            "session_edge_precision": 1.0,
+            "extra_edge_count": 0,
+            "false_edge_rate": 0.0,
+            "goal_attachment_count": 0,
+            "attachment_match_count": 0,
+            "attachment_recall": null,
+            "attachment_precision": 1.0,
+            "extra_attachment_count": 0,
+            "false_attachment_rate": 0.0,
+            "goal_cover_count": 0,
+            "covered_match_count": 0,
+            "covered_recall": null,
+            "covered_precision": 1.0,
+            "extra_cover_count": 0,
+            "covered_complete": false,
+            "task_complete_proxy": true,
+            "task_complete_strict": true,
+            "matched_goal_to_draft": {
+                "s0": "draft_s0",
+                "s1": "draft_s1",
+                "s2": "draft_s2"
+            },
+            "matched_goal_scores": {
+                "s0": 1.0,
+                "s1": 1.0,
+                "s2": 1.0
+            }
+        },
+        {
+            "id": "holdout::mixed_add_link::06_easy",
+            "task_type": "mixed_add_link",
+            "target_memory_ids": [
+                "first_law_thermodynamics"
+            ],
+            "covered_hit_count": 0,
+            "attachment_hit_count": 1,
+            "anchors": [],
+            "visited_nodes": [
+                {
+                    "id": "first_law_thermodynamics",
+                    "score": 1.0,
+                    "text": "The first law of thermodynamics states that energy is conserved as heat and work are exchanged.",
+                    "node_type": "claim"
+                }
+            ],
+            "draft_session_nodes": [
+                {
+                    "id": "draft_s0",
+                    "text": "Steam engines convert heat into mechanical work.",
+                    "source_memory_id": "first_law_thermodynamics",
+                    "span_id": "span_1",
+                    "span_kind": "clause",
+                    "node_type": "concept",
+                    "created_step": 0,
+                    "create_score": 1.0,
+                    "source_memory_ids": [
+                        "first_law_thermodynamics"
+                    ],
+                    "is_bridge": false,
+                    "goal_session_name": "new_note",
+                    "covered_by": null
+                }
+            ],
+            "draft_session_edges": [],
+            "draft_attachments": [
+                {
+                    "session_id": "draft_s0",
+                    "memory_id": "first_law_thermodynamics",
+                    "relation": "depend",
+                    "kind": "attach",
+                    "created_step": 1,
+                    "score": 1.0
+                }
+            ],
+            "trace": [
+                {
+                    "step": 0,
+                    "node_id": "first_law_thermodynamics",
+                    "from_node_id": null,
+                    "node_score": 1.0,
+                    "node_text": "Steam engines convert heat into mechanical work.",
+                    "events": [
+                        {
+                            "action": "CREATE_SESSION_NODE",
+                            "session_id": "draft_s0",
+                            "source_memory_id": "first_law_thermodynamics",
+                            "goal_session_name": "new_note",
+                            "span_id": "span_1",
+                            "text": "Steam engines convert heat into mechanical work.",
+                            "score": 1.0,
+                            "kind": "goal_executor"
+                        }
+                    ],
+                    "draft_state": {
+                        "session_nodes": 1,
+                        "session_edges": 0,
+                        "attachments": 0
+                    }
+                }
+            ],
+            "postprocess_events": [
+                {
+                    "action": "PROPOSE_LINK_SESSION_TO_MEMORY",
+                    "session_id": "draft_s0",
+                    "memory_id": "first_law_thermodynamics",
+                    "relation": "depend",
+                    "score": 1.0,
+                    "kind": "goal_executor"
+                }
+            ],
+            "synthesis_used": false,
+            "unresolved_add_sessions_after": [],
+            "rejected_edges": [],
+            "steps": 1,
+            "controller_mode": "executor",
+            "signal": "Add a new note related to The first law of thermodynamics states that energy is conserved as heat and work are exchanged.: Steam engines convert heat into mechanical work.",
+            "goal_session_node_count": 1,
+            "session_node_match_count": 1,
+            "session_node_recall": 1.0,
+            "session_node_precision": 1.0,
+            "extra_node_count": 0,
+            "extra_node_rate": 0.0,
+            "goal_session_edge_count": 0,
+            "session_edge_match_count": 0,
+            "session_edge_recall": null,
+            "session_edge_precision": 1.0,
+            "extra_edge_count": 0,
+            "false_edge_rate": 0.0,
+            "goal_attachment_count": 1,
+            "attachment_match_count": 1,
+            "attachment_recall": 1.0,
+            "attachment_precision": 1.0,
+            "extra_attachment_count": 0,
+            "false_attachment_rate": 0.0,
+            "goal_cover_count": 0,
+            "covered_match_count": 0,
+            "covered_recall": null,
+            "covered_precision": 1.0,
+            "extra_cover_count": 0,
+            "covered_complete": false,
+            "task_complete_proxy": true,
+            "task_complete_strict": true,
+            "matched_goal_to_draft": {
+                "new_note": "draft_s0"
+            },
+            "matched_goal_scores": {
+                "new_note": 1.0
+            }
+        },
+        {
+            "id": "holdout::mixed_add_link::07_medium",
+            "task_type": "mixed_add_link",
+            "target_memory_ids": [
+                "electromagnetic_waves_propagate_in_vacuum"
+            ],
+            "covered_hit_count": 0,
+            "attachment_hit_count": 1,
+            "anchors": [],
+            "visited_nodes": [
+                {
+                    "id": "electromagnetic_waves_propagate_in_vacuum",
+                    "score": 1.0,
+                    "text": "Electromagnetic waves can propagate through a vacuum and do not require a material medium.",
+                    "node_type": "claim"
+                }
+            ],
+            "draft_session_nodes": [
+                {
+                    "id": "draft_s0",
+                    "text": "Radio signals can be detected after travelling through space.",
+                    "source_memory_id": "electromagnetic_waves_propagate_in_vacuum",
+                    "span_id": "span_1",
+                    "span_kind": "clause",
+                    "node_type": "concept",
+                    "created_step": 0,
+                    "create_score": 1.0,
+                    "source_memory_ids": [
+                        "electromagnetic_waves_propagate_in_vacuum"
+                    ],
+                    "is_bridge": false,
+                    "goal_session_name": "new_note",
+                    "covered_by": null
+                }
+            ],
+            "draft_session_edges": [],
+            "draft_attachments": [
+                {
+                    "session_id": "draft_s0",
+                    "memory_id": "electromagnetic_waves_propagate_in_vacuum",
+                    "relation": "support",
+                    "kind": "attach",
+                    "created_step": 1,
+                    "score": 1.0
+                }
+            ],
+            "trace": [
+                {
+                    "step": 0,
+                    "node_id": "electromagnetic_waves_propagate_in_vacuum",
+                    "from_node_id": null,
+                    "node_score": 1.0,
+                    "node_text": "Radio signals can be detected after travelling through space.",
+                    "events": [
+                        {
+                            "action": "CREATE_SESSION_NODE",
+                            "session_id": "draft_s0",
+                            "source_memory_id": "electromagnetic_waves_propagate_in_vacuum",
+                            "goal_session_name": "new_note",
+                            "span_id": "span_1",
+                            "text": "Radio signals can be detected after travelling through space.",
+                            "score": 1.0,
+                            "kind": "goal_executor"
+                        }
+                    ],
+                    "draft_state": {
+                        "session_nodes": 1,
+                        "session_edges": 0,
+                        "attachments": 0
+                    }
+                }
+            ],
+            "postprocess_events": [
+                {
+                    "action": "PROPOSE_LINK_SESSION_TO_MEMORY",
+                    "session_id": "draft_s0",
+                    "memory_id": "electromagnetic_waves_propagate_in_vacuum",
+                    "relation": "support",
+                    "score": 1.0,
+                    "kind": "goal_executor"
+                }
+            ],
+            "synthesis_used": false,
+            "unresolved_add_sessions_after": [],
+            "rejected_edges": [],
+            "steps": 1,
+            "controller_mode": "executor",
+            "signal": "Add a new note related to Electromagnetic waves can propagate through a vacuum and do not require a material medium.: Radio signals can be detected after travelling through space.",
+            "goal_session_node_count": 1,
+            "session_node_match_count": 1,
+            "session_node_recall": 1.0,
+            "session_node_precision": 1.0,
+            "extra_node_count": 0,
+            "extra_node_rate": 0.0,
+            "goal_session_edge_count": 0,
+            "session_edge_match_count": 0,
+            "session_edge_recall": null,
+            "session_edge_precision": 1.0,
+            "extra_edge_count": 0,
+            "false_edge_rate": 0.0,
+            "goal_attachment_count": 1,
+            "attachment_match_count": 1,
+            "attachment_recall": 1.0,
+            "attachment_precision": 1.0,
+            "extra_attachment_count": 0,
+            "false_attachment_rate": 0.0,
+            "goal_cover_count": 0,
+            "covered_match_count": 0,
+            "covered_recall": null,
+            "covered_precision": 1.0,
+            "extra_cover_count": 0,
+            "covered_complete": false,
+            "task_complete_proxy": true,
+            "task_complete_strict": true,
+            "matched_goal_to_draft": {
+                "new_note": "draft_s0"
+            },
+            "matched_goal_scores": {
+                "new_note": 1.0
+            }
+        },
+        {
+            "id": "holdout::mixed_add_link::08_hard_contradict",
+            "task_type": "mixed_add_link",
+            "target_memory_ids": [
+                "battery_fixed_current_false"
+            ],
+            "covered_hit_count": 0,
+            "attachment_hit_count": 1,
+            "anchors": [],
+            "visited_nodes": [
+                {
+                    "id": "battery_fixed_current_false",
+                    "score": 1.0,
+                    "text": "A battery supplies a fixed current regardless of circuit resistance.",
+                    "node_type": "claim"
+                }
+            ],
+            "draft_session_nodes": [
+                {
+                    "id": "draft_s0",
+                    "text": "A real battery's output current depends on the load resistance via Ohm's law.",
+                    "source_memory_id": "battery_fixed_current_false",
+                    "span_id": "span_1",
+                    "span_kind": "clause",
+                    "node_type": "concept",
+                    "created_step": 0,
+                    "create_score": 1.0,
+                    "source_memory_ids": [
+                        "battery_fixed_current_false"
+                    ],
+                    "is_bridge": false,
+                    "goal_session_name": "new_note",
+                    "covered_by": null
+                }
+            ],
+            "draft_session_edges": [],
+            "draft_attachments": [
+                {
+                    "session_id": "draft_s0",
+                    "memory_id": "battery_fixed_current_false",
+                    "relation": "contradict",
+                    "kind": "attach",
+                    "created_step": 1,
+                    "score": 1.0
+                }
+            ],
+            "trace": [
+                {
+                    "step": 0,
+                    "node_id": "battery_fixed_current_false",
+                    "from_node_id": null,
+                    "node_score": 1.0,
+                    "node_text": "A real battery's output current depends on the load resistance via Ohm's law.",
+                    "events": [
+                        {
+                            "action": "CREATE_SESSION_NODE",
+                            "session_id": "draft_s0",
+                            "source_memory_id": "battery_fixed_current_false",
+                            "goal_session_name": "new_note",
+                            "span_id": "span_1",
+                            "text": "A real battery's output current depends on the load resistance via Ohm's law.",
+                            "score": 1.0,
+                            "kind": "goal_executor"
+                        }
+                    ],
+                    "draft_state": {
+                        "session_nodes": 1,
+                        "session_edges": 0,
+                        "attachments": 0
+                    }
+                }
+            ],
+            "postprocess_events": [
+                {
+                    "action": "PROPOSE_LINK_SESSION_TO_MEMORY",
+                    "session_id": "draft_s0",
+                    "memory_id": "battery_fixed_current_false",
+                    "relation": "contradict",
+                    "score": 1.0,
+                    "kind": "goal_executor"
+                }
+            ],
+            "synthesis_used": false,
+            "unresolved_add_sessions_after": [],
+            "rejected_edges": [],
+            "steps": 1,
+            "controller_mode": "executor",
+            "signal": "Add a new note related to A battery supplies a fixed current regardless of circuit resistance.: A real battery's output current depends on the load resistance via Ohm's law.",
+            "goal_session_node_count": 1,
+            "session_node_match_count": 1,
+            "session_node_recall": 1.0,
+            "session_node_precision": 1.0,
+            "extra_node_count": 0,
+            "extra_node_rate": 0.0,
+            "goal_session_edge_count": 0,
+            "session_edge_match_count": 0,
+            "session_edge_recall": null,
+            "session_edge_precision": 1.0,
+            "extra_edge_count": 0,
+            "false_edge_rate": 0.0,
+            "goal_attachment_count": 1,
+            "attachment_match_count": 1,
+            "attachment_recall": 1.0,
+            "attachment_precision": 1.0,
+            "extra_attachment_count": 0,
+            "false_attachment_rate": 0.0,
+            "goal_cover_count": 0,
+            "covered_match_count": 0,
+            "covered_recall": null,
+            "covered_precision": 1.0,
+            "extra_cover_count": 0,
+            "covered_complete": false,
+            "task_complete_proxy": true,
+            "task_complete_strict": true,
+            "matched_goal_to_draft": {
+                "new_note": "draft_s0"
+            },
+            "matched_goal_scores": {
+                "new_note": 1.0
+            }
+        },
+        {
+            "id": "holdout::multi_region_attach::09_medium",
+            "task_type": "multi_region_attach",
+            "target_memory_ids": [
+                "first_law_thermodynamics",
+                "force_momentum_energy_bridge"
+            ],
+            "covered_hit_count": 0,
+            "attachment_hit_count": 2,
+            "anchors": [],
+            "visited_nodes": [
+                {
+                    "id": "first_law_thermodynamics",
+                    "score": 1.0,
+                    "text": "The first law of thermodynamics states that energy is conserved as heat and work are exchanged.",
+                    "node_type": "claim"
+                },
+                {
+                    "id": "heat_equals_temperature_false",
+                    "score": 1.0,
+                    "text": "Heat and temperature are the same physical quantity.",
+                    "node_type": "claim"
+                },
+                {
+                    "id": "force_momentum_energy_bridge",
+                    "score": 1.0,
+                    "text": "Mechanics unifies force laws, momentum change, and work-energy reasoning: the same dynamical interaction can be analyzed through acceleration, impulse, or energy transfer depending on the question.",
+                    "node_type": "bridge"
+                }
+            ],
+            "draft_session_nodes": [
+                {
+                    "id": "draft_s0",
+                    "text": "The first law of thermodynamics states that energy is conserved as heat and work are exchanged.",
+                    "source_memory_id": "first_law_thermodynamics",
+                    "span_id": "span_1",
+                    "span_kind": "clause",
+                    "node_type": "concept",
+                    "created_step": 0,
+                    "create_score": 1.0,
+                    "source_memory_ids": [
+                        "first_law_thermodynamics",
+                        "heat_equals_temperature_false"
+                    ],
+                    "is_bridge": false,
+                    "goal_session_name": "support_note",
+                    "covered_by": null
+                },
+                {
+                    "id": "draft_s1",
+                    "text": "A new bridge concept connects these ideas: The first law of thermodynamics states that energy is conserved as heat and work are exchanged. and Mechanics unifies force laws, momentum change, and work-energy reasoning: the same dynamical interaction can be analyzed through acceleration, impulse, or energy transfer depending on the question.",
+                    "source_memory_id": "first_law_thermodynamics",
+                    "span_id": "span_0",
+                    "span_kind": "full",
+                    "node_type": "bridge",
+                    "created_step": 1,
+                    "create_score": 1.0,
+                    "source_memory_ids": [
+                        "first_law_thermodynamics",
+                        "force_momentum_energy_bridge"
+                    ],
+                    "is_bridge": true,
+                    "goal_session_name": "bridge",
+                    "covered_by": null
+                }
+            ],
+            "draft_session_edges": [
+                {
+                    "src": "draft_s0",
+                    "dst": "draft_s1",
+                    "relation": "support",
+                    "created_step": 2,
+                    "score": 1.0
+                }
+            ],
+            "draft_attachments": [
+                {
+                    "session_id": "draft_s1",
+                    "memory_id": "first_law_thermodynamics",
+                    "relation": "related",
+                    "kind": "attach",
+                    "created_step": 3,
+                    "score": 1.0
+                },
+                {
+                    "session_id": "draft_s1",
+                    "memory_id": "force_momentum_energy_bridge",
+                    "relation": "related",
+                    "kind": "attach",
+                    "created_step": 4,
+                    "score": 1.0
+                }
+            ],
+            "trace": [
+                {
+                    "step": 0,
+                    "node_id": "first_law_thermodynamics",
+                    "from_node_id": null,
+                    "node_score": 1.0,
+                    "node_text": "The first law of thermodynamics states that energy is conserved as heat and work are exchanged.",
+                    "events": [
+                        {
+                            "action": "CREATE_SESSION_NODE",
+                            "session_id": "draft_s0",
+                            "source_memory_id": "first_law_thermodynamics",
+                            "goal_session_name": "support_note",
+                            "span_id": "span_1",
+                            "text": "The first law of thermodynamics states that energy is conserved as heat and work are exchanged.",
+                            "score": 1.0,
+                            "kind": "goal_executor"
+                        }
+                    ],
+                    "draft_state": {
+                        "session_nodes": 1,
+                        "session_edges": 0,
+                        "attachments": 0
+                    }
+                },
+                {
+                    "step": 1,
+                    "node_id": "first_law_thermodynamics",
+                    "from_node_id": null,
+                    "node_score": 1.0,
+                    "node_text": "A new bridge concept connects these ideas: The first law of thermodynamics states that energy is conserved as heat and work are exchanged. and Mechanics unifies force laws, momentum change, and work-energy reasoning: the same dynamical interaction can be analyzed through acceleration, impulse, or energy transfer depending on the question.",
+                    "events": [
+                        {
+                            "action": "CREATE_SESSION_NODE",
+                            "session_id": "draft_s1",
+                            "source_memory_id": "first_law_thermodynamics",
+                            "goal_session_name": "bridge",
+                            "span_id": "span_0",
+                            "text": "A new bridge concept connects these ideas: The first law of thermodynamics states that energy is conserved as heat and work are exchanged. and Mechanics unifies force laws, momentum change, and work-energy reasoning: the same dynamical interaction can be analyzed through acceleration, impulse, or energy transfer depending on the question.",
+                            "score": 1.0,
+                            "kind": "goal_executor"
+                        }
+                    ],
+                    "draft_state": {
+                        "session_nodes": 2,
+                        "session_edges": 0,
+                        "attachments": 0
+                    }
+                }
+            ],
+            "postprocess_events": [
+                {
+                    "action": "LINK_SESSION_NODES",
+                    "src_session_id": "draft_s0",
+                    "dst_session_id": "draft_s1",
+                    "relation": "support",
+                    "backing_memory_relation": null,
+                    "score": 1.0,
+                    "kind": "goal_executor"
+                },
+                {
+                    "action": "PROPOSE_LINK_SESSION_TO_MEMORY",
+                    "session_id": "draft_s1",
+                    "memory_id": "first_law_thermodynamics",
+                    "relation": "related",
+                    "score": 1.0,
+                    "kind": "goal_executor"
+                },
+                {
+                    "action": "PROPOSE_LINK_SESSION_TO_MEMORY",
+                    "session_id": "draft_s1",
+                    "memory_id": "force_momentum_energy_bridge",
+                    "relation": "related",
+                    "score": 1.0,
+                    "kind": "goal_executor"
+                }
+            ],
+            "synthesis_used": false,
+            "unresolved_add_sessions_after": [],
+            "rejected_edges": [],
+            "steps": 2,
+            "controller_mode": "executor",
+            "signal": "A new bridge concept connects these ideas: The first law of thermodynamics states that energy is conserved as heat and work are exchanged. and Mechanics unifies force laws, momentum change, and work-energy reasoning: the same dynamical interaction can be analyzed through acceleration, impulse, or energy transfer depending on the question.",
+            "goal_session_node_count": 2,
+            "session_node_match_count": 2,
+            "session_node_recall": 1.0,
+            "session_node_precision": 1.0,
+            "extra_node_count": 0,
+            "extra_node_rate": 0.0,
+            "goal_session_edge_count": 1,
+            "session_edge_match_count": 1,
+            "session_edge_recall": 1.0,
+            "session_edge_precision": 1.0,
+            "extra_edge_count": 0,
+            "false_edge_rate": 0.0,
+            "goal_attachment_count": 2,
+            "attachment_match_count": 2,
+            "attachment_recall": 1.0,
+            "attachment_precision": 1.0,
+            "extra_attachment_count": 0,
+            "false_attachment_rate": 0.0,
+            "goal_cover_count": 0,
+            "covered_match_count": 0,
+            "covered_recall": null,
+            "covered_precision": 1.0,
+            "extra_cover_count": 0,
+            "covered_complete": false,
+            "task_complete_proxy": true,
+            "task_complete_strict": true,
+            "matched_goal_to_draft": {
+                "support_note": "draft_s0",
+                "bridge": "draft_s1"
+            },
+            "matched_goal_scores": {
+                "support_note": 1.0,
+                "bridge": 1.0
+            }
+        },
+        {
+            "id": "holdout::multi_region_attach::10_hard_overlap",
+            "task_type": "multi_region_attach",
+            "target_memory_ids": [
+                "energy_conservation_bridge",
+                "entropy_energy_direction_bridge"
+            ],
+            "covered_hit_count": 0,
+            "attachment_hit_count": 2,
+            "anchors": [],
+            "visited_nodes": [
+                {
+                    "id": "entropy_energy_direction_bridge",
+                    "score": 1.0,
+                    "text": "Thermodynamic reasoning combines energy accounting with directionality: the first law tracks conservation, while the second law distinguishes which energy transfers are spontaneous.",
+                    "node_type": "bridge"
+                },
+                {
+                    "id": "first_law_thermodynamics",
+                    "score": 1.0,
+                    "text": "The first law of thermodynamics states that energy is conserved as heat and work are exchanged.",
+                    "node_type": "claim"
+                },
+                {
+                    "id": "energy_conservation_bridge",
+                    "score": 1.0,
+                    "text": "Energy conservation appears in both mechanics and thermodynamics.",
+                    "node_type": "claim"
+                }
+            ],
+            "draft_session_nodes": [
+                {
+                    "id": "draft_s0",
+                    "text": "Thermodynamic reasoning combines energy accounting with directionality: the first law tracks conservation, while the sec",
+                    "source_memory_id": "entropy_energy_direction_bridge",
+                    "span_id": "span_1",
+                    "span_kind": "clause",
+                    "node_type": "concept",
+                    "created_step": 0,
+                    "create_score": 1.0,
+                    "source_memory_ids": [
+                        "entropy_energy_direction_bridge",
+                        "first_law_thermodynamics"
+                    ],
+                    "is_bridge": false,
+                    "goal_session_name": "support_note",
+                    "covered_by": null
+                },
+                {
+                    "id": "draft_s1",
+                    "text": "A new bridge concept connects these ideas: Thermodynamic reasoning combines energy accounting with directionality: the first law tracks conservation, while the second law distinguishes which energy transfers are spontaneous. and Energy conservation appears in both mechanics and thermodynamics.",
+                    "source_memory_id": "energy_conservation_bridge",
+                    "span_id": "span_0",
+                    "span_kind": "full",
+                    "node_type": "bridge",
+                    "created_step": 1,
+                    "create_score": 1.0,
+                    "source_memory_ids": [
+                        "energy_conservation_bridge",
+                        "entropy_energy_direction_bridge"
+                    ],
+                    "is_bridge": true,
+                    "goal_session_name": "bridge",
+                    "covered_by": null
+                }
+            ],
+            "draft_session_edges": [
+                {
+                    "src": "draft_s0",
+                    "dst": "draft_s1",
+                    "relation": "support",
+                    "created_step": 2,
+                    "score": 1.0
+                }
+            ],
+            "draft_attachments": [
+                {
+                    "session_id": "draft_s1",
+                    "memory_id": "energy_conservation_bridge",
+                    "relation": "related",
+                    "kind": "attach",
+                    "created_step": 3,
+                    "score": 1.0
+                },
+                {
+                    "session_id": "draft_s1",
+                    "memory_id": "entropy_energy_direction_bridge",
+                    "relation": "related",
+                    "kind": "attach",
+                    "created_step": 4,
+                    "score": 1.0
+                }
+            ],
+            "trace": [
+                {
+                    "step": 0,
+                    "node_id": "entropy_energy_direction_bridge",
+                    "from_node_id": null,
+                    "node_score": 1.0,
+                    "node_text": "Thermodynamic reasoning combines energy accounting with directionality: the first law tracks conservation, while the sec",
+                    "events": [
+                        {
+                            "action": "CREATE_SESSION_NODE",
+                            "session_id": "draft_s0",
+                            "source_memory_id": "entropy_energy_direction_bridge",
+                            "goal_session_name": "support_note",
+                            "span_id": "span_1",
+                            "text": "Thermodynamic reasoning combines energy accounting with directionality: the first law tracks conservation, while the sec",
+                            "score": 1.0,
+                            "kind": "goal_executor"
+                        }
+                    ],
+                    "draft_state": {
+                        "session_nodes": 1,
+                        "session_edges": 0,
+                        "attachments": 0
+                    }
+                },
+                {
+                    "step": 1,
+                    "node_id": "energy_conservation_bridge",
+                    "from_node_id": null,
+                    "node_score": 1.0,
+                    "node_text": "A new bridge concept connects these ideas: Thermodynamic reasoning combines energy accounting with directionality: the first law tracks conservation, while the second law distinguishes which energy transfers are spontaneous. and Energy conservation appears in both mechanics and thermodynamics.",
+                    "events": [
+                        {
+                            "action": "CREATE_SESSION_NODE",
+                            "session_id": "draft_s1",
+                            "source_memory_id": "energy_conservation_bridge",
+                            "goal_session_name": "bridge",
+                            "span_id": "span_0",
+                            "text": "A new bridge concept connects these ideas: Thermodynamic reasoning combines energy accounting with directionality: the first law tracks conservation, while the second law distinguishes which energy transfers are spontaneous. and Energy conservation appears in both mechanics and thermodynamics.",
+                            "score": 1.0,
+                            "kind": "goal_executor"
+                        }
+                    ],
+                    "draft_state": {
+                        "session_nodes": 2,
+                        "session_edges": 0,
+                        "attachments": 0
+                    }
+                }
+            ],
+            "postprocess_events": [
+                {
+                    "action": "LINK_SESSION_NODES",
+                    "src_session_id": "draft_s0",
+                    "dst_session_id": "draft_s1",
+                    "relation": "support",
+                    "backing_memory_relation": "support",
+                    "score": 1.0,
+                    "kind": "goal_executor"
+                },
+                {
+                    "action": "PROPOSE_LINK_SESSION_TO_MEMORY",
+                    "session_id": "draft_s1",
+                    "memory_id": "energy_conservation_bridge",
+                    "relation": "related",
+                    "score": 1.0,
+                    "kind": "goal_executor"
+                },
+                {
+                    "action": "PROPOSE_LINK_SESSION_TO_MEMORY",
+                    "session_id": "draft_s1",
+                    "memory_id": "entropy_energy_direction_bridge",
+                    "relation": "related",
+                    "score": 1.0,
+                    "kind": "goal_executor"
+                }
+            ],
+            "synthesis_used": false,
+            "unresolved_add_sessions_after": [],
+            "rejected_edges": [],
+            "steps": 2,
+            "controller_mode": "executor",
+            "signal": "A new bridge concept connects these ideas: Thermodynamic reasoning combines energy accounting with directionality: the first law tracks conservation, while the second law distinguishes which energy transfers are spontaneous. and Energy conservation appears in both mechanics and thermodynamics.",
+            "goal_session_node_count": 2,
+            "session_node_match_count": 2,
+            "session_node_recall": 1.0,
+            "session_node_precision": 1.0,
+            "extra_node_count": 0,
+            "extra_node_rate": 0.0,
+            "goal_session_edge_count": 1,
+            "session_edge_match_count": 1,
+            "session_edge_recall": 1.0,
+            "session_edge_precision": 1.0,
+            "extra_edge_count": 0,
+            "false_edge_rate": 0.0,
+            "goal_attachment_count": 2,
+            "attachment_match_count": 2,
+            "attachment_recall": 1.0,
+            "attachment_precision": 1.0,
+            "extra_attachment_count": 0,
+            "false_attachment_rate": 0.0,
+            "goal_cover_count": 0,
+            "covered_match_count": 0,
+            "covered_recall": null,
+            "covered_precision": 1.0,
+            "extra_cover_count": 0,
+            "covered_complete": false,
+            "task_complete_proxy": true,
+            "task_complete_strict": true,
+            "matched_goal_to_draft": {
+                "support_note": "draft_s0",
+                "bridge": "draft_s1"
+            },
+            "matched_goal_scores": {
+                "support_note": 1.0,
+                "bridge": 1.0
+            }
+        }
+    ]
+}

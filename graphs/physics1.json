@@ -1,0 +1,1816 @@
+{
+  "metadata": {
+    "title": "Physics theory graph (gold, theory-focused revision)",
+    "source_note": "Rewritten from the uploaded physics graph to reduce hub over-dependence, remove vague relations, and sharpen contradiction/bridge structure.",
+    "relation_convention": {
+      "part_of": "child hub -> parent hub",
+      "example_of": "example -> concept",
+      "support": "evidence or prerequisite statement -> claim",
+      "contradict": "false or opposing claim -> target claim",
+      "refine": "more specific statement -> broader statement",
+      "depend": "prerequisite concept -> dependent concept",
+      "cause": "cause or mechanism -> effect"
+    },
+    "notes": [
+      "Summary nodes are structural hubs only.",
+      "Ordinary claims are not attached to hubs by default; cluster membership lives in metadata.",
+      "Misconceptions are encoded in metadata rather than special node types.",
+      "Weak labels such as related_to were removed.",
+      "Part_of edges were reduced to hub hierarchy only.",
+      "Gold revision adds explicit theory nodes, law-level bridges, and component summaries for training supervision."
+    ],
+    "gold_version": "v1_theory_focused"
+  },
+  "nodes": [
+    {
+      "id": "battery_fixed_current_false",
+      "text": "A battery supplies a fixed current regardless of circuit resistance.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.89,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "electromagnetism",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "bridges_hub",
+      "text": "Bridge insights connect major physics clusters through shared reasoning patterns.",
+      "node_type": "summary",
+      "confidence": 0.98,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "bridges"
+      }
+    },
+    {
+      "id": "changing_magnetic_field_induces_emf",
+      "text": "A changing magnetic field can induce an electromotive force and drive current.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "electromagnetism",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "charges_create_electric_field",
+      "text": "Electric charges create electric fields.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "electromagnetism",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "coulombs_law_inverse_square",
+      "text": "Coulomb's law states that the electric force between two point charges is proportional to the product of the charges and inversely proportional to the square of their separation.",
+      "node_type": "law",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "electromagnetism",
+        "kind": "law",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "current_rate_of_charge_flow",
+      "text": "Electric current is the rate of flow of electric charge.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "electromagnetism",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "double_slit_example",
+      "text": "A double-slit pattern is a standard example of wave interference.",
+      "node_type": "example",
+      "confidence": 0.97,
+      "importance": 0.8,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "waves_optics",
+        "kind": "example"
+      }
+    },
+    {
+      "id": "elastic_collision_example",
+      "text": "An isolated elastic collision is a standard example where total momentum is conserved.",
+      "node_type": "example",
+      "confidence": 0.97,
+      "importance": 0.8,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "mechanics",
+        "kind": "example"
+      }
+    },
+    {
+      "id": "electric_field_exerts_force",
+      "text": "An electric field exerts force on a charged particle.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "electromagnetism",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "electric_power_relation",
+      "text": "Electrical power in a circuit can be expressed as P = IV, relating energy transfer rate to current and potential difference.",
+      "node_type": "equation",
+      "confidence": 0.99,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "electromagnetism",
+        "kind": "equation",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "electromagnetic_unification_bridge",
+      "text": "Electromagnetic theory links electric fields, induction, and light.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "electromagnetic_waves_propagate_in_vacuum",
+      "text": "Electromagnetic waves can propagate through a vacuum and do not require a material medium.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "waves_optics",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "electromagnetism_field_circuit_induction_summary",
+      "text": "Electromagnetic theory explains how charges create fields, fields do work on charge, circuits encode those effects through voltage and current, and changing magnetic flux induces emf.",
+      "node_type": "summary",
+      "confidence": 0.98,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "electromagnetism",
+        "kind": "component_summary"
+      }
+    },
+    {
+      "id": "electromagnetism_hub",
+      "text": "Electromagnetism studies charge, fields, circuits, and induction.",
+      "node_type": "summary",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "electromagnetism"
+      }
+    },
+    {
+      "id": "energy_conservation_bridge",
+      "text": "Energy conservation appears in both mechanics and thermodynamics.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "entropy_energy_direction_bridge",
+      "text": "Thermodynamic reasoning combines energy accounting with directionality: the first law tracks conservation, while the second law distinguishes which energy transfers are spontaneous.",
+      "node_type": "bridge",
+      "confidence": 0.98,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "entropy_increases_isolated",
+      "text": "Entropy tends to increase in an isolated system.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "thermodynamics",
+        "kind": "lawlike_claim",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "faradays_law_induction",
+      "text": "Faraday's law states that the induced electromotive force is proportional to the rate of change of magnetic flux through a circuit.",
+      "node_type": "law",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "electromagnetism",
+        "kind": "law",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "field_potential_current_bridge",
+      "text": "Electromagnetism connects fields, potential differences, currents, and power: fields move charge, potential measures energy per charge, and circuits translate those ideas into measurable current and power.",
+      "node_type": "bridge",
+      "confidence": 0.98,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "first_law_thermodynamics",
+      "text": "The first law of thermodynamics states that energy is conserved as heat and work are exchanged.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "thermodynamics",
+        "kind": "law",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "force_momentum_energy_bridge",
+      "text": "Mechanics unifies force laws, momentum change, and work-energy reasoning: the same dynamical interaction can be analyzed through acceleration, impulse, or energy transfer depending on the question.",
+      "node_type": "bridge",
+      "confidence": 0.98,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "frequency_changes_across_media_false",
+      "text": "When light refracts into a new medium, its frequency changes while its wavelength stays fixed.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.88,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "waves_optics",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "heat_energy_transfer",
+      "text": "Heat is energy transferred because of a temperature difference.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "thermodynamics",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "heat_equals_temperature_false",
+      "text": "Heat and temperature are the same physical quantity.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.88,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "thermodynamics",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "heavier_objects_fall_faster_vacuum_false",
+      "text": "Heavier objects fall faster than lighter objects in a vacuum.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "mechanics",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "ideal_gas_law",
+      "text": "The ideal gas law relates pressure, volume, temperature, and amount of gas through PV = nRT.",
+      "node_type": "equation",
+      "confidence": 0.99,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "thermodynamics",
+        "kind": "equation",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "impulse_changes_momentum",
+      "text": "Impulse equals the change in momentum, so a net force acting over a time interval changes a system's momentum.",
+      "node_type": "theorem",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "mechanics",
+        "kind": "theorem",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "interference_superposition",
+      "text": "Waves can interfere constructively or destructively through superposition.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "waves_optics",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "internal_energy_state_function",
+      "text": "Internal energy is a state function, so its change depends only on the initial and final thermodynamic states, not on the path taken between them.",
+      "node_type": "principle",
+      "confidence": 0.99,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "thermodynamics",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "lenz_law_opposes_flux_change",
+      "text": "Lenz's law states that an induced current flows in the direction that opposes the change in magnetic flux that produced it.",
+      "node_type": "law",
+      "confidence": 0.99,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "electromagnetism",
+        "kind": "law",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "mechanical_energy_conservative",
+      "text": "Mechanical energy is conserved when only conservative forces do work.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "mechanics",
+        "kind": "law",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "mechanics_force_momentum_energy_summary",
+      "text": "Mechanics links net force, momentum change, collision reasoning, and work-energy ideas into one coherent framework for predicting motion.",
+      "node_type": "summary",
+      "confidence": 0.98,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "mechanics",
+        "kind": "component_summary"
+      }
+    },
+    {
+      "id": "mechanics_hub",
+      "text": "Mechanics studies force, motion, momentum, and mechanical energy.",
+      "node_type": "summary",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "mechanics"
+      }
+    },
+    {
+      "id": "medium_response_bridge",
+      "text": "Wave behavior depends on how a medium responds: refraction, propagation speed, and the ability of sound to travel all reflect the physical properties of the medium.",
+      "node_type": "bridge",
+      "confidence": 0.98,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "momentum_conservation_isolated",
+      "text": "Total momentum is conserved in an isolated system.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "mechanics",
+        "kind": "law",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "momentum_definition",
+      "text": "Momentum equals mass times velocity.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "mechanics",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "net_force_vector_sum",
+      "text": "The net force on an object is the vector sum of all individual forces acting on it.",
+      "node_type": "principle",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "mechanics",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "newton_second_law",
+      "text": "Newton's second law states that net force equals mass times acceleration.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "mechanics",
+        "kind": "law",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "ohms_law_fixed_resistance",
+      "text": "For a fixed resistance, current is proportional to voltage.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "electromagnetism",
+        "kind": "law",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "physics_hub",
+      "text": "Physics studies matter, energy, motion, fields, and waves.",
+      "node_type": "summary",
+      "confidence": 1.0,
+      "importance": 1.0,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "global"
+      }
+    },
+    {
+      "id": "physics_unification_summary",
+      "text": "Across physics, conserved quantities, field descriptions, and medium-dependent propagation patterns reveal common reasoning structures that tie separate subfields together.",
+      "node_type": "summary",
+      "confidence": 0.98,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "bridges",
+        "kind": "component_summary"
+      }
+    },
+    {
+      "id": "potential_difference_work_per_charge",
+      "text": "Potential difference is work per unit charge between two points.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "electromagnetism",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "prism_refraction_example",
+      "text": "A prism is a standard example of refraction of visible light.",
+      "node_type": "example",
+      "confidence": 0.97,
+      "importance": 0.79,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "waves_optics",
+        "kind": "example"
+      }
+    },
+    {
+      "id": "refraction_speed_change_media",
+      "text": "Refraction occurs because a wave changes speed when it enters a different medium.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "waves_optics",
+        "kind": "mechanism",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "second_law_thermodynamics",
+      "text": "The second law of thermodynamics states that isolated systems evolve toward states of greater total entropy and that spontaneous processes have a preferred direction.",
+      "node_type": "law",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "thermodynamics",
+        "kind": "law",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "snells_law",
+      "text": "Snell's law relates angles of incidence and refraction to the wave speeds or refractive indices of two media.",
+      "node_type": "law",
+      "confidence": 0.99,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "waves_optics",
+        "kind": "law",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "sound_requires_material_medium",
+      "text": "Sound waves require a material medium to propagate.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "waves_optics",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "sound_travels_in_vacuum_false",
+      "text": "Sound waves can travel through a vacuum.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.88,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "waves_optics",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "spontaneous_heat_flow_increases_entropy",
+      "text": "Spontaneous heat flow from hotter to colder regions increases total entropy.",
+      "node_type": "claim",
+      "confidence": 0.97,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "thermodynamics",
+        "kind": "mechanism",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "superposition_principle_wave",
+      "text": "When waves overlap, the resulting displacement is the sum of the individual displacements; this is the superposition principle.",
+      "node_type": "principle",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "waves_optics",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "temperature_average_kinetic_energy",
+      "text": "Temperature tracks the average kinetic energy of particles in a system.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "thermodynamics",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "thermodynamics_heat_energy_entropy_summary",
+      "text": "Thermodynamics combines energy bookkeeping, microscopic interpretations of temperature, the meaning of heat transfer, and entropy-based directionality into one theory of macroscopic change.",
+      "node_type": "summary",
+      "confidence": 0.98,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "thermodynamics",
+        "kind": "component_summary"
+      }
+    },
+    {
+      "id": "thermodynamics_hub",
+      "text": "Thermodynamics studies heat, temperature, entropy, and energy transfer.",
+      "node_type": "summary",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "thermodynamics"
+      }
+    },
+    {
+      "id": "vacuum_free_fall_same_g",
+      "text": "Near Earth, objects in a vacuum fall with the same gravitational acceleration regardless of mass.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "mechanics",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "visible_light_electromagnetic_wave",
+      "text": "Visible light is an electromagnetic wave.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "waves_optics",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "wave_frequency_fixed_by_source",
+      "text": "When a wave enters a new medium, its frequency is fixed by the source, while speed and wavelength may change.",
+      "node_type": "principle",
+      "confidence": 0.99,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "waves_optics",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "wave_medium_contrast_bridge",
+      "text": "Comparing sound and light reveals a deep wave distinction: mechanical waves require matter to oscillate, while electromagnetic waves can self-propagate through vacuum.",
+      "node_type": "bridge",
+      "confidence": 0.98,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "wave_speed_relation",
+      "text": "Wave speed equals frequency times wavelength.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "waves_optics",
+        "kind": "equation",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "waves_interference_refraction_summary",
+      "text": "Wave theory organizes speed, wavelength, frequency, superposition, interference, refraction, and medium dependence into a single account of propagation and optical behavior.",
+      "node_type": "summary",
+      "confidence": 0.98,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "waves_optics",
+        "kind": "component_summary"
+      }
+    },
+    {
+      "id": "waves_optics_hub",
+      "text": "Wave physics studies propagation, interference, sound, and light.",
+      "node_type": "summary",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "waves_optics"
+      }
+    },
+    {
+      "id": "work_energy_theorem",
+      "text": "The net work done on an object equals the change in its kinetic energy.",
+      "node_type": "theorem",
+      "confidence": 0.99,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "mechanics",
+        "kind": "theorem",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "zero_net_force_constant_velocity",
+      "text": "With zero net force, an object remains at rest or moves at constant velocity.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "physics",
+        "cluster": "mechanics",
+        "kind": "consequence",
+        "status": "accepted"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "src": "mechanics_hub",
+      "dst": "physics_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "electromagnetism_hub",
+      "dst": "physics_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "thermodynamics_hub",
+      "dst": "physics_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "waves_optics_hub",
+      "dst": "physics_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bridges_hub",
+      "dst": "physics_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "energy_conservation_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "electromagnetic_unification_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "zero_net_force_constant_velocity",
+      "dst": "newton_second_law",
+      "relation": "refine",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "newton_second_law",
+      "dst": "vacuum_free_fall_same_g",
+      "relation": "depend",
+      "strength": 0.88,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "vacuum_free_fall_same_g",
+      "dst": "heavier_objects_fall_faster_vacuum_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "momentum_definition",
+      "dst": "momentum_conservation_isolated",
+      "relation": "depend",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "elastic_collision_example",
+      "dst": "momentum_conservation_isolated",
+      "relation": "example_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mechanical_energy_conservative",
+      "dst": "energy_conservation_bridge",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "charges_create_electric_field",
+      "dst": "electric_field_exerts_force",
+      "relation": "support",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "electric_field_exerts_force",
+      "dst": "potential_difference_work_per_charge",
+      "relation": "support",
+      "strength": 0.88,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ohms_law_fixed_resistance",
+      "dst": "current_rate_of_charge_flow",
+      "relation": "refine",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ohms_law_fixed_resistance",
+      "dst": "battery_fixed_current_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "changing_magnetic_field_induces_emf",
+      "dst": "electromagnetic_unification_bridge",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "temperature_average_kinetic_energy",
+      "dst": "heat_energy_transfer",
+      "relation": "support",
+      "strength": 0.86,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "heat_energy_transfer",
+      "dst": "spontaneous_heat_flow_increases_entropy",
+      "relation": "cause",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "spontaneous_heat_flow_increases_entropy",
+      "dst": "entropy_increases_isolated",
+      "relation": "support",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "heat_energy_transfer",
+      "dst": "heat_equals_temperature_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "temperature_average_kinetic_energy",
+      "dst": "heat_equals_temperature_false",
+      "relation": "contradict",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "first_law_thermodynamics",
+      "dst": "energy_conservation_bridge",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "double_slit_example",
+      "dst": "interference_superposition",
+      "relation": "example_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wave_speed_relation",
+      "dst": "refraction_speed_change_media",
+      "relation": "support",
+      "strength": 0.87,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "prism_refraction_example",
+      "dst": "refraction_speed_change_media",
+      "relation": "example_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "sound_requires_material_medium",
+      "dst": "sound_travels_in_vacuum_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "visible_light_electromagnetic_wave",
+      "dst": "electromagnetic_unification_bridge",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "changing_magnetic_field_induces_emf",
+      "dst": "visible_light_electromagnetic_wave",
+      "relation": "support",
+      "strength": 0.72,
+      "directed": true,
+      "metadata": {
+        "note": "Both belong to the same electromagnetic framework."
+      }
+    },
+    {
+      "src": "mechanical_energy_conservative",
+      "dst": "first_law_thermodynamics",
+      "relation": "refine",
+      "strength": 0.78,
+      "directed": true,
+      "metadata": {
+        "note": "Mechanical-energy conservation is a narrower conservation statement than the thermodynamic energy balance."
+      }
+    },
+    {
+      "src": "net_force_vector_sum",
+      "dst": "mechanics_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "impulse_changes_momentum",
+      "dst": "mechanics_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "work_energy_theorem",
+      "dst": "mechanics_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "coulombs_law_inverse_square",
+      "dst": "electromagnetism_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "faradays_law_induction",
+      "dst": "electromagnetism_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "lenz_law_opposes_flux_change",
+      "dst": "electromagnetism_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "electric_power_relation",
+      "dst": "electromagnetism_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "second_law_thermodynamics",
+      "dst": "thermodynamics_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "internal_energy_state_function",
+      "dst": "thermodynamics_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ideal_gas_law",
+      "dst": "thermodynamics_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "superposition_principle_wave",
+      "dst": "waves_optics_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wave_frequency_fixed_by_source",
+      "dst": "waves_optics_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "snells_law",
+      "dst": "waves_optics_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "electromagnetic_waves_propagate_in_vacuum",
+      "dst": "waves_optics_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "frequency_changes_across_media_false",
+      "dst": "waves_optics_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "force_momentum_energy_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "field_potential_current_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "entropy_energy_direction_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "medium_response_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wave_medium_contrast_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mechanics_force_momentum_energy_summary",
+      "dst": "mechanics_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "electromagnetism_field_circuit_induction_summary",
+      "dst": "electromagnetism_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "thermodynamics_heat_energy_entropy_summary",
+      "dst": "thermodynamics_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "waves_interference_refraction_summary",
+      "dst": "waves_optics_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "physics_unification_summary",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "net_force_vector_sum",
+      "dst": "newton_second_law",
+      "relation": "support",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "newton_second_law",
+      "dst": "impulse_changes_momentum",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "momentum_definition",
+      "dst": "impulse_changes_momentum",
+      "relation": "depend",
+      "strength": 0.91,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "impulse_changes_momentum",
+      "dst": "momentum_conservation_isolated",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {
+        "note": "Zero external impulse yields momentum conservation."
+      }
+    },
+    {
+      "src": "work_energy_theorem",
+      "dst": "mechanical_energy_conservative",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {
+        "note": "Conservative-force energy conservation is a special work-energy structure."
+      }
+    },
+    {
+      "src": "newton_second_law",
+      "dst": "force_momentum_energy_bridge",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "impulse_changes_momentum",
+      "dst": "force_momentum_energy_bridge",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "work_energy_theorem",
+      "dst": "force_momentum_energy_bridge",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mechanical_energy_conservative",
+      "dst": "force_momentum_energy_bridge",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "momentum_conservation_isolated",
+      "dst": "force_momentum_energy_bridge",
+      "relation": "support",
+      "strength": 0.88,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "coulombs_law_inverse_square",
+      "dst": "charges_create_electric_field",
+      "relation": "support",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "coulombs_law_inverse_square",
+      "dst": "electric_field_exerts_force",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "faradays_law_induction",
+      "dst": "changing_magnetic_field_induces_emf",
+      "relation": "support",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "lenz_law_opposes_flux_change",
+      "dst": "changing_magnetic_field_induces_emf",
+      "relation": "refine",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "potential_difference_work_per_charge",
+      "dst": "electric_power_relation",
+      "relation": "support",
+      "strength": 0.88,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "current_rate_of_charge_flow",
+      "dst": "electric_power_relation",
+      "relation": "support",
+      "strength": 0.91,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "electric_field_exerts_force",
+      "dst": "field_potential_current_bridge",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "potential_difference_work_per_charge",
+      "dst": "field_potential_current_bridge",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "current_rate_of_charge_flow",
+      "dst": "field_potential_current_bridge",
+      "relation": "support",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "electric_power_relation",
+      "dst": "field_potential_current_bridge",
+      "relation": "support",
+      "strength": 0.91,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "faradays_law_induction",
+      "dst": "electromagnetic_unification_bridge",
+      "relation": "support",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "electromagnetic_waves_propagate_in_vacuum",
+      "dst": "electromagnetic_unification_bridge",
+      "relation": "support",
+      "strength": 0.88,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "internal_energy_state_function",
+      "dst": "first_law_thermodynamics",
+      "relation": "support",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "first_law_thermodynamics",
+      "dst": "ideal_gas_law",
+      "relation": "support",
+      "strength": 0.72,
+      "directed": true,
+      "metadata": {
+        "note": "Ideal-gas processes are often analyzed through thermodynamic energy relations."
+      }
+    },
+    {
+      "src": "second_law_thermodynamics",
+      "dst": "entropy_increases_isolated",
+      "relation": "support",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "first_law_thermodynamics",
+      "dst": "entropy_energy_direction_bridge",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "second_law_thermodynamics",
+      "dst": "entropy_energy_direction_bridge",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "heat_energy_transfer",
+      "dst": "entropy_energy_direction_bridge",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "temperature_average_kinetic_energy",
+      "dst": "ideal_gas_law",
+      "relation": "support",
+      "strength": 0.76,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "superposition_principle_wave",
+      "dst": "interference_superposition",
+      "relation": "support",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wave_frequency_fixed_by_source",
+      "dst": "refraction_speed_change_media",
+      "relation": "support",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "snells_law",
+      "dst": "refraction_speed_change_media",
+      "relation": "refine",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wave_speed_relation",
+      "dst": "wave_frequency_fixed_by_source",
+      "relation": "support",
+      "strength": 0.86,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wave_frequency_fixed_by_source",
+      "dst": "frequency_changes_across_media_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "refraction_speed_change_media",
+      "dst": "frequency_changes_across_media_false",
+      "relation": "contradict",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "electromagnetic_waves_propagate_in_vacuum",
+      "dst": "wave_medium_contrast_bridge",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "sound_requires_material_medium",
+      "dst": "wave_medium_contrast_bridge",
+      "relation": "support",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "visible_light_electromagnetic_wave",
+      "dst": "wave_medium_contrast_bridge",
+      "relation": "support",
+      "strength": 0.89,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "refraction_speed_change_media",
+      "dst": "medium_response_bridge",
+      "relation": "support",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "sound_requires_material_medium",
+      "dst": "medium_response_bridge",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wave_frequency_fixed_by_source",
+      "dst": "medium_response_bridge",
+      "relation": "support",
+      "strength": 0.88,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "energy_conservation_bridge",
+      "dst": "physics_unification_summary",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "electromagnetic_unification_bridge",
+      "dst": "physics_unification_summary",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "force_momentum_energy_bridge",
+      "dst": "physics_unification_summary",
+      "relation": "support",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "field_potential_current_bridge",
+      "dst": "physics_unification_summary",
+      "relation": "support",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "entropy_energy_direction_bridge",
+      "dst": "physics_unification_summary",
+      "relation": "support",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wave_medium_contrast_bridge",
+      "dst": "physics_unification_summary",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "newton_second_law",
+      "dst": "mechanics_force_momentum_energy_summary",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "impulse_changes_momentum",
+      "dst": "mechanics_force_momentum_energy_summary",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "work_energy_theorem",
+      "dst": "mechanics_force_momentum_energy_summary",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "momentum_conservation_isolated",
+      "dst": "mechanics_force_momentum_energy_summary",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mechanical_energy_conservative",
+      "dst": "mechanics_force_momentum_energy_summary",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "coulombs_law_inverse_square",
+      "dst": "electromagnetism_field_circuit_induction_summary",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ohms_law_fixed_resistance",
+      "dst": "electromagnetism_field_circuit_induction_summary",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "electric_power_relation",
+      "dst": "electromagnetism_field_circuit_induction_summary",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "faradays_law_induction",
+      "dst": "electromagnetism_field_circuit_induction_summary",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "changing_magnetic_field_induces_emf",
+      "dst": "electromagnetism_field_circuit_induction_summary",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "first_law_thermodynamics",
+      "dst": "thermodynamics_heat_energy_entropy_summary",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "second_law_thermodynamics",
+      "dst": "thermodynamics_heat_energy_entropy_summary",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "heat_energy_transfer",
+      "dst": "thermodynamics_heat_energy_entropy_summary",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "entropy_increases_isolated",
+      "dst": "thermodynamics_heat_energy_entropy_summary",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ideal_gas_law",
+      "dst": "thermodynamics_heat_energy_entropy_summary",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wave_speed_relation",
+      "dst": "waves_interference_refraction_summary",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "superposition_principle_wave",
+      "dst": "waves_interference_refraction_summary",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "interference_superposition",
+      "dst": "waves_interference_refraction_summary",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "refraction_speed_change_media",
+      "dst": "waves_interference_refraction_summary",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "wave_frequency_fixed_by_source",
+      "dst": "waves_interference_refraction_summary",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "snells_law",
+      "dst": "waves_interference_refraction_summary",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    }
+  ]
+}

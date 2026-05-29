@@ -1,0 +1,2048 @@
+{
+  "metadata": {
+    "title": "Biology reasoning graph (multi-hop, contradiction-rich, bridge-oriented)",
+    "source_note": "Designed to keep nodes atomic, keep summary nodes structural, prefer sparse meaningful edges, and emphasize longer reasoning chains plus resolvable misconceptions.",
+    "relation_convention": {
+      "part_of": "child hub -> parent hub",
+      "example_of": "example -> concept",
+      "support": "evidence, mechanism, or prerequisite statement -> claim",
+      "contradict": "false or competing claim -> accepted claim",
+      "refine": "more specific statement -> broader statement",
+      "depend": "prerequisite concept -> dependent concept",
+      "cause": "causal mechanism -> downstream effect"
+    },
+    "notes": [
+      "Summary nodes are structural hubs only.",
+      "Ordinary claims are not attached to hubs by default; cluster membership lives in metadata.",
+      "Contradictions are placed near the claims that resolve them.",
+      "Bridge nodes are rare and intended to connect clusters through real reasoning, not mere topic overlap.",
+      "Several chains intentionally reuse nodes so the graph supports add_node, update_node, link_nodes, create_bridge, resolve_conflict, summarize_cluster, and no_op.",
+      "Augmented with accepted enrichment nodes and grounded misconception nodes to support harder negative training samples.",
+      "Added low-confidence provisional summary nodes so summarize_cluster can mean component compression and summary-node update."
+    ],
+    "augmented_for_training": true,
+    "augmentation_version": "v1_negative_samples",
+    "true_summarize_cluster_semantics": true
+  },
+  "nodes": [
+    {
+      "id": "biology_hub",
+      "text": "Biology studies living systems across molecular, cellular, organismal, and population scales.",
+      "node_type": "summary",
+      "confidence": 1.0,
+      "importance": 1.0,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "global"
+      }
+    },
+    {
+      "id": "cell_biology_hub",
+      "text": "Cell biology studies membranes, transport, enzymes, and cellular organization.",
+      "node_type": "summary",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "cell_biology"
+      }
+    },
+    {
+      "id": "molecular_genetics_hub",
+      "text": "Molecular genetics studies DNA, RNA, protein synthesis, and mutation.",
+      "node_type": "summary",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "molecular_genetics"
+      }
+    },
+    {
+      "id": "physiology_hub",
+      "text": "Physiology studies gas exchange, transport, metabolism, and organism function.",
+      "node_type": "summary",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "physiology"
+      }
+    },
+    {
+      "id": "evolution_ecology_hub",
+      "text": "Evolutionary biology studies variation, selection, adaptation, and population change.",
+      "node_type": "summary",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "evolution_ecology"
+      }
+    },
+    {
+      "id": "bridges_hub",
+      "text": "Bridge insights connect molecular, cellular, physiological, and evolutionary reasoning.",
+      "node_type": "summary",
+      "confidence": 0.98,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "bridges"
+      }
+    },
+    {
+      "id": "gene_to_trait_bridge",
+      "text": "Changes in DNA can propagate through RNA and protein changes to alter phenotype.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "metabolism_to_activity_bridge",
+      "text": "Energy captured and released in metabolism powers transport, maintenance, and organism activity.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "molecular_variation_to_evolution_bridge",
+      "text": "Molecular variation can scale up into population-level evolutionary change when selection acts on phenotypes.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "surface_exchange_bridge",
+      "text": "Diffusion across thin surfaces links membrane transport at the cellular scale to gas exchange at the organism scale.",
+      "node_type": "claim",
+      "confidence": 0.97,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "phospholipid_bilayer_forms_membrane",
+      "text": "Cell membranes are built from a phospholipid bilayer.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.91,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "cell_biology",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "membrane_is_selectively_permeable",
+      "text": "A cell membrane is selectively permeable rather than freely open to all substances.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "cell_biology",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "diffusion_moves_down_concentration_gradient",
+      "text": "Diffusion moves particles down a concentration gradient without direct ATP input.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "cell_biology",
+        "kind": "process",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "osmosis_is_water_diffusion_across_membrane",
+      "text": "Osmosis is the diffusion of water across a selectively permeable membrane.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "cell_biology",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "active_transport_requires_atp",
+      "text": "Active transport uses ATP to move substances against a gradient.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "cell_biology",
+        "kind": "process",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "enzymes_lower_activation_energy",
+      "text": "Enzymes speed reactions by lowering activation energy rather than by creating energy.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "cell_biology",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "dna_stores_heritable_information",
+      "text": "DNA stores heritable sequence information.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "molecular_genetics",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "transcription_copies_gene_to_mrna",
+      "text": "Transcription copies a gene's information into mRNA.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "molecular_genetics",
+        "kind": "process",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "ribosome_translates_mrna",
+      "text": "Ribosomes translate mRNA codons into an amino acid sequence.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "molecular_genetics",
+        "kind": "process",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "amino_acid_sequence_determines_protein_shape",
+      "text": "A protein's amino acid sequence strongly influences its three-dimensional shape.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "molecular_genetics",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "protein_shape_affects_function",
+      "text": "Protein function depends on protein shape.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "molecular_genetics",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "mutation_changes_dna_sequence",
+      "text": "A mutation is a change in a DNA sequence.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "molecular_genetics",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "some_mutations_are_neutral_or_beneficial",
+      "text": "Some mutations are neutral, and some can be beneficial in a given environment.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "molecular_genetics",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "all_mutations_are_harmful_false",
+      "text": "All mutations are harmful.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "molecular_genetics",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "chloroplasts_are_sites_of_photosynthesis",
+      "text": "In plants, chloroplasts are the main sites of photosynthesis.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "physiology",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "photosynthesis_stores_light_energy_in_glucose",
+      "text": "Photosynthesis stores light energy in the chemical bonds of glucose.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "physiology",
+        "kind": "process",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "stomata_allow_carbon_dioxide_entry",
+      "text": "Stomata allow carbon dioxide to enter leaf tissue.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.91,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "physiology",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "carbon_from_co2_enters_plant_biomass",
+      "text": "Carbon atoms from atmospheric carbon dioxide are incorporated into plant biomass.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "physiology",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "plants_gain_most_mass_from_co2",
+      "text": "Most of a growing plant's dry mass comes from carbon fixed from carbon dioxide, not from soil matter.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "physiology",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "plants_get_food_from_soil_false",
+      "text": "Plants get their food mainly from soil.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "physiology",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "mitochondria_are_sites_of_aerobic_respiration",
+      "text": "Mitochondria are major sites of aerobic cellular respiration in eukaryotic cells.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "physiology",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "oxygen_is_final_electron_acceptor",
+      "text": "In aerobic respiration, oxygen acts as the final electron acceptor in the electron transport chain.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "physiology",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "cellular_respiration_produces_atp",
+      "text": "Cellular respiration releases energy from organic molecules to produce ATP.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "physiology",
+        "kind": "process",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "alveoli_have_large_surface_area",
+      "text": "Alveoli provide a large surface area for gas exchange.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "physiology",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "alveoli_enable_fast_oxygen_diffusion",
+      "text": "Thin alveolar surfaces enable rapid diffusion of oxygen into the blood.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "physiology",
+        "kind": "mechanism",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "hemoglobin_binds_oxygen_reversibly",
+      "text": "Hemoglobin binds oxygen reversibly for transport in blood.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "physiology",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "circulatory_system_delivers_oxygen_and_glucose",
+      "text": "The circulatory system delivers oxygen and nutrients such as glucose to tissues.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "physiology",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "exercise_increases_atp_demand",
+      "text": "Exercise increases ATP demand in muscle cells.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "physiology",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "exercise_increases_breathing_and_heart_rate",
+      "text": "Exercise raises breathing rate and heart rate to support increased metabolic demand.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "physiology",
+        "kind": "response",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "heritable_variation_is_required_for_selection",
+      "text": "Natural selection requires heritable variation among individuals.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "evolution_ecology",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "advantageous_traits_increase_reproductive_success",
+      "text": "Traits that improve survival or reproduction can increase reproductive success in a given environment.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "evolution_ecology",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "population_trait_frequencies_change_over_generations",
+      "text": "Evolution changes trait or allele frequencies in populations across generations.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "evolution_ecology",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "individuals_do_not_evolve_within_lifetime",
+      "text": "Individual organisms do not evolve within their own lifetime; populations evolve over generations.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "evolution_ecology",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "individuals_evolve_false",
+      "text": "Individual organisms evolve during their own lifetime in the evolutionary sense.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "evolution_ecology",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "random_mutations_exist_before_antibiotics",
+      "text": "Mutations arise before antibiotic exposure rather than appearing only because bacteria need them.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "evolution_ecology",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "some_mutations_reduce_antibiotic_susceptibility",
+      "text": "Some mutations reduce susceptibility to a particular antibiotic.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "evolution_ecology",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "antibiotic_exposure_selects_resistant_bacteria",
+      "text": "Antibiotic exposure selects for bacteria that already carry resistance-conferring variants.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "evolution_ecology",
+        "kind": "mechanism",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "bacteria_become_resistant_because_they_need_to_false",
+      "text": "Bacteria become resistant because they intentionally mutate when they need to survive antibiotics.",
+      "node_type": "claim",
+      "confidence": 0.02,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "evolution_ecology",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "antibiotics_target_bacterial_cell_walls_or_ribosomes",
+      "text": "Many antibiotics work by targeting bacterial cell walls or bacterial ribosomes.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "evolution_ecology",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "viruses_lack_bacterial_targets",
+      "text": "Viruses do not have bacterial cell walls and do not carry out translation on their own ribosomes.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "evolution_ecology",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "antibiotics_kill_viruses_false",
+      "text": "Antibiotics kill viral infections.",
+      "node_type": "claim",
+      "confidence": 0.02,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "evolution_ecology",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "dialysis_tubing_osmosis_example",
+      "text": "Water moving through dialysis tubing toward a higher solute concentration is a standard osmosis example.",
+      "node_type": "example",
+      "confidence": 0.97,
+      "importance": 0.8,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "cell_biology",
+        "kind": "example"
+      }
+    },
+    {
+      "id": "mrsa_resistance_example",
+      "text": "MRSA is a standard example of bacterial populations becoming enriched for antibiotic resistance under selection.",
+      "node_type": "example",
+      "confidence": 0.97,
+      "importance": 0.82,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "evolution_ecology",
+        "kind": "example"
+      }
+    },
+    {
+      "id": "aquaporins_speed_osmosis_via_channels",
+      "text": "Aquaporin channels speed osmosis by providing hydrophilic pathways that let water cross membranes rapidly.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.9,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "cell_biology",
+        "kind": "mechanism",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "hypertonic_solution_causes_cell_shrinkage",
+      "text": "In a hypertonic solution, water leaves an animal cell by osmosis and the cell shrinks.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.91,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "cell_biology",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "facilitated_diffusion_is_passive_via_proteins",
+      "text": "Facilitated diffusion uses membrane proteins but remains passive because substances move down their gradient without ATP.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "cell_biology",
+        "kind": "process",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "enzyme_active_site_confers_specificity",
+      "text": "An enzyme's active site gives the enzyme specificity because only certain substrates fit its shape and chemistry.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.91,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "cell_biology",
+        "kind": "mechanism",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "silent_mutation_can_leave_protein_unchanged",
+      "text": "A silent mutation can change DNA without changing the amino acid sequence of the resulting protein.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "molecular_genetics",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "oxygen_released_in_photosynthesis_comes_from_water",
+      "text": "The oxygen released during photosynthesis comes from water split in the light reactions rather than from carbon dioxide.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "physiology",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "plants_also_respire_to_make_atp",
+      "text": "Plants also carry out cellular respiration, using some of their sugars to make ATP for their own cells.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "physiology",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "genetic_drift_can_change_allele_frequencies_by_chance",
+      "text": "Genetic drift can change allele frequencies by chance alone, especially in small populations.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "evolution_ecology",
+        "kind": "mechanism",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "gene_expression_changes_can_alter_phenotype",
+      "text": "Changes in gene expression can change how much protein is made and thereby alter phenotype.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "gas_exchange_supports_but_does_not_replace_respiration",
+      "text": "Gas exchange and circulation support cellular respiration by delivering reactants, but ATP is produced inside cells rather than in lungs or blood.",
+      "node_type": "claim",
+      "confidence": 0.98,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "aquaporins_pump_water_using_atp_false",
+      "text": "Aquaporins pump water against its gradient using ATP whenever water crosses a membrane.",
+      "node_type": "claim",
+      "confidence": 0.02,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "cell_biology",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "hypertonic_solution_makes_cells_swell_false",
+      "text": "A hypertonic solution makes an animal cell swell because the concentrated solution pushes water into the cell.",
+      "node_type": "claim",
+      "confidence": 0.02,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "cell_biology",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "facilitated_diffusion_requires_atp_false",
+      "text": "Facilitated diffusion requires ATP because any transport through a membrane protein uses energy.",
+      "node_type": "claim",
+      "confidence": 0.02,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "cell_biology",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "enzymes_bind_any_substrate_false",
+      "text": "Enzymes work on almost any substrate because catalysis does not depend strongly on active-site shape.",
+      "node_type": "claim",
+      "confidence": 0.02,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "cell_biology",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "every_mutation_changes_protein_false",
+      "text": "Every mutation changes the amino acid sequence of a protein and therefore always changes the protein itself.",
+      "node_type": "claim",
+      "confidence": 0.02,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "molecular_genetics",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "translation_happens_in_nucleus_false",
+      "text": "Translation happens in the nucleus because mRNA stays next to DNA while proteins are assembled.",
+      "node_type": "claim",
+      "confidence": 0.02,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "molecular_genetics",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "photosynthetic_oxygen_comes_from_co2_false",
+      "text": "The oxygen released by photosynthesis comes directly from carbon dioxide rather than from water.",
+      "node_type": "claim",
+      "confidence": 0.02,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "physiology",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "plants_do_not_respire_false",
+      "text": "Plants do not perform cellular respiration because photosynthesis already provides all of the energy they need.",
+      "node_type": "claim",
+      "confidence": 0.02,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "physiology",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "all_evolutionary_change_is_selection_false",
+      "text": "All evolutionary change is caused by natural selection, so chance alone cannot shift allele frequencies.",
+      "node_type": "claim",
+      "confidence": 0.02,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "evolution_ecology",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "antibiotic_need_creates_resistance_false",
+      "text": "Bacteria create the exact resistance mutation they need only after antibiotics are applied.",
+      "node_type": "claim",
+      "confidence": 0.02,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "evolution_ecology",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "more_gene_expression_always_improves_trait_false",
+      "text": "Increasing expression of any gene will always improve organism performance because more protein is always better.",
+      "node_type": "claim",
+      "confidence": 0.02,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "bridges",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "breathing_faster_directly_makes_atp_false",
+      "text": "Breathing faster directly makes ATP in the lungs, so muscle cells do not need cellular respiration during exercise.",
+      "node_type": "claim",
+      "confidence": 0.02,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "bridges",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "membrane_transport_pattern_hypothesis_summary",
+      "text": "Cell transport probably separates into passive movement and a distinct ATP-using active process.",
+      "node_type": "summary",
+      "confidence": 0.44,
+      "importance": 0.88,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "cell_biology",
+        "kind": "compressed_summary",
+        "status": "hypothesis",
+        "compression_role": "provisional_summary"
+      }
+    },
+    {
+      "id": "dna_expression_trait_hypothesis_summary",
+      "text": "Genes seem to influence traits through RNA and protein steps, but the path is still underspecified.",
+      "node_type": "summary",
+      "confidence": 0.4,
+      "importance": 0.88,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "bridges",
+        "kind": "compressed_summary",
+        "status": "hypothesis",
+        "compression_role": "provisional_summary"
+      }
+    },
+    {
+      "id": "plant_carbon_growth_hypothesis_summary",
+      "text": "Plants use photosynthesis to gain mass somehow, and some of those products later support energy use.",
+      "node_type": "summary",
+      "confidence": 0.43,
+      "importance": 0.88,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "physiology",
+        "kind": "compressed_summary",
+        "status": "hypothesis",
+        "compression_role": "provisional_summary"
+      }
+    },
+    {
+      "id": "resistance_evolution_hypothesis_summary",
+      "text": "Antibiotics, resistance, and evolution are connected, but the order between mutation and selection is still unclear.",
+      "node_type": "summary",
+      "confidence": 0.33,
+      "importance": 0.88,
+      "metadata": {
+        "topic": "biology",
+        "cluster": "evolution_ecology",
+        "kind": "compressed_summary",
+        "status": "hypothesis",
+        "compression_role": "provisional_summary"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "src": "cell_biology_hub",
+      "dst": "biology_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "molecular_genetics_hub",
+      "dst": "biology_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "physiology_hub",
+      "dst": "biology_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "evolution_ecology_hub",
+      "dst": "biology_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bridges_hub",
+      "dst": "biology_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "gene_to_trait_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "metabolism_to_activity_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "molecular_variation_to_evolution_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "surface_exchange_bridge",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "phospholipid_bilayer_forms_membrane",
+      "dst": "membrane_is_selectively_permeable",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "membrane_is_selectively_permeable",
+      "dst": "osmosis_is_water_diffusion_across_membrane",
+      "relation": "depend",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "osmosis_is_water_diffusion_across_membrane",
+      "dst": "diffusion_moves_down_concentration_gradient",
+      "relation": "refine",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dialysis_tubing_osmosis_example",
+      "dst": "osmosis_is_water_diffusion_across_membrane",
+      "relation": "example_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cellular_respiration_produces_atp",
+      "dst": "active_transport_requires_atp",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "diffusion_moves_down_concentration_gradient",
+      "dst": "surface_exchange_bridge",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "membrane_is_selectively_permeable",
+      "dst": "surface_exchange_bridge",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dna_stores_heritable_information",
+      "dst": "transcription_copies_gene_to_mrna",
+      "relation": "depend",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "transcription_copies_gene_to_mrna",
+      "dst": "ribosome_translates_mrna",
+      "relation": "depend",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ribosome_translates_mrna",
+      "dst": "amino_acid_sequence_determines_protein_shape",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "amino_acid_sequence_determines_protein_shape",
+      "dst": "protein_shape_affects_function",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "protein_shape_affects_function",
+      "dst": "enzymes_lower_activation_energy",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mutation_changes_dna_sequence",
+      "dst": "some_mutations_are_neutral_or_beneficial",
+      "relation": "support",
+      "strength": 0.88,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "some_mutations_are_neutral_or_beneficial",
+      "dst": "all_mutations_are_harmful_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "protein_shape_affects_function",
+      "dst": "gene_to_trait_bridge",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mutation_changes_dna_sequence",
+      "dst": "gene_to_trait_bridge",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ribosome_translates_mrna",
+      "dst": "gene_to_trait_bridge",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "stomata_allow_carbon_dioxide_entry",
+      "dst": "carbon_from_co2_enters_plant_biomass",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "chloroplasts_are_sites_of_photosynthesis",
+      "dst": "photosynthesis_stores_light_energy_in_glucose",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "chloroplasts_are_sites_of_photosynthesis",
+      "dst": "carbon_from_co2_enters_plant_biomass",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "carbon_from_co2_enters_plant_biomass",
+      "dst": "plants_gain_most_mass_from_co2",
+      "relation": "support",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "plants_gain_most_mass_from_co2",
+      "dst": "plants_get_food_from_soil_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "photosynthesis_stores_light_energy_in_glucose",
+      "dst": "metabolism_to_activity_bridge",
+      "relation": "support",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mitochondria_are_sites_of_aerobic_respiration",
+      "dst": "cellular_respiration_produces_atp",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "oxygen_is_final_electron_acceptor",
+      "dst": "cellular_respiration_produces_atp",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "alveoli_have_large_surface_area",
+      "dst": "alveoli_enable_fast_oxygen_diffusion",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "alveoli_enable_fast_oxygen_diffusion",
+      "dst": "circulatory_system_delivers_oxygen_and_glucose",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "hemoglobin_binds_oxygen_reversibly",
+      "dst": "circulatory_system_delivers_oxygen_and_glucose",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "circulatory_system_delivers_oxygen_and_glucose",
+      "dst": "cellular_respiration_produces_atp",
+      "relation": "support",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "exercise_increases_atp_demand",
+      "dst": "exercise_increases_breathing_and_heart_rate",
+      "relation": "cause",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cellular_respiration_produces_atp",
+      "dst": "metabolism_to_activity_bridge",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "active_transport_requires_atp",
+      "dst": "metabolism_to_activity_bridge",
+      "relation": "support",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "exercise_increases_atp_demand",
+      "dst": "metabolism_to_activity_bridge",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "metabolism_to_activity_bridge",
+      "dst": "exercise_increases_breathing_and_heart_rate",
+      "relation": "support",
+      "strength": 0.91,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "alveoli_enable_fast_oxygen_diffusion",
+      "dst": "surface_exchange_bridge",
+      "relation": "support",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "heritable_variation_is_required_for_selection",
+      "dst": "population_trait_frequencies_change_over_generations",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "advantageous_traits_increase_reproductive_success",
+      "dst": "population_trait_frequencies_change_over_generations",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "population_trait_frequencies_change_over_generations",
+      "dst": "individuals_do_not_evolve_within_lifetime",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "individuals_do_not_evolve_within_lifetime",
+      "dst": "individuals_evolve_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "random_mutations_exist_before_antibiotics",
+      "dst": "some_mutations_reduce_antibiotic_susceptibility",
+      "relation": "support",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "some_mutations_reduce_antibiotic_susceptibility",
+      "dst": "antibiotic_exposure_selects_resistant_bacteria",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "random_mutations_exist_before_antibiotics",
+      "dst": "bacteria_become_resistant_because_they_need_to_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "antibiotic_exposure_selects_resistant_bacteria",
+      "dst": "bacteria_become_resistant_because_they_need_to_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "gene_to_trait_bridge",
+      "dst": "some_mutations_reduce_antibiotic_susceptibility",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "some_mutations_reduce_antibiotic_susceptibility",
+      "dst": "molecular_variation_to_evolution_bridge",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "antibiotic_exposure_selects_resistant_bacteria",
+      "dst": "molecular_variation_to_evolution_bridge",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "gene_to_trait_bridge",
+      "dst": "molecular_variation_to_evolution_bridge",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "molecular_variation_to_evolution_bridge",
+      "dst": "population_trait_frequencies_change_over_generations",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "heritable_variation_is_required_for_selection",
+      "dst": "molecular_variation_to_evolution_bridge",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mrsa_resistance_example",
+      "dst": "antibiotic_exposure_selects_resistant_bacteria",
+      "relation": "example_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "antibiotics_target_bacterial_cell_walls_or_ribosomes",
+      "dst": "antibiotics_kill_viruses_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "viruses_lack_bacterial_targets",
+      "dst": "antibiotics_kill_viruses_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "membrane_is_selectively_permeable",
+      "dst": "aquaporins_speed_osmosis_via_channels",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "osmosis_is_water_diffusion_across_membrane",
+      "dst": "aquaporins_speed_osmosis_via_channels",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "osmosis_is_water_diffusion_across_membrane",
+      "dst": "hypertonic_solution_causes_cell_shrinkage",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "membrane_is_selectively_permeable",
+      "dst": "hypertonic_solution_causes_cell_shrinkage",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "diffusion_moves_down_concentration_gradient",
+      "dst": "facilitated_diffusion_is_passive_via_proteins",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "membrane_is_selectively_permeable",
+      "dst": "facilitated_diffusion_is_passive_via_proteins",
+      "relation": "support",
+      "strength": 0.91,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "protein_shape_affects_function",
+      "dst": "enzyme_active_site_confers_specificity",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "enzymes_lower_activation_energy",
+      "dst": "enzyme_active_site_confers_specificity",
+      "relation": "support",
+      "strength": 0.88,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "mutation_changes_dna_sequence",
+      "dst": "silent_mutation_can_leave_protein_unchanged",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "some_mutations_are_neutral_or_beneficial",
+      "dst": "silent_mutation_can_leave_protein_unchanged",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "chloroplasts_are_sites_of_photosynthesis",
+      "dst": "oxygen_released_in_photosynthesis_comes_from_water",
+      "relation": "support",
+      "strength": 0.91,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "photosynthesis_stores_light_energy_in_glucose",
+      "dst": "oxygen_released_in_photosynthesis_comes_from_water",
+      "relation": "support",
+      "strength": 0.89,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "photosynthesis_stores_light_energy_in_glucose",
+      "dst": "plants_also_respire_to_make_atp",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cellular_respiration_produces_atp",
+      "dst": "plants_also_respire_to_make_atp",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "genetic_drift_can_change_allele_frequencies_by_chance",
+      "dst": "population_trait_frequencies_change_over_generations",
+      "relation": "support",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "transcription_copies_gene_to_mrna",
+      "dst": "gene_expression_changes_can_alter_phenotype",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "gene_expression_changes_can_alter_phenotype",
+      "dst": "gene_to_trait_bridge",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "circulatory_system_delivers_oxygen_and_glucose",
+      "dst": "gas_exchange_supports_but_does_not_replace_respiration",
+      "relation": "support",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cellular_respiration_produces_atp",
+      "dst": "gas_exchange_supports_but_does_not_replace_respiration",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "gas_exchange_supports_but_does_not_replace_respiration",
+      "dst": "metabolism_to_activity_bridge",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "aquaporins_speed_osmosis_via_channels",
+      "dst": "aquaporins_pump_water_using_atp_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "diffusion_moves_down_concentration_gradient",
+      "dst": "aquaporins_pump_water_using_atp_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "hypertonic_solution_causes_cell_shrinkage",
+      "dst": "hypertonic_solution_makes_cells_swell_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "osmosis_is_water_diffusion_across_membrane",
+      "dst": "hypertonic_solution_makes_cells_swell_false",
+      "relation": "contradict",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "facilitated_diffusion_is_passive_via_proteins",
+      "dst": "facilitated_diffusion_requires_atp_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "diffusion_moves_down_concentration_gradient",
+      "dst": "facilitated_diffusion_requires_atp_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "enzyme_active_site_confers_specificity",
+      "dst": "enzymes_bind_any_substrate_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "protein_shape_affects_function",
+      "dst": "enzymes_bind_any_substrate_false",
+      "relation": "contradict",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "silent_mutation_can_leave_protein_unchanged",
+      "dst": "every_mutation_changes_protein_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "some_mutations_are_neutral_or_beneficial",
+      "dst": "every_mutation_changes_protein_false",
+      "relation": "contradict",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ribosome_translates_mrna",
+      "dst": "translation_happens_in_nucleus_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "transcription_copies_gene_to_mrna",
+      "dst": "translation_happens_in_nucleus_false",
+      "relation": "contradict",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "oxygen_released_in_photosynthesis_comes_from_water",
+      "dst": "photosynthetic_oxygen_comes_from_co2_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "chloroplasts_are_sites_of_photosynthesis",
+      "dst": "photosynthetic_oxygen_comes_from_co2_false",
+      "relation": "contradict",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "plants_also_respire_to_make_atp",
+      "dst": "plants_do_not_respire_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cellular_respiration_produces_atp",
+      "dst": "plants_do_not_respire_false",
+      "relation": "contradict",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "genetic_drift_can_change_allele_frequencies_by_chance",
+      "dst": "all_evolutionary_change_is_selection_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "population_trait_frequencies_change_over_generations",
+      "dst": "all_evolutionary_change_is_selection_false",
+      "relation": "contradict",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "random_mutations_exist_before_antibiotics",
+      "dst": "antibiotic_need_creates_resistance_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "antibiotic_exposure_selects_resistant_bacteria",
+      "dst": "antibiotic_need_creates_resistance_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "gene_expression_changes_can_alter_phenotype",
+      "dst": "more_gene_expression_always_improves_trait_false",
+      "relation": "contradict",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "protein_shape_affects_function",
+      "dst": "more_gene_expression_always_improves_trait_false",
+      "relation": "contradict",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "gas_exchange_supports_but_does_not_replace_respiration",
+      "dst": "breathing_faster_directly_makes_atp_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "cellular_respiration_produces_atp",
+      "dst": "breathing_faster_directly_makes_atp_false",
+      "relation": "contradict",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "membrane_is_selectively_permeable",
+      "dst": "membrane_transport_pattern_hypothesis_summary",
+      "relation": "support",
+      "strength": 0.71,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "diffusion_moves_down_concentration_gradient",
+      "dst": "membrane_transport_pattern_hypothesis_summary",
+      "relation": "support",
+      "strength": 0.71,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "osmosis_is_water_diffusion_across_membrane",
+      "dst": "membrane_transport_pattern_hypothesis_summary",
+      "relation": "support",
+      "strength": 0.71,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "facilitated_diffusion_is_passive_via_proteins",
+      "dst": "membrane_transport_pattern_hypothesis_summary",
+      "relation": "support",
+      "strength": 0.71,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "active_transport_requires_atp",
+      "dst": "membrane_transport_pattern_hypothesis_summary",
+      "relation": "support",
+      "strength": 0.71,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "dna_stores_heritable_information",
+      "dst": "dna_expression_trait_hypothesis_summary",
+      "relation": "support",
+      "strength": 0.71,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "transcription_copies_gene_to_mrna",
+      "dst": "dna_expression_trait_hypothesis_summary",
+      "relation": "support",
+      "strength": 0.71,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ribosome_translates_mrna",
+      "dst": "dna_expression_trait_hypothesis_summary",
+      "relation": "support",
+      "strength": 0.71,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "protein_shape_affects_function",
+      "dst": "dna_expression_trait_hypothesis_summary",
+      "relation": "support",
+      "strength": 0.71,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "gene_expression_changes_can_alter_phenotype",
+      "dst": "dna_expression_trait_hypothesis_summary",
+      "relation": "support",
+      "strength": 0.71,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "gene_to_trait_bridge",
+      "dst": "dna_expression_trait_hypothesis_summary",
+      "relation": "support",
+      "strength": 0.71,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "stomata_allow_carbon_dioxide_entry",
+      "dst": "plant_carbon_growth_hypothesis_summary",
+      "relation": "support",
+      "strength": 0.71,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "photosynthesis_stores_light_energy_in_glucose",
+      "dst": "plant_carbon_growth_hypothesis_summary",
+      "relation": "support",
+      "strength": 0.71,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "carbon_from_co2_enters_plant_biomass",
+      "dst": "plant_carbon_growth_hypothesis_summary",
+      "relation": "support",
+      "strength": 0.71,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "plants_gain_most_mass_from_co2",
+      "dst": "plant_carbon_growth_hypothesis_summary",
+      "relation": "support",
+      "strength": 0.71,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "plants_also_respire_to_make_atp",
+      "dst": "plant_carbon_growth_hypothesis_summary",
+      "relation": "support",
+      "strength": 0.71,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "random_mutations_exist_before_antibiotics",
+      "dst": "resistance_evolution_hypothesis_summary",
+      "relation": "support",
+      "strength": 0.71,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "some_mutations_reduce_antibiotic_susceptibility",
+      "dst": "resistance_evolution_hypothesis_summary",
+      "relation": "support",
+      "strength": 0.71,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "antibiotic_exposure_selects_resistant_bacteria",
+      "dst": "resistance_evolution_hypothesis_summary",
+      "relation": "support",
+      "strength": 0.71,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "population_trait_frequencies_change_over_generations",
+      "dst": "resistance_evolution_hypothesis_summary",
+      "relation": "support",
+      "strength": 0.71,
+      "directed": true,
+      "metadata": {}
+    }
+  ]
+}

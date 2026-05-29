@@ -1,0 +1,10 @@
+streamlit>=1.35
+pyvis>=0.3.2
+pandas>=2.0
+numpy>=1.24
+
+# Needed for real local model runs through answerer_v2.py.
+# The UI can still run in Mock mode without llama-cpp-python.
+llama-cpp-python>=0.2.90
+torch>=2.0
+transformers>=4.40

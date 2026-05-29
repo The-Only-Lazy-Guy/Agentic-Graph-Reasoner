@@ -1,0 +1,125 @@
+{
+  "metadata": {
+    "topic": "physics",
+    "subtopic": "brendrian_heat_conduction",
+    "fictional": true,
+    "version": 1,
+    "purpose": "HELD-OUT EVAL graph. Brendrian rods carry heat via a fictional fourth-power conduction law modulated by a density coefficient. Decide whether a rod overheats. Solvable purely by reading the graph; no real-physics equivalent in pretraining."
+  },
+  "nodes": [
+    {
+      "id": "brendrian_hub",
+      "text": "Brendrian rods are a fictional class of conducting solids whose steady-state heat flux scales with the FOURTH power of the temperature gradient (not the first power, as in Fourier's law) and is modulated by a density-dependent coefficient. A rod is said to 'overheat' when its computed flux equals or exceeds a fixed safe-flux threshold.",
+      "node_type": "summary",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "brendrian_physics"}
+    },
+    {
+      "id": "brendrian_flux_formula",
+      "text": "Heat flux: q_b = (lambda_b / 4) * (dT/dx)^4 * (1 + beta_b * (rho - rho_ref)). Here dT/dx is the temperature gradient in K/m, rho is the rod density in kg/m^3, rho_ref = 5000 kg/m^3 is the reference density, lambda_b is the Brendrian conductivity, and beta_b is the Brendrian density coefficient.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {"topic": "brendrian_physics"}
+    },
+    {
+      "id": "brendrian_conductivity_value",
+      "text": "Brendrian conductivity: lambda_b = 2.0 * 10^-4 W*m^2/K^4. This is a universal constant for all Brendrian rods in this framework.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {"topic": "brendrian_physics"}
+    },
+    {
+      "id": "brendrian_density_coeff_value",
+      "text": "Brendrian density coefficient: beta_b = 2.0 * 10^-4 per (kg/m^3). Heat flux rises linearly with density above rho_ref and falls linearly below it.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {"topic": "brendrian_physics"}
+    },
+    {
+      "id": "brendrian_safe_flux_value",
+      "text": "Safe-flux threshold: q_safe = 1.0 * 10^5 W/m^2. A rod overheats when q_b >= q_safe; the rod is safe when q_b < q_safe.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {"topic": "brendrian_physics"}
+    },
+    {
+      "id": "brendrian_fourth_power_note",
+      "text": "Crucially, the gradient enters as (dT/dx)^4, NOT linearly. Doubling the gradient multiplies the flux by 16, not by 2. This makes Brendrian rods extremely sensitive to large gradients.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {"topic": "brendrian_physics"}
+    },
+    {
+      "id": "brendrian_step1_density_factor",
+      "text": "Step 1 (density factor): evaluate (1 + beta_b * (rho - rho_ref)) = (1 + 2.0e-4 * (rho - 5000)). At rho = 5000 kg/m^3 the factor is 1; at rho = 7500 kg/m^3 the factor is 1.5; at rho = 2500 kg/m^3 it is 0.5.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {"topic": "brendrian_physics"}
+    },
+    {
+      "id": "brendrian_step2_flux",
+      "text": "Step 2 (flux): substitute into q_b = (lambda_b/4) * (dT/dx)^4 * density_factor. lambda_b/4 = 5.0 * 10^-5 W*m^2/K^4. Evaluate (dT/dx)^4 numerically first, then multiply by the density factor.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {"topic": "brendrian_physics"}
+    },
+    {
+      "id": "brendrian_step3_compare",
+      "text": "Step 3 (overheat decision): compare q_b to q_safe = 1.0e5 W/m^2. If q_b >= q_safe, the rod overheats; otherwise the rod is safe at this gradient and density.",
+      "node_type": "fact",
+      "confidence": 1.0,
+      "importance": 0.9,
+      "metadata": {"topic": "brendrian_physics"}
+    },
+    {
+      "id": "brendrian_worked_example",
+      "text": "Worked example. Inputs: rho = 5000 kg/m^3, dT/dx = 30 K/m.\nStep 1: density factor = 1 + 2.0e-4 * (5000 - 5000) = 1.\nStep 2: q_b = 5.0e-5 * (30)^4 * 1 = 5.0e-5 * 810000 = 40.5 W/m^2.\nStep 3: 40.5 < 1.0e5, so no overheat.\nVerdict: SAFE.",
+      "node_type": "example",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "brendrian_physics"}
+    },
+    {
+      "id": "treat_as_fourier_linear_false",
+      "text": "MISCONCEPTION: 'use the Fourier formula q = lambda * dT/dx with lambda = lambda_b'. This is wrong twice over. (a) The gradient enters as the FOURTH power in Brendrian rods, not linearly. (b) Fourier conduction has no density-modulation term; Brendrian flux depends on rho through beta_b. Substituting Fourier gives an answer that is orders of magnitude off for realistic gradients.",
+      "node_type": "claim",
+      "confidence": 0.05,
+      "importance": 0.85,
+      "metadata": {"topic": "brendrian_physics", "kind": "misconception"}
+    },
+    {
+      "id": "brendrian_complete_summary",
+      "text": "Brendrian overheat analysis. Constants: lambda_b = 2.0e-4 W*m^2/K^4, beta_b = 2.0e-4/(kg/m^3), rho_ref = 5000 kg/m^3, q_safe = 1.0e5 W/m^2. Formula: q_b = (lambda_b/4) * (dT/dx)^4 * (1 + beta_b * (rho - rho_ref)). Overheats iff q_b >= q_safe.",
+      "node_type": "summary",
+      "confidence": 1.0,
+      "importance": 0.95,
+      "metadata": {"topic": "brendrian_physics"}
+    }
+  ],
+  "edges": [
+    {"src": "brendrian_flux_formula", "dst": "brendrian_hub", "relation": "support", "strength": 0.92, "directed": true, "metadata": {}},
+    {"src": "brendrian_fourth_power_note", "dst": "brendrian_flux_formula", "relation": "support", "strength": 0.92, "directed": true, "metadata": {}},
+    {"src": "brendrian_conductivity_value", "dst": "brendrian_flux_formula", "relation": "refine", "strength": 0.92, "directed": true, "metadata": {}},
+    {"src": "brendrian_density_coeff_value", "dst": "brendrian_flux_formula", "relation": "refine", "strength": 0.92, "directed": true, "metadata": {}},
+    {"src": "brendrian_safe_flux_value", "dst": "brendrian_hub", "relation": "support", "strength": 0.92, "directed": true, "metadata": {}},
+    {"src": "brendrian_step1_density_factor", "dst": "brendrian_density_coeff_value", "relation": "example_of", "strength": 0.92, "directed": true, "metadata": {}},
+    {"src": "brendrian_step2_flux", "dst": "brendrian_flux_formula", "relation": "example_of", "strength": 0.92, "directed": true, "metadata": {}},
+    {"src": "brendrian_step3_compare", "dst": "brendrian_safe_flux_value", "relation": "example_of", "strength": 0.92, "directed": true, "metadata": {}},
+    {"src": "brendrian_step2_flux", "dst": "brendrian_step1_density_factor", "relation": "support", "strength": 0.92, "directed": true, "metadata": {}},
+    {"src": "brendrian_step3_compare", "dst": "brendrian_step2_flux", "relation": "support", "strength": 0.92, "directed": true, "metadata": {}},
+    {"src": "brendrian_worked_example", "dst": "brendrian_step1_density_factor", "relation": "example_of", "strength": 0.92, "directed": true, "metadata": {}},
+    {"src": "brendrian_worked_example", "dst": "brendrian_step2_flux", "relation": "example_of", "strength": 0.92, "directed": true, "metadata": {}},
+    {"src": "brendrian_worked_example", "dst": "brendrian_step3_compare", "relation": "example_of", "strength": 0.92, "directed": true, "metadata": {}},
+    {"src": "brendrian_flux_formula", "dst": "treat_as_fourier_linear_false", "relation": "contradict", "strength": 0.92, "directed": true, "metadata": {}},
+    {"src": "brendrian_complete_summary", "dst": "brendrian_hub", "relation": "part_of", "strength": 0.92, "directed": true, "metadata": {}},
+    {"src": "brendrian_step3_compare", "dst": "brendrian_complete_summary", "relation": "support", "strength": 0.92, "directed": true, "metadata": {}}
+  ]
+}

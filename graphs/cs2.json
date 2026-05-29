@@ -1,0 +1,2270 @@
+{
+  "metadata": {
+    "title": "Computer science applied graph (gold, true summary semantics)",
+    "relation_convention": {
+      "part_of": "child -> parent hub",
+      "example_of": "example -> concept",
+      "support": "evidence/mechanism -> claim",
+      "contradict": "source claim -> target claim",
+      "refine": "more specific statement -> broader statement",
+      "cause": "cause -> effect",
+      "depend": "prerequisite concept -> dependent concept"
+    },
+    "notes": [
+      "Hub nodes are structural containers only and are not summary nodes.",
+      "Summary nodes should be created only when a mature component can be compressed into one reusable language node.",
+      "Several low-confidence hypothesis nodes are intentionally retained so the controller can learn when to keep, refine, or overturn tentative ideas.",
+      "False or overgeneralized claims remain in the graph with low confidence to support resolve_conflict supervision.",
+      "Branching support patterns are preferred over narrow chains: many claims support multiple downstream consequences or tradeoffs.",
+      "Cross-cluster bridge opportunities are intentionally left partially incomplete so create_bridge and link_nodes remain meaningful tasks."
+    ],
+    "source_note": "Gold supervision graph for routing/edit tasks over databases, networking, graphics, HCI, information retrieval, and compression. Structural hubs are hubs rather than summaries. The graph includes accepted principles, misconceptions, and tentative low-confidence hypotheses to supervise add/update/no_op/resolve decisions under uncertainty.",
+    "gold_version": "v2_true_summary_semantics_hypothesis_aware"
+  },
+  "nodes": [
+    {
+      "id": "cs_applied_hub",
+      "text": "This graph covers applied computer science topics in data, communication, interaction, media, and retrieval.",
+      "node_type": "hub",
+      "confidence": 1.0,
+      "importance": 1.0,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "global"
+      }
+    },
+    {
+      "id": "databases_hub",
+      "text": "Databases study data organization, constraints, querying, and efficient access.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "databases"
+      }
+    },
+    {
+      "id": "networking_hub",
+      "text": "Networking studies communication across machines, protocols, delay, and naming.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "networking"
+      }
+    },
+    {
+      "id": "graphics_hub",
+      "text": "Computer graphics studies digital images, rendering, visibility, and sampling.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "graphics"
+      }
+    },
+    {
+      "id": "hci_hub",
+      "text": "Human-computer interaction studies usability, feedback, perception, and interface design.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "hci"
+      }
+    },
+    {
+      "id": "ir_hub",
+      "text": "Information retrieval studies search indexes, ranking signals, and relevance tradeoffs.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "information_retrieval"
+      }
+    },
+    {
+      "id": "compression_hub",
+      "text": "Compression studies compact data representation with or without exact reconstruction.",
+      "node_type": "hub",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "compression"
+      }
+    },
+    {
+      "id": "bridges_hub",
+      "text": "Bridge insights connect storage, retrieval, delivery, media, and user experience.",
+      "node_type": "hub",
+      "confidence": 0.98,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "bridges"
+      }
+    },
+    {
+      "id": "db_relational_tables",
+      "text": "The relational model organizes data into tables with rows and columns.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "databases",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "db_primary_key_unique",
+      "text": "A primary key uniquely identifies a row in a table.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "databases",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "db_foreign_key_reference",
+      "text": "A foreign key links a row to a key value in another table.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "databases",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "db_normalization_reduces_redundancy",
+      "text": "Normalization reduces redundant data across related tables.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "databases",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "db_redundancy_causes_update_anomalies",
+      "text": "Redundant data can cause update anomalies when copies become inconsistent.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "databases",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "db_index_speeds_selective_lookup",
+      "text": "An index can speed selective lookups by avoiding a full table scan.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "databases",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "db_index_always_faster_false",
+      "text": "Adding an index always makes every query faster.",
+      "node_type": "claim",
+      "confidence": 0.02,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "databases",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "db_btree_example",
+      "text": "A B-tree is a common database index structure used for ordered access.",
+      "node_type": "example",
+      "confidence": 0.98,
+      "importance": 0.84,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "databases",
+        "kind": "example"
+      }
+    },
+    {
+      "id": "net_packet_switching",
+      "text": "Packet switching sends data in discrete packets that share network links.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "networking",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "net_tcp_reliable_ordered",
+      "text": "TCP provides reliable, ordered byte delivery between endpoints.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "networking",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "net_udp_no_guarantee",
+      "text": "UDP does not guarantee delivery, ordering, or duplicate suppression.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "networking",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "net_dns_name_resolution",
+      "text": "DNS maps domain names to network resource records such as IP addresses.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "networking",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "net_latency_bandwidth_distinct",
+      "text": "Latency and bandwidth are different properties of a network path.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "networking",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "net_congestion_causes_delay_loss",
+      "text": "Congestion can increase delay and trigger packet loss.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "networking",
+        "kind": "cause_effect",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "net_higher_bandwidth_lower_latency_false",
+      "text": "Higher bandwidth automatically means lower latency.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "networking",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "net_cdn_example",
+      "text": "A content delivery network caches content closer to users to reduce response delay.",
+      "node_type": "example",
+      "confidence": 0.98,
+      "importance": 0.85,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "networking",
+        "kind": "example"
+      }
+    },
+    {
+      "id": "gfx_raster_pixels",
+      "text": "Raster graphics represent an image as a grid of pixels.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "graphics",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "gfx_vector_shapes",
+      "text": "Vector graphics represent images with geometric primitives and formulas.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "graphics",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "gfx_aliasing_under_sampling",
+      "text": "Aliasing appears when image sampling is too coarse for the visual detail present.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "graphics",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "gfx_antialiasing_reduces_jaggies",
+      "text": "Anti-aliasing reduces jagged edge artifacts created by discrete sampling.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "graphics",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "gfx_zbuffer_visibility",
+      "text": "A Z-buffer keeps the closest visible fragment at each screen position.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "graphics",
+        "kind": "mechanism",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "gfx_texture_filtering_smooths_sampling",
+      "text": "Texture filtering reduces visual artifacts when sampling images onto surfaces.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "graphics",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "gfx_more_pixels_solve_aliasing_false",
+      "text": "Increasing pixel count alone solves aliasing artifacts.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "graphics",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "gfx_svg_example",
+      "text": "An SVG icon is a typical example of vector graphics.",
+      "node_type": "example",
+      "confidence": 0.98,
+      "importance": 0.83,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "graphics",
+        "kind": "example"
+      }
+    },
+    {
+      "id": "hci_affordance_signals_action",
+      "text": "An affordance signals what action a user can take with an interface element.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "hci",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "hci_feedback_confirms_result",
+      "text": "Feedback helps users understand the result of their actions.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "hci",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "hci_fitts_law_targets",
+      "text": "Larger and nearer targets are generally faster to acquire under Fitts's law.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "hci",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "hci_consistency_reduces_learning_cost",
+      "text": "Consistent interface patterns reduce learning cost and user error.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "hci",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "hci_usability_testing_finds_real_problems",
+      "text": "Usability testing with representative users reveals problems that designers may miss.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "hci",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "hci_high_contrast_improves_legibility",
+      "text": "Higher contrast often improves legibility for visual text and controls.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "hci",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "hci_expert_review_alone_enough_false",
+      "text": "Expert review alone is enough to establish good usability.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "hci",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "hci_button_highlight_example",
+      "text": "Highlighting a pressed button is an example of interface feedback.",
+      "node_type": "example",
+      "confidence": 0.98,
+      "importance": 0.83,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "hci",
+        "kind": "example"
+      }
+    },
+    {
+      "id": "ir_inverted_index_postings",
+      "text": "An inverted index maps each term to a postings list of matching documents.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "information_retrieval",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "ir_tfidf_specificity",
+      "text": "TF-IDF increases the weight of terms that are informative for distinguishing documents.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "information_retrieval",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "ir_precision_definition",
+      "text": "Precision is the fraction of retrieved items that are relevant.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "information_retrieval",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "ir_recall_definition",
+      "text": "Recall is the fraction of relevant items that are retrieved.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "information_retrieval",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "ir_query_expansion_recall_tradeoff",
+      "text": "Query expansion can improve recall while reducing precision.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "information_retrieval",
+        "kind": "tradeoff",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "ir_stemming_merges_variants",
+      "text": "Stemming merges related word forms to broaden matching.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "information_retrieval",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "ir_recall_improves_precision_false",
+      "text": "Improving recall automatically improves precision.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "information_retrieval",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "ir_search_postings_example",
+      "text": "A search engine term lookup over postings lists is an example of inverted indexing.",
+      "node_type": "example",
+      "confidence": 0.98,
+      "importance": 0.84,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "information_retrieval",
+        "kind": "example"
+      }
+    },
+    {
+      "id": "comp_lossless_exact_reconstruction",
+      "text": "Lossless compression preserves all original information for exact reconstruction.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "compression",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "comp_lossy_discards_information",
+      "text": "Lossy compression reduces size by discarding some information.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "compression",
+        "kind": "definition",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "comp_entropy_limits_lossless",
+      "text": "Entropy places a theoretical limit on average lossless compression for a source model.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "compression",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "comp_huffman_short_codes",
+      "text": "Huffman coding gives shorter codewords to more frequent symbols.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "compression",
+        "kind": "mechanism",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "comp_run_length_repetition",
+      "text": "Run-length encoding works well when the same symbol repeats many times.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "compression",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "comp_png_lossless_example",
+      "text": "PNG is a common example of lossless image compression.",
+      "node_type": "example",
+      "confidence": 0.98,
+      "importance": 0.84,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "compression",
+        "kind": "example"
+      }
+    },
+    {
+      "id": "comp_compression_never_changes_quality_false",
+      "text": "Compression never changes data quality.",
+      "node_type": "claim",
+      "confidence": 0.03,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "compression",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "comp_jpeg_example",
+      "text": "JPEG is a common example of lossy image compression.",
+      "node_type": "example",
+      "confidence": 0.98,
+      "importance": 0.84,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "compression",
+        "kind": "example"
+      }
+    },
+    {
+      "id": "bridge_inverted_index_specialized_db_index",
+      "text": "An inverted index is a specialized indexing structure for text retrieval over document collections.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.97,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "bridge_network_latency_affects_responsiveness",
+      "text": "Network latency directly affects perceived responsiveness in interactive online applications.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "bridge_image_compression_supports_delivery",
+      "text": "Image compression enables faster media delivery by reducing transmitted data size.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "bridge_ranking_tradeoff_shapes_search_experience",
+      "text": "Precision and recall tradeoffs shape user experience in search interfaces.",
+      "node_type": "claim",
+      "confidence": 0.99,
+      "importance": 0.98,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "bridges",
+        "kind": "bridge_insight",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "db_covering_index_avoids_row_fetches",
+      "text": "A covering index can answer some queries without fetching full base-table rows.",
+      "node_type": "claim",
+      "confidence": 0.82,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "databases",
+        "kind": "hypothesis",
+        "status": "tentative",
+        "evidence_needed": true
+      }
+    },
+    {
+      "id": "db_indexes_trade_read_speed_for_write_cost",
+      "text": "Additional indexes can speed reads but may slow writes because inserts, deletes, and updates must maintain index entries.",
+      "node_type": "claim",
+      "confidence": 0.76,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "databases",
+        "kind": "hypothesis",
+        "status": "tentative",
+        "evidence_needed": true
+      }
+    },
+    {
+      "id": "db_denormalization_can_reduce_join_cost",
+      "text": "Denormalization can reduce join cost for read-heavy workloads, but it increases redundancy and consistency risk.",
+      "node_type": "claim",
+      "confidence": 0.84,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "databases",
+        "kind": "tradeoff",
+        "status": "accepted_low_conf"
+      }
+    },
+    {
+      "id": "db_join_without_supporting_index_can_be_expensive",
+      "text": "Joins on foreign-key relationships can become expensive when supporting indexes are absent.",
+      "node_type": "claim",
+      "confidence": 0.87,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "databases",
+        "kind": "fact",
+        "status": "accepted_low_conf"
+      }
+    },
+    {
+      "id": "db_denormalization_always_bad_false",
+      "text": "Denormalization is always a design mistake and should never be used.",
+      "node_type": "claim",
+      "confidence": 0.09,
+      "importance": 0.91,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "databases",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "net_packet_loss_can_reduce_tcp_throughput",
+      "text": "Packet loss can reduce TCP throughput because retransmission and congestion control limit the sending rate.",
+      "node_type": "claim",
+      "confidence": 0.91,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "networking",
+        "kind": "cause_effect",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "net_quic_reduces_transport_head_of_line",
+      "text": "Using multiple streams over QUIC can reduce transport-level head-of-line blocking compared with a single ordered byte stream.",
+      "node_type": "claim",
+      "confidence": 0.78,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "networking",
+        "kind": "hypothesis",
+        "status": "tentative",
+        "evidence_needed": true
+      }
+    },
+    {
+      "id": "net_caching_reduces_origin_load",
+      "text": "Caching popular responses closer to clients can reduce origin load and improve perceived performance.",
+      "node_type": "claim",
+      "confidence": 0.9,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "networking",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "net_reliability_can_be_built_above_udp",
+      "text": "Applications can add their own reliability mechanisms above UDP when the transport itself does not guarantee delivery.",
+      "node_type": "claim",
+      "confidence": 0.75,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "networking",
+        "kind": "hypothesis",
+        "status": "tentative",
+        "evidence_needed": true
+      }
+    },
+    {
+      "id": "net_only_tcp_can_support_reliable_apps_false",
+      "text": "Only TCP can be used to build reliable applications.",
+      "node_type": "claim",
+      "confidence": 0.08,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "networking",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "gfx_mipmaps_reduce_minification_aliasing",
+      "text": "Mipmaps reduce minification artifacts by sampling from prefiltered lower-resolution texture levels.",
+      "node_type": "claim",
+      "confidence": 0.8,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "graphics",
+        "kind": "hypothesis",
+        "status": "tentative",
+        "evidence_needed": true
+      }
+    },
+    {
+      "id": "gfx_supersampling_trades_cost_for_quality",
+      "text": "Supersampling improves image quality by taking more samples, but it increases computational cost.",
+      "node_type": "claim",
+      "confidence": 0.9,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "graphics",
+        "kind": "tradeoff",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "gfx_alpha_blending_order_affects_result",
+      "text": "Alpha blending can depend on draw order because semi-transparent fragments do not combine like opaque visibility tests.",
+      "node_type": "claim",
+      "confidence": 0.85,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "graphics",
+        "kind": "fact",
+        "status": "accepted_low_conf"
+      }
+    },
+    {
+      "id": "gfx_resolution_increase_reduces_but_not_eliminates_aliasing",
+      "text": "Raising resolution can reduce visible aliasing, but it does not eliminate sampling problems in general.",
+      "node_type": "claim",
+      "confidence": 0.86,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "graphics",
+        "kind": "distinction",
+        "status": "accepted_low_conf"
+      }
+    },
+    {
+      "id": "hci_progressive_disclosure_reduces_overload",
+      "text": "Progressive disclosure can reduce cognitive overload by revealing advanced options only when needed.",
+      "node_type": "claim",
+      "confidence": 0.79,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "hci",
+        "kind": "hypothesis",
+        "status": "tentative",
+        "evidence_needed": true
+      }
+    },
+    {
+      "id": "hci_visibility_of_system_status",
+      "text": "Interfaces should keep users informed about what the system is doing and whether an action is still in progress.",
+      "node_type": "claim",
+      "confidence": 0.9,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "hci",
+        "kind": "principle",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "hci_latency_disrupts_action_feedback_loop",
+      "text": "Excessive latency can disrupt the action-feedback loop and make an interface feel unresponsive even when functionality is correct.",
+      "node_type": "claim",
+      "confidence": 0.82,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "hci",
+        "kind": "hypothesis",
+        "status": "tentative",
+        "evidence_needed": true
+      }
+    },
+    {
+      "id": "hci_more_options_always_better_false",
+      "text": "Giving users more visible options always improves usability.",
+      "node_type": "claim",
+      "confidence": 0.08,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "hci",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    },
+    {
+      "id": "ir_clicks_are_noisy_relevance_signals",
+      "text": "Click data can be a noisy relevance signal because position bias and presentation effects influence what users choose.",
+      "node_type": "claim",
+      "confidence": 0.82,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "information_retrieval",
+        "kind": "hypothesis",
+        "status": "tentative",
+        "evidence_needed": true
+      }
+    },
+    {
+      "id": "ir_stopword_removal_can_hurt_phrase_queries",
+      "text": "Removing stopwords can hurt phrase queries or titles where the omitted words contribute meaning.",
+      "node_type": "claim",
+      "confidence": 0.77,
+      "importance": 0.93,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "information_retrieval",
+        "kind": "hypothesis",
+        "status": "tentative",
+        "evidence_needed": true
+      }
+    },
+    {
+      "id": "ir_bm25_saturates_term_frequency",
+      "text": "BM25 uses diminishing returns for repeated term frequency instead of rewarding every repetition linearly.",
+      "node_type": "claim",
+      "confidence": 0.85,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "information_retrieval",
+        "kind": "fact",
+        "status": "accepted_low_conf"
+      }
+    },
+    {
+      "id": "ir_index_pruning_can_reduce_recall",
+      "text": "Aggressive index pruning can reduce latency or storage but may lower recall by removing low-weight matches.",
+      "node_type": "claim",
+      "confidence": 0.81,
+      "importance": 0.94,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "information_retrieval",
+        "kind": "tradeoff",
+        "status": "tentative",
+        "evidence_needed": true
+      }
+    },
+    {
+      "id": "comp_transform_coding_concentrates_energy",
+      "text": "Transform coding can concentrate signal energy into a smaller set of coefficients that are easier to compress.",
+      "node_type": "claim",
+      "confidence": 0.79,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "compression",
+        "kind": "hypothesis",
+        "status": "tentative",
+        "evidence_needed": true
+      }
+    },
+    {
+      "id": "comp_quantization_trades_rate_for_distortion",
+      "text": "Quantization trades bitrate for distortion by coarsening represented values.",
+      "node_type": "claim",
+      "confidence": 0.9,
+      "importance": 0.96,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "compression",
+        "kind": "tradeoff",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "comp_temporal_redundancy_supports_video_compression",
+      "text": "Video compression exploits temporal redundancy between nearby frames in addition to spatial redundancy within a frame.",
+      "node_type": "claim",
+      "confidence": 0.89,
+      "importance": 0.95,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "compression",
+        "kind": "fact",
+        "status": "accepted"
+      }
+    },
+    {
+      "id": "comp_stronger_compression_always_better_false",
+      "text": "Stronger compression is always better because the smallest file is the best outcome.",
+      "node_type": "claim",
+      "confidence": 0.09,
+      "importance": 0.92,
+      "metadata": {
+        "topic": "computer_science_applied",
+        "cluster": "compression",
+        "kind": "misconception",
+        "polarity": "false"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "src": "databases_hub",
+      "dst": "cs_applied_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "networking_hub",
+      "dst": "cs_applied_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "graphics_hub",
+      "dst": "cs_applied_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "hci_hub",
+      "dst": "cs_applied_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ir_hub",
+      "dst": "cs_applied_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "compression_hub",
+      "dst": "cs_applied_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bridges_hub",
+      "dst": "cs_applied_hub",
+      "relation": "part_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "db_relational_tables",
+      "dst": "databases_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "db_primary_key_unique",
+      "dst": "databases_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "db_foreign_key_reference",
+      "dst": "databases_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "db_normalization_reduces_redundancy",
+      "dst": "databases_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "db_redundancy_causes_update_anomalies",
+      "dst": "databases_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "db_index_speeds_selective_lookup",
+      "dst": "databases_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "db_index_always_faster_false",
+      "dst": "databases_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "db_btree_example",
+      "dst": "databases_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "net_packet_switching",
+      "dst": "networking_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "net_tcp_reliable_ordered",
+      "dst": "networking_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "net_udp_no_guarantee",
+      "dst": "networking_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "net_dns_name_resolution",
+      "dst": "networking_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "net_latency_bandwidth_distinct",
+      "dst": "networking_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "net_congestion_causes_delay_loss",
+      "dst": "networking_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "net_higher_bandwidth_lower_latency_false",
+      "dst": "networking_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "net_cdn_example",
+      "dst": "networking_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "gfx_raster_pixels",
+      "dst": "graphics_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "gfx_vector_shapes",
+      "dst": "graphics_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "gfx_aliasing_under_sampling",
+      "dst": "graphics_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "gfx_antialiasing_reduces_jaggies",
+      "dst": "graphics_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "gfx_zbuffer_visibility",
+      "dst": "graphics_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "gfx_texture_filtering_smooths_sampling",
+      "dst": "graphics_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "gfx_more_pixels_solve_aliasing_false",
+      "dst": "graphics_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "gfx_svg_example",
+      "dst": "graphics_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "hci_affordance_signals_action",
+      "dst": "hci_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "hci_feedback_confirms_result",
+      "dst": "hci_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "hci_fitts_law_targets",
+      "dst": "hci_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "hci_consistency_reduces_learning_cost",
+      "dst": "hci_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "hci_usability_testing_finds_real_problems",
+      "dst": "hci_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "hci_high_contrast_improves_legibility",
+      "dst": "hci_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "hci_expert_review_alone_enough_false",
+      "dst": "hci_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "hci_button_highlight_example",
+      "dst": "hci_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ir_inverted_index_postings",
+      "dst": "ir_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ir_tfidf_specificity",
+      "dst": "ir_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ir_precision_definition",
+      "dst": "ir_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ir_recall_definition",
+      "dst": "ir_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ir_query_expansion_recall_tradeoff",
+      "dst": "ir_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ir_stemming_merges_variants",
+      "dst": "ir_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ir_recall_improves_precision_false",
+      "dst": "ir_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ir_search_postings_example",
+      "dst": "ir_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "comp_lossless_exact_reconstruction",
+      "dst": "compression_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "comp_lossy_discards_information",
+      "dst": "compression_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "comp_entropy_limits_lossless",
+      "dst": "compression_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "comp_huffman_short_codes",
+      "dst": "compression_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "comp_run_length_repetition",
+      "dst": "compression_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "comp_png_lossless_example",
+      "dst": "compression_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "comp_compression_never_changes_quality_false",
+      "dst": "compression_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "comp_jpeg_example",
+      "dst": "compression_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bridge_inverted_index_specialized_db_index",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bridge_network_latency_affects_responsiveness",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bridge_image_compression_supports_delivery",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "bridge_ranking_tradeoff_shapes_search_experience",
+      "dst": "bridges_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "db_primary_key_unique",
+      "dst": "db_foreign_key_reference",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "db_redundancy_causes_update_anomalies",
+      "dst": "db_normalization_reduces_redundancy",
+      "relation": "support",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "db_index_speeds_selective_lookup",
+      "dst": "db_index_always_faster_false",
+      "relation": "contradict",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "db_btree_example",
+      "dst": "db_index_speeds_selective_lookup",
+      "relation": "example_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "db_relational_tables",
+      "dst": "db_normalization_reduces_redundancy",
+      "relation": "depend",
+      "strength": 0.88,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "net_packet_switching",
+      "dst": "net_congestion_causes_delay_loss",
+      "relation": "support",
+      "strength": 0.89,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "net_latency_bandwidth_distinct",
+      "dst": "net_higher_bandwidth_lower_latency_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "net_congestion_causes_delay_loss",
+      "dst": "net_higher_bandwidth_lower_latency_false",
+      "relation": "contradict",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "net_cdn_example",
+      "dst": "bridge_network_latency_affects_responsiveness",
+      "relation": "example_of",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "gfx_aliasing_under_sampling",
+      "dst": "gfx_antialiasing_reduces_jaggies",
+      "relation": "support",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "gfx_antialiasing_reduces_jaggies",
+      "dst": "gfx_more_pixels_solve_aliasing_false",
+      "relation": "contradict",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "gfx_texture_filtering_smooths_sampling",
+      "dst": "gfx_more_pixels_solve_aliasing_false",
+      "relation": "contradict",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "gfx_svg_example",
+      "dst": "gfx_vector_shapes",
+      "relation": "example_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "gfx_raster_pixels",
+      "dst": "gfx_aliasing_under_sampling",
+      "relation": "depend",
+      "strength": 0.86,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "hci_button_highlight_example",
+      "dst": "hci_feedback_confirms_result",
+      "relation": "example_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "hci_usability_testing_finds_real_problems",
+      "dst": "hci_expert_review_alone_enough_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "hci_consistency_reduces_learning_cost",
+      "dst": "hci_expert_review_alone_enough_false",
+      "relation": "contradict",
+      "strength": 0.84,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ir_search_postings_example",
+      "dst": "ir_inverted_index_postings",
+      "relation": "example_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ir_tfidf_specificity",
+      "dst": "bridge_ranking_tradeoff_shapes_search_experience",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ir_precision_definition",
+      "dst": "ir_query_expansion_recall_tradeoff",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ir_recall_definition",
+      "dst": "ir_query_expansion_recall_tradeoff",
+      "relation": "support",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ir_query_expansion_recall_tradeoff",
+      "dst": "ir_recall_improves_precision_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ir_stemming_merges_variants",
+      "dst": "ir_query_expansion_recall_tradeoff",
+      "relation": "refine",
+      "strength": 0.82,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "comp_png_lossless_example",
+      "dst": "comp_lossless_exact_reconstruction",
+      "relation": "example_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "comp_jpeg_example",
+      "dst": "comp_lossy_discards_information",
+      "relation": "example_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "comp_huffman_short_codes",
+      "dst": "comp_entropy_limits_lossless",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "comp_lossy_discards_information",
+      "dst": "comp_compression_never_changes_quality_false",
+      "relation": "contradict",
+      "strength": 0.99,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "db_index_speeds_selective_lookup",
+      "dst": "bridge_inverted_index_specialized_db_index",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ir_inverted_index_postings",
+      "dst": "bridge_inverted_index_specialized_db_index",
+      "relation": "support",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "net_latency_bandwidth_distinct",
+      "dst": "bridge_network_latency_affects_responsiveness",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "hci_feedback_confirms_result",
+      "dst": "bridge_network_latency_affects_responsiveness",
+      "relation": "support",
+      "strength": 0.83,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "comp_lossy_discards_information",
+      "dst": "bridge_image_compression_supports_delivery",
+      "relation": "support",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "net_packet_switching",
+      "dst": "bridge_image_compression_supports_delivery",
+      "relation": "support",
+      "strength": 0.86,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "gfx_raster_pixels",
+      "dst": "bridge_image_compression_supports_delivery",
+      "relation": "support",
+      "strength": 0.78,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ir_precision_definition",
+      "dst": "bridge_ranking_tradeoff_shapes_search_experience",
+      "relation": "support",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ir_recall_definition",
+      "dst": "bridge_ranking_tradeoff_shapes_search_experience",
+      "relation": "support",
+      "strength": 0.93,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "hci_usability_testing_finds_real_problems",
+      "dst": "bridge_ranking_tradeoff_shapes_search_experience",
+      "relation": "support",
+      "strength": 0.81,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "db_covering_index_avoids_row_fetches",
+      "dst": "databases_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "db_indexes_trade_read_speed_for_write_cost",
+      "dst": "databases_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "db_denormalization_can_reduce_join_cost",
+      "dst": "databases_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "db_join_without_supporting_index_can_be_expensive",
+      "dst": "databases_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "db_denormalization_always_bad_false",
+      "dst": "databases_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "net_packet_loss_can_reduce_tcp_throughput",
+      "dst": "networking_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "net_quic_reduces_transport_head_of_line",
+      "dst": "networking_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "net_caching_reduces_origin_load",
+      "dst": "networking_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "net_reliability_can_be_built_above_udp",
+      "dst": "networking_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "net_only_tcp_can_support_reliable_apps_false",
+      "dst": "networking_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "gfx_mipmaps_reduce_minification_aliasing",
+      "dst": "graphics_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "gfx_supersampling_trades_cost_for_quality",
+      "dst": "graphics_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "gfx_alpha_blending_order_affects_result",
+      "dst": "graphics_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "gfx_resolution_increase_reduces_but_not_eliminates_aliasing",
+      "dst": "graphics_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "hci_progressive_disclosure_reduces_overload",
+      "dst": "hci_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "hci_visibility_of_system_status",
+      "dst": "hci_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "hci_latency_disrupts_action_feedback_loop",
+      "dst": "hci_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "hci_more_options_always_better_false",
+      "dst": "hci_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ir_clicks_are_noisy_relevance_signals",
+      "dst": "ir_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ir_stopword_removal_can_hurt_phrase_queries",
+      "dst": "ir_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ir_bm25_saturates_term_frequency",
+      "dst": "ir_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ir_index_pruning_can_reduce_recall",
+      "dst": "ir_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "comp_transform_coding_concentrates_energy",
+      "dst": "compression_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "comp_quantization_trades_rate_for_distortion",
+      "dst": "compression_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "comp_temporal_redundancy_supports_video_compression",
+      "dst": "compression_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "comp_stronger_compression_always_better_false",
+      "dst": "compression_hub",
+      "relation": "part_of",
+      "strength": 0.95,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "db_index_speeds_selective_lookup",
+      "dst": "db_covering_index_avoids_row_fetches",
+      "relation": "support",
+      "strength": 0.92,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "db_btree_example",
+      "dst": "db_covering_index_avoids_row_fetches",
+      "relation": "example_of",
+      "strength": 0.94,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "db_indexes_trade_read_speed_for_write_cost",
+      "dst": "db_index_always_faster_false",
+      "relation": "contradict",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "db_denormalization_can_reduce_join_cost",
+      "dst": "db_denormalization_always_bad_false",
+      "relation": "contradict",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "db_redundancy_causes_update_anomalies",
+      "dst": "db_denormalization_can_reduce_join_cost",
+      "relation": "support",
+      "strength": 0.76,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "net_udp_no_guarantee",
+      "dst": "net_reliability_can_be_built_above_udp",
+      "relation": "support",
+      "strength": 0.86,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "net_reliability_can_be_built_above_udp",
+      "dst": "net_only_tcp_can_support_reliable_apps_false",
+      "relation": "contradict",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "net_packet_loss_can_reduce_tcp_throughput",
+      "dst": "bridge_network_latency_affects_responsiveness",
+      "relation": "support",
+      "strength": 0.88,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "net_cdn_example",
+      "dst": "net_caching_reduces_origin_load",
+      "relation": "example_of",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "gfx_texture_filtering_smooths_sampling",
+      "dst": "gfx_mipmaps_reduce_minification_aliasing",
+      "relation": "support",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "gfx_resolution_increase_reduces_but_not_eliminates_aliasing",
+      "dst": "gfx_more_pixels_solve_aliasing_false",
+      "relation": "contradict",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "gfx_supersampling_trades_cost_for_quality",
+      "dst": "gfx_more_pixels_solve_aliasing_false",
+      "relation": "contradict",
+      "strength": 0.9,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "hci_progressive_disclosure_reduces_overload",
+      "dst": "hci_more_options_always_better_false",
+      "relation": "contradict",
+      "strength": 0.97,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "hci_latency_disrupts_action_feedback_loop",
+      "dst": "bridge_network_latency_affects_responsiveness",
+      "relation": "support",
+      "strength": 0.87,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ir_bm25_saturates_term_frequency",
+      "dst": "ir_tfidf_specificity",
+      "relation": "refine",
+      "strength": 0.83,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "ir_index_pruning_can_reduce_recall",
+      "dst": "ir_query_expansion_recall_tradeoff",
+      "relation": "support",
+      "strength": 0.8,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "comp_transform_coding_concentrates_energy",
+      "dst": "comp_quantization_trades_rate_for_distortion",
+      "relation": "support",
+      "strength": 0.91,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "comp_quantization_trades_rate_for_distortion",
+      "dst": "comp_stronger_compression_always_better_false",
+      "relation": "contradict",
+      "strength": 0.98,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "comp_temporal_redundancy_supports_video_compression",
+      "dst": "bridge_image_compression_supports_delivery",
+      "relation": "support",
+      "strength": 0.86,
+      "directed": true,
+      "metadata": {}
+    },
+    {
+      "src": "comp_lossy_discards_information",
+      "dst": "comp_stronger_compression_always_better_false",
+      "relation": "contradict",
+      "strength": 0.96,
+      "directed": true,
+      "metadata": {}
+    }
+  ]
+}
