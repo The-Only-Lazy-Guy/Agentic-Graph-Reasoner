@@ -103,15 +103,12 @@ class GraphAttentionInjector:
             graph, node_ids, text_embeddings, self.device, task_frame
         )
 
-        # GNN forward pass (once per session)
-        plan_block = self.adapter.planning_block
+        # GNN forward pass (once per session) — raw embeddings only
         self.gnn.eval()
         with torch.no_grad():
             self._graph_kv = self.gnn.encode_to_kv(
                 self._active_subgraph.encoder_inputs,
                 self._active_subgraph,
-                k_proj=plan_block.K_proj,
-                v_proj=plan_block.V_proj,
             )
 
         self.goal_encoder.eval()
@@ -119,7 +116,12 @@ class GraphAttentionInjector:
             self._goal = encode_task_frame(task_frame, self.device, self.goal_encoder)
 
     def _planning_hook(self, module, args, output):
-        """Forward hook for layer 8 (planning block). Uses planning_mask."""
+        """Forward hook for layer 8 (planning block). Uses planning_mask.
+
+        Skips decode steps (seq_len == 1) — hooks run only during prefill.
+        Uses the LAST token's hidden state as the reasoning anchor (most
+        context-rich position during prompt processing).
+        """
         if self._graph_kv is None:
             return output
 
@@ -128,12 +130,16 @@ class GraphAttentionInjector:
         else:
             h = output
 
-        h_anchor = h[:, 0, :]   # [B, d_lm]
+        # Skip token-by-token decode steps; only run during prefill
+        if h.shape[1] == 1:
+            return output
+
+        h_anchor = h[:, -1, :]   # [B, d_lm] — last token, not first
 
         h_updated, state, logs = self.adapter.run_planning(
             h=h_anchor,
             goal=self._goal,
-            graph_kv=self._graph_kv,      # GraphMemoryKV with planning_mask
+            graph_kv=self._graph_kv,
             r_max=self._r_plan,
             task_frame=self._task_frame,
         )
@@ -141,13 +147,16 @@ class GraphAttentionInjector:
         self._loop_logs.extend(logs)
 
         h_new = h.clone()
-        h_new[:, 0, :] = h_updated
+        h_new[:, -1, :] = h_updated   # write back to last position
         if isinstance(output, tuple):
             return (h_new,) + output[1:]
         return h_new
 
     def _evidence_hook(self, module, args, output):
-        """Forward hook for layer 20 (evidence block). Uses evidence_mask."""
+        """Forward hook for layer 20 (evidence block). Uses evidence_mask.
+
+        Same prefill-only + last-token anchor rules as planning hook.
+        """
         if self._graph_kv is None:
             return output
 
@@ -156,12 +165,15 @@ class GraphAttentionInjector:
         else:
             h = output
 
-        h_anchor = h[:, 0, :]   # [B, d_lm]
+        if h.shape[1] == 1:
+            return output
+
+        h_anchor = h[:, -1, :]   # [B, d_lm]
 
         h_updated, state, logs = self.adapter.run_evidence(
             h=h_anchor,
             goal=self._goal,
-            graph_kv=self._graph_kv,      # GraphMemoryKV with evidence_mask
+            graph_kv=self._graph_kv,
             r_max=self._r_evidence,
             task_frame=self._task_frame,
         )
@@ -169,7 +181,7 @@ class GraphAttentionInjector:
         self._loop_logs.extend(logs)
 
         h_new = h.clone()
-        h_new[:, 0, :] = h_updated
+        h_new[:, -1, :] = h_updated
         if isinstance(output, tuple):
             return (h_new,) + output[1:]
         return h_new

@@ -4,6 +4,10 @@ Exit requires ALL conditions to hold — attention stability alone is not
 sufficient (prevents false convergence on wrong nodes).
 
 See V5_ARCHITECTURE.md §6.5 for full rationale.
+
+Fixes applied:
+  - max_loops_reached: check loop_idx >= r_max - 1 (loop runs 0..r_max-1)
+  - Slot fill: only checks required slots from task_frame, not all NUM_SLOTS
 """
 from __future__ import annotations
 
@@ -14,23 +18,44 @@ from torch import Tensor
 
 from v5.loop_state import LoopState
 
-ENTROPY_THRESHOLD = 1.5          # nats; lower = more concentrated attention
-SLOT_FILL_THRESHOLD = 0.85       # minimum confidence to consider a slot filled
-EPISTEMIC_THRESHOLD = 0.70       # minimum epistemic confidence on top nodes
-SHORTCUT_THRESHOLD = 0.85        # minimum shortcut_validity to attempt shortcut exit
-TOP_K_NODES = 3                  # nodes checked for invalidators and epistemic confidence
+ENTROPY_THRESHOLD = 1.5
+SLOT_FILL_THRESHOLD = 0.85
+EPISTEMIC_THRESHOLD = 0.70
+SHORTCUT_THRESHOLD = 0.85
+TOP_K_NODES = 3
 
 
 def _attention_entropy(node_scores: Tensor) -> float:
-    """Shannon entropy of softmax attention distribution over node scores."""
     probs = torch.softmax(node_scores.squeeze(0), dim=0)
     entropy = -(probs * (probs + 1e-9).log()).sum()
     return float(entropy.item())
 
 
-def _all_slots_filled(slot_state: Tensor, threshold: float = SLOT_FILL_THRESHOLD) -> bool:
-    """True if every slot has fill-confidence >= threshold."""
-    return bool((slot_state.squeeze(0) >= threshold).all().item())
+def _required_slot_indices(task_frame: Optional[dict]) -> Optional[List[int]]:
+    """Return slot vocab indices for required slots in task_frame, or None."""
+    if not task_frame:
+        return None
+    slots = task_frame.get("required_slots") or []
+    if not slots:
+        return None
+    from v5.goal_encoder import SLOT_ID
+    return [SLOT_ID.get(str(s), SLOT_ID["unknown"]) for s in slots]
+
+
+def _all_slots_filled(
+    slot_state: Tensor,
+    threshold: float = SLOT_FILL_THRESHOLD,
+    required_indices: Optional[List[int]] = None,
+) -> bool:
+    """True if all required slots have fill-confidence >= threshold.
+
+    If required_indices is None, checks all slots (conservative fallback).
+    """
+    s = slot_state.squeeze(0)   # [NUM_SLOTS]
+    if required_indices is not None and len(required_indices) > 0:
+        req = torch.tensor(required_indices, dtype=torch.long, device=s.device)
+        return bool((s[req] >= threshold).all().item())
+    return bool((s >= threshold).all().item())
 
 
 def _top_k_indices(node_scores: Tensor, k: int = TOP_K_NODES) -> List[int]:
@@ -45,20 +70,13 @@ def should_exit_loop(
     r_max: int,
     task_frame: Optional[dict] = None,
 ) -> Tuple[bool, str]:
-    """Compound exit guard.
+    """Compound exit guard. Returns (should_exit, reason_string).
 
-    Returns (should_exit, reason_string).
-
-    Compound rule (all must hold for non-shortcut exit):
-      1. Hard cap always fires
-      2. Attention entropy below threshold
-      3. All slots filled with high confidence
-      4. No active invalidators on top-K nodes
-      5. High epistemic confidence on top-K nodes
-      6. Shortcut path: extra guard (shortcut_validity + precondition match)
+    Hard cap fires on the LAST iteration (loop_idx == r_max - 1) so that
+    exit_reason is always set inside the loop body.
     """
-    # 1. Hard cap
-    if loop_idx >= r_max:
+    # 1. Hard cap — fires on last iteration (loop runs 0..r_max-1)
+    if loop_idx >= r_max - 1:
         return True, "max_loops_reached"
 
     N = state.node_scores_r.shape[-1]
@@ -66,13 +84,13 @@ def should_exit_loop(
         return True, "empty_node_pool"
 
     top_k = _top_k_indices(state.node_scores_r)
+    required_indices = _required_slot_indices(task_frame)
 
     # 2. Attention stability
-    entropy = _attention_entropy(state.node_scores_r)
-    attention_stable = entropy < ENTROPY_THRESHOLD
+    attention_stable = _attention_entropy(state.node_scores_r) < ENTROPY_THRESHOLD
 
-    # 3. Slot fill
-    slots_ok = _all_slots_filled(state.slot_state_r)
+    # 3. Required slots filled
+    slots_ok = _all_slots_filled(state.slot_state_r, required_indices=required_indices)
 
     # 4. No active invalidators on top nodes
     inv = state.invalidator_flags_r.squeeze(0)
@@ -80,16 +98,13 @@ def should_exit_loop(
 
     # 5. Epistemic confidence on top nodes
     epi = state.epistemic_confidence_r.squeeze(0)
-    epistemic_ok = all(
-        float(epi[i].item()) >= EPISTEMIC_THRESHOLD for i in top_k
-    )
+    epistemic_ok = all(float(epi[i].item()) >= EPISTEMIC_THRESHOLD for i in top_k)
 
-    # 6. Shortcut path (shortcut_validity > threshold + all guards pass)
+    # 6. Shortcut path
     shortcut_val = float(state.shortcut_validity_r.item())
     if shortcut_val > SHORTCUT_THRESHOLD and no_invalidators and epistemic_ok and slots_ok:
         return True, "shortcut_verified"
 
-    # Full compound condition
     if attention_stable and slots_ok and no_invalidators and epistemic_ok:
         return True, "all_conditions_met"
 
@@ -98,19 +113,14 @@ def should_exit_loop(
 
 def fallback_needed(
     state: LoopState,
-    coverage_threshold: float = 0.6,
-    contradiction_threshold: float = 0.4,
+    task_frame: Optional[dict] = None,
 ) -> bool:
-    """True when the loop ended but reasoning is still incomplete.
-
-    Triggers V4 external tool loop as fallback (Deep mode).
-    Checked after max_loops_reached exit.
-    """
+    """True when max_loops_reached but reasoning still incomplete."""
     if state.exit_reason != "max_loops_reached":
         return False
 
-    slots_ok = _all_slots_filled(state.slot_state_r)
-    if not slots_ok:
+    required_indices = _required_slot_indices(task_frame)
+    if not _all_slots_filled(state.slot_state_r, required_indices=required_indices):
         return True
 
     top_k = _top_k_indices(state.node_scores_r)

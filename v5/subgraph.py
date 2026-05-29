@@ -57,11 +57,13 @@ INVALIDATOR_RELATIONS = frozenset({Rel.INVALIDATED_BY, Rel.CONTRADICTS})
 class GraphMemoryKV:
     """Structured output of the GNN encoder, consumed by RecurrentAttentionBlock.
 
+    Stores raw node embeddings only. Each RecurrentAttentionBlock projects
+    its own K/V via its own K_proj/V_proj, so planning and evidence blocks
+    can learn different key spaces.
+
     All tensors share the same device.
     """
-    K: Tensor                          # [N, CROSS_ATTN_DIM]  key matrix
-    V: Tensor                          # [N, CROSS_ATTN_DIM]  value matrix
-    node_embeddings: Tensor            # [N, GNN_HIDDEN_DIM]  raw encoder output
+    node_embeddings: Tensor            # [N, GNN_HIDDEN_DIM]  raw R-GCN output
     node_ids: List[str]
     node_types: List[str]
     planning_mask: Tensor              # [N] bool — attend at Layer 8

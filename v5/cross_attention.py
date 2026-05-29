@@ -83,10 +83,13 @@ class CrossAttentionProjections(nn.Module):
 
         # Apply node pool mask: nodes outside the pool get -inf before softmax
         if node_mask is not None:
-            # node_mask: [N] bool, True = allowed
-            mask_val = torch.zeros_like(logits)
-            mask_val[:, ~node_mask] = _NEG_INF
-            logits = logits + mask_val
+            # Safety: if mask excludes ALL nodes, fall back to no mask
+            if not node_mask.any():
+                node_mask = None
+            else:
+                mask_val = torch.zeros_like(logits)
+                mask_val[:, ~node_mask] = _NEG_INF
+                logits = logits + mask_val
 
         attn_weights = torch.softmax(logits, dim=-1)           # [B, N]
 
@@ -151,18 +154,18 @@ class RecurrentAttentionBlock(nn.Module):
         # Unpack GraphMemoryKV or fall back to raw tensor
         if isinstance(graph_kv, GraphMemoryKV):
             base_node_embeddings = graph_kv.node_embeddings   # [N, GNN_HIDDEN_DIM]
-            base_K = graph_kv.K                               # already projected
-            base_V = graph_kv.V
             node_ids = node_ids or graph_kv.node_ids
+            # Each block projects its own K/V (planning and evidence learn different key spaces)
+            base_K = self.K_proj(base_node_embeddings)         # [N, CROSS_ATTN_DIM]
+            base_V = self.V_proj(base_node_embeddings)         # [N, CROSS_ATTN_DIM]
             # Select correct mask for this block (planning vs evidence)
             if self.layer_id == 8:
                 node_mask = graph_kv.planning_mask             # [N] bool
             else:
                 node_mask = graph_kv.evidence_mask             # [N] bool
-            # Pre-init invalidator flags from static graph structure
             static_inv = graph_kv.invalidator_flags.unsqueeze(0)  # [1, N]
         else:
-            # Raw tensor path (tests / pre-GraphMemoryKV callers)
+            # Raw tensor path (tests / backward compat)
             base_node_embeddings = graph_kv
             base_K = self.K_proj(base_node_embeddings)
             base_V = self.V_proj(base_node_embeddings)
@@ -208,16 +211,22 @@ class RecurrentAttentionBlock(nn.Module):
                 invalidator_flags_r=state.invalidator_flags_r,
                 loop_idx=r,
             )
-            state = self.aux.update_state(state, base_node_embeddings)
+            state = self.aux.update_state(
+                state, base_node_embeddings, static_inv=static_inv
+            )
 
             # 4. Log
             loop_log.append(state.to_log_entry(node_ids or [], layer=self.layer_id))
 
-            # 5. Exit check
+            # 5. Exit check (hard cap fires at last iteration: r == r_max-1)
             should_exit, reason = should_exit_loop(state, r, r_max, task_frame)
             if should_exit:
                 state.exit_reason = reason
                 break
+
+        # Guarantee exit_reason is always set
+        if state.exit_reason is None:
+            state.exit_reason = "max_loops_reached"
 
         return state.h_r, state, loop_log
 

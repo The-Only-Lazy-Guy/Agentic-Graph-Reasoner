@@ -235,20 +235,37 @@ class AuxHeads(nn.Module):
     def update_state(
         self,
         state: LoopState,
-        node_embeddings: Tensor,   # [N, gnn_dim]
+        node_embeddings: Tensor,        # [N, gnn_dim]
+        static_inv: Optional[Tensor] = None,  # [1, N] from graph structure
     ) -> LoopState:
-        """Run all heads and return a new LoopState with updated predictions."""
-        h = state.h_r                           # [1, d_lm]
+        """Run all heads and return a new LoopState with updated predictions.
+
+        Invalidator combining: static_inv marks nodes that structurally HAVE an
+        outgoing invalidated_by edge. The neural head predicts whether that
+        invalidator is ACTIVE in the current context.
+
+            combined = static_inv * dynamic_inv
+
+        This prevents the head from firing on nodes with no structural invalidator,
+        and prevents the head from suppressing real structural invalidators entirely.
+        """
+        h = state.h_r                                          # [1, d_lm]
         N = node_embeddings.shape[0]
 
-        new_slot = self.slot(h)                            # [1, NUM_SLOTS]
-        new_node_adj = self.node(h, node_embeddings)       # [1, N]
-        new_shortcut = self.shortcut(h)                    # [1, 1]
-        new_epistemic = self.epistemic(h, node_embeddings) # [1, N]
-        new_invalidator = self.invalidator(h, node_embeddings) # [1, N]
+        new_slot = self.slot(h)                                # [1, NUM_SLOTS]
+        new_node_adj = self.node(h, node_embeddings)           # [1, N]
+        new_shortcut = self.shortcut(h)                        # [1, 1]
+        new_epistemic = self.epistemic(h, node_embeddings)     # [1, N]
+        dynamic_inv = self.invalidator(h, node_embeddings)     # [1, N]  0-1
+
+        # Combine: structural gate × dynamic activation
+        if static_inv is not None:
+            combined_inv = static_inv * dynamic_inv            # [1, N]
+        else:
+            combined_inv = dynamic_inv
 
         # Node scores = previous scores + learned adjustment
-        new_scores = state.node_scores_r + new_node_adj    # [1, N]
+        new_scores = state.node_scores_r + new_node_adj        # [1, N]
 
         return LoopState(
             h_r=state.h_r,
@@ -256,7 +273,7 @@ class AuxHeads(nn.Module):
             node_scores_r=new_scores,
             shortcut_validity_r=new_shortcut,
             epistemic_confidence_r=new_epistemic,
-            invalidator_flags_r=new_invalidator,
+            invalidator_flags_r=combined_inv,
             loop_idx=state.loop_idx + 1,
             exit_reason=None,
         )

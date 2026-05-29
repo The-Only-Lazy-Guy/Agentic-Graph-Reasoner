@@ -151,21 +151,16 @@ class RGCNEncoder(nn.Module):
         self,
         inputs: GraphEncoderInputs,
         active_subgraph,               # ActiveSubgraph
-        k_proj: "nn.Linear",
-        v_proj: "nn.Linear",
     ):
         """Full pipeline: GraphEncoderInputs -> GraphMemoryKV.
 
-        Runs forward pass then projects to K, V and attaches masks.
-        k_proj and v_proj are owned by RecurrentAttentionBlock.
+        Produces raw node embeddings + masks. Each RecurrentAttentionBlock
+        projects its own K/V from node_embeddings so planning and evidence
+        blocks can learn separate key spaces.
         """
         from v5.subgraph import GraphMemoryKV
-        node_embs = self.forward(inputs)                     # [N, GNN_HIDDEN_DIM]
-        K = k_proj(node_embs)                                # [N, CROSS_ATTN_DIM]
-        V = v_proj(node_embs)                                # [N, CROSS_ATTN_DIM]
+        node_embs = self.forward(inputs)     # [N, GNN_HIDDEN_DIM]
         return GraphMemoryKV(
-            K=K,
-            V=V,
             node_embeddings=node_embs,
             node_ids=active_subgraph.node_ids,
             node_types=active_subgraph.node_types,
