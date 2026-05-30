@@ -30,8 +30,13 @@ def main():
             if not line:
                 continue
             r = json.loads(line)
-            # de-dup by (session_id, task_id) so re-pushed/overlapping rows collapse
-            key = (r.get("session_id"), (r.get("input", {}) or {}).get("question"))
+            # De-dup by QUESTION (stable across runs) — NOT session_id, which V4
+            # regenerates every run, so the same question from two runs would
+            # otherwise survive as duplicates. Falls back to task_id then text.
+            inp = r.get("input", {}) or {}
+            extra = r.get("extra", {}) or {}
+            key = (inp.get("question") or extra.get("task_id")
+                   or r.get("session_id"))
             if key in seen:
                 dup += 1; continue
             seen.add(key); rows.append(line); n += 1

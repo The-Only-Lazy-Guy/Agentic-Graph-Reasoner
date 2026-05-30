@@ -23,6 +23,24 @@ from reasoning.distillation_corpus import append_session_to_corpus
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 
+def _existing_questions(shards_dir):
+    """Set of question strings already present across data/corpus_shards/*.jsonl."""
+    import glob
+    done = set()
+    for f in glob.glob(str(Path(shards_dir) / "*.jsonl")):
+        for line in open(f, encoding="utf-8"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                q = (json.loads(line).get("input", {}) or {}).get("question")
+            except Exception:
+                continue
+            if q:
+                done.add(q.strip())
+    return done
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset", default="data/question_bank.json")
@@ -39,6 +57,9 @@ def main():
     ap.add_argument("--openai-mode", action="store_true",
                     help="generic OpenAI server (e.g. llama-cpp-python python -m llama_cpp.server): "
                          "skips the /health probe + llama.cpp-only body fields. Use on vast.ai.")
+    ap.add_argument("--skip-existing", action="store_true",
+                    help="skip questions already present in any data/corpus_shards/*.jsonl "
+                         "(re-run safety: each run only generates NEW questions)")
     ap.add_argument("--backend", choices=["llama", "opencode"], default="llama",
                     help="llama=local GGUF server; opencode=big cloud model via opencode CLI")
     ap.add_argument("--opencode-config-dir", default="pure-opencode")
@@ -52,6 +73,12 @@ def main():
     all_tasks = json.load(open(a.dataset, encoding="utf-8"))["tasks"]
     # disjoint shard so machines generate UNIQUE data
     tasks = [t for i, t in enumerate(all_tasks) if i % a.num_shards == a.shard_index]
+    if a.skip_existing:
+        done = _existing_questions(a.out_dir)
+        before = len(tasks)
+        tasks = [t for t in tasks if (t.get("question") or "").strip() not in done]
+        print(f"--skip-existing: {before - len(tasks)} already-generated questions skipped "
+              f"({len(done)} known)")
     if a.start:
         tasks = tasks[a.start:]
     if a.limit:

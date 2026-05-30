@@ -68,7 +68,13 @@ die(){ echo "[gen_and_push] ERROR: $*" >&2; exit 1; }
 command -v python3 >/dev/null || die "python3 not found"
 command -v git >/dev/null || die "git not found"
 case "$BACKEND" in llama|opencode) ;; *) die "BACKEND must be llama or opencode (got $BACKEND)";; esac
-log "BACKEND=$BACKEND  RUN_ID=$RUN_ID  shard $SHARD_INDEX/$NUM_SHARDS"
+log "BACKEND=$BACKEND  RUN_ID=$RUN_ID  shard $SHARD_INDEX/$NUM_SHARDS  skip_existing=${SKIP_EXISTING:-1}"
+
+# Pull existing shards FIRST so --skip-existing sees what every machine has
+# already generated -> this run only makes questions nobody has done yet.
+if [ "${NO_PUSH:-0}" != "1" ]; then
+  git pull --rebase --autostash "$GIT_REMOTE" "$GIT_BRANCH" 2>/dev/null || log "WARN: initial pull skipped"
+fi
 if [ "$BACKEND" = "opencode" ]; then
   # Resolve the opencode executable (nvm installs outside the default PATH).
   if [ -n "${OPENCODE_EXE_PATH:-}" ]; then
@@ -155,15 +161,19 @@ PY
 fi
 
 # ---- 6. generate this machine's UNIQUE shard ------------------------------
+# SKIP_EXISTING (default 1): skip any question already in data/corpus_shards/*.jsonl
+# (incl. shards pulled from other machines) -> never regenerate the same question.
+SKIP_FLAG=""; [ "${SKIP_EXISTING:-1}" = "1" ] && SKIP_FLAG="--skip-existing"
 log "generating shard ($BACKEND) -> $SHARD_PATH"
 if [ "$BACKEND" = "opencode" ]; then
   python run_gen_llama.py --backend opencode --opencode-config-dir "${OPENCODE_CONFIG_DIR:-pure-opencode}" \
-    ${OPENCODE_MODEL:+--opencode-model "$OPENCODE_MODEL"} \
+    ${OPENCODE_MODEL:+--opencode-model "$OPENCODE_MODEL"} $SKIP_FLAG \
     --dataset data/question_bank.json --graph graphs/merged_graph.json \
     --out-dir data/corpus_shards --run-id "$RUN_ID" \
     --shard-index "$SHARD_INDEX" --num-shards "$NUM_SHARDS" ${LIMIT:+--limit "$LIMIT"}
 else
-  python run_gen_llama.py --backend llama --dataset data/question_bank.json --graph graphs/merged_graph.json \
+  python run_gen_llama.py --backend llama $SKIP_FLAG \
+    --dataset data/question_bank.json --graph graphs/merged_graph.json \
     --out-dir data/corpus_shards --run-id "$RUN_ID" \
     --shard-index "$SHARD_INDEX" --num-shards "$NUM_SHARDS" \
     --base-url "http://127.0.0.1:${PORT}" --openai-mode ${LIMIT:+--limit "$LIMIT"}
