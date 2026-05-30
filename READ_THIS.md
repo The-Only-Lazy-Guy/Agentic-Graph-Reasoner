@@ -4,7 +4,7 @@
 > you don't have to dig through commits/logs. Updated each working session.
 
 **Last updated:** 2026-05-30
-**HEAD:** `e1ae5f4` · branch `main`
+**HEAD:** `perturbation-baseline` · branch `main`
 
 ---
 
@@ -14,6 +14,8 @@
   planning**, on a substrate-rich V4 corpus.
 - ✅ V5 **generates** end-to-end with the adapter live; injection is numerically
   stable (stays coherent even with untrained projections).
+- ✅ Random-init injection is **95% non-catastrophic** over 20 questions (perfect
+  1/1 hook control) → Stage 2 starts from a stable injected-generation baseline.
 - ❌ NOT yet: V5 **generalizes** (corpus is 20 traces → train-fit only).
 - ❌ NOT yet: V5 **improves** generation (cross-attn projections untrained — Stage 2/LoRA needed).
 
@@ -47,6 +49,29 @@ DIFF: outputs differ
 
 Key finding: injection stayed **coherent** with random `W_o` → residual magnitude
 is sane → Stage 2 will *shape* it, not fight catastrophic perturbation.
+
+---
+
+## 1b. Perturbation baseline (raw) — `python -m v5.perturbation_baseline`
+
+20 corpus questions, baseline vs V5-injected (random-init projections), Qwen2.5-1.5B.
+Goal: prove the adapter is *usually non-catastrophic* before Stage 2 — NOT improvement.
+
+```
+AGGREGATE (n=20):
+  hook control ok (1/1)    : 20/20
+  baseline gibberish       : 1/20
+  injected gibberish       : 1/20
+  CATASTROPHIC (inj broke) : 1/20  (5%)
+  non-catastrophic rate    : 95%
+  mean baseline length     : 272 chars
+  mean injected length     : 265 chars   (no length collapse)
+  mean semantic sim        : 0.73        (1=identical; moderate drift, stays related)
+```
+
+Read: random injection rarely breaks generation (1 catastrophic case, sim→0.43);
+moderate drift is expected with untrained projections; hook control perfect.
+=> Stage 2 starts from a stable injected-generation baseline.
 
 ---
 
@@ -114,6 +139,7 @@ python -m v5.training.bridge                        # corpus -> Stage1Example + 
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.realstack_test       # real-stack prefill
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.stage1_real # real Stage 1 (planning incl.)
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.infer_demo           # baseline vs injected generation
+$env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.perturbation_baseline --n 20  # non-catastrophic baseline
 ```
 
 Env note: `sentence_transformers` segfaults when co-loaded with `torch_geometric`
