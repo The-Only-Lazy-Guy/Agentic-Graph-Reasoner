@@ -138,7 +138,11 @@ class StateOverlayHead(nn.Module):
         loop-state context.
         """
         K = self.TOP_K
-        scores = state.node_scores_r.squeeze(0)       # [N]
+        # node_scores carry a -1e9 sentinel on out-of-pool nodes (pool masking in
+        # RecurrentAttentionBlock). Clamp before summarizing so the sentinel does
+        # not blow up the delta MLP — feeding -1e9 here makes delta_K/delta_V
+        # explode, which in turn explodes K_r/V_r and the residual stream.
+        scores = state.node_scores_r.squeeze(0).clamp(-30.0, 30.0)  # [N]
         epi = state.epistemic_confidence_r.squeeze(0) # [N]
         inv = state.invalidator_flags_r.squeeze(0)    # [N]
 
@@ -168,36 +172,61 @@ class StateOverlayHead(nn.Module):
 
 
 class EpistemicHead(nn.Module):
-    """(h_r, node_embeddings) -> [B, N] per-node epistemic confidence (0-1)."""
+    """(h_r, node_embeddings) -> [B, N] per-node epistemic confidence (0-1).
 
-    def __init__(self, lm_hidden_dim: int = LM_HIDDEN_DIM, gnn_dim: int = GNN_HIDDEN_DIM):
-        super().__init__()
-        self.h_proj = nn.Linear(lm_hidden_dim, 64)
-        self.n_proj = nn.Linear(gnn_dim, 64)
-        self.sig = nn.Sigmoid()
-
-    def forward(self, h: Tensor, node_embeddings: Tensor) -> Tensor:
-        h_p = self.h_proj(h)                    # [B, 64]
-        n_p = self.n_proj(node_embeddings)      # [N, 64]
-        return self.sig(h_p @ n_p.T)            # [B, N]
-
-
-class InvalidatorHead(nn.Module):
-    """(h_r, node_embeddings) -> [B, N] invalidator fire probability (0-1).
-
-    High score = invalidator for this node is active in current context.
+    Concat-MLP interaction (not pure bilinear): epistemic status of a node is
+    context-gated — e.g. a fact may be 'supported' in one task context and
+    'unsupported' in another, while a verified node stays high regardless. A
+    bilinear h·n score cannot hold one node constant while gating another by
+    context through the same h; the MLP over [h, n, h⊙n] has the capacity to.
     """
 
     def __init__(self, lm_hidden_dim: int = LM_HIDDEN_DIM, gnn_dim: int = GNN_HIDDEN_DIM):
         super().__init__()
         self.h_proj = nn.Linear(lm_hidden_dim, 64)
         self.n_proj = nn.Linear(gnn_dim, 64)
+        self.score = nn.Sequential(
+            nn.Linear(64 * 3, 64), nn.GELU(), nn.Linear(64, 1),
+        )
         self.sig = nn.Sigmoid()
 
     def forward(self, h: Tensor, node_embeddings: Tensor) -> Tensor:
-        h_p = self.h_proj(h)
-        n_p = self.n_proj(node_embeddings)
-        return self.sig(h_p @ n_p.T)            # [B, N]
+        h_p = self.h_proj(h)                          # [B, 64]
+        n_p = self.n_proj(node_embeddings)            # [N, 64]
+        B, N = h_p.shape[0], n_p.shape[0]
+        h_e = h_p.unsqueeze(1).expand(B, N, -1)       # [B, N, 64]
+        n_e = n_p.unsqueeze(0).expand(B, N, -1)       # [B, N, 64]
+        feat = torch.cat([h_e, n_e, h_e * n_e], dim=-1)  # [B, N, 192]
+        return self.sig(self.score(feat).squeeze(-1))    # [B, N]
+
+
+class InvalidatorHead(nn.Module):
+    """(h_r, node_embeddings) -> [B, N] invalidator fire probability (0-1).
+
+    High score = invalidator for this node is active in current context.
+    Concat-MLP interaction (same rationale as EpistemicHead): whether a node's
+    structural invalidator is ACTIVE is context-gated — the same node may fire in
+    one task context and not another. A bilinear h·n score is too weak for this
+    per-node context gating; the MLP over [h, n, h⊙n] handles it.
+    """
+
+    def __init__(self, lm_hidden_dim: int = LM_HIDDEN_DIM, gnn_dim: int = GNN_HIDDEN_DIM):
+        super().__init__()
+        self.h_proj = nn.Linear(lm_hidden_dim, 64)
+        self.n_proj = nn.Linear(gnn_dim, 64)
+        self.score = nn.Sequential(
+            nn.Linear(64 * 3, 64), nn.GELU(), nn.Linear(64, 1),
+        )
+        self.sig = nn.Sigmoid()
+
+    def forward(self, h: Tensor, node_embeddings: Tensor) -> Tensor:
+        h_p = self.h_proj(h)                          # [B, 64]
+        n_p = self.n_proj(node_embeddings)            # [N, 64]
+        B, N = h_p.shape[0], n_p.shape[0]
+        h_e = h_p.unsqueeze(1).expand(B, N, -1)
+        n_e = n_p.unsqueeze(0).expand(B, N, -1)
+        feat = torch.cat([h_e, n_e, h_e * n_e], dim=-1)  # [B, N, 192]
+        return self.sig(self.score(feat).squeeze(-1))    # [B, N]
 
 
 class ShortcutHead(nn.Module):
@@ -225,6 +254,13 @@ class AuxHeads(nn.Module):
         gnn_dim: int = GNN_HIDDEN_DIM,
     ):
         super().__init__()
+        # The recurrent block uses a pre-norm residual stream, so h_r grows in
+        # magnitude across iterations. Normalize h before the heads read it
+        # (GPT-style final ln_f): bounds magnitude so the sigmoid heads don't
+        # saturate, while preserving the direction that carries the LM/family
+        # signal. Without this, a large-magnitude h_r drives every head output
+        # to the same saturated value regardless of input.
+        self.head_norm = nn.LayerNorm(lm_hidden_dim)
         self.slot = SlotHead(lm_hidden_dim)
         self.node = NodeHead(lm_hidden_dim, gnn_dim)
         self.overlay = StateOverlayHead(gnn_dim)
@@ -249,7 +285,7 @@ class AuxHeads(nn.Module):
         This prevents the head from firing on nodes with no structural invalidator,
         and prevents the head from suppressing real structural invalidators entirely.
         """
-        h = state.h_r                                          # [1, d_lm]
+        h = self.head_norm(state.h_r)                          # [1, d_lm] normalized for heads
         N = node_embeddings.shape[0]
 
         new_slot = self.slot(h)                                # [1, NUM_SLOTS]

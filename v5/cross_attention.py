@@ -79,8 +79,20 @@ class CrossAttentionProjections(nn.Module):
         V_r: Tensor,                    # [N, attn_dim]
         node_mask: Optional[Tensor] = None,  # [N] bool — True = attend; None = attend all
     ) -> Tuple[Tensor, Tensor]:
-        """Return (updated h_{r+1}, attn_weights): ([B, d_lm], [B, N])."""
-        q_input = torch.cat([h_r, goal, slot_state], dim=-1)   # [B, Q_INPUT_DIM]
+        """Return (updated h_{r+1}, attn_weights): ([B, d_lm], [B, N]).
+
+        Pre-norm residual-stream update (GPT-style):
+
+            h_new = h_r + W_o(attn(W_q(norm(h_r) ‖ goal ‖ slot), K_r, V_r))
+
+        The residual stream h_r flows forward UN-normalized; LayerNorm is applied
+        only to the query input. Post-norm (`norm(h_r + sublayer)`) is a
+        contraction when the attention context is fixed across inputs — it drives
+        every h_init to the same fixed point and erases the LM hidden state the
+        loop is meant to condition on. Pre-norm preserves h_init additively.
+        """
+        h_norm = self.norm(h_r)                                # normalize query input only
+        q_input = torch.cat([h_norm, goal, slot_state], dim=-1)  # [B, Q_INPUT_DIM]
         Q = self.W_q(q_input)                                   # [B, attn_dim]
 
         logits = Q @ K_r.T / self.scale                        # [B, N]
@@ -98,7 +110,7 @@ class CrossAttentionProjections(nn.Module):
         attn_weights = torch.softmax(logits, dim=-1)           # [B, N]
 
         A = attn_weights @ V_r                                  # [B, attn_dim]
-        h_new = self.norm(h_r + self.W_o(A))                   # [B, d_lm]
+        h_new = h_r + self.W_o(A)                              # residual stream preserves h_r
         return h_new, attn_weights
 
 

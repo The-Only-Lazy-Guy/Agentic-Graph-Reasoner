@@ -96,9 +96,13 @@ def should_exit_loop(
     inv = state.invalidator_flags_r.squeeze(0)
     no_invalidators = not any(float(inv[i].item()) > 0.5 for i in top_k)
 
-    # 5. Epistemic confidence on top nodes
+    # 5. Epistemic confidence on the PRIMARY (highest-attention) node.
+    # Checking every top-k node is too strict: attention legitimately includes
+    # contradicting / uncertain evidence, which would block exit forever. The
+    # answer rests on the primary attended node, so gate on that one.
     epi = state.epistemic_confidence_r.squeeze(0)
-    epistemic_ok = all(float(epi[i].item()) >= EPISTEMIC_THRESHOLD for i in top_k)
+    primary = top_k[0] if top_k else 0
+    epistemic_ok = float(epi[primary].item()) >= EPISTEMIC_THRESHOLD
 
     # 6. Shortcut path
     shortcut_val = float(state.shortcut_validity_r.item())
@@ -128,8 +132,12 @@ def fallback_needed(
     if any(float(inv[i].item()) > 0.5 for i in top_k):
         return True
 
+    # Primary (highest-attention) node must be epistemically confident; a
+    # secondary attended node being uncertain is informative context, not a
+    # reason to fall back. Mirrors the should_exit_loop epistemic gate.
     epi = state.epistemic_confidence_r.squeeze(0)
-    if any(float(epi[i].item()) < EPISTEMIC_THRESHOLD for i in top_k):
+    primary = top_k[0] if top_k else 0
+    if float(epi[primary].item()) < EPISTEMIC_THRESHOLD:
         return True
 
     return False
