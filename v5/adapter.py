@@ -70,6 +70,17 @@ class GraphAttentionInjector:
         self._plan_state: Optional[LoopState] = None
         self._evid_state: Optional[LoopState] = None
 
+        # Hook-call accounting + run-once guards.
+        # During model.generate() the prefill pass fires each layer hook once;
+        # decode steps (seq_len==1) are skipped. These guards also prevent a
+        # second prefill-shaped pass (beam search / chunked prefill) from
+        # re-running the recurrent loops within one session.
+        self._plan_ran: bool = False
+        self._evid_ran: bool = False
+        self._plan_hook_calls: int = 0
+        self._evid_hook_calls: int = 0
+        self.run_once_per_session: bool = True
+
         self._hooks: List = []
 
     def prepare_session(
@@ -97,6 +108,10 @@ class GraphAttentionInjector:
         self._loop_logs = []
         self._plan_state = None
         self._evid_state = None
+        self._plan_ran = False
+        self._evid_ran = False
+        self._plan_hook_calls = 0
+        self._evid_hook_calls = 0
 
         # Build ActiveSubgraph (encoder inputs + planning/evidence masks)
         self._active_subgraph = build_active_subgraph(
@@ -134,6 +149,11 @@ class GraphAttentionInjector:
         if h.shape[1] == 1:
             return output
 
+        # Run-once guard: skip a second prefill-shaped pass in one session
+        if self.run_once_per_session and self._plan_ran:
+            return output
+
+        self._plan_hook_calls += 1
         h_anchor = h[:, -1, :]   # [B, d_lm] — last token, not first
 
         h_updated, state, logs = self.adapter.run_planning(
@@ -144,6 +164,7 @@ class GraphAttentionInjector:
             task_frame=self._task_frame,
         )
         self._plan_state = state
+        self._plan_ran = True
         self._loop_logs.extend(logs)
 
         h_new = h.clone()
@@ -168,6 +189,11 @@ class GraphAttentionInjector:
         if h.shape[1] == 1:
             return output
 
+        # Run-once guard: skip a second prefill-shaped pass in one session
+        if self.run_once_per_session and self._evid_ran:
+            return output
+
+        self._evid_hook_calls += 1
         h_anchor = h[:, -1, :]   # [B, d_lm]
 
         h_updated, state, logs = self.adapter.run_evidence(
@@ -178,6 +204,7 @@ class GraphAttentionInjector:
             task_frame=self._task_frame,
         )
         self._evid_state = state
+        self._evid_ran = True
         self._loop_logs.extend(logs)
 
         h_new = h.clone()
@@ -208,6 +235,14 @@ class GraphAttentionInjector:
 
     def get_loop_logs(self) -> List[dict]:
         return list(self._loop_logs)
+
+    def get_hook_call_counts(self) -> Dict[str, int]:
+        """Per-session hook fire counts. With run_once_per_session=True both
+        should be exactly 1 after a single generate() call."""
+        return {
+            "planning": self._plan_hook_calls,
+            "evidence": self._evid_hook_calls,
+        }
 
     def get_fallback_needed(self) -> bool:
         """True if evidence loop exited via max_loops with incomplete state."""

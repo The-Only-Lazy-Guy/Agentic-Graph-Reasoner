@@ -77,7 +77,7 @@ class GraphMemoryKV:
 
     @property
     def device(self) -> torch.device:
-        return self.K.device
+        return self.node_embeddings.device
 
 
 @dataclass
