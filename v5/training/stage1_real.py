@@ -19,6 +19,8 @@ import argparse
 
 import torch
 
+import os
+
 from v5.cross_attention import V5AttentionAdapter
 from v5.gnn_encoder import RGCNEncoder
 from v5.training.bridge import corpus_to_stage1_examples, DEFAULT_PERSISTED_GRAPH
@@ -26,6 +28,12 @@ from v5.training.providers import RealEmbedder, FrozenQwenHInitProvider, ANCHOR_
 from v5.training.stage1 import Stage1Trainer, Stage1Config
 
 CORPUS = "artifacts/phase15/phase15_corpus.jsonl"
+SUBSTRATE_GRAPH = "graphs/merged_graph_substrate.json"
+
+
+def _graph_path() -> str:
+    """Prefer the substrate-enriched graph (planning coverage > 0) when present."""
+    return SUBSTRATE_GRAPH if os.path.exists(SUBSTRATE_GRAPH) else DEFAULT_PERSISTED_GRAPH
 
 
 def run(corpus_path: str = CORPUS, model_name: str = "Qwen/Qwen2.5-1.5B",
@@ -47,11 +55,14 @@ def run(corpus_path: str = CORPUS, model_name: str = "Qwen/Qwen2.5-1.5B",
         p.requires_grad_(False)
 
     # build real corpus examples (persisted neighborhood + real embeddings + real h_init)
-    print("building Stage1Examples from the real corpus (this runs Qwen prefills + mpnet)...")
+    gpath = _graph_path()
+    print(f"building Stage1Examples from the real corpus (graph={gpath}; runs Qwen prefills + mpnet)...")
     examples = corpus_to_stage1_examples(
         corpus_path, gnn=gnn, embedder=embedder, h_init_provider=h_provider,
-        device=device, lm_dim=lm_dim, graph_path=DEFAULT_PERSISTED_GRAPH, hops=1)
-    print(f"  built {len(examples)} examples  (avg nodes={sum(len(e.node_ids) for e in examples)/max(1,len(examples)):.1f})")
+        device=device, lm_dim=lm_dim, graph_path=gpath, hops=1)
+    n_plan = sum(1 for e in examples if e.plan_anchor is not None)
+    print(f"  built {len(examples)} examples  (avg nodes={sum(len(e.node_ids) for e in examples)/max(1,len(examples)):.1f}"
+          f", planning-labeled: {n_plan}/{len(examples)})")
 
     # adapter sized to the LM
     adapter = V5AttentionAdapter(r_plan=3, r_evidence=3, lm_hidden_dim=lm_dim).to(device)
@@ -68,14 +79,13 @@ def run(corpus_path: str = CORPUS, model_name: str = "Qwen/Qwen2.5-1.5B",
     _show(after)
 
     print("\n=== DELTA (covered heads) ===")
-    for k in ("evid_acc", "slot_acc", "epi_acc", "sc_acc"):
+    for k in ("plan_acc", "evid_acc", "slot_acc", "epi_acc", "sc_acc"):
         if k in before and k in after:
             b, a = before[k], after[k]
             if a == a and b == b:   # not NaN
                 print(f"  {k:10s} {b:.2f} -> {a:.2f}  ({a-b:+.2f})")
-    print("\nNOTE: planning head is untrained — corpus planning coverage is 0% until")
-    print("V4 writes reasoning substrate into the graph. This run trains the heads")
-    print("that have real corpus labels, on real graph states + real LM h_init.")
+    print("\nReal graph states + real LM h_init. With the substrate-enriched graph,")
+    print("planning is now supervised (substrate planning nodes as labeled anchors).")
     print("\nREAL-CORPUS STAGE 1 COMPLETE")
     return after
 

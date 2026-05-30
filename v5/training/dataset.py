@@ -61,6 +61,20 @@ EPISTEMIC_PATCH_TYPES = frozenset({"add_epistemic_state"})
 # Patch types that indicate an invalidator fired on a node
 INVALIDATOR_PATCH_TYPES = frozenset({"deprecate_fact"})
 
+# Substrate-node-adding patch types -> the node_type they create. These are the
+# reasoning substrate V4 writes; their patch target nodes are the planning/
+# evidence-pool nodes a trace engaged (the planning supervision signal).
+SUBSTRATE_PATCH_TYPE_TO_NODE = {
+    "add_strategy": "strategy",
+    "add_failure_pattern": "failure_pattern",
+    "add_control_rule": "control_rule",
+    "add_reasoning_atom": "reasoning_atom",
+    "add_reasoning_chain": "reasoning_chain",
+    "add_solved_subgoal": "solved_subgoal",
+    "add_epistemic_state": "epistemic_state",
+}
+SAFE_PATCH_STATUSES = frozenset({"accept", "soft_only"})
+
 
 @dataclass
 class Phase15Sample:
@@ -84,6 +98,13 @@ class Phase15Sample:
     # Global targets
     slot_fill_target: List[float]  # [NUM_SLOTS] — SlotHead target
     shortcut_valid: float          # ShortcutHead target
+
+    # Reasoning substrate this trace wrote (safe add_* substrate patches):
+    # node_id -> {"type": str, "text": str, "status": str}. These are the
+    # planning/evidence-pool nodes the trace engaged — the planning supervision
+    # the base-graph anchors lack. Empty until V4 writes substrate / patches are
+    # applied. Default factory keeps older constructors working.
+    substrate_nodes: Dict[str, dict] = field(default_factory=dict)
 
 
 class Phase15Dataset(Dataset):
@@ -156,6 +177,7 @@ def _parse_row(row: dict) -> Optional[Phase15Sample]:
     patches = row.get("trace", {}).get("scoped_patches") or []
     epistemic_nodes = _nodes_with_patch_type(patches, EPISTEMIC_PATCH_TYPES)
     invalidator_nodes = _nodes_with_patch_type(patches, INVALIDATOR_PATCH_TYPES)
+    substrate_nodes = _extract_substrate_nodes(patches)
 
     anchor_set = {n["id"] for n in anchors if isinstance(n, dict) and "id" in n}
 
@@ -185,7 +207,34 @@ def _parse_row(row: dict) -> Optional[Phase15Sample]:
         invalidator_target=invalidator_target,
         slot_fill_target=slot_fill_target,
         shortcut_valid=shortcut_valid,
+        substrate_nodes=substrate_nodes,
     )
+
+
+def _extract_substrate_nodes(patches: list) -> Dict[str, dict]:
+    """Collect safe substrate add_node patches: node_id -> {type, text, status}.
+
+    Only `accept`/`soft_only` patches are taken (needs_review/reject are held
+    back, matching V4's apply gate). Fresh epistemic_state nodes default to
+    'uncertain' status -> planning pool (an asserted-but-unverified belief).
+    """
+    out: Dict[str, dict] = {}
+    for p in patches:
+        if not isinstance(p, dict):
+            continue
+        ntype = SUBSTRATE_PATCH_TYPE_TO_NODE.get(p.get("patch_type"))
+        if ntype is None:
+            continue
+        status = (p.get("validation") or {}).get("status")
+        if status not in SAFE_PATCH_STATUSES:
+            continue
+        raw = p.get("raw_edit") or {}
+        nid = raw.get("node_id") or p.get("target_id")
+        if not nid:
+            continue
+        epi_status = "uncertain" if ntype == "epistemic_state" else "unknown"
+        out[nid] = {"type": ntype, "text": p.get("text") or "", "status": epi_status}
+    return out
 
 
 def _extract_nodes(

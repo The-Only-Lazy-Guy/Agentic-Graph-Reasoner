@@ -180,9 +180,16 @@ def sample_to_stage1_example(
     if use_persisted:
         node_ids = _neighborhood(persisted_graph, anchor_ids, hops, max_nodes=max_nodes)
         graph = persisted_graph
+        # Substrate the trace wrote, if present in the (enriched) graph: these are
+        # the planning/evidence-pool nodes V4 engaged — the planning supervision
+        # the base-graph anchors lack. Append the ones not already pulled in.
+        substrate_ids = [nid for nid in sample.substrate_nodes if nid in graph.nodes]
+        seen = set(node_ids)
+        node_ids = node_ids + [s for s in substrate_ids if s not in seen]
         node_texts = {nid: (getattr(graph.nodes[nid], "text", "") or "") for nid in node_ids}
     else:
         node_ids = anchor_ids
+        substrate_ids = []
         inv_node_ids = {nid for i, nid in enumerate(anchor_ids)
                         if sample.invalidator_target[i] > 0.5}
         graph = _build_corpus_graph(sample, inv_node_ids)
@@ -203,7 +210,14 @@ def sample_to_stage1_example(
                 out[0, j] = float(values[anchor_pos[nid]])
         return out
 
+    # "Anchored" = original anchors (accessed nodes) OR substrate nodes the trace
+    # wrote. The pool split then routes substrate planning-type nodes to
+    # plan_anchor and evidence-type substrate to evid_anchor.
+    substrate_set = set(substrate_ids)
     anchor = _remap(sample.anchor_mask)              # [1, N]
+    for j, nid in enumerate(node_ids):
+        if nid in substrate_set:
+            anchor[0, j] = 1.0
     epi_t = _remap(sample.epistemic_target)
     inv_t = _remap(sample.invalidator_target)
     struct = (inv_t > 0.5)
