@@ -265,32 +265,29 @@ def synthetic_examples(n_per_family: int, device, lm_dim: int) -> List[Stage1Exa
 
 # ── V4-corpus data path (needs the real stack) ───────────────────────────────
 
-def corpus_examples(corpus_path, embedder, h_init_provider: Callable, device, lm_dim: int):
-    """Build Stage1Examples from the Phase 15 V4 corpus + real components.
+def corpus_examples(corpus_path, gnn=None, embedder=None, h_init_provider: Optional[Callable] = None,
+                    device=None, lm_dim: int = 128):
+    """Build Stage1Examples from the Phase 15 V4 corpus (delegates to the bridge).
 
-    Args:
-        corpus_path: artifacts/phase15/phase15_corpus.jsonl
-        embedder:    object with .embed_nodes({id: text}) -> {id: [768]} (mpnet
-                     via transformers.AutoModel; see realstack_test.RealEmbedder)
-        h_init_provider: callable(question, task_frame) -> [1, lm_dim] real frozen
-                     Qwen prefill hidden state at the anchor layer (see
-                     GraphAttentionInjector / realstack_test for wiring)
+    The Phase 15/17 bridge (`v5/training/bridge.py`) does the real conversion:
+    parse labels via Phase15Dataset, build the subgraph + frozen-GNN GraphMemoryKV,
+    split the anchor mask into planning vs evidence by pool, and pull h_init from
+    the provider.
 
-    PREREQUISITES (documented blockers, see v5_PROGRESS.md "What remains"):
-      - a substrate-populated graph so the corpus subgraph has planning-pool
-        node types (strategy/failure_pattern/...); base-graph anchors are mostly
-        fact/claim -> evidence pool only.
-      - real frozen Qwen for h_init via h_init_provider.
+    gnn/embedder/h_init_provider default to test mocks so the converter runs on
+    the real corpus without a LM. Real training passes a frozen RGCNEncoder, an
+    mpnet embedder (transformers.AutoModel), and a frozen-Qwen h_init provider.
 
-    Labels come from Phase15Dataset (anchor_mask, slot/epistemic/invalidator/
-    shortcut targets). This function is the wiring; it is not exercised in the
-    synthetic smoke run.
+    NOTE (substrate gap, see v5_PROGRESS.md "What remains"): the current corpus
+    has ~0% planning-pool labels — base-graph anchors are mostly fact/claim
+    (evidence pool). Planning labels appear once V4 writes the reasoning substrate
+    (strategy/failure_pattern/epistemic_state/...) into the graph. Run
+    `python -m v5.training.bridge` for the per-head coverage report.
     """
-    raise NotImplementedError(
-        "corpus_examples requires a substrate-populated graph + real frozen-Qwen "
-        "h_init_provider. Wire via realstack_test.RealEmbedder and "
-        "GraphAttentionInjector once the substrate graph exists. See "
-        "v5/training/dataset.py:Phase15Dataset for the label source.")
+    from v5.training.bridge import corpus_to_stage1_examples
+    return corpus_to_stage1_examples(
+        corpus_path, gnn=gnn, embedder=embedder,
+        h_init_provider=h_init_provider, device=device, lm_dim=lm_dim)
 
 
 # ── synthetic smoke run ──────────────────────────────────────────────────────
