@@ -4,7 +4,7 @@
 > you don't have to dig through commits/logs. Updated each working session.
 
 **Last updated:** 2026-05-30
-**HEAD:** `59a449b` · branch `main`
+**HEAD:** `ee11189` · branch `main`
 
 ---
 
@@ -17,7 +17,13 @@
 - ✅ Random-init injection is **95% non-catastrophic** over 20 questions (perfect
   1/1 hook control) → Stage 2 starts from a stable injected-generation baseline.
 - ✅ **Stage 2 core (synthetic)**: residual gate + 2A/2B trainer learns attention
-  routing (plan/evid precision → 1.0) with bounded gated write (~11% of ‖h‖).
+  routing (plan/evid precision → 1.0) with bounded gated write (~11% of ‖h‖);
+  negatives stay diffuse (entropy ln 3), positives confident, no collapse.
+- ✅ **Stage 2A on REAL corpus**: routing plan 0.76→1.00, evid 0.37→1.00;
+  perturbation re-check 0/20 catastrophic, hooks 20/20, sim 0.95 (W_o/gate frozen
+  → generation untouched, as intended for "learn to look").
+- ⏳ **Stage 2B held** (learn to write): the real write-safety question is only
+  answered once W_o + gate train; not run yet.
 - ❌ NOT yet: V5 **generalizes** (corpus is 20 traces → train-fit only).
 - ❌ NOT yet: V5 **improves** generation (Stage 2 not yet on the real 1536-d adapter;
   LoRA untrained).
@@ -102,6 +108,33 @@ success criteria: plan>=0.9 OK · evid>=0.9 OK · write bounded (<=0.35) OK
 Note: lr 1e-3 diverged (attn loss 1.8→9.6) on the small attention pool; lr 2e-4
 converges. Residual gate keeps the write ~11% of ‖h‖.
 
+With negatives (15+15 positive, 10 negative): positives confident (entropy
+0.00/0.35), negatives maximally diffuse (entropy 1.10 = ln 3), top-1 freq 0.5/0.5
+(no collapse).
+
+---
+
+## 1d. Stage 2A on REAL corpus + perturbation re-check — `python -m v5.training.stage2_real`
+
+Qwen2.5-1.5B, substrate graph, gate=0.02, W_o frozen (learn to LOOK only).
+
+```
+attention routing (real corpus): plan 0.76 -> 1.00,  evid 0.37 -> 1.00
+
+PERTURBATION RE-CHECK (Stage-2A adapter, 20 questions):
+  catastrophic           : 0/20
+  non_catastrophic_rate  : 1.000
+  hooks_ok               : 20/20
+  mean_base_len          : 272
+  mean_inj_len           : 265
+  mean_sim               : 0.948   (generation barely changes — W_o/gate frozen)
+  injected_gibberish     : 0
+```
+
+HONEST CONFOUND: this used gate=0.02 vs the random baseline's gate=1.0, so 0%
+catastrophic is partly because 2A barely writes by design. Write-safety is only
+truly tested in Stage 2B (W_o + gate trained) — intentionally held.
+
 ---
 
 ## 2. Substrate Population Pass (raw) — `python -m v5.training.substrate`
@@ -166,6 +199,7 @@ python -m v5.training.trainability_test             # synthetic head trainabilit
 python -m v5.training.substrate                     # build substrate-enriched graph
 python -m v5.training.bridge                        # corpus -> Stage1Example + coverage
 python -m v5.training.stage2                         # Stage 2 (2A routing + 2B write), synthetic
+$env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.stage2_real  # real Stage 2A + perturbation re-check
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.realstack_test       # real-stack prefill
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.stage1_real # real Stage 1 (planning incl.)
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.infer_demo           # baseline vs injected generation
