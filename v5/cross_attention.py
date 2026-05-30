@@ -53,12 +53,16 @@ class CrossAttentionProjections(nn.Module):
 
     def __init__(
         self,
-        q_input_dim: int = Q_INPUT_DIM,
+        q_input_dim: Optional[int] = None,
         kv_input_dim: int = GNN_HIDDEN_DIM,
         attn_dim: int = CROSS_ATTN_DIM,
         lm_hidden_dim: int = LM_HIDDEN_DIM,
     ):
         super().__init__()
+        # q_input_dim depends on lm_hidden_dim; derive it when not given so a
+        # non-2560 LM (e.g. Qwen2.5-1.5B hidden=1536) works without edits.
+        if q_input_dim is None:
+            q_input_dim = lm_hidden_dim + GOAL_DIM + _NUM_SLOTS
         self.W_q = nn.Linear(q_input_dim, attn_dim, bias=False)
         self.W_k = nn.Linear(kv_input_dim, attn_dim, bias=False)
         self.W_v = nn.Linear(kv_input_dim, attn_dim, bias=False)
@@ -238,6 +242,11 @@ class RecurrentAttentionBlock(nn.Module):
         if state.exit_reason is None:
             state.exit_reason = "max_loops_reached"
 
+        # The last log entry was appended before the exit decision in its
+        # iteration; backfill it so corpus logs record why the loop stopped.
+        if loop_log:
+            loop_log[-1]["exit_reason"] = state.exit_reason
+
         return state.h_r, state, loop_log
 
 
@@ -252,12 +261,14 @@ class V5AttentionAdapter(nn.Module):
         self,
         r_plan: int = 4,
         r_evidence: int = 6,
+        lm_hidden_dim: int = LM_HIDDEN_DIM,
     ):
         super().__init__()
-        aux_heads = AuxHeads()
+        self.lm_hidden_dim = lm_hidden_dim
+        aux_heads = AuxHeads(lm_hidden_dim=lm_hidden_dim)
 
-        plan_proj = CrossAttentionProjections()
-        evid_proj = CrossAttentionProjections()
+        plan_proj = CrossAttentionProjections(lm_hidden_dim=lm_hidden_dim)
+        evid_proj = CrossAttentionProjections(lm_hidden_dim=lm_hidden_dim)
 
         self.planning_block = RecurrentAttentionBlock(
             projections=plan_proj,
