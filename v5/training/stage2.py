@@ -63,11 +63,17 @@ def prepare_stage2a(adapter: V5AttentionAdapter) -> List[Tensor]:
 
 
 def prepare_stage2b(adapter: V5AttentionAdapter) -> List[Tensor]:
-    """2B: also train the residual write (W_o + gate); Q/K/V stay trainable."""
+    """2B: train the residual write (W_o + gate); Q/K/V stay trainable; and allow
+    SLIGHT head fine-tuning (prediction heads, not overlay) so the heads track the
+    h that 2B's writing shifts — without this, frozen heads regress (the Stage-1
+    semantics drift as h changes). A head-retention loss keeps the semantics."""
     prepare_stage2a(adapter)
     for blk in (adapter.planning_block, adapter.evidence_block):
         blk.proj.W_o.requires_grad_(True)
         blk.proj.gate.requires_grad_(True)
+    aux = adapter.aux_heads          # prediction heads (NOT overlay, which is Stage 3)
+    for head in (aux.head_norm, aux.slot, aux.node, aux.epistemic, aux.invalidator, aux.shortcut):
+        _set(head, True)
     return [p for p in adapter.parameters() if p.requires_grad]
 
 
@@ -129,6 +135,7 @@ class Stage2Config:
     grad_clip: float = 0.5
     lambda_delta: float = 0.5      # residual-magnitude penalty weight (2B)
     lambda_neg: float = 0.5        # diffuse-attention penalty on negative cases
+    lambda_head: float = 1.0       # 2B head-retention loss weight (keep Stage-1 semantics)
     target_write_ratio: float = 0.05   # keep ||gate*W_o(A)||/||h|| around here
     qkv_lr_scale: float = 0.3      # 2B: Q/K/V at lower LR than the write path (W_o/gate)
     wo_weight_decay: float = 1e-3  # 2B: extra decay on W_o to keep the write bounded
@@ -145,14 +152,15 @@ class Stage2Trainer:
             # 2B: write path (W_o + gate) at full LR + extra decay; Q/K/V at a
             # lower LR (already-good routing should drift only slightly while the
             # write path learns).
-            write_params, qkv_params = [], []
+            write_params = []
             for blk in (adapter.planning_block, adapter.evidence_block):
                 write_params += [blk.proj.W_o.weight, blk.proj.gate]
             write_set = set(id(p) for p in write_params)
-            qkv_params = [p for p in self.params if id(p) not in write_set]
+            # Q/K/V + heads at lower LR (slight drift); write path at full LR.
+            other_params = [p for p in self.params if id(p) not in write_set]
             self.opt = torch.optim.AdamW([
                 {"params": write_params, "lr": self.cfg.lr, "weight_decay": self.cfg.wo_weight_decay},
-                {"params": qkv_params, "lr": self.cfg.lr * self.cfg.qkv_lr_scale,
+                {"params": other_params, "lr": self.cfg.lr * self.cfg.qkv_lr_scale,
                  "weight_decay": self.cfg.weight_decay},
             ])
         else:
@@ -190,7 +198,29 @@ class Stage2Trainer:
             gate_pen = (self.adapter.planning_block.proj.gate ** 2
                         + self.adapter.evidence_block.proj.gate ** 2)
             loss = loss + self.cfg.lambda_delta * gate_pen
+            # head-retention: heads are slightly trainable in 2B so they track the h
+            # that the write path shifts. Keep Stage-1 semantics (slot/epi/shortcut).
+            if not is_neg:
+                loss = loss + self.cfg.lambda_head * self._head_retention(es, ex)
         return loss, mean_wr
+
+    def _head_retention(self, es, ex: Stage1Example) -> Tensor:
+        """Stage-1 head losses on the current (2B-shifted) state, so frozen-semantics
+        do not drift as h changes. slot/epistemic/shortcut + invalidator."""
+        from v5.training.stage1 import _required_slot_idx
+        loss = es.slot_state_r.sum() * 0.0
+        if ex.slot_target is not None:
+            req = _required_slot_idx(ex.task_frame)
+            loss = loss + F.binary_cross_entropy(es.slot_state_r[0, req], ex.slot_target[0, req])
+        if ex.epi_target is not None:
+            loss = loss + F.binary_cross_entropy(es.epistemic_confidence_r, ex.epi_target)
+        if ex.shortcut_target is not None:
+            loss = loss + F.binary_cross_entropy(es.shortcut_validity_r, ex.shortcut_target)
+        if ex.inv_target is not None and ex.struct_inv_mask is not None and ex.struct_inv_mask.any():
+            inv_p = es.invalidator_flags_r.clamp(1e-6, 1 - 1e-6)
+            m = ex.struct_inv_mask
+            loss = loss + F.binary_cross_entropy(inv_p[m], ex.inv_target[m])
+        return loss
 
     def train(self, examples: List[Stage1Example]):
         for ep in range(self.cfg.epochs):
@@ -198,10 +228,13 @@ class Stage2Trainer:
             tot = 0.0; mwr = 0.0
             for ex in examples:
                 loss, wr = self._step(ex)
+                mwr += wr
+                if loss.grad_fn is None:      # no supervised/penalty term this example
+                    continue
                 self.opt.zero_grad(); loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.params, self.cfg.grad_clip)
                 self.opt.step()
-                tot += float(loss.item()); mwr += wr
+                tot += float(loss.item())
             self.sched.step()
             if (ep + 1) % self.cfg.log_every == 0 or ep == 0:
                 print(f"  [{self.cfg.sub_stage}] epoch {ep+1:3d}  attn_loss={tot/len(examples):.4f}  "

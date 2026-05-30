@@ -226,6 +226,16 @@ def sample_to_stage1_example(
     evid_mask = kv.evidence_mask.unsqueeze(0)
     plan_anchor = anchor * plan_mask.float()
     evid_anchor = anchor * evid_mask.float()
+
+    # Epistemic support for FALLBACK: the evidence a FINALIZED trace relied on to
+    # answer is epistemically supported. Without this, the corpus only marks
+    # add_epistemic_state substrate nodes, so the primary evidence FACT a trace
+    # used gets target 0 -> the head learns it is "unsupported" -> fallback_needed
+    # fires even on applicable cases. Mark finalized traces' cited evidence-pool
+    # anchors as supported so applicable fallback can correctly drop. (Non-finalized
+    # / blocked traces are NOT marked -> their fallback correctly stays on.)
+    if sample.finalized:
+        epi_t = torch.maximum(epi_t, (anchor * evid_mask.float()))
     plan_anchor = plan_anchor if plan_anchor.sum() > 0 else None
     evid_anchor = evid_anchor if evid_anchor.sum() > 0 else None
 

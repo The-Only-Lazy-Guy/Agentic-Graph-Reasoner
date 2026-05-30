@@ -172,6 +172,8 @@ class Stage1Trainer:
             tot = 0.0
             for ex in examples:
                 loss = self._losses(ex)
+                if loss.grad_fn is None:      # no supervised term (e.g. all-None labels)
+                    continue
                 self.opt.zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.params, self.cfg.grad_clip)
