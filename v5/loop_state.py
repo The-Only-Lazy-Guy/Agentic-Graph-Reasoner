@@ -39,6 +39,9 @@ class LoopState:
     invalidator_flags_r: Tensor                      # [1, N] float (>0.5 = fired)
     loop_idx: int = 0
     exit_reason: Optional[str] = None
+    # Per-loop telemetry attached by RecurrentAttentionBlock for Stage 2:
+    attn_history: Optional[list] = None              # list of [1, N] softmax attention
+    write_ratios: Optional[list] = None              # list of ||gate*W_o(A)||/||h|| floats
 
     # Readable snapshot for logging / corpus
     def to_log_entry(

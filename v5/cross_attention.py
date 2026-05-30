@@ -65,12 +65,18 @@ class CrossAttentionProjections(nn.Module):
         kv_input_dim: int = GNN_HIDDEN_DIM,
         attn_dim: int = CROSS_ATTN_DIM,
         lm_hidden_dim: int = LM_HIDDEN_DIM,
+        gate_init: float = 1.0,
     ):
         super().__init__()
         # q_input_dim depends on lm_hidden_dim; derive it when not given so a
         # non-2560 LM (e.g. Qwen2.5-1.5B hidden=1536) works without edits.
         if q_input_dim is None:
             q_input_dim = lm_hidden_dim + GOAL_DIM + _NUM_SLOTS
+        # Learned residual gate alpha: h_next = h_r + alpha * W_o(A). Default 1.0
+        # preserves Stage-1 behavior; Stage 2 starts it small (~0.02) so the
+        # adapter learns to write graph signal gradually instead of letting a
+        # random/over-eager W_o perturb the LM. Track ||alpha*W_o(A)|| / ||h||.
+        self.gate = nn.Parameter(torch.tensor(float(gate_init)))
         self.W_q = nn.Linear(q_input_dim, attn_dim, bias=False)
         self.W_k = nn.Linear(kv_input_dim, attn_dim, bias=False)
         self.W_v = nn.Linear(kv_input_dim, attn_dim, bias=False)
@@ -118,7 +124,10 @@ class CrossAttentionProjections(nn.Module):
         attn_weights = torch.softmax(logits, dim=-1)           # [B, N]
 
         A = attn_weights @ V_r                                  # [B, attn_dim]
-        h_new = h_r + self.W_o(A)                              # residual stream preserves h_r
+        write = self.gate * self.W_o(A)                        # gated residual write
+        h_new = h_r + write                                    # residual stream preserves h_r
+        self._last_write_ratio = float(                        # ||gate*W_o(A)|| / ||h||  (telemetry)
+            (write.norm() / (h_r.norm() + 1e-9)).item())
         return h_new, attn_weights
 
 
@@ -212,6 +221,8 @@ class RecurrentAttentionBlock(nn.Module):
         )
 
         loop_log: List[dict] = []
+        attn_history: List[Tensor] = []     # per-loop softmax attention (Stage 2 supervision)
+        write_ratios: List[float] = []      # per-loop ||gate*W_o(A)||/||h|| (telemetry)
 
         for r in range(r_max):
             # 1. Dynamic K/V overlay from current loop state
@@ -224,6 +235,8 @@ class RecurrentAttentionBlock(nn.Module):
                 state.h_r, goal, state.slot_state_r, K_r, V_r,
                 node_mask=node_mask,
             )
+            attn_history.append(attn_weights)
+            write_ratios.append(getattr(self.proj, "_last_write_ratio", 0.0))
 
             # 3. Update loop state
             state = LoopState(
@@ -267,6 +280,10 @@ class RecurrentAttentionBlock(nn.Module):
         if loop_log:
             loop_log[-1]["exit_reason"] = state.exit_reason
 
+        # Stash per-loop attention + write telemetry for Stage 2 supervision.
+        state.attn_history = attn_history
+        state.write_ratios = write_ratios
+
         return state.h_r, state, loop_log
 
 
@@ -282,13 +299,14 @@ class V5AttentionAdapter(nn.Module):
         r_plan: int = 4,
         r_evidence: int = 6,
         lm_hidden_dim: int = LM_HIDDEN_DIM,
+        gate_init: float = 1.0,
     ):
         super().__init__()
         self.lm_hidden_dim = lm_hidden_dim
         aux_heads = AuxHeads(lm_hidden_dim=lm_hidden_dim)
 
-        plan_proj = CrossAttentionProjections(lm_hidden_dim=lm_hidden_dim)
-        evid_proj = CrossAttentionProjections(lm_hidden_dim=lm_hidden_dim)
+        plan_proj = CrossAttentionProjections(lm_hidden_dim=lm_hidden_dim, gate_init=gate_init)
+        evid_proj = CrossAttentionProjections(lm_hidden_dim=lm_hidden_dim, gate_init=gate_init)
 
         self.planning_block = RecurrentAttentionBlock(
             projections=plan_proj,
