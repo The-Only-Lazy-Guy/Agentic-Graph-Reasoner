@@ -38,14 +38,20 @@
   **epistemic generalization (all-node 0.00)** → points to an architecture/label
   problem (the **support-pointer head**), NOT pure data scale. (n=10 still < 100–300
   bar; indicative not conclusive.)
-- 🔬 **Oracle diagnostic OVERTURNED the support-pointer hypothesis**: feeding the
-  fallback gate the GOLD support node did NOT drop applicable fallback (7/7 → 7/7).
-  The real blocker is the **SLOT gate (fails 7/7)**, not epistemic (epi was 0.71
-  top / 0.86 gold-support, mostly ABOVE the 0.70 threshold). → **Do NOT build the
-  support-pointer head.** Fix = **slot calibration** (required slots sit ~0.7–0.8,
-  fail the ≥0.85 gate).
-- ⏸️ **Held on purpose**: support-pointer head (ruled out by oracle), Stage 3
-  overlay, Stage 4 LoRA, any quality claim.
+- 🔬 **Two diagnostics ruled out the obvious fixes; the fallback gate is
+  data-scale-bound, not a single-head fix.**
+  - Oracle support-pointer: gold support node did NOT drop applicable fallback
+    (7/7) → **support-pointer head ruled out**.
+  - Slot sweep (0.50→0.85): applicable fallback **flat at 1.00**, slot recall 0.60
+    (40% of required slots predicted <0.50) → **threshold tuning ruled out**.
+  - Gold-slot oracle: applicable only 1.00→0.86 → **slots alone aren't the
+    blocker; epi/inv also fail** (conjunctive gate). The two runs disagree on the
+    dominant failing condition → **n=7 held-out is variance-dominated.**
+  → Verdict: **multi-head calibration that only generalizes with more data.**
+    Next = SCALE the corpus (vast.ai pipeline), get held-out n≥30, THEN calibrate
+    per-condition. Stop running n=7 diagnostics (noise).
+- ⏸️ **Held on purpose**: support-pointer head, slot-threshold change, Stage 3,
+  Stage 4, any quality claim.
 - ❌ NOT yet: V5 **generalizes** (corpus is 20 traces → train-fit only).
 - ❌ NOT yet: V5 **improves** generation (Stage 2 not yet on the real 1536-d adapter;
   LoRA untrained).
@@ -317,8 +323,21 @@ trips:  slot 7/7  ·  inv 1/7  ·  epi_top 2/7
 mean epi:  top-attended 0.71 · gold-support 0.86   (mostly >= 0.70 threshold)
 VERDICT: NOT support selection -> SLOT calibration is the blocker.
 ```
-=> support-pointer head is ruled out. Next fix is slot-head calibration (get
-required slots above 0.85), then re-check fallback.
+=> support-pointer head is ruled out.
+
+## 1i. Slot-calibration sweep — `v5.training.slot_calibration_diag`
+
+```
+SWEEP (held-out, applicable n=7):  applicable fallback = 1.00 at EVERY thresh 0.50..0.85
+  slot_P 1.00  slot_R 0.60  (40% of required slots predicted <0.50 -> fail at any thresh)
+GOLD-SLOT ORACLE:  predicted@0.85 applicable 1.00  ->  GOLD slots applicable 0.86 (barely)
+RECOMMENDATION: no threshold helps; gold slots barely help -> NOT a slot-threshold fix.
+```
+Combined with the oracle (support-pointer ruled out): the fallback gate is a
+CONJUNCTION (slots AND no-inv AND epi); multiple heads under-calibrate on held-out
+and the dominant failing condition VARIES between runs (n=7 = variance-dominated).
+=> data-scale problem. Scale corpus (vast.ai), get held-out n>=30, then calibrate
+per-condition. Stop n=7 diagnostics.
 
 ---
 
