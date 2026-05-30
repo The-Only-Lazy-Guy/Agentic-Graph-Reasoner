@@ -78,9 +78,10 @@ def heldout_metrics(adapter, examples):
     adapter.eval()
     plan_pr = _node_pr(adapter, examples, "plan")
     evid_pr = _node_pr(adapter, examples, "evid")
-    head = defaultdict(lambda: [0, 0])     # name -> [hit, n]
+    head = defaultdict(lambda: [0, 0])     # name -> [hit, n]  (strict all-node match)
     fb = defaultdict(lambda: [0, 0])       # tag -> [fb, n]
     wr = defaultdict(list)
+    epi_node_hit = epi_node_tot = 0        # per-node epistemic accuracy (less strict)
     for ex in examples:
         _, ps, _ = adapter.run_planning(ex.h_init, ex.goal, ex.graph_kv, ex.node_ids, task_frame=ex.task_frame)
         _, es, _ = adapter.run_evidence(ps.h_r, ex.goal, ex.graph_kv, ex.node_ids, task_frame=ex.task_frame)
@@ -89,8 +90,10 @@ def heldout_metrics(adapter, examples):
             ok = ((es.slot_state_r[0, req] - ex.slot_target[0, req]).abs() < 0.5).all().item()
             head["slot"][0] += int(ok); head["slot"][1] += 1
         if ex.epi_target is not None:
-            ok = ((es.epistemic_confidence_r > 0.5).float() == ex.epi_target).all().item()
+            pred = (es.epistemic_confidence_r > 0.5).float()
+            ok = (pred == ex.epi_target).all().item()
             head["epi"][0] += int(ok); head["epi"][1] += 1
+            epi_node_hit += int((pred == ex.epi_target).sum().item()); epi_node_tot += ex.epi_target.numel()
         if ex.shortcut_target is not None:
             ok = (es.shortcut_validity_r.item() > 0.5) == ex.shortcut_target.item()
             head["shortcut"][0] += int(ok); head["shortcut"][1] += 1
@@ -105,6 +108,7 @@ def heldout_metrics(adapter, examples):
         "head_acc": {k: v[0] / max(1, v[1]) for k, v in head.items()},
         "fallback": {k: v[0] / max(1, v[1]) for k, v in fb.items()},
         "write_ratio": {k: (sum(v) / max(1, len(v))) for k, v in wr.items()},
+        "epi_per_node_acc": epi_node_hit / max(1, epi_node_tot),
         "n_eval": len(examples),
     }
 
@@ -185,7 +189,8 @@ def run(corpus_path, model_name=DEFAULT_LM, device_str=None, eval_frac=0.2,
           f"recall@gold={m['plan_node']['recall@gold']:.2f} (n={m['plan_node']['n']})")
     print(f"    evid  node  precision@1={m['evid_node']['precision@1']:.2f} "
           f"recall@gold={m['evid_node']['recall@gold']:.2f} (n={m['evid_node']['n']})")
-    print(f"    head acc: " + "  ".join(f"{k}={v:.2f}" for k, v in m["head_acc"].items()))
+    print(f"    head acc (strict all-node): " + "  ".join(f"{k}={v:.2f}" for k, v in m["head_acc"].items()))
+    print(f"    epi per-node acc: {m['epi_per_node_acc']:.2f}  (less strict than all-node)")
     print(f"    fallback: " + "  ".join(f"{k}={v:.2f}" for k, v in m["fallback"].items()))
     print(f"    write ratio: " + "  ".join(f"{k}={v:.3f}" for k, v in m["write_ratio"].items()))
     print("\n    KEY: fallback applicable should DROP while blocked/negative stay high.")
