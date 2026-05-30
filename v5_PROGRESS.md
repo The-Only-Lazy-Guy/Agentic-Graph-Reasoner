@@ -1,13 +1,12 @@
 # V5 GNN + Recurrent Cross-Attention Adapter — Progress Log
 
 **Status:** Architecture implemented, validated end-to-end on a real stack, proven
-**trainable** (synthetic teacher-forced: every head 0.5→1.0), and now **trained on
-the real V4 corpus** with real mpnet embeddings + real frozen-Qwen h_init —
-covered heads (evidence/slot/epistemic/shortcut) all learn. The V4-trace → V5
-Stage1Example bridge (with persisted-graph neighborhood) is built and measures the
-remaining bottleneck precisely: planning supervision is 0% until V4 writes the
-reasoning substrate into the graph. Pending: substrate population (the data loop),
-joint end-to-end recipe (Stages 2–5), 4B GGUF path.
+**trainable** (synthetic teacher-forced: every head 0.5→1.0), and **trained on the
+real V4 corpus** with real mpnet embeddings + real frozen-Qwen h_init. The
+Substrate Population Pass applies the corpus's own scoped patches into the graph,
+taking **planning coverage 0% → 85%**, and real Stage 1 now trains **all six heads
+including planning** on real graph states. Remaining work is data scale + the
+joint end-to-end recipe (Stages 2–5) + the 4B GGUF path — not architecture.
 
 **Last updated:** 2026-05-30
 
@@ -550,6 +549,54 @@ should climb off 0%) → `stage1_real` picks up the planning head automatically.
 
 ---
 
+## 2026-05-30: Substrate Population Pass — planning unblocked (commit `0acd967`)
+
+The bridge had measured the one remaining gap: planning coverage 0%, because
+planning **labels** come from `anchor_mask` (accessed nodes, all evidence-type),
+while the planning substrate V4 wrote lives in each trace's `scoped_patches`. The
+pass closes that loop using the patches already in the Phase 15 corpus (no new V4
+run needed):
+
+1. **`dataset.py`** — `Phase15Sample.substrate_nodes`: parse safe
+   (`accept`/`soft_only`) `add_*` substrate patches per trace into
+   `{node_id: {type, text, status}}`. Fresh `epistemic_state` nodes default to
+   `uncertain` → planning pool.
+2. **`substrate.py`** — `build_substrate_graph()` applies the safe substrate nodes
+   + relations into a `merged_graph` copy → `graphs/merged_graph_substrate.json`.
+   Added **+47 nodes** (27 epistemic_state, 7 strategy, 5 reasoning_atom,
+   4 solved_subgoal, 4 failure_pattern) and **+79 relations** (831→878 nodes).
+3. **`bridge.py`** — when the enriched graph is used, append each trace's
+   substrate nodes to the node list and mark them as anchors; the pool split
+   routes planning-type substrate to `plan_anchor`, evidence-type to `evid_anchor`.
+
+### Bridge coverage: planning 0% → 85%
+
+| head | base graph | substrate-enriched |
+|---|---|---|
+| **plan** | **0%** | **85% (17/20)** |
+| evid | 95% | 95% |
+| slot | 100% | 100% |
+| epi | 40% | 40% |
+| inv | 5% | 5% |
+| shortcut | 100% | 100% |
+
+### Real Stage 1 WITH planning (Qwen2.5-1.5B, loss 18.5 → 2.99)
+
+| head | before | after |
+|---|---|---|
+| **planning** | 0.94 | **1.00** (now supervised) |
+| evidence | 0.32 | **1.00** |
+| slot | 0.00 | **1.00** |
+| epistemic | 0.00 | **1.00** |
+| shortcut | 0.65 | **1.00** |
+
+The planning head — blocked at 0% coverage for the whole project — now trains on
+real graph states + real LM h_init. Same honest caveat: train-fit on 20 examples,
+no held-out split (the corpus is too small for an 80/20 split yet); this proves
+the full pipeline incl. planning *learns*, not generalization.
+
+---
+
 ## What remains before real training
 
 1. **Substrate-populated graph**: run V4 (or apply Phase 15 scoped patches) so a
@@ -590,7 +637,8 @@ v5/
     ├── stage1.py              Stage1Trainer (heads-only, frozen loop projections)
     ├── bridge.py              Phase 15/17 bridge: V4 corpus trace -> Stage1Example
     ├── providers.py           RealEmbedder (mpnet) + FrozenQwenHInitProvider
-    └── stage1_real.py         Stage 1 on the real corpus (real embeddings + h_init)
+    ├── stage1_real.py         Stage 1 on the real corpus (real embeddings + h_init)
+    └── substrate.py           Substrate Population Pass (apply V4 patches -> graph)
 ```
 
 ## Test commands
@@ -611,7 +659,11 @@ python -m v5.training.bridge
 # real-stack test (real mpnet + Qwen2.5-1.5B; needs KMP workaround)
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.realstack_test
 
-# Stage 1 on the REAL corpus (real mpnet + real frozen-Qwen h_init)
+# Substrate Population Pass: apply safe V4 patches -> merged_graph_substrate.json
+python -m v5.training.substrate
+
+# Stage 1 on the REAL corpus (real mpnet + real frozen-Qwen h_init; uses the
+# substrate-enriched graph when present -> planning is supervised)
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.stage1_real
 ```
 
