@@ -194,12 +194,17 @@ class Phase16Trainer:
         # ── losses ────────────────────────────────────────────────────────────
         cfg = self.cfg
 
-        # Node attention: node_scores_r is cumulative attn weights (sum = r per iter,
-        # can exceed [0,1]). Apply sigmoid to get proper probabilities.
+        # Node attention: node_scores_r is cumulative attn weights, with
+        # out-of-pool nodes masked to -1e9 by RecurrentAttentionBlock. Apply
+        # sigmoid → out-of-pool nodes become exactly 0. A block can only be
+        # supervised on nodes it can attend, so restrict each block's BCE to
+        # its own pool (planning block → planning_mask; evidence → evidence_mask).
         plan_scores = torch.sigmoid(plan_state.node_scores_r)   # [1, N] in (0,1)
         evid_scores = torch.sigmoid(evid_state.node_scores_r)
-        node_loss_plan = F.binary_cross_entropy(plan_scores, anchor_t)
-        node_loss_evid = F.binary_cross_entropy(evid_scores, anchor_t)
+        plan_pool = graph_kv.planning_mask.unsqueeze(0)         # [1, N] bool
+        evid_pool = graph_kv.evidence_mask.unsqueeze(0)
+        node_loss_plan = _masked_bce(plan_scores, anchor_t, plan_pool)
+        node_loss_evid = _masked_bce(evid_scores, anchor_t, evid_pool)
         node_loss = (node_loss_plan + node_loss_evid) * 0.5
 
         slot_loss = F.binary_cross_entropy(evid_state.slot_state_r, slot_t)
@@ -241,6 +246,22 @@ class Phase16Trainer:
             "shortcut": sc_loss.item(),
         }
         return total, breakdown
+
+
+# ── loss helpers ──────────────────────────────────────────────────────────────
+
+def _masked_bce(pred: Tensor, target: Tensor, pool_mask: Tensor) -> Tensor:
+    """BCE over in-pool nodes only. Returns 0 (grad-safe) if pool is empty.
+
+    pred/target: [1, N] in (0,1); pool_mask: [1, N] bool.
+    Out-of-pool nodes (masked to ~0 in pred) are excluded so a node a block
+    cannot attend does not generate a spurious max-BCE penalty.
+    """
+    if pool_mask is None or not pool_mask.any():
+        return pred.sum() * 0.0   # zero with grad path preserved
+    p = pred[pool_mask].clamp(1e-6, 1 - 1e-6)
+    t = target[pool_mask]
+    return F.binary_cross_entropy(p, t)
 
 
 # ── fake graph stub ───────────────────────────────────────────────────────────

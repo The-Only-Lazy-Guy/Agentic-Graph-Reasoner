@@ -215,6 +215,16 @@ class RecurrentAttentionBlock(nn.Module):
                 state, base_node_embeddings, static_inv=static_inv
             )
 
+            # 3b. Re-apply the pool mask to node_scores. update_state adds the
+            # NodeHead adjustment to ALL nodes; without re-masking, out-of-pool
+            # nodes leak into node_scores_r and can drive the exit-condition
+            # top-k / StateOverlayHead top-k onto the wrong pool. The attention
+            # itself is already masked; this keeps the cumulative score in-pool.
+            if node_mask is not None:
+                masked_scores = state.node_scores_r.clone()
+                masked_scores[:, ~node_mask] = _NEG_INF
+                state.node_scores_r = masked_scores
+
             # 4. Log
             loop_log.append(state.to_log_entry(node_ids or [], layer=self.layer_id))
 
