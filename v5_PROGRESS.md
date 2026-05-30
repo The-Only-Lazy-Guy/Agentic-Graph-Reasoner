@@ -409,6 +409,37 @@ blocked ones.
 
 ---
 
+## Staged training plan (the recipe for joint end-to-end)
+
+The trainability test proved capacity by training heads on a *frozen* loop
+representation. Real training must unfreeze progressively — the instability is
+optimization, not design. Planned stages, each with warmup + low LR on the
+recurrent projections:
+
+1. **Stage 1** — freeze LM + freeze GNN, train aux heads only. (This is what the
+   trainability test already does; the proven-good starting point.)
+2. **Stage 2** — unfreeze the cross-attention projections (`W_q/W_k/W_v/W_o`,
+   `K_proj/V_proj`) with LR warmup so they don't shift `h_r` out from under the
+   heads.
+3. **Stage 3** — unfreeze the `StateOverlayHead`.
+4. **Stage 4** — LoRA on selected LM layers (around L8 / L20).
+5. **Stage 5** — optional GNN fine-tuning.
+
+> NOTE: this is **adapter** staged training (progressive unfreezing of the V5
+> module). It is **not** the same as the graph-edit data staging used in V4
+> learning — there the cycle is: generate data → collect scoped edits but do NOT
+> apply → train → apply edits → move to the next, harder question batch. Do not
+> conflate the two.
+
+### Open architectural item (post-trainability)
+
+- **Support-pointer head.** The fallback/exit epistemic gate currently uses the
+  primary (top-1) attention node as the answer's support. Highest-attention and
+  "the node the answer rests on" are usually aligned but not guaranteed — the top
+  node could be a failure pattern or contradiction. A dedicated
+  `answer_support_node` / `primary_support_pointer` head would make this explicit
+  and is worth adding before scaled training. Fine as-is for now.
+
 ## What remains before real training
 
 1. **Substrate-populated graph**: run V4 (or apply Phase 15 scoped patches) so a
@@ -421,7 +452,7 @@ blocked ones.
 3. **Real embedder in trainer**: replace `FakeEmbedder` with the
    `transformers.AutoModel` mpnet path used by `realstack_test.py`.
 4. **LoRA wrapping**: apply peft LoRA to `W_q` / `W_o` in
-   `CrossAttentionProjections` before training.
+   `CrossAttentionProjections` before training (Stage 4 above).
 5. **4B GGUF path (Phase 18)**: HF export or llama-cpp hidden-state hooks (see
    finding #2 above).
 
