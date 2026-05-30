@@ -485,6 +485,24 @@ measurable: planning labels rise only after V4 writes the reasoning substrate
 (strategy / failure_pattern / control_rule / reasoning_chain / solved_subgoal /
 epistemic_state) into the graph.
 
+### Persisted-graph neighborhood (real topology) — commit `e42b8f0`
+
+Initial bridge built an anchors-only graph (no edges → isolated nodes, shallow
+R-GCN). Upgraded to source the **persisted `MemoryGraph` neighborhood**: resolve
+the row's anchors in `graphs/merged_graph.json`, expand to the k-hop neighborhood
+(anchors + neighbors **with their edges**), and remap per-anchor labels onto the
+expanded node list (anchors keep labels; neighbors are unlabeled context).
+Falls back to anchors-only when no graph resolves.
+
+Measured: all 100 anchors resolve in `merged_graph`; subgraph grows from **5.0**
+nodes (anchors-only, ~0.5 edges) to **17.8** nodes/example with real edges →
+actual message passing. Label coverage is unchanged, which is the point:
+neighborhood expansion adds topology and evidence context but **not** planning
+labels (merged_graph has no strategy/failure_pattern/epistemic_state nodes). The
+substrate gap is therefore conclusively a V4-write problem, not a graph-expansion
+one. Next bridge step (when substrate exists): the same neighborhood path will
+pick up planning-pool nodes automatically.
+
 ---
 
 ## What remains before real training
