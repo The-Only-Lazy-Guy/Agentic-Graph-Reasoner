@@ -130,6 +130,8 @@ class Stage2Config:
     lambda_delta: float = 0.5      # residual-magnitude penalty weight (2B)
     lambda_neg: float = 0.5        # diffuse-attention penalty on negative cases
     target_write_ratio: float = 0.05   # keep ||gate*W_o(A)||/||h|| around here
+    qkv_lr_scale: float = 0.3      # 2B: Q/K/V at lower LR than the write path (W_o/gate)
+    wo_weight_decay: float = 1e-3  # 2B: extra decay on W_o to keep the write bounded
     log_every: int = 50
 
 
@@ -139,7 +141,22 @@ class Stage2Trainer:
         self.cfg = config or Stage2Config()
         prep = prepare_stage2b if self.cfg.sub_stage == "2B" else prepare_stage2a
         self.params = prep(adapter)
-        self.opt = torch.optim.AdamW(self.params, lr=self.cfg.lr, weight_decay=self.cfg.weight_decay)
+        if self.cfg.sub_stage == "2B":
+            # 2B: write path (W_o + gate) at full LR + extra decay; Q/K/V at a
+            # lower LR (already-good routing should drift only slightly while the
+            # write path learns).
+            write_params, qkv_params = [], []
+            for blk in (adapter.planning_block, adapter.evidence_block):
+                write_params += [blk.proj.W_o.weight, blk.proj.gate]
+            write_set = set(id(p) for p in write_params)
+            qkv_params = [p for p in self.params if id(p) not in write_set]
+            self.opt = torch.optim.AdamW([
+                {"params": write_params, "lr": self.cfg.lr, "weight_decay": self.cfg.wo_weight_decay},
+                {"params": qkv_params, "lr": self.cfg.lr * self.cfg.qkv_lr_scale,
+                 "weight_decay": self.cfg.weight_decay},
+            ])
+        else:
+            self.opt = torch.optim.AdamW(self.params, lr=self.cfg.lr, weight_decay=self.cfg.weight_decay)
         self.sched = torch.optim.lr_scheduler.CosineAnnealingLR(self.opt, T_max=self.cfg.epochs)
 
     def _step(self, ex: Stage1Example):
@@ -164,16 +181,15 @@ class Stage2Trainer:
             if ex.evid_anchor is not None:
                 loss = loss + attention_ce(es.attn_history, ex.evid_anchor, kv.evidence_mask.unsqueeze(0))
 
-        # residual-magnitude penalty (2B): keep the write near target, not runaway
+        # residual-magnitude penalty (2B): keep the gated write small (gate is the
+        # dominant differentiable knob; W_o is also decayed). Penalize gate^2 so
+        # the write stays in the ~0.01-0.10 band unless attention CE truly needs more.
         wr = (ps.write_ratios or []) + (es.write_ratios or [])
         mean_wr = sum(wr) / max(1, len(wr))
         if self.cfg.sub_stage == "2B":
-            ratio = torch.tensor(0.0, requires_grad=True)
-            # differentiable proxy: penalize gate^2 above target (gate is the learnable knob)
-            for blk in (self.adapter.planning_block, self.adapter.evidence_block):
-                over = torch.relu(blk.proj.gate.abs() - self.cfg.target_write_ratio * 10)
-                ratio = ratio + over ** 2
-            loss = loss + self.cfg.lambda_delta * ratio
+            gate_pen = (self.adapter.planning_block.proj.gate ** 2
+                        + self.adapter.evidence_block.proj.gate ** 2)
+            loss = loss + self.cfg.lambda_delta * gate_pen
         return loss, mean_wr
 
     def train(self, examples: List[Stage1Example]):
