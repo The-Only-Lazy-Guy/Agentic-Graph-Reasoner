@@ -70,10 +70,20 @@ command -v git >/dev/null || die "git not found"
 case "$BACKEND" in llama|opencode) ;; *) die "BACKEND must be llama or opencode (got $BACKEND)";; esac
 log "BACKEND=$BACKEND  RUN_ID=$RUN_ID  shard $SHARD_INDEX/$NUM_SHARDS"
 if [ "$BACKEND" = "opencode" ]; then
-  command -v opencode >/dev/null || die "opencode not found. Install: npm i -g opencode-ai (Node 18+), then 'opencode auth login'."
-  if ! opencode auth list 2>/dev/null | grep -qiE "key|token|oauth|credential|provider"; then
-    log "WARN: 'opencode auth list' shows no obvious credential — generation will fail if no provider is configured."
+  # Resolve the opencode executable (nvm installs outside the default PATH).
+  if [ -n "${OPENCODE_EXE_PATH:-}" ]; then
+    :  # caller provided it
+  elif command -v opencode >/dev/null; then
+    OPENCODE_EXE_PATH="$(command -v opencode)"
+  else
+    OPENCODE_EXE_PATH="$(ls -1 /opt/nvm/versions/node/*/bin/opencode "$HOME"/.nvm/versions/node/*/bin/opencode 2>/dev/null | head -1 || true)"
   fi
+  [ -n "${OPENCODE_EXE_PATH:-}" ] && [ -x "$OPENCODE_EXE_PATH" ] \
+    || die "opencode not found. Install (npm i -g opencode-ai) or set OPENCODE_EXE_PATH=/opt/nvm/versions/node/<ver>/bin/opencode"
+  export OPENCODE_EXE_PATH
+  log "opencode: $OPENCODE_EXE_PATH"
+  "$OPENCODE_EXE_PATH" auth list 2>/dev/null | grep -qiE "key|token|oauth|credential|provider" \
+    || log "WARN: 'opencode auth list' shows no credential — run 'opencode auth login' first or generation will fail."
 fi
 
 # ---- 1. system deps (best-effort; needs sudo or root) ----------------------

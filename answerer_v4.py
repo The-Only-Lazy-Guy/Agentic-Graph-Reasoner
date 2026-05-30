@@ -2722,11 +2722,13 @@ class V4OpencodeController:
         started_at = datetime.now(timezone.utc).isoformat()
         started_ts = time.time()
         session_id_before = self._session_id
-        cmd = [
-            _OPENCODE_EXE, "run",
-            "--model", self.model,
-            "--format", "json",
-        ]
+        cmd = [_OPENCODE_EXE, "run"]
+        # Only pass --model when one is set; if model is None/empty, use the
+        # model already configured as opencode's default (e.g. on a box where
+        # `opencode run --format json <msg>` is the intended invocation).
+        if self.model:
+            cmd += ["--model", self.model]
+        cmd += ["--format", "json"]
         if self.server_url:
             cmd += ["--attach", self.server_url]
         if self._session_id:

@@ -67,13 +67,14 @@ def main():
 
     def make_controller():
         if a.backend == "opencode":
-            kw = {"config_dir": a.opencode_config_dir}
-            if a.opencode_model:
-                kw["model"] = a.opencode_model
-            return V4OpencodeController(**kw)
+            # model=None -> omit --model -> use opencode's own configured default
+            # (invocation: `opencode run --format json <msg>`). Pass --opencode-model
+            # only if you specifically want to override it.
+            return V4OpencodeController(config_dir=a.opencode_config_dir,
+                                        model=a.opencode_model, server_url=None)
         return V4LlamaServerController(cfg)
     if a.backend == "opencode":
-        print(f"opencode model = {a.opencode_model or '(controller default)'}")
+        print(f"opencode model = {a.opencode_model or '(opencode default, no --model)'}")
 
     ok = fail = 0
     for i, task in enumerate(tasks):
