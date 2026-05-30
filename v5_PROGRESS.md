@@ -1,12 +1,13 @@
 # V5 GNN + Recurrent Cross-Attention Adapter — Progress Log
 
-**Status:** Architecture implemented, validated end-to-end on a real stack
-(mpnet-768 + frozen Qwen2.5-1.5B + real graph), and proven **trainable** — a
-teacher-forced test drives every aux head from chance (0.5) to 1.0 and makes
-fallback drop on easy tasks. 7 initial correctness bugs + 4 caught by the toy /
-real-stack tests + 4 architecture fixes caught by the trainability test, all
-fixed. Phase 15 corpus collected, Phase 16 pipeline built. Pending: joint
-end-to-end training recipe (lr staging); substrate-populated graph; 4B GGUF path.
+**Status:** Architecture implemented, validated end-to-end on a real stack, proven
+**trainable** (synthetic teacher-forced: every head 0.5→1.0), and now **trained on
+the real V4 corpus** with real mpnet embeddings + real frozen-Qwen h_init —
+covered heads (evidence/slot/epistemic/shortcut) all learn. The V4-trace → V5
+Stage1Example bridge (with persisted-graph neighborhood) is built and measures the
+remaining bottleneck precisely: planning supervision is 0% until V4 writes the
+reasoning substrate into the graph. Pending: substrate population (the data loop),
+joint end-to-end recipe (Stages 2–5), 4B GGUF path.
 
 **Last updated:** 2026-05-30
 
@@ -509,6 +510,46 @@ pick up planning-pool nodes automatically.
 
 ---
 
+## 2026-05-30: RealProvider path + first real-corpus Stage 1 (commit `926ec1b`)
+
+`v5/training/providers.py` supplies the real inputs that replace the bridge mocks:
+
+- **`RealEmbedder`** — mpnet-768 via `transformers.AutoModel` + mean pooling
+  (canonical home; `realstack_test` re-exports it).
+- **`FrozenQwenHInitProvider`** — loads Qwen frozen; per question runs one prefill
+  and returns the last-token hidden state at the anchor layer
+  (`hidden_states[anchor_layer+1]`), cached per question. Exposes `hidden_size`
+  so the adapter is built with `lm_hidden_dim` = the LM width.
+
+`v5/training/stage1_real.py` runs Stage 1 end-to-end on the real Phase 15 corpus:
+real mpnet node embeddings + real frozen-Qwen h_init + persisted-graph
+neighborhood, training the heads that have corpus labels.
+
+**Result** (Qwen2.5-1.5B, hidden=1536, anchor_layer=8, 20 examples, 150 epochs,
+loss 11.9 → 2.26):
+
+| head | before | after |
+|---|---|---|
+| evidence | 0.42 | **1.00** |
+| slot | 0.00 | **1.00** |
+| epistemic | 0.00 | **0.88** |
+| shortcut | 0.25 | **1.00** |
+| planning | — | n/a (0% coverage) |
+
+This is the **first training of V5 heads on real graph states + real LM hidden
+states** — the synthetic trainability test proved capacity; this proves the real
+pipeline trains end-to-end.
+
+> CAVEAT (honest): train-fit on 20 examples with no held-out split — overfitting
+> is expected and this demonstrates the pipeline *learns*, not generalization. A
+> held-out eval is meaningful once the corpus is larger / substrate-rich.
+
+The data-improvement loop is now fully tooled and measurable: apply V4 substrate
+patches → rebuild persisted neighborhoods → re-run `bridge` coverage (planning
+should climb off 0%) → `stage1_real` picks up the planning head automatically.
+
+---
+
 ## What remains before real training
 
 1. **Substrate-populated graph**: run V4 (or apply Phase 15 scoped patches) so a
@@ -547,7 +588,9 @@ v5/
     ├── trainer.py             Phase16Trainer, FakeEmbedder, _masked_bce, TrainingConfig
     ├── trainability_test.py   teacher-forced head-trainability proof (synthetic)
     ├── stage1.py              Stage1Trainer (heads-only, frozen loop projections)
-    └── bridge.py              Phase 15/17 bridge: V4 corpus trace -> Stage1Example
+    ├── bridge.py              Phase 15/17 bridge: V4 corpus trace -> Stage1Example
+    ├── providers.py           RealEmbedder (mpnet) + FrozenQwenHInitProvider
+    └── stage1_real.py         Stage 1 on the real corpus (real embeddings + h_init)
 ```
 
 ## Test commands
@@ -567,6 +610,9 @@ python -m v5.training.bridge
 
 # real-stack test (real mpnet + Qwen2.5-1.5B; needs KMP workaround)
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.realstack_test
+
+# Stage 1 on the REAL corpus (real mpnet + real frozen-Qwen h_init)
+$env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.stage1_real
 ```
 
 ## torch_geometric install
