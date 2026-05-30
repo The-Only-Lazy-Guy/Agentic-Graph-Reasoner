@@ -73,6 +73,42 @@ def _build_corpus_graph(sample: Phase15Sample, inv_node_ids: set) -> _CorpusGrap
     return _CorpusGraph(nodes, edges=[])  # no topology available from corpus row
 
 
+# ── persisted-graph neighborhood (real topology) ─────────────────────────────
+
+DEFAULT_PERSISTED_GRAPH = "graphs/merged_graph.json"
+
+
+def load_persisted_graph(path: str = DEFAULT_PERSISTED_GRAPH):
+    """Load the persisted MemoryGraph once (the real topology source)."""
+    from graph_core import MemoryGraph
+    return MemoryGraph.load_json(path)
+
+
+def _neighborhood(graph, anchor_ids: List[str], hops: int) -> List[str]:
+    """Ordered node list = anchors (present in graph) + their k-hop neighbors.
+
+    Anchors come first (so label remap is stable); neighbors expand the subgraph
+    so build_active_subgraph keeps the edges among them -> real R-GCN message
+    passing instead of isolated nodes.
+    """
+    present = [a for a in anchor_ids if a in graph.nodes]
+    frontier = set(present)
+    seen = set(present)
+    for _ in range(max(0, hops)):
+        nxt = set()
+        for e in graph.edges:
+            if e.src in frontier and e.dst not in seen:
+                nxt.add(e.dst)
+            if e.dst in frontier and e.src not in seen:
+                nxt.add(e.src)
+        seen |= nxt
+        frontier = nxt
+        if not frontier:
+            break
+    neighbors = [n for n in seen if n not in set(present)]
+    return present + neighbors
+
+
 # ── h_init providers ─────────────────────────────────────────────────────────
 
 class MockHInitProvider:
@@ -110,37 +146,64 @@ def sample_to_stage1_example(
     h_init_provider: HInitProvider,
     device: torch.device,
     lm_dim: int,
+    persisted_graph=None,
+    hops: int = 1,
 ) -> Optional[Stage1Example]:
-    """Convert one Phase15Sample -> Stage1Example. Returns None if unusable."""
-    node_ids = sample.node_ids
-    N = len(node_ids)
-    if N == 0:
+    """Convert one Phase15Sample -> Stage1Example. Returns None if unusable.
+
+    When `persisted_graph` is given and the anchors resolve in it, the subgraph is
+    the k-hop NEIGHBORHOOD (anchors + neighbors, with real edges) so the GNN does
+    real message passing. Otherwise it falls back to an anchors-only corpus graph
+    (no topology). Per-node labels are remapped onto the (possibly expanded) node
+    list — anchors keep their labels, neighbor nodes are unlabeled context.
+    """
+    anchor_ids = sample.node_ids
+    if not anchor_ids:
         return None
 
-    # nodes flagged by deprecate_fact patches act as structural invalidators here
-    inv_node_ids = {nid for i, nid in enumerate(node_ids)
-                    if sample.invalidator_target[i] > 0.5}
-    graph = _build_corpus_graph(sample, inv_node_ids)
+    # Resolve against the persisted graph for real topology, else anchors-only.
+    use_persisted = (
+        persisted_graph is not None
+        and any(a in persisted_graph.nodes for a in anchor_ids)
+    )
+    if use_persisted:
+        node_ids = _neighborhood(persisted_graph, anchor_ids, hops)
+        graph = persisted_graph
+        node_texts = {nid: (getattr(graph.nodes[nid], "text", "") or "") for nid in node_ids}
+    else:
+        node_ids = anchor_ids
+        inv_node_ids = {nid for i, nid in enumerate(anchor_ids)
+                        if sample.invalidator_target[i] > 0.5}
+        graph = _build_corpus_graph(sample, inv_node_ids)
+        node_texts = {nid: sample.node_texts.get(nid, "") for nid in node_ids}
 
-    text_emb = embedder.embed_nodes({nid: sample.node_texts.get(nid, "") for nid in node_ids})
+    N = len(node_ids)
+    text_emb = embedder.embed_nodes(node_texts)
     asg = build_active_subgraph(graph, node_ids, text_emb, device, sample.task_frame)
     with torch.no_grad():
         kv = gnn.encode_to_kv(asg.encoder_inputs, asg)
 
-    anchor = torch.tensor(sample.anchor_mask, dtype=torch.float32, device=device).unsqueeze(0)  # [1,N]
+    # Remap per-anchor labels onto the (possibly expanded) node list.
+    anchor_pos = {a: i for i, a in enumerate(anchor_ids)}
+    def _remap(values: List[float]) -> Tensor:
+        out = torch.zeros(1, N, device=device)
+        for j, nid in enumerate(node_ids):
+            if nid in anchor_pos:
+                out[0, j] = float(values[anchor_pos[nid]])
+        return out
+
+    anchor = _remap(sample.anchor_mask)              # [1, N]
+    epi_t = _remap(sample.epistemic_target)
+    inv_t = _remap(sample.invalidator_target)
+    struct = (inv_t > 0.5)
+
     plan_mask = kv.planning_mask.unsqueeze(0)
     evid_mask = kv.evidence_mask.unsqueeze(0)
-
-    # Split the single anchor mask by pool: a node is supervised only in the pool
-    # its block attends. None when that pool has no anchored node (partial labels).
     plan_anchor = anchor * plan_mask.float()
     evid_anchor = anchor * evid_mask.float()
     plan_anchor = plan_anchor if plan_anchor.sum() > 0 else None
     evid_anchor = evid_anchor if evid_anchor.sum() > 0 else None
 
-    epi_t = torch.tensor(sample.epistemic_target, dtype=torch.float32, device=device).unsqueeze(0)
-    inv_t = torch.tensor(sample.invalidator_target, dtype=torch.float32, device=device).unsqueeze(0)
-    struct = (inv_t > 0.5)
     slot_t = torch.tensor(sample.slot_fill_target, dtype=torch.float32, device=device).unsqueeze(0)
     shortcut_t = torch.tensor([[sample.shortcut_valid]], dtype=torch.float32, device=device)
 
@@ -182,12 +245,18 @@ def corpus_to_stage1_examples(
     h_init_provider: Optional[HInitProvider] = None,
     device: Optional[torch.device] = None,
     lm_dim: int = 128,
+    persisted_graph=None,
+    graph_path: Optional[str] = DEFAULT_PERSISTED_GRAPH,
+    hops: int = 1,
 ) -> List[Stage1Example]:
     """Convert the whole Phase 15 corpus into Stage1Examples.
 
     gnn/embedder/h_init_provider default to test mocks so the converter logic can
     be exercised on the real corpus without a LM. Real training passes a frozen
     RGCNEncoder, an mpnet embedder, and a frozen-Qwen h_init provider.
+
+    persisted_graph/graph_path: source real topology (k-hop neighborhood with
+    edges) instead of anchors-only. Pass graph_path=None to force anchors-only.
     """
     device = device or torch.device("cpu")
     gnn = gnn or RGCNEncoder().to(device).eval()
@@ -196,10 +265,17 @@ def corpus_to_stage1_examples(
     embedder = embedder or ZeroEmbedder(device)
     h_init_provider = h_init_provider or MockHInitProvider(lm_dim, device)
 
+    if persisted_graph is None and graph_path:
+        import os
+        if os.path.exists(graph_path):
+            persisted_graph = load_persisted_graph(graph_path)
+
     ds = Phase15Dataset(corpus_path)
     examples = []
     for sample in ds.samples:
-        ex = sample_to_stage1_example(sample, gnn, embedder, h_init_provider, device, lm_dim)
+        ex = sample_to_stage1_example(
+            sample, gnn, embedder, h_init_provider, device, lm_dim,
+            persisted_graph=persisted_graph, hops=hops)
         if ex is not None:
             examples.append(ex)
     return examples
@@ -207,13 +283,7 @@ def corpus_to_stage1_examples(
 
 # ── demo / coverage report on the real corpus ────────────────────────────────
 
-def run(corpus_path: str = "artifacts/phase15/phase15_corpus.jsonl"):
-    device = torch.device("cpu")
-    lm_dim = 128
-    examples = corpus_to_stage1_examples(corpus_path, device=device, lm_dim=lm_dim)
-    print(f"converted {len(examples)} corpus rows -> Stage1Example (mock embedder + mock h_init)")
-
-    # label coverage — quantifies the substrate gap honestly
+def _coverage(examples):
     cov = {"plan": 0, "evid": 0, "slot": 0, "epi": 0, "inv": 0, "shortcut": 0}
     for ex in examples:
         cov["plan"] += int(ex.plan_anchor is not None)
@@ -222,24 +292,52 @@ def run(corpus_path: str = "artifacts/phase15/phase15_corpus.jsonl"):
         cov["epi"] += int(ex.epi_target is not None)
         cov["inv"] += int(ex.inv_target is not None)
         cov["shortcut"] += int(ex.shortcut_target is not None)
-    T = max(1, len(examples))
+    return cov
+
+
+def _avg_nodes(examples):
+    return sum(len(ex.node_ids) for ex in examples) / max(1, len(examples))
+
+
+def run(corpus_path: str = "artifacts/phase15/phase15_corpus.jsonl"):
+    device = torch.device("cpu")
+    lm_dim = 128
+
+    # anchors-only vs persisted-neighborhood — show the topology upgrade
+    anchors_only = corpus_to_stage1_examples(corpus_path, device=device, lm_dim=lm_dim,
+                                             graph_path=None)
+    persisted = corpus_to_stage1_examples(corpus_path, device=device, lm_dim=lm_dim,
+                                          graph_path=DEFAULT_PERSISTED_GRAPH, hops=1)
+
+    print(f"converted {len(persisted)} corpus rows -> Stage1Example "
+          f"(mock embedder + mock h_init)")
+    print(f"\nsubgraph size (avg nodes/example):")
+    print(f"  anchors-only           : {_avg_nodes(anchors_only):.1f}")
+    print(f"  persisted 1-hop nbhd   : {_avg_nodes(persisted):.1f}  "
+          f"(real edges -> real R-GCN message passing)")
+
+    cov = _coverage(persisted)
+    T = max(1, len(persisted))
     print("\nper-head label coverage (rows with a usable label):")
     for k, v in cov.items():
-        print(f"  {k:9s} {v:3d}/{len(examples)}  ({v/T:.0%})")
+        print(f"  {k:9s} {v:3d}/{len(persisted)}  ({v/T:.0%})")
 
-    # shape sanity on the first example
-    ex = examples[0]
-    N = len(ex.node_ids)
-    print(f"\nexample[0]: N={N} nodes, h_init={tuple(ex.h_init.shape)}, "
+    ex = persisted[0]
+    print(f"\nexample[0]: N={len(ex.node_ids)} nodes "
+          f"(anchors + 1-hop neighbors), h_init={tuple(ex.h_init.shape)}, "
           f"kv.node_embeddings={tuple(ex.graph_kv.node_embeddings.shape)}, tag={ex.tag}")
     print(f"  plan_anchor={'present' if ex.plan_anchor is not None else 'None (no planning-pool anchor)'}")
     print(f"  evid_anchor={'present' if ex.evid_anchor is not None else 'None'}")
 
-    print("\nINTERPRETATION: planning-label coverage is the substrate gap — base-graph")
-    print("corpus anchors are mostly evidence-pool (fact/claim). Planning labels rise")
-    print("once V4 writes strategy/failure_pattern/epistemic_state substrate into the graph.")
-    print("\nBRIDGE OK — converter produces well-formed Stage1Examples from the real corpus")
-    return examples
+    print("\nINTERPRETATION:")
+    print("- Topology: persisted neighborhood replaces isolated anchors with a real")
+    print("  edge-bearing subgraph, so the GNN does actual message passing.")
+    print("- Substrate gap: planning-label coverage is still the bottleneck —")
+    print("  merged_graph has no strategy/failure_pattern/epistemic_state nodes, so")
+    print("  planning labels stay 0 until V4 writes that reasoning substrate.")
+    print("\nBRIDGE OK — converter produces well-formed Stage1Examples from the")
+    print("persisted MemoryGraph neighborhood of the real corpus")
+    return persisted
 
 
 if __name__ == "__main__":
