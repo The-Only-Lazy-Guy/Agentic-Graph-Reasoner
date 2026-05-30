@@ -4,7 +4,7 @@
 > you don't have to dig through commits/logs. Updated each working session.
 
 **Last updated:** 2026-05-31
-**HEAD:** `716a3a9` · branch `main`
+**HEAD:** `7664f99` · branch `main`
 
 ---
 
@@ -32,12 +32,14 @@
   slot≥0.85 AND primary-evidence epi≥0.70; the 20-example corpus doesn't calibrate
   the heads to cross those thresholds. A calibration + corpus-scale issue (motivates
   a support-pointer head), not a training-mechanism failure.
-- ✅ **Corpus-scaling harness built** + first HELD-OUT (generalization) numbers:
-  plan node P@1 1.00, evid P@1 0.50, but **held-out epi acc 0.00 vs ~0.88 train**
-  → heads OVERFIT 20 examples. n=3–4 held-out is indicative only. **Next: scale to
-  100–300 traces** (data-gen env scripts shipped).
-- ⏸️ **Held on purpose**: Stage 3 overlay, Stage 4 LoRA, any quality claim — until
-  held-out calibration is proven on a larger corpus.
+- ✅ **Scaled 20 → 46 traces** (local GGUF gen, 35 finalized, 382 patches) and
+  re-ran held-out (10 eval). KEY FINDING: 2.3× data improved slot/shortcut/node
+  generalization but did NOT fix **fallback-applicable (still 1.00)** or
+  **epistemic generalization (all-node 0.00)** → points to an architecture/label
+  problem (the **support-pointer head**), NOT pure data scale. (n=10 still < 100–300
+  bar; indicative not conclusive.)
+- ⏸️ **Held on purpose**: Stage 3 overlay, Stage 4 LoRA, any quality claim. **Next
+  indicated step: support-pointer head**, not just more data.
 - ❌ NOT yet: V5 **generalizes** (corpus is 20 traces → train-fit only).
 - ❌ NOT yet: V5 **improves** generation (Stage 2 not yet on the real 1536-d adapter;
   LoRA untrained).
@@ -275,6 +277,30 @@ $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.stage2b_real  # real 
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.stage_integrated  # integrated 1->2A->2B (7/8 gates)
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.corpus_scaling --corpus <corpus.jsonl>  # scale + held-out metrics
 ```
+
+## 1g. Corpus scaling 20 -> 46 traces (held-out) — `v5.training.corpus_scaling`
+
+Local GGUF generation (run_gen_llama.py -> llama-server :6768), 46 traces
+(35 finalized, 382 patches), 41 train / 10 held-out.
+
+```
+coverage: plan 76% · evid 98% · slot 100% · epi 76% · inv 2% · shortcut 100%
+
+HELD-OUT (10 unseen):
+  plan node  P@1=0.57  recall=0.63   (n=7)
+  evid node  P@1=0.67  recall=0.58   (n=9)
+  head acc (strict all-node): slot=0.89  epi=0.00  shortcut=0.89
+  fallback:  applicable=1.00  blocked=1.00  negative=1.00
+  write:     applicable 0.097 · blocked 0.128 · negative 0.056 (negatives least)
+```
+
+vs n=20: node attention now generalizes modestly (the earlier P@1=1.0 was noise);
+slot/shortcut generalize (0.89). BUT fallback-applicable stayed 1.00 and epi
+stayed 0.00 across BOTH scales -> the epistemic/fallback gate is an architecture/
+label issue (support-pointer head), not data-scale. Caveats: n=10 < 100-300;
+epi all-node match is strict (per-node metric added).
+
+---
 
 ## Scaling the corpus (data-gen on a fresh box / cloud)
 
