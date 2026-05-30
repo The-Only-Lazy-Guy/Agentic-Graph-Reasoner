@@ -46,33 +46,9 @@ DEFAULT_LM = "Qwen/Qwen2.5-1.5B"         # HF format, hidden=1536, 28 layers
 
 # ── real embedder ────────────────────────────────────────────────────────────
 
-class RealEmbedder:
-    """mpnet-768 sentence embedder via transformers AutoModel + mean pooling.
-
-    Uses transformers directly rather than sentence_transformers: on this
-    machine the sentence_transformers native stack segfaults when co-loaded
-    with torch_geometric / the LM. Mean-pooled, L2-normalized embeddings match
-    sentence-transformers/all-mpnet-base-v2 semantics.
-    """
-    def __init__(self, device: torch.device):
-        from transformers import AutoTokenizer, AutoModel
-        self.device = device
-        repo = f"sentence-transformers/{EMBED_MODEL}"
-        self.tok = AutoTokenizer.from_pretrained(repo)
-        self.model = AutoModel.from_pretrained(repo).to(device).eval()
-        self.dim = self.model.config.hidden_size
-        assert self.dim == 768, f"expected 768-dim embedder, got {self.dim}"
-
-    @torch.no_grad()
-    def embed_nodes(self, node_texts: Dict[str, str]) -> Dict[str, List[float]]:
-        ids = list(node_texts.keys())
-        enc = self.tok([node_texts[i] for i in ids], padding=True,
-                       truncation=True, return_tensors="pt").to(self.device)
-        out = self.model(**enc).last_hidden_state            # [B, T, 768]
-        mask = enc["attention_mask"].unsqueeze(-1).float()
-        emb = (out * mask).sum(1) / mask.sum(1).clamp(min=1e-9)
-        emb = torch.nn.functional.normalize(emb, dim=-1)
-        return {i: emb[k].tolist() for k, i in enumerate(ids)}
+# RealEmbedder now lives in v5/training/providers.py (canonical, shared with the
+# Stage 1 real-corpus runner). Re-exported here for backwards compatibility.
+from v5.training.providers import RealEmbedder
 
 
 # ── build a real-ish test subgraph ───────────────────────────────────────────
