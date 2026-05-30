@@ -84,14 +84,24 @@ def load_persisted_graph(path: str = DEFAULT_PERSISTED_GRAPH):
     return MemoryGraph.load_json(path)
 
 
-def _neighborhood(graph, anchor_ids: List[str], hops: int) -> List[str]:
+def _neighborhood(graph, anchor_ids: List[str], hops: int, max_nodes: int = 32) -> List[str]:
     """Ordered node list = anchors (present in graph) + their k-hop neighbors.
 
     Anchors come first (so label remap is stable); neighbors expand the subgraph
     so build_active_subgraph keeps the edges among them -> real R-GCN message
     passing instead of isolated nodes.
+
+    Delegates to MemoryGraph.local_neighborhood when available — it bounds growth
+    by max_hops AND max_nodes and orders expansion by node importance (so a dense
+    graph cannot blow up the subgraph). Falls back to a plain BFS otherwise.
     """
     present = [a for a in anchor_ids if a in graph.nodes]
+    if hasattr(graph, "local_neighborhood"):
+        nb = graph.local_neighborhood(present, max_hops=max(1, hops), max_nodes=max_nodes)
+        # keep anchors first, then the importance-ordered neighbors
+        pres_set = set(present)
+        return present + [n for n in nb if n not in pres_set]
+    # fallback BFS (e.g. for graph-likes without the helper)
     frontier = set(present)
     seen = set(present)
     for _ in range(max(0, hops)):
@@ -103,9 +113,9 @@ def _neighborhood(graph, anchor_ids: List[str], hops: int) -> List[str]:
                 nxt.add(e.src)
         seen |= nxt
         frontier = nxt
-        if not frontier:
+        if not frontier or len(seen) >= max_nodes:
             break
-    neighbors = [n for n in seen if n not in set(present)]
+    neighbors = [n for n in seen if n not in set(present)][: max(0, max_nodes - len(present))]
     return present + neighbors
 
 
@@ -148,6 +158,7 @@ def sample_to_stage1_example(
     lm_dim: int,
     persisted_graph=None,
     hops: int = 1,
+    max_nodes: int = 32,
 ) -> Optional[Stage1Example]:
     """Convert one Phase15Sample -> Stage1Example. Returns None if unusable.
 
@@ -167,7 +178,7 @@ def sample_to_stage1_example(
         and any(a in persisted_graph.nodes for a in anchor_ids)
     )
     if use_persisted:
-        node_ids = _neighborhood(persisted_graph, anchor_ids, hops)
+        node_ids = _neighborhood(persisted_graph, anchor_ids, hops, max_nodes=max_nodes)
         graph = persisted_graph
         node_texts = {nid: (getattr(graph.nodes[nid], "text", "") or "") for nid in node_ids}
     else:
@@ -248,6 +259,7 @@ def corpus_to_stage1_examples(
     persisted_graph=None,
     graph_path: Optional[str] = DEFAULT_PERSISTED_GRAPH,
     hops: int = 1,
+    max_nodes: int = 32,
 ) -> List[Stage1Example]:
     """Convert the whole Phase 15 corpus into Stage1Examples.
 
@@ -275,7 +287,7 @@ def corpus_to_stage1_examples(
     for sample in ds.samples:
         ex = sample_to_stage1_example(
             sample, gnn, embedder, h_init_provider, device, lm_dim,
-            persisted_graph=persisted_graph, hops=hops)
+            persisted_graph=persisted_graph, hops=hops, max_nodes=max_nodes)
         if ex is not None:
             examples.append(ex)
     return examples

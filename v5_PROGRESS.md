@@ -33,13 +33,17 @@ MemoryGraph
 Each block runs R iterations of:
 
 ```
-Q_r = W_q( h_r ‖ goal_vector ‖ slot_state_r )
+Q_r = W_q( LayerNorm(h_r) ‖ goal_vector ‖ slot_state_r )
 K_r = base_K + delta_K,  V_r = base_V + delta_V   (StateOverlayHead)
 A_r = softmax(Q_r @ K_r.T / sqrt(d)) @ V_r
-h_{r+1} = LayerNorm(h_r + W_o(A_r))
-[AuxHeads update LoopState]
+h_{r+1} = h_r + W_o(A_r)        # pre-norm residual stream (norm on the Q input only)
+[AuxHeads read LayerNorm(h_r) via head_norm, then update LoopState]
 [ExitCondition check]
 ```
+
+> NOTE: the update is **pre-norm** (norm on the query input, residual stream
+> carried forward). The earlier post-norm form `LayerNorm(h_r + W_o(A))` was a
+> contraction that erased h_init — see the 2026-05-30 trainability section.
 
 ---
 
