@@ -4,7 +4,7 @@
 > you don't have to dig through commits/logs. Updated each working session.
 
 **Last updated:** 2026-05-30
-**HEAD:** `perturbation-baseline` · branch `main`
+**HEAD:** `810e5ac` · branch `main`
 
 ---
 
