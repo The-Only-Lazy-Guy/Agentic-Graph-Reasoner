@@ -416,8 +416,12 @@ representation. Real training must unfreeze progressively — the instability is
 optimization, not design. Planned stages, each with warmup + low LR on the
 recurrent projections:
 
-1. **Stage 1** — freeze LM + freeze GNN, train aux heads only. (This is what the
-   trainability test already does; the proven-good starting point.)
+1. **Stage 1** — freeze LM + freeze GNN, train aux heads only. **Implemented:**
+   `v5/training/stage1.py` (`Stage1Trainer`, `prepare_stage1` freeze protocol,
+   `Stage1Example` interface, `synthetic_examples` + `corpus_examples` data
+   paths). Synthetic smoke trains all heads 0.5→1.0 with fallback dropping on
+   applicable tasks. The V4-corpus path (`corpus_examples`) is wired but gated on
+   the substrate-graph + real-Qwen-h_init prerequisites below.
 2. **Stage 2** — unfreeze the cross-attention projections (`W_q/W_k/W_v/W_o`,
    `K_proj/V_proj`) with LR warmup so they don't shift `h_r` out from under the
    heads.
@@ -476,7 +480,8 @@ v5/
     ├── __init__.py
     ├── dataset.py             Phase15Dataset, Phase15Sample, CORPUS_SLOT_ALIAS
     ├── trainer.py             Phase16Trainer, FakeEmbedder, _masked_bce, TrainingConfig
-    └── trainability_test.py   teacher-forced head-trainability proof (synthetic)
+    ├── trainability_test.py   teacher-forced head-trainability proof (synthetic)
+    └── stage1.py              Stage1Trainer (heads-only, frozen loop projections)
 ```
 
 ## Test commands
@@ -487,6 +492,9 @@ python -m v5.smoke_test_toy
 
 # trainability test (synthetic; heads 0.5 -> 1.0, fallback drops)
 python -m v5.training.trainability_test
+
+# Stage 1 trainer scaffold (synthetic smoke; heads-only, frozen loop projections)
+python -m v5.training.stage1
 
 # real-stack test (real mpnet + Qwen2.5-1.5B; needs KMP workaround)
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.realstack_test
