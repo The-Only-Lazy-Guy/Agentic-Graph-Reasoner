@@ -63,6 +63,45 @@ def _gen(model, tok, q, device, max_new_tokens):
     return tok.decode(out[0][enc["input_ids"].shape[1]:], skip_special_tokens=True).strip()
 
 
+def evaluate_injection(model, tok, embedder, injector, graph, samples, device, max_new_tokens=60):
+    """Baseline vs injected generation over `samples`, using a (possibly trained)
+    injector/adapter. Returns the aggregate dict. Shared by the random-init
+    baseline and the post-Stage-2 check."""
+    catastrophic = hooks_ok = 0
+    sims, rows = [], []
+    for i, s in enumerate(samples):
+        node_ids = _neighborhood(graph, s.node_ids, hops=1, max_nodes=24)
+        node_ids = node_ids + [nid for nid in s.substrate_nodes
+                               if nid in graph.nodes and nid not in set(node_ids)]
+        text_emb = embedder.embed_nodes({nid: (getattr(graph.nodes[nid], "text", "") or "") for nid in node_ids})
+        injector.prepare_session(graph, node_ids, text_emb, s.task_frame, r_plan=3, r_evidence=4)
+        base = _gen(model, tok, s.question, device, max_new_tokens)
+        with injector.inject(model):
+            inj = _gen(model, tok, s.question, device, max_new_tokens)
+        hc = injector.get_hook_call_counts()
+        hooks_ok += int(hc == {"planning": 1, "evidence": 1})
+        bg, ig = is_degenerate(base), is_degenerate(inj)
+        if ig and not bg:
+            catastrophic += 1
+        em = embedder.embed_nodes({"b": base or ".", "i": inj or "."})
+        vb, vi = torch.tensor(em["b"]), torch.tensor(em["i"])
+        sims.append(float(torch.dot(vb, vi) / (vb.norm() * vi.norm() + 1e-9)))
+        rows.append((i, len(base), len(inj), bg, ig, sims[-1]))
+        print(f"[{i:2d}] base_len={len(base):4d} inj_len={len(inj):4d} "
+              f"base_gib={bg!s:5} inj_gib={ig!s:5} sim={sims[-1]:.2f}")
+    N = len(samples)
+    return {
+        "n": N, "hooks_ok": hooks_ok,
+        "baseline_gibberish": sum(r[3] for r in rows),
+        "injected_gibberish": sum(r[4] for r in rows),
+        "catastrophic": catastrophic,
+        "non_catastrophic_rate": (N - catastrophic) / max(1, N),
+        "mean_base_len": sum(r[1] for r in rows) / max(1, N),
+        "mean_inj_len": sum(r[2] for r in rows) / max(1, N),
+        "mean_sim": sum(sims) / max(1, N),
+    }
+
+
 def run(corpus_path=CORPUS, model_name=DEFAULT_LM, device_str=None, n=20, max_new_tokens=60):
     device = torch.device(device_str or ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"device={device}  lm={model_name}  n={n}")
