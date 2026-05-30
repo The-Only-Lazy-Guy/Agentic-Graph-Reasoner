@@ -121,11 +121,20 @@ def _onehot(idxs: List[int], n: int) -> Tensor:
     return v
 
 
-def make_tasks(n_per_family: int, device, seed: int = 0) -> List[Task]:
+def make_tasks(n_per_family: int, device, seed: int = 0, n_negative: int = 0) -> List[Task]:
+    """Two positive families (applicable/blocked) + optional negatives.
+
+    Negatives = no-graph / weak-evidence / unrelated cases. Correct behavior is
+    NO strong anchor (diffuse attention), shortcut=false, low epistemic, fallback.
+    They prevent Stage 2 from learning "always inject graph signal". A negative
+    has plan_anchor=evid_anchor=None (no gold) so it contributes no attention CE;
+    Stage 2 instead applies an entropy regularizer + write penalty on tag=='negative'.
+    """
     g = torch.Generator().manual_seed(seed)
     fam_base = {
         "applicable": torch.randn(1, LM_DIM, generator=g) * 0.5,
         "blocked":    torch.randn(1, LM_DIM, generator=g) * 0.5,
+        "negative":   torch.randn(1, LM_DIM, generator=g) * 0.5,
     }
     N = len(NODE_IDS)
     tasks: List[Task] = []
@@ -152,6 +161,17 @@ def make_tasks(n_per_family: int, device, seed: int = 0) -> List[Task]:
                 slot_target=slot_target.to(device), epi_target=epi_target.to(device),
                 inv_target=inv_target.to(device), shortcut_target=shortcut.to(device),
             ))
+    # negatives: no gold anchor, nothing supported, fallback expected
+    for _ in range(n_negative):
+        h = (fam_base["negative"] + torch.randn(1, LM_DIM, generator=g) * H_NOISE).to(device)
+        tasks.append(Task(
+            family="negative", h_init=h,
+            plan_anchor=None, evid_anchor=None,                        # no gold -> diffuse
+            slot_target=_slot([("verdict", 0.0), ("reason", 0.0)]).to(device),  # unfilled
+            epi_target=torch.zeros(1, N, device=device),               # low everywhere
+            inv_target=_onehot([], N).to(device),
+            shortcut_target=torch.tensor([[0.0]]).to(device),
+        ))
     return tasks
 
 

@@ -234,10 +234,12 @@ def _required_slot_idx(task_frame: dict) -> List[int]:
 
 # ── synthetic data path (runs now) ───────────────────────────────────────────
 
-def synthetic_examples(n_per_family: int, device, lm_dim: int) -> List[Stage1Example]:
+def synthetic_examples(n_per_family: int, device, lm_dim: int,
+                       n_negative: int = 0) -> List[Stage1Example]:
     """Build Stage1Examples from the trainability synthetic generator.
 
-    Reuses the proven two-family (applicable/blocked) construction.
+    Two positive families (applicable/blocked) + optional negatives (no-graph /
+    weak-evidence; tag=='negative', no gold anchor).
     """
     from v5.training.trainability_test import (
         make_tasks, encode_graph, TASK_FRAME, NODE_IDS, STRUCT_INV_IDX)
@@ -245,7 +247,7 @@ def synthetic_examples(n_per_family: int, device, lm_dim: int) -> List[Stage1Exa
 
     kv = encode_graph(device)
     goal = encode_task_frame(TASK_FRAME, device, GoalEncoder().to(device).eval())
-    tasks = make_tasks(n_per_family, device, seed=42)
+    tasks = make_tasks(n_per_family, device, seed=42, n_negative=n_negative)
     struct = torch.zeros(1, len(NODE_IDS), dtype=torch.bool, device=device)
     for i in STRUCT_INV_IDX:
         struct[0, i] = True

@@ -28,6 +28,7 @@ trainer uses the residual-magnitude penalty + head retention as stability proxie
 """
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -79,6 +80,24 @@ def _loop_weights(n: int) -> List[float]:
     return [0.5 + 0.5 * (i / (n - 1)) for i in range(n)]   # 0.5 -> 1.0
 
 
+def _pool_probs(attn: Tensor, pool_mask: Tensor) -> Tensor:
+    """Renormalize attention over the pool nodes only (mask out-of-pool)."""
+    p = attn.squeeze(0) * pool_mask.float()
+    s = p.sum()
+    return p / (s + _EPS) if float(s.item()) > 0 else p
+
+
+def attn_entropy(attn: Tensor, pool_mask: Tensor) -> Tensor:
+    """Shannon entropy of the pool attention (high = diffuse, low = confident)."""
+    p = _pool_probs(attn, pool_mask)
+    return -(p * torch.log(p.clamp_min(_EPS))).sum()
+
+
+def max_pool_attn(attn: Tensor, pool_mask: Tensor) -> Tensor:
+    """Largest single attention weight over the pool (1.0 = collapsed on one node)."""
+    return _pool_probs(attn, pool_mask).max()
+
+
 def attention_ce(attn_history: List[Tensor], target_onehot: Tensor, pool_mask: Tensor) -> Tensor:
     """Per-loop weighted CE of the softmax attention toward the gold pool anchors.
 
@@ -109,6 +128,7 @@ class Stage2Config:
     weight_decay: float = 5e-4     # bound K/V projections so the write doesn't inflate
     grad_clip: float = 0.5
     lambda_delta: float = 0.5      # residual-magnitude penalty weight (2B)
+    lambda_neg: float = 0.5        # diffuse-attention penalty on negative cases
     target_write_ratio: float = 0.05   # keep ||gate*W_o(A)||/||h|| around here
     log_every: int = 50
 
@@ -128,10 +148,21 @@ class Stage2Trainer:
         _, es, _ = self.adapter.run_evidence(ps.h_r, ex.goal, kv, ex.node_ids, task_frame=ex.task_frame)
 
         loss = ex.h_init.sum() * 0.0
-        if ex.plan_anchor is not None:
-            loss = loss + attention_ce(ps.attn_history, ex.plan_anchor, kv.planning_mask.unsqueeze(0))
-        if ex.evid_anchor is not None:
-            loss = loss + attention_ce(es.attn_history, ex.evid_anchor, kv.evidence_mask.unsqueeze(0))
+        is_neg = (ex.tag == "negative")
+        if is_neg:
+            # No gold anchor: push attention DIFFUSE (penalize concentration) so
+            # the adapter does not learn to confidently inject on unrelated /
+            # weak-evidence questions.
+            pm, em = kv.planning_mask.unsqueeze(0), kv.evidence_mask.unsqueeze(0)
+            for a in ps.attn_history:
+                loss = loss + self.cfg.lambda_neg * max_pool_attn(a, pm)
+            for a in es.attn_history:
+                loss = loss + self.cfg.lambda_neg * max_pool_attn(a, em)
+        else:
+            if ex.plan_anchor is not None:
+                loss = loss + attention_ce(ps.attn_history, ex.plan_anchor, kv.planning_mask.unsqueeze(0))
+            if ex.evid_anchor is not None:
+                loss = loss + attention_ce(es.attn_history, ex.evid_anchor, kv.evidence_mask.unsqueeze(0))
 
         # residual-magnitude penalty (2B): keep the write near target, not runaway
         wr = (ps.write_ratios or []) + (es.write_ratios or [])
@@ -167,24 +198,46 @@ class Stage2Trainer:
         self.adapter.eval()
         plan_hit = plan_n = evid_hit = evid_n = 0
         wrs = []
+        pos_plan_ent, pos_evid_ent, neg_ent = [], [], []
+        plan_top1, evid_top1 = [], []
         for ex in examples:
             _, ps, _ = self.adapter.run_planning(ex.h_init, ex.goal, ex.graph_kv, ex.node_ids, task_frame=ex.task_frame)
             _, es, _ = self.adapter.run_evidence(ps.h_r, ex.goal, ex.graph_kv, ex.node_ids, task_frame=ex.task_frame)
+            pm, em = ex.graph_kv.planning_mask.unsqueeze(0), ex.graph_kv.evidence_mask.unsqueeze(0)
+            if ex.tag == "negative":
+                if ps.attn_history:
+                    neg_ent.append(float(attn_entropy(ps.attn_history[-1], pm).item()))
+                continue
             if ex.plan_anchor is not None and ps.attn_history:
                 plan_n += 1
                 idx = ps.attn_history[-1].argmax().item()
                 plan_hit += int(ex.plan_anchor[0, idx].item() == 1.0)
+                pos_plan_ent.append(float(attn_entropy(ps.attn_history[-1], pm).item()))
+                plan_top1.append(idx)
             if ex.evid_anchor is not None and es.attn_history:
                 evid_n += 1
                 idx = es.attn_history[-1].argmax().item()
                 evid_hit += int(ex.evid_anchor[0, idx].item() == 1.0)
+                pos_evid_ent.append(float(attn_entropy(es.attn_history[-1], em).item()))
+                evid_top1.append(idx)
             wrs += (ps.write_ratios or []) + (es.write_ratios or [])
+
+        def _top1_freq(idxs):  # fraction taken by the single most common top-1 node
+            if not idxs:
+                return float("nan")
+            return max(Counter(idxs).values()) / len(idxs)
+
         return {
             "plan_attn_precision": plan_hit / max(1, plan_n),
             "evid_attn_precision": evid_hit / max(1, evid_n),
             "mean_write_ratio": sum(wrs) / max(1, len(wrs)),
             "plan_gate": float(self.adapter.planning_block.proj.gate.item()),
             "evid_gate": float(self.adapter.evidence_block.proj.gate.item()),
+            "plan_entropy_pos": sum(pos_plan_ent) / max(1, len(pos_plan_ent)),
+            "evid_entropy_pos": sum(pos_evid_ent) / max(1, len(pos_evid_ent)),
+            "neg_entropy": (sum(neg_ent) / len(neg_ent)) if neg_ent else float("nan"),
+            "plan_top1_freq": _top1_freq(plan_top1),
+            "evid_top1_freq": _top1_freq(evid_top1),
         }
 
 
@@ -193,8 +246,9 @@ def run():
     device = torch.device("cpu")
     lm_dim = 128
     adapter = V5AttentionAdapter(r_plan=3, r_evidence=3, lm_hidden_dim=lm_dim, gate_init=GATE_INIT).to(device)
-    examples = synthetic_examples(15, device, lm_dim)
-    print(f"Stage 2 synthetic: {len(examples)} examples  gate_init={GATE_INIT}")
+    examples = synthetic_examples(15, device, lm_dim, n_negative=10)
+    n_neg = sum(1 for e in examples if e.tag == "negative")
+    print(f"Stage 2 synthetic: {len(examples)} examples ({n_neg} negative)  gate_init={GATE_INIT}")
 
     print("\n--- Stage 2A: learn to LOOK (train Q/K/V; W_o/gate frozen) ---")
     t2a = Stage2Trainer(adapter, Stage2Config(sub_stage="2A", epochs=200, lr=2e-4))
@@ -216,12 +270,21 @@ def run():
     ok_plan = after2a["plan_attn_precision"] >= 0.9
     ok_evid = after2a["evid_attn_precision"] >= 0.9
     ok_write = after2b["mean_write_ratio"] <= 0.35
+    # positives should get MORE confident (lower entropy) than negatives stay diffuse;
+    # top-1 freq < 1.0 means not collapsed to a single node across the two families.
+    ok_neg_diffuse = (after2b["neg_entropy"] != after2b["neg_entropy"]) or \
+                     (after2b["neg_entropy"] >= max(after2b["plan_entropy_pos"], after2b["evid_entropy_pos"]))
+    ok_not_collapsed = after2b["plan_top1_freq"] < 0.99 and after2b["evid_top1_freq"] < 0.99
     print(f"  planning attention precision >=0.9 : {after2a['plan_attn_precision']:.2f}  {'OK' if ok_plan else 'FAIL'}")
     print(f"  evidence attention precision >=0.9 : {after2a['evid_attn_precision']:.2f}  {'OK' if ok_evid else 'FAIL'}")
     print(f"  residual write ratio bounded       : {after2b['mean_write_ratio']:.3f}  {'OK' if ok_write else 'FAIL'}")
     print(f"  gates (plan/evid)                  : {after2b['plan_gate']:.3f} / {after2b['evid_gate']:.3f}")
-    assert ok_plan and ok_evid and ok_write
-    print("\nSTAGE 2 (2A routing + 2B gated write) OK on synthetic.")
+    print(f"  entropy pos plan/evid              : {after2b['plan_entropy_pos']:.2f} / {after2b['evid_entropy_pos']:.2f}  (lower=confident)")
+    print(f"  entropy negatives (diffuse)        : {after2b['neg_entropy']:.2f}  {'OK' if ok_neg_diffuse else 'FAIL'}")
+    print(f"  top-1 freq plan/evid (<1=ok)       : {after2b['plan_top1_freq']:.2f} / {after2b['evid_top1_freq']:.2f}  {'OK' if ok_not_collapsed else 'FAIL'}")
+    assert ok_plan and ok_evid and ok_write and ok_not_collapsed
+    print("\nSTAGE 2 (2A routing + 2B gated write) OK on synthetic, with negatives:")
+    print("positives route confidently, negatives stay diffuse, write bounded, no collapse.")
     print("Generation stability vs base LM is checked by v5.perturbation_baseline.")
     return after2b
 
