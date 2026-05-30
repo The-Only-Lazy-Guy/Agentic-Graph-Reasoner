@@ -1,0 +1,17 @@
+# V4 data-generation runtime (NOT training). Enough to run answerer_v4 +
+# run_phase15_corpus.py to produce traces + scoped_patches for the V5 corpus.
+#
+# Install (after creating a venv):
+#   pip install -r requirements-datagen.txt
+# torch is pulled by sentence-transformers; for a specific CPU/CUDA build install
+# torch first from https://pytorch.org (see setup_datagen_env.bat).
+
+sentence-transformers>=2.2      # reasoning/scoring.py embeddings (all-MiniLM-L6-v2)
+numpy>=1.24
+requests>=2.28                  # optional web lookups
+huggingface_hub>=0.20           # model/embedder download
+
+# LLM backend is EXTERNAL to pip:
+#   Option A (opencode CLI):   npm install -g opencode-ai   (needs Node 18+)
+#   Option B (local server):   llama.cpp llama-server serving a GGUF on :6768
+# See setup_datagen_env.bat.
