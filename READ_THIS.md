@@ -4,7 +4,7 @@
 > you don't have to dig through commits/logs. Updated each working session.
 
 **Last updated:** 2026-05-31
-**HEAD:** `f8dfe76` · branch `main`
+**HEAD:** `716a3a9` · branch `main`
 
 ---
 
@@ -32,6 +32,12 @@
   slot≥0.85 AND primary-evidence epi≥0.70; the 20-example corpus doesn't calibrate
   the heads to cross those thresholds. A calibration + corpus-scale issue (motivates
   a support-pointer head), not a training-mechanism failure.
+- ✅ **Corpus-scaling harness built** + first HELD-OUT (generalization) numbers:
+  plan node P@1 1.00, evid P@1 0.50, but **held-out epi acc 0.00 vs ~0.88 train**
+  → heads OVERFIT 20 examples. n=3–4 held-out is indicative only. **Next: scale to
+  100–300 traces** (data-gen env scripts shipped).
+- ⏸️ **Held on purpose**: Stage 3 overlay, Stage 4 LoRA, any quality claim — until
+  held-out calibration is proven on a larger corpus.
 - ❌ NOT yet: V5 **generalizes** (corpus is 20 traces → train-fit only).
 - ❌ NOT yet: V5 **improves** generation (Stage 2 not yet on the real 1536-d adapter;
   LoRA untrained).
@@ -267,6 +273,22 @@ python -m v5.training.stage2                         # Stage 2 (2A routing + 2B 
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.stage2_real   # real Stage 2A + perturbation re-check
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.stage2b_real  # real Stage 2B write-safety milestone
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.stage_integrated  # integrated 1->2A->2B (7/8 gates)
+$env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.corpus_scaling --corpus <corpus.jsonl>  # scale + held-out metrics
+```
+
+## Scaling the corpus (data-gen on a fresh box / cloud)
+
+```
+# fresh environment setup (venv + deps + LLM backend + env vars)
+setup_datagen_env.bat            # Windows   (--gpu for CUDA torch, --run to generate)
+bash setup_datagen_env.sh        # Linux/cloud
+
+# backend: opencode CLI (npm i -g opencode-ai; opencode auth login)
+#          OR llama-server serving a GGUF on :6768  (LOCAL_LLM_BASE_URL)
+
+# generate traces, then scale + measure held-out calibration:
+python run_phase15_corpus.py --dataset <questions.json> --graph graphs/merged_graph.json --mode harvest
+python -m v5.training.corpus_scaling --corpus artifacts/phase15/phase15_corpus.jsonl
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.realstack_test       # real-stack prefill
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.stage1_real # real Stage 1 (planning incl.)
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.infer_demo           # baseline vs injected generation
