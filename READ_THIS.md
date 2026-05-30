@@ -4,7 +4,7 @@
 > you don't have to dig through commits/logs. Updated each working session.
 
 **Last updated:** 2026-05-30
-**HEAD:** `ee11189` · branch `main`
+**HEAD:** `145fb01` · branch `main`
 
 ---
 
@@ -22,8 +22,12 @@
 - ✅ **Stage 2A on REAL corpus**: routing plan 0.76→1.00, evid 0.37→1.00;
   perturbation re-check 0/20 catastrophic, hooks 20/20, sim 0.95 (W_o/gate frozen
   → generation untouched, as intended for "learn to look").
-- ⏳ **Stage 2B held** (learn to write): the real write-safety question is only
-  answered once W_o + gate train; not run yet.
+- ✅ **Stage 2B on REAL corpus (write-safety)**: write path trained, all 6 gates
+  pass — write_ratio 0.047 (negatives lowest 0.034), catastrophic 0/20, hooks
+  20/20, sim 0.94. Generation stable with real writing.
+- ⏳ **Fallback applicable-drop**: not shown — this 2B run used random (untrained)
+  heads, so fallback is 1.0 everywhere (retained, not regressed). The drop needs
+  Stage 1 heads + Stage 2 on ONE adapter (pipeline integration).
 - ❌ NOT yet: V5 **generalizes** (corpus is 20 traces → train-fit only).
 - ❌ NOT yet: V5 **improves** generation (Stage 2 not yet on the real 1536-d adapter;
   LoRA untrained).
@@ -137,6 +141,32 @@ truly tested in Stage 2B (W_o + gate trained) — intentionally held.
 
 ---
 
+## 1e. Stage 2B on REAL corpus — write-safety milestone — `python -m v5.training.stage2b_real`
+
+Qwen2.5-1.5B. Train W_o + gate (Q/K/V lower LR), real positives + real negatives.
+NOT a quality milestone — tests whether the adapter can WRITE without breaking safety.
+
+```
+per-case-type (after 2B):
+  tag          n   write_ratio   fallback
+  applicable  17     0.048         1.00
+  blocked      3     0.044         1.00
+  negative     5     0.034         1.00   <- negatives write LEAST
+gates plan/evid: 0.012 / 0.008    overall write_ratio 0.047
+
+perturbation re-check (20q): catastrophic 0/20, hooks 20/20, gibberish 0, sim 0.940
+
+WRITE-SAFETY GATES (all OK): catastrophic ~0 · hooks 20/20 · no gibberish ·
+  sim>=0.5 · write<=0.20 · negatives <= positives
+```
+
+HONEST CAVEAT: standalone 2B run -> aux heads are random (untrained), so
+fallback_needed is 1.0 for ALL case types (retained, not regressed, but NOT the
+desired "drops for applicable"). The applicable-fallback-drop needs Stage 1 heads
++ Stage 2 on ONE adapter (pipeline integration) — separate from write-safety.
+
+---
+
 ## 2. Substrate Population Pass (raw) — `python -m v5.training.substrate`
 
 ```
@@ -199,7 +229,8 @@ python -m v5.training.trainability_test             # synthetic head trainabilit
 python -m v5.training.substrate                     # build substrate-enriched graph
 python -m v5.training.bridge                        # corpus -> Stage1Example + coverage
 python -m v5.training.stage2                         # Stage 2 (2A routing + 2B write), synthetic
-$env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.stage2_real  # real Stage 2A + perturbation re-check
+$env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.stage2_real   # real Stage 2A + perturbation re-check
+$env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.stage2b_real  # real Stage 2B write-safety milestone
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.realstack_test       # real-stack prefill
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.stage1_real # real Stage 1 (planning incl.)
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.infer_demo           # baseline vs injected generation
