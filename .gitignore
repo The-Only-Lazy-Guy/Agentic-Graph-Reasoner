@@ -65,3 +65,8 @@ search_out.txt
 user_msgs.txt
 live_bias_comparison_results.txt
 traverse_threshold_draft_edit_result.txt
+
+# Shared V5 corpus shards: small jsonl pushed across machines (local + vast.ai)
+# for merging. Re-included despite the global *.jsonl ignore.
+!data/corpus_shards/
+!data/corpus_shards/*.jsonl

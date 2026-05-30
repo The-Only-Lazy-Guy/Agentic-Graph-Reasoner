@@ -1,0 +1,704 @@
+{
+  "tasks": [
+    {
+      "id": "q_01_easy_physics",
+      "difficulty": "easy",
+      "question": "What is the primary difference between a scalar and a vector quantity?",
+      "max_steps": 4,
+      "expected": "Fast retrieval, definition-based fact checking."
+    },
+    {
+      "id": "q_02_easy_math",
+      "difficulty": "easy",
+      "question": "If a triangle has sides of length 3, 4, and 5, what is its area?",
+      "max_steps": 4,
+      "expected": "Recognize right triangle, compute 0.5 * 3 * 4 = 6."
+    },
+    {
+      "id": "q_03_easy_cs",
+      "difficulty": "easy",
+      "question": "What is the time complexity of searching for an element in a balanced binary search tree?",
+      "max_steps": 4,
+      "expected": "Direct knowledge retrieval (O(log n))."
+    },
+    {
+      "id": "q_04_easy_logic",
+      "difficulty": "easy",
+      "question": "If all A are B, and some B are C, does it follow that some A are C?",
+      "max_steps": 5,
+      "expected": "Basic syllogism evaluation (No)."
+    },
+    {
+      "id": "q_05_easy_algo",
+      "difficulty": "easy",
+      "question": "Which sorting algorithm is typically used in the implementation of Python's built-in sort() function?",
+      "max_steps": 4,
+      "expected": "Identify Timsort."
+    },
+    {
+      "id": "q_06_medium_physics",
+      "difficulty": "medium",
+      "question": "Why do astronauts in the ISS experience weightlessness despite being only 400km above Earth where gravity is still ~90% as strong?",
+      "max_steps": 6,
+      "expected": "Resolve misconception about zero-g; explain freefall/orbit."
+    },
+    {
+      "id": "q_07_medium_cs",
+      "difficulty": "medium",
+      "question": "In a relational database, what is the difference between a clustered and non-clustered index in terms of physical storage?",
+      "max_steps": 6,
+      "expected": "Explain physical sorting vs separate pointer structure."
+    },
+    {
+      "id": "q_08_medium_algo",
+      "difficulty": "medium",
+      "question": "Can I use Dijkstra's algorithm to find the longest path in a Directed Acyclic Graph? Why or why not?",
+      "max_steps": 8,
+      "expected": "Notice invalidator: longest path reduces to negative weights, breaking Dijkstra's greedy invariant. Correct alternative: negate and use DAG shortest path or topological sort."
+    },
+    {
+      "id": "q_09_medium_math",
+      "difficulty": "medium",
+      "question": "A bat and a ball cost $1.10 in total. The bat costs $1.00 more than the ball. How much does the ball cost?",
+      "max_steps": 6,
+      "expected": "Avoid the immediate heuristic trap ($0.10); set up equation to find $0.05."
+    },
+    {
+      "id": "q_10_medium_sysdesign",
+      "difficulty": "medium",
+      "question": "What happens if a client sends a request to a server, the server processes it and sends the response, but the network drops the response? How does the client handle this safely?",
+      "max_steps": 8,
+      "expected": "Identify need for idempotency keys / retries."
+    },
+    {
+      "id": "q_11_hard_algo",
+      "difficulty": "hard",
+      "question": "Design an algorithm to find the median of two sorted arrays of size m and n in O(log(m+n)) time.",
+      "max_steps": 12,
+      "expected": "Recognize binary search on the partition index. Hard constraint on time complexity."
+    },
+    {
+      "id": "q_12_hard_physics",
+      "difficulty": "hard",
+      "question": "If you drop a magnet down a highly conductive copper pipe, it falls much slower than gravity would dictate. Explain the exact mechanism, naming the specific laws involved.",
+      "max_steps": 10,
+      "expected": "Identify Lenz's Law and Faraday's Law, eddy currents, opposing magnetic fields."
+    },
+    {
+      "id": "q_13_hard_sysdesign",
+      "difficulty": "hard",
+      "question": "You are designing a distributed rate limiter. It must support 100,000 requests per second across 50 nodes. Strict accuracy is less important than low latency. Describe the chosen algorithm, storage mechanism, and sync strategy.",
+      "max_steps": 12,
+      "expected": "Discuss token bucket / sliding window log, Redis/Memcached vs local memory with eventual sync (gossip/batching)."
+    },
+    {
+      "id": "q_14_hard_logic",
+      "difficulty": "hard",
+      "question": "Three gods A, B, and C are called, in some order, True, False, and Random. True always speaks truly, False always speaks falsely, but whether Random speaks truly or falsely is a completely random coin flip. You can ask three yes/no questions to determine who is who. Formulate the first question.",
+      "max_steps": 15,
+      "expected": "Recognize the Hardest Logic Puzzle. Multi-hop deductive chain needed."
+    },
+    {
+      "id": "q_15_hard_cs",
+      "difficulty": "hard",
+      "question": "How does the Linux kernel mitigate the Meltdown vulnerability (CVE-2017-5754), and what is the specific performance cost associated with this mitigation?",
+      "max_steps": 10,
+      "expected": "Identify KPTI (Kernel Page-Table Isolation), explain TLB flush overhead on context switches."
+    },
+    {
+      "id": "q_16_extreme_algo",
+      "difficulty": "extreme",
+      "question": "You have a string of length N (up to 10^5). You need to find the lexicographically smallest cyclic shift of the string in O(N) time. Describe the algorithm, specifically explaining how it avoids O(N^2) worst-case time on strings like 'aaaaa'.",
+      "max_steps": 15,
+      "expected": "Identify Booth's algorithm or Duval's algorithm. Must explain the failure pattern of naive two-pointer approaches."
+    },
+    {
+      "id": "q_17_extreme_sysdesign",
+      "difficulty": "extreme",
+      "question": "Design a globally distributed lock manager for a Spanner-like database. It must handle network partitions without split-brain, minimize cross-region latency for lock acquisition, and handle clock drift safely. Detail the consensus mechanism and lease timeout strategy.",
+      "max_steps": 18,
+      "expected": "Discuss Paxos/Raft for lock state, TrueTime/NTP bounds for leases, leader election per shard."
+    },
+    {
+      "id": "q_18_extreme_physics",
+      "difficulty": "extreme",
+      "question": "Calculate the theoretical maximum efficiency (in percentage) of a solar cell with a single p-n junction, assuming standard solar spectrum (AM1.5). Name this limit and explain the two primary thermodynamic loss mechanisms that define it.",
+      "max_steps": 15,
+      "expected": "Identify Shockley-Queisser limit (~33.7%). Thermalization (photons > bandgap lose excess energy) and non-absorption (photons < bandgap pass through)."
+    },
+    {
+      "id": "q_19_extreme_math",
+      "difficulty": "extreme",
+      "question": "Let f(x) be a continuous function such that f(f(x)) = -x for all real x. Prove that no such function exists.",
+      "max_steps": 15,
+      "expected": "Injectivity/Surjectivity arguments. If f is continuous and injective, it must be strictly monotonic. But composing a strictly monotonic function with itself gives an increasing function, contradicting f(f(x)) = -x."
+    },
+    {
+      "id": "q_20_extreme_logic",
+      "difficulty": "extreme",
+      "question": "100 prisoners are given a chance to be freed. There is a room with 100 boxes, each containing a slip with a prisoner's number (1-100). Each prisoner may enter the room one by one and open up to 50 boxes. They must leave the room exactly as they found it. If every prisoner finds their own number, all are freed. If even one fails, all are executed. They can strategize beforehand but cannot communicate once the game starts. Describe the optimal strategy and calculate its approximate probability of success.",
+      "max_steps": 15,
+      "expected": "Identify the pointer-following cycle strategy. Explain the math of permutations avoiding cycles of length > 50. Probability is approx 1 - ln(2) (~31%)."
+    },
+    {
+      "id": "q_21_easy_physics",
+      "difficulty": "easy",
+      "question": "Why does ice float on water?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_22_medium_physics",
+      "difficulty": "medium",
+      "question": "Explain why the sky appears blue during the day.",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_23_medium_physics",
+      "difficulty": "medium",
+      "question": "State Newtons third law and give one everyday example.",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_24_hard_physics",
+      "difficulty": "hard",
+      "question": "How does total internal reflection enable optical fibers to carry signals?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_25_easy_chem",
+      "difficulty": "easy",
+      "question": "What distinguishes an ionic bond from a covalent bond?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_26_medium_chem",
+      "difficulty": "medium",
+      "question": "Why does increasing temperature generally speed up a chemical reaction?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_27_easy_bio",
+      "difficulty": "easy",
+      "question": "What is the role of mitochondria in a cell?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_28_medium_bio",
+      "difficulty": "medium",
+      "question": "Explain how natural selection leads to adaptation over generations.",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_29_easy_math",
+      "difficulty": "easy",
+      "question": "What does the derivative of a function represent geometrically?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_30_medium_math",
+      "difficulty": "medium",
+      "question": "Use the pigeonhole principle to explain why two people in a group of 13 share a birth month.",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_31_hard_math",
+      "difficulty": "hard",
+      "question": "Prove there are infinitely many prime numbers.",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_32_medium_math",
+      "difficulty": "medium",
+      "question": "What is Bayes theorem and what does it let you compute?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_33_easy_cs",
+      "difficulty": "easy",
+      "question": "What is the difference between a stack and a queue?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_34_medium_cs",
+      "difficulty": "medium",
+      "question": "Why can a hash table offer average O(1) lookup, and when does it degrade?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_35_medium_cs",
+      "difficulty": "medium",
+      "question": "What are the ACID properties of a database transaction?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_36_hard_cs",
+      "difficulty": "hard",
+      "question": "How does a deadlock arise and what are the four necessary conditions?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_37_medium_cs",
+      "difficulty": "medium",
+      "question": "What is the difference between TCP and UDP?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_38_hard_cs",
+      "difficulty": "hard",
+      "question": "Explain how copying garbage collection reclaims memory.",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_39_easy_algo",
+      "difficulty": "easy",
+      "question": "What precondition must hold for binary search to be correct?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_40_medium_algo",
+      "difficulty": "medium",
+      "question": "What is the worst-case time of quicksort and what input causes it?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_41_medium_algo",
+      "difficulty": "medium",
+      "question": "When would you use BFS instead of DFS on a graph?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_42_hard_algo",
+      "difficulty": "hard",
+      "question": "What property must a problem have for dynamic programming to apply?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_43_medium_algo",
+      "difficulty": "medium",
+      "question": "Why does a greedy algorithm fail to give optimal change for some coin systems?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_44_hard_algo",
+      "difficulty": "hard",
+      "question": "How does Bellman-Ford handle negative edge weights where Dijkstra cannot?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_45_easy_logic",
+      "difficulty": "easy",
+      "question": "What is the contrapositive of \"if it rains, the ground is wet\"?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_46_medium_logic",
+      "difficulty": "medium",
+      "question": "Explain the difference between a necessary and a sufficient condition.",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_47_medium_sysdesign",
+      "difficulty": "medium",
+      "question": "What problem does a load balancer solve and name one balancing strategy.",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_48_hard_sysdesign",
+      "difficulty": "hard",
+      "question": "State the CAP theorem and what it forces you to trade off during a partition.",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_49_medium_sysdesign",
+      "difficulty": "medium",
+      "question": "Why should a payment API endpoint be idempotent?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_50_hard_sysdesign",
+      "difficulty": "hard",
+      "question": "What is database sharding and what new problem does it introduce?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_051_easy_physics",
+      "difficulty": "easy",
+      "question": "What is the difference between mass and weight?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_052_easy_physics",
+      "difficulty": "easy",
+      "question": "Why do objects of different mass fall at the same rate in a vacuum?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_053_medium_physics",
+      "difficulty": "medium",
+      "question": "Explain the Doppler effect and give an everyday example.",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_054_medium_physics",
+      "difficulty": "medium",
+      "question": "Why does a spinning figure skater speed up when pulling their arms in?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_055_hard_physics",
+      "difficulty": "hard",
+      "question": "Why does time dilation occur for objects moving near the speed of light?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_056_medium_physics",
+      "difficulty": "medium",
+      "question": "What is the difference between heat and temperature?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_057_hard_physics",
+      "difficulty": "hard",
+      "question": "How does a transformer change AC voltage without moving parts?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_058_easy_chem",
+      "difficulty": "easy",
+      "question": "What is the difference between an element and a compound?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_059_medium_chem",
+      "difficulty": "medium",
+      "question": "Why is water a polar molecule and why does that matter?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_060_medium_chem",
+      "difficulty": "medium",
+      "question": "What is the difference between an acid and a base in terms of pH?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_061_hard_chem",
+      "difficulty": "hard",
+      "question": "Why does Le Chateliers principle predict how equilibrium shifts under pressure?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_062_easy_bio",
+      "difficulty": "easy",
+      "question": "What is the difference between DNA and RNA?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_063_medium_bio",
+      "difficulty": "medium",
+      "question": "How does an enzyme speed up a biochemical reaction?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_064_medium_bio",
+      "difficulty": "medium",
+      "question": "Why do antibiotics work on bacteria but not viruses?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_065_hard_bio",
+      "difficulty": "hard",
+      "question": "How does the sodium-potassium pump maintain a cells resting potential?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_066_easy_math",
+      "difficulty": "easy",
+      "question": "What is the difference between a permutation and a combination?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_067_medium_math",
+      "difficulty": "medium",
+      "question": "Why is the sum of the first n odd numbers always a perfect square?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_068_medium_math",
+      "difficulty": "medium",
+      "question": "What does it mean for a function to be continuous but not differentiable?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_069_hard_math",
+      "difficulty": "hard",
+      "question": "Explain why the harmonic series diverges.",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_070_medium_math",
+      "difficulty": "medium",
+      "question": "What is the geometric meaning of an eigenvector?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_071_hard_math",
+      "difficulty": "hard",
+      "question": "Why does Gaussian elimination solve a linear system, and when does it fail?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_072_easy_cs",
+      "difficulty": "easy",
+      "question": "What is the difference between compiled and interpreted languages?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_073_medium_cs",
+      "difficulty": "medium",
+      "question": "What problem does virtual memory solve in an operating system?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_074_medium_cs",
+      "difficulty": "medium",
+      "question": "Why can floating-point arithmetic give 0.1 + 0.2 != 0.3?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_075_hard_cs",
+      "difficulty": "hard",
+      "question": "How does a B-tree keep database index lookups logarithmic on disk?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_076_medium_cs",
+      "difficulty": "medium",
+      "question": "What is the difference between a process and a thread?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_077_hard_cs",
+      "difficulty": "hard",
+      "question": "How does TLS establish a secure channel over an untrusted network?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_078_medium_cs",
+      "difficulty": "medium",
+      "question": "What is the difference between authentication and authorization?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_079_easy_algo",
+      "difficulty": "easy",
+      "question": "What is the difference between O(n) and O(log n) growth?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_080_medium_algo",
+      "difficulty": "medium",
+      "question": "Why does merge sort guarantee O(n log n) while quicksort does not?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_081_medium_algo",
+      "difficulty": "medium",
+      "question": "How does a hash set detect duplicates in O(n)?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_082_hard_algo",
+      "difficulty": "hard",
+      "question": "How does Dijkstra use a priority queue to achieve its time bound?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_083_medium_algo",
+      "difficulty": "medium",
+      "question": "When is a stack the right data structure for an algorithm?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_084_hard_algo",
+      "difficulty": "hard",
+      "question": "Why does topological sort require a directed acyclic graph?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_085_medium_algo",
+      "difficulty": "medium",
+      "question": "What is memoization and how does it change recursion cost?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_086_hard_algo",
+      "difficulty": "hard",
+      "question": "How does union-find achieve near-constant time with path compression?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_087_easy_logic",
+      "difficulty": "easy",
+      "question": "What makes an argument valid versus sound?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_088_medium_logic",
+      "difficulty": "medium",
+      "question": "Explain the difference between correlation and causation.",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_089_medium_logic",
+      "difficulty": "medium",
+      "question": "What is a counterexample and how does it disprove a universal claim?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_090_hard_logic",
+      "difficulty": "hard",
+      "question": "Why can you not prove a universal statement by checking finitely many cases?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_091_easy_sysdesign",
+      "difficulty": "easy",
+      "question": "What is the purpose of a cache in a web system?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_092_medium_sysdesign",
+      "difficulty": "medium",
+      "question": "When would you choose a message queue over a direct API call?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_093_medium_sysdesign",
+      "difficulty": "medium",
+      "question": "What is eventual consistency and when is it acceptable?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_094_hard_sysdesign",
+      "difficulty": "hard",
+      "question": "How does consistent hashing reduce reshuffling when a node is added?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_095_medium_sysdesign",
+      "difficulty": "medium",
+      "question": "Why use a read replica, and what staleness risk does it introduce?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_096_hard_sysdesign",
+      "difficulty": "hard",
+      "question": "How would you design an idempotent retry mechanism for payments?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_097_medium_sysdesign",
+      "difficulty": "medium",
+      "question": "What is backpressure and why does a streaming system need it?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_098_hard_sysdesign",
+      "difficulty": "hard",
+      "question": "How does a write-ahead log help a database recover after a crash?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_099_medium_cs",
+      "difficulty": "medium",
+      "question": "What is the difference between symmetric and asymmetric encryption?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_100_easy_math",
+      "difficulty": "easy",
+      "question": "Why is dividing by zero undefined?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    }
+  ]
+}
