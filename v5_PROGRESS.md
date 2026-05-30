@@ -1,6 +1,12 @@
 # V5 GNN + Recurrent Cross-Attention Adapter — Progress Log
 
-**Status:** Architecture implemented, 7 correctness bugs fixed, Phase 15 corpus collected, Phase 16 training pipeline built. Pending: real BERT embedder, Qwen3 hidden-state integration (Phase 17).
+**Status:** Architecture implemented and validated end-to-end on a real stack
+(mpnet-768 + frozen Qwen2.5-1.5B + real graph). 7 initial correctness bugs +
+4 more caught by the toy and real-stack tests, all fixed. Phase 15 corpus
+collected, Phase 16 training pipeline built and converging on fake data. Loop
+mechanics, pool routing, invalidator gating, exit wiring, and V4 fallback all
+proven with real embeddings and real LM hidden states. Pending: train the heads
+on a substrate-populated graph; resolve the 4B GGUF path (Phase 18).
 
 **Last updated:** 2026-05-30
 
@@ -200,13 +206,157 @@ Parses `phase15_corpus.jsonl` into `Phase15Sample` dataclasses with supervision 
 
 ---
 
-## What remains before Phase 17
+## 2026-05-30: Consistency pass — device crash + hook run-once guard (commit `c61d942`)
 
-1. **Real BERT embedder**: replace `FakeEmbedder` with `sentence-transformers` or HuggingFace BERT; provides meaningful `[N, 768]` text embeddings → GNN produces semantically meaningful K/V
-2. **Real Qwen3 hidden states**: `h_init` must come from actual Qwen3 prefill via `GraphAttentionInjector`; raise `w_epistemic` and `w_invalidator` back to 1.0 once real h_init is in use
-3. **Real MemoryGraph with edges**: load actual session subgraphs from `data/session_subgraphs/`; edges are needed for R-GCN to propagate across relation types
-4. **LoRA wrapping**: apply peft LoRA to `W_q` and `W_o` in `CrossAttentionProjections` before Phase 17 training
-5. **Qwen3 smoke test**: one toy graph + Dijkstra question + frozen Qwen3 with hooks to verify planning/evidence pool selection and fallback trigger end-to-end
+An external review flagged six items against `raw.githubusercontent.com`. Verified
+each against **live source** (the CDN serves a cached snapshot that lagged `cd4bff5`):
+
+| # | Reviewer claim | Reality |
+|---|---|---|
+| 1 | `encode_to_kv` passes `K=K, V=V` | Stale — already raw-embeddings-only |
+| 2 | `GraphMemoryKV.device` returns `self.K.device` | **REAL** — crash, fixed |
+| 3 | `update_state` missing `static_inv` | Stale — sig already has it |
+| 4 | Exit checks all slots | Stale — `_required_slot_indices(task_frame)` gates it |
+| 5 | Hook frequency uncontrolled | Partial — decode already skipped; added run-once guard |
+| 6 | Anchor uses `h[:, 0, :]` | Stale — already `h[:, -1, :]` |
+
+Fixes landed:
+
+- **`subgraph.py`**: `GraphMemoryKV.device` returned `self.K.device`, but `K` was
+  removed when the dataclass went raw-embeddings-only. Now `node_embeddings.device`.
+  Previously raised `AttributeError` on any `.device` access.
+- **`adapter.py`**: added `run_once_per_session` guard so a second prefill-shaped
+  pass (beam search / chunked prefill) does not re-run the loops; decode steps
+  were already skipped via `seq_len == 1`. Added `_plan_hook_calls` /
+  `_evid_hook_calls` counters + `get_hook_call_counts()` for observability.
+
+Verified: full pipeline runs clean; run-once guard holds at 1/1 across
+prefill+decode+reprefill; all six v5 modules `py_compile` clean (the reviewer's
+"file is one long line" was a web-tool rendering artifact, not the real file).
+
+---
+
+## 2026-05-30: Behavioral smoke test + node_scores cross-pool leak (commit `3989128`)
+
+`v5/smoke_test_toy.py` — Dijkstra negative-edge toy graph, one TaskFrame, runs
+planning + evidence loops, asserts deterministic invariants that hold regardless
+of head training:
+
+- planning / evidence / invalidator masks match expected node pools
+- attention mass stays within each block's pool (no cross-pool leak)
+- both loops always set an exit_reason
+- combined invalidator (static × dynamic) fires only on nodes with a structural
+  `INVALIDATED_BY` / `CONTRADICTS` edge
+
+**Bug the smoke test caught:** `AuxHeads.update_state` adds the `NodeHead`
+adjustment to ALL nodes (`new_scores = node_scores_r + new_node_adj`), so
+`node_scores_r` leaked out-of-pool even though the **attention** was masked. This
+contaminated the exit-condition top-k and `StateOverlayHead` top-k — a leaked
+evidence node could have driven the planning loop's epistemic/invalidator check
+onto a node the block cannot attend.
+
+Fix (`cross_attention.py`): re-apply the pool mask to `node_scores_r` after
+`update_state` (−1e9 on out-of-pool), keeping the cumulative score in-pool across
+iterations.
+
+**Second-order fix (`trainer.py`):** masking makes `sigmoid(node_scores_r)=0` on
+out-of-pool nodes → max BCE vs anchor target=1 (node loss exploded 0.1 → 76). A
+block can only be supervised on nodes it can attend, so node BCE is now restricted
+to each block's own pool via `_masked_bce()`. Node loss finite again; total
+converges 2.65 → 1.59 over 5 epochs.
+
+---
+
+## 2026-05-30: Phase 17 minimal real-stack test (commit `df2bc6c`)
+
+`v5/realstack_test.py` — end-to-end test with REAL components, no training, no GPU
+spend beyond one frozen prefill:
+
+```text
+real mpnet-768 embeddings
+  + real base graph (graphs/*.json)        → evidence-pool nodes
+  + injected reasoning-substrate nodes      → planning-pool nodes
+  + real frozen Qwen2.5-1.5B prefill h_init → via GraphAttentionInjector hooks
+  → loop logs
+```
+
+Run:
+
+```powershell
+$env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.realstack_test
+python -u -m v5.realstack_test --graph graphs/cs1.json --model Qwen/Qwen2.5-0.5B-Instruct
+```
+
+Observed pool routing on real data (real GNN encode):
+
+| node | type | plan | evid | inv |
+|---|---|---|---|---|
+| bsearch_strategy | strategy | ✓ | | 0 |
+| unsorted_array_failure | failure_pattern | ✓ | | **1** |
+| bsearch_applicability_epi | epistemic_state (uncertain) | ✓ | | 0 |
+| sorted_precondition_verified | epistemic_state (verified) | | ✓ | 0 |
+| binary_search_* | fact / claim | | ✓ | 0 |
+
+Result: planning attends only planning-pool nodes, evidence only evidence-pool,
+invalidator fires on the structurally-invalidating node, hooks fire **once each**,
+exit reasons recorded, `fallback_needed=True` — the correct safe behavior with
+untrained heads (V5 defers to the V4 path rather than answering on garbage).
+
+### Fixes landed this milestone
+
+- **Configurable LM hidden dim** (`cross_attention.py`): `lm_hidden_dim` threaded
+  to `CrossAttentionProjections` + `AuxHeads`; `q_input_dim` derived from it. Lets
+  a non-2560 LM (Qwen2.5-1.5B hidden=1536) run without edits; swap to the 4B is a
+  config change.
+- **Loop-log `exit_reason` backfill** (`cross_attention.py`): `to_log_entry` was
+  appended before the in-iteration exit decision, so corpus logs recorded
+  `exit_reason=None` even when the loop stopped via `max_loops_reached`. Now the
+  last log entry is backfilled with the final exit reason. Logs are training data —
+  exit_reason is a key signal.
+
+### Three findings from this milestone
+
+1. **Node-vocab gap (architectural).** Base graphs (`graphs/*.json`) use node
+   types fact/claim/theorem/equation/hub/… that populate only the **evidence**
+   pool. V5's planning-pool types (strategy / failure_pattern / control_rule /
+   reasoning_chain) are the reasoning substrate V4 *writes into the graph over
+   time*, not present in any base graph yet (session subgraphs hold only
+   session_object/failure_pattern/signal/etc, and Phase 15 scoped patches that add
+   the substrate types were never applied to a persisted graph). The real-stack
+   test **injects** a few substrate nodes to mirror how V5 sees the graph in
+   production. Real deployment requires V4 to have populated the substrate first.
+
+2. **4B GGUF blocker (Phase 18).** The real target at
+   `E:/PROJECT/graph_final/cache/models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf` is
+   llama.cpp (GGUF) format. Forward-hook hidden-state extraction
+   (`register_forward_hook` on `model.model.layers[8]`) needs HF format. Swapping
+   in the 4B needs either an HF-format export of the weights or a llama-cpp
+   hidden-state hook path. Adapter dim is now config-driven, so this is the only
+   remaining blocker for the 4B.
+
+3. **Env instability (native-lib clash).** `sentence_transformers` segfaults
+   (exit 139) when co-loaded with `torch_geometric` / the LM on this machine —
+   same class of crash flagged in `v4_PROGRESS.md`. Worked around by loading mpnet
+   via `transformers.AutoModel` + mean pooling instead. Run heavy combos with
+   `KMP_DUPLICATE_LIB_OK=TRUE`.
+
+---
+
+## What remains before real training
+
+1. **Substrate-populated graph**: run V4 (or apply Phase 15 scoped patches) so a
+   persisted graph actually contains strategy / failure_pattern / solved_subgoal /
+   epistemic_state nodes — the planning pool. Proven to flow once present.
+2. **Real h_init into the trainer**: `Phase16Trainer` still uses `FakeEmbedder` +
+   random `h_init`. Wire `GraphAttentionInjector` real Qwen prefill hidden states
+   into training; raise `w_epistemic` / `w_invalidator` back to 1.0 once real
+   h_init is in use. (The real flow is now proven by `realstack_test.py`.)
+3. **Real embedder in trainer**: replace `FakeEmbedder` with the
+   `transformers.AutoModel` mpnet path used by `realstack_test.py`.
+4. **LoRA wrapping**: apply peft LoRA to `W_q` / `W_o` in
+   `CrossAttentionProjections` before training.
+5. **4B GGUF path (Phase 18)**: HF export or llama-cpp hidden-state hooks (see
+   finding #2 above).
 
 ---
 
@@ -215,17 +365,29 @@ Parses `phase15_corpus.jsonl` into `Phase15Sample` dataclasses with supervision 
 ```text
 v5/
 ├── __init__.py
-├── adapter.py          GraphAttentionInjector — hook injection into Qwen3-4B
-├── cross_attention.py  CrossAttentionProjections, RecurrentAttentionBlock, V5AttentionAdapter
+├── adapter.py          GraphAttentionInjector — hook injection (run-once guard + hook counters)
+├── cross_attention.py  CrossAttentionProjections, RecurrentAttentionBlock, V5AttentionAdapter (configurable lm_hidden_dim)
 ├── exit_condition.py   Compound exit guard, fallback_needed
 ├── gnn_encoder.py      RGCNEncoder (2-layer R-GCN), GraphEncoderInputs, build_encoder_inputs
 ├── goal_encoder.py     GoalEncoder, encode_task_frame
 ├── loop_state.py       LoopState, 6 AuxHeads, AuxHeads.update_state
 ├── subgraph.py         GraphMemoryKV, ActiveSubgraph, build_active_subgraph
+├── smoke_test_toy.py   Deterministic toy-graph invariant test (masks/gating/exit)
+├── realstack_test.py   Phase 17 real-stack test (mpnet + Qwen2.5-1.5B + real graph)
 └── training/
     ├── __init__.py
     ├── dataset.py      Phase15Dataset, Phase15Sample, CORPUS_SLOT_ALIAS
-    └── trainer.py      Phase16Trainer, FakeEmbedder, TrainingConfig
+    └── trainer.py      Phase16Trainer, FakeEmbedder, _masked_bce, TrainingConfig
+```
+
+## Test commands
+
+```powershell
+# deterministic invariant test (fast, no model)
+python -m v5.smoke_test_toy
+
+# real-stack test (real mpnet + Qwen2.5-1.5B; needs KMP workaround)
+$env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.realstack_test
 ```
 
 ## torch_geometric install
