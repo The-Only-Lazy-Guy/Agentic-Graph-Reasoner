@@ -3,8 +3,8 @@
 > At-a-glance dump of the latest runs (raw outputs, numbers, repro commands) so
 > you don't have to dig through commits/logs. Updated each working session.
 
-**Last updated:** 2026-05-30
-**HEAD:** `145fb01` · branch `main`
+**Last updated:** 2026-05-31
+**HEAD:** `f8dfe76` · branch `main`
 
 ---
 
@@ -25,9 +25,13 @@
 - ✅ **Stage 2B on REAL corpus (write-safety)**: write path trained, all 6 gates
   pass — write_ratio 0.047 (negatives lowest 0.034), catastrophic 0/20, hooks
   20/20, sim 0.94. Generation stable with real writing.
-- ⏳ **Fallback applicable-drop**: not shown — this 2B run used random (untrained)
-  heads, so fallback is 1.0 everywhere (retained, not regressed). The drop needs
-  Stage 1 heads + Stage 2 on ONE adapter (pipeline integration).
+- ✅ **Integrated Stage 1→2A→2B (one adapter)**: 7/8 gates. Heads retained
+  (head-retention loss fixed epi 0.38→0.88), routing 1.0, write 0.109 (negatives
+  least 0.057), catastrophic 0/20, fallback blocked/negative HIGH.
+- ⚠️ **Fallback applicable-drop**: only 1.00→0.94 (1/17). The fallback gate needs
+  slot≥0.85 AND primary-evidence epi≥0.70; the 20-example corpus doesn't calibrate
+  the heads to cross those thresholds. A calibration + corpus-scale issue (motivates
+  a support-pointer head), not a training-mechanism failure.
 - ❌ NOT yet: V5 **generalizes** (corpus is 20 traces → train-fit only).
 - ❌ NOT yet: V5 **improves** generation (Stage 2 not yet on the real 1536-d adapter;
   LoRA untrained).
@@ -167,6 +171,37 @@ desired "drops for applicable"). The applicable-fallback-drop needs Stage 1 head
 
 ---
 
+## 1f. Integrated Stage 1->2A->2B — `python -m v5.training.stage_integrated`
+
+One adapter through Stage 1 (heads) -> 2A (routing) -> 2B (write + head-retention).
+Qwen2.5-1.5B. 7/8 integrated gates pass.
+
+```
+head metrics retained (after 2B): plan 1.0 evid 1.0 slot 1.0 epi 0.88 sc 1.0
+  (head-retention loss fixed the regression: epi WAS 0.38 without it)
+routing retained: plan 1.00 evid 1.00
+
+per-case-type (write_ratio | fallback before->after):
+  applicable  17   0.109   1.00 -> 0.94
+  blocked      3   0.117   1.00 -> 1.00
+  negative     5   0.057   1.00 -> 1.00     <- negatives write least
+
+perturbation (20q): catastrophic 0/20, hooks 20/20, gibberish 0, sim 0.88
+
+GATES: 7/8 OK
+  [OK] head retained · routing retained · write bounded · negatives least ·
+       catastrophic<=baseline · fallback blocked HIGH · fallback negative HIGH
+  [FAIL] fallback applicable LOW  (0.94 — see below)
+```
+
+UNMET GATE: applicable fallback barely drops (1.00->0.94). fallback_needed wants
+slot>=0.85 AND primary-evidence epi>=0.70; the 20-example corpus doesn't calibrate
+the heads to cross those specific thresholds. Calibration + corpus-scale issue
+(motivates an explicit support-pointer head), NOT a training-mechanism failure —
+heads, routing, and write all train and retain.
+
+---
+
 ## 2. Substrate Population Pass (raw) — `python -m v5.training.substrate`
 
 ```
@@ -231,6 +266,7 @@ python -m v5.training.bridge                        # corpus -> Stage1Example + 
 python -m v5.training.stage2                         # Stage 2 (2A routing + 2B write), synthetic
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.stage2_real   # real Stage 2A + perturbation re-check
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.stage2b_real  # real Stage 2B write-safety milestone
+$env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.stage_integrated  # integrated 1->2A->2B (7/8 gates)
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.realstack_test       # real-stack prefill
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.stage1_real # real Stage 1 (planning incl.)
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.infer_demo           # baseline vs injected generation
