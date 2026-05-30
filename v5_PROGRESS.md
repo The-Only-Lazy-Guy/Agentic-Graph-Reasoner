@@ -444,6 +444,49 @@ recurrent projections:
   `answer_support_node` / `primary_support_pointer` head would make this explicit
   and is worth adding before scaled training. Fine as-is for now.
 
+## 2026-05-30: Phase 15/17 bridge — V4 trace → Stage1Example (commit `7ca53dd`)
+
+`v5/training/bridge.py` is the critical-path converter from "V4 produced labeled
+traces" to "V5 heads train on real graph states." Per corpus row it:
+
+- parses labels via `Phase15Dataset` (anchor / slot / epistemic / invalidator /
+  shortcut);
+- builds a graph object + `ActiveSubgraph` and runs the **frozen GNN** to get the
+  `GraphMemoryKV`;
+- **splits the single anchor mask** into `plan_anchor` vs `evid_anchor` by GNN
+  pool membership — a node is supervised only in the pool its block attends;
+  `None` when that pool has no anchored node (partial labels, which
+  `Stage1Example` supports);
+- pulls `h_init` from an injected provider.
+
+**Real logic, swappable inputs.** `gnn` / `embedder` / `h_init_provider` default
+to mocks (`ZeroEmbedder`, `MockHInitProvider`) so the converter runs on the real
+corpus with no LM; real training passes a frozen `RGCNEncoder`, an mpnet
+`AutoModel` embedder, and a frozen-Qwen `h_init` provider.
+`stage1.corpus_examples()` now delegates to the bridge.
+
+### Coverage report on the real corpus (measures the substrate gap)
+
+`python -m v5.training.bridge` converts all 20 rows and reports per-head label
+coverage:
+
+| head | coverage | note |
+|---|---|---|
+| plan | **0/20 (0%)** | the substrate gap — no planning-pool anchors yet |
+| evid | 19/20 (95%) | base-graph anchors are mostly fact/claim |
+| slot | 20/20 (100%) | |
+| epi | 8/20 (40%) | from `add_epistemic_state` patches |
+| inv | 1/20 (5%) | from `deprecate_fact` patches |
+| shortcut | 20/20 (100%) | |
+
+The bridge handles substrate-poor rows gracefully and **reports** the 0% planning
+coverage rather than hiding it. This makes the next bottleneck concrete and
+measurable: planning labels rise only after V4 writes the reasoning substrate
+(strategy / failure_pattern / control_rule / reasoning_chain / solved_subgoal /
+epistemic_state) into the graph.
+
+---
+
 ## What remains before real training
 
 1. **Substrate-populated graph**: run V4 (or apply Phase 15 scoped patches) so a
@@ -481,7 +524,8 @@ v5/
     ├── dataset.py             Phase15Dataset, Phase15Sample, CORPUS_SLOT_ALIAS
     ├── trainer.py             Phase16Trainer, FakeEmbedder, _masked_bce, TrainingConfig
     ├── trainability_test.py   teacher-forced head-trainability proof (synthetic)
-    └── stage1.py              Stage1Trainer (heads-only, frozen loop projections)
+    ├── stage1.py              Stage1Trainer (heads-only, frozen loop projections)
+    └── bridge.py              Phase 15/17 bridge: V4 corpus trace -> Stage1Example
 ```
 
 ## Test commands
@@ -495,6 +539,9 @@ python -m v5.training.trainability_test
 
 # Stage 1 trainer scaffold (synthetic smoke; heads-only, frozen loop projections)
 python -m v5.training.stage1
+
+# Phase 15/17 bridge: convert the real V4 corpus -> Stage1Example + coverage report
+python -m v5.training.bridge
 
 # real-stack test (real mpnet + Qwen2.5-1.5B; needs KMP workaround)
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.realstack_test
