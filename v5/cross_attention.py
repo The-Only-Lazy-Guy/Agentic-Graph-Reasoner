@@ -1,11 +1,19 @@
 """Recurrent cross-attention block: one iteration of the planning or evidence loop.
 
-Implements the per-iteration update from V5_ARCHITECTURE.md §6:
+Pre-norm residual-stream update (per-iteration), from V5_ARCHITECTURE.md §6:
 
-    Q_r    = W_q(concat(h_r, goal_vector, slot_state_r))
-    A_r    = softmax(Q_r @ K_r.T / sqrt(d)) @ V_r
-    h_{r+1} = LayerNorm(h_r + W_o(A_r))
+    Q_r     = W_q(concat(LayerNorm(h_r), goal_vector, slot_state_r))
+    A_r     = softmax(Q_r @ K_r.T / sqrt(d)) @ V_r
+    h_{r+1} = h_r + W_o(A_r)          # residual stream; norm only on the Q input
     [then aux heads update loop state]
+
+The residual stream h_r flows forward UN-normalized; LayerNorm is applied only
+to the query input. Post-norm (`LayerNorm(h_r + W_o(A))`) is a contraction when
+the attention context is fixed across inputs — it collapses every h_init to one
+fixed point and erases the LM hidden state the loop is meant to condition on.
+Pre-norm preserves h_init additively so Q_r genuinely depends on the LM state.
+The AuxHeads apply their own LayerNorm (head_norm) before reading h_r, bounding
+its growing magnitude without losing direction.
 
 W_q and W_o are LoRA-adapted projections (base weights from Qwen3 frozen;
 LoRA delta trained). At inference before fine-tuning, they start as identity-
