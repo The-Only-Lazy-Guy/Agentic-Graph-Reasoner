@@ -597,21 +597,34 @@ the full pipeline incl. planning *learns*, not generalization.
 
 ---
 
-## What remains before real training
+## What remains
 
-1. **Substrate-populated graph**: run V4 (or apply Phase 15 scoped patches) so a
-   persisted graph actually contains strategy / failure_pattern / solved_subgoal /
-   epistemic_state nodes — the planning pool. Proven to flow once present.
-2. **Real h_init into the trainer**: `Phase16Trainer` still uses `FakeEmbedder` +
-   random `h_init`. Wire `GraphAttentionInjector` real Qwen prefill hidden states
-   into training; raise `w_epistemic` / `w_invalidator` back to 1.0 once real
-   h_init is in use. (The real flow is now proven by `realstack_test.py`.)
-3. **Real embedder in trainer**: replace `FakeEmbedder` with the
-   `transformers.AutoModel` mpnet path used by `realstack_test.py`.
-4. **LoRA wrapping**: apply peft LoRA to `W_q` / `W_o` in
-   `CrossAttentionProjections` before training (Stage 4 above).
-5. **4B GGUF path (Phase 18)**: HF export or llama-cpp hidden-state hooks (see
-   finding #2 above).
+Architecture and the real-data training path are **done**. What's left is scale
+and recipe, not structure:
+
+- **DONE — substrate-populated graph**: the Substrate Population Pass applies the
+  corpus's safe scoped patches → `graphs/merged_graph_substrate.json`; planning
+  coverage 0% → 85%.
+- **DONE — real h_init + real embedder**: `stage1_real.py` trains on real
+  frozen-Qwen prefill h_init (`FrozenQwenHInitProvider`) + real mpnet embeddings
+  (`RealEmbedder`). (`Phase16Trainer`'s `FakeEmbedder` remains only as the
+  no-LM smoke path; the real path is `stage1_real`.)
+
+Remaining:
+
+1. **Corpus scale for held-out evaluation** — the current corpus is 20 traces, so
+   every result so far is train-fit. A larger V4 corpus enables an 80/20 split and
+   the first *generalization* metrics: node precision/recall by pool, slot /
+   epistemic / invalidator / shortcut accuracy, fallback decision accuracy. **This
+   is the next true milestone.**
+2. **Stages 2–5** (progressive unfreezing): cross-attn projections → overlay →
+   LM LoRA → GNN, with warmup / low LR (see staging plan above). Stage 1 is done.
+3. **LoRA wrapping** — peft LoRA on `W_q` / `W_o` (Stage 4).
+4. **4B GGUF path (Phase 18)** — HF export or llama-cpp hidden-state hooks.
+
+> Defensible claim today: *V5 trains end-to-end on real graph states + real LM
+> hidden states, including planning, on a substrate-rich V4 corpus.* **Not yet**:
+> *V5 generalizes* (needs corpus scale + held-out eval).
 
 ---
 

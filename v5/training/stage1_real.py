@@ -2,16 +2,22 @@
 
 End-to-end real-data run of Stage 1 (heads-only, frozen loop projections) on the
 Phase 15 corpus, using the persisted-graph neighborhood, real mpnet node
-embeddings, and real frozen-Qwen prefill h_init. Trains the heads that actually
-have corpus labels (evidence / slot / epistemic / shortcut); planning is skipped
-because corpus planning coverage is still 0% (substrate gap).
+embeddings, and real frozen-Qwen prefill h_init.
 
-This is the first training of V5 heads on real graph states + real LM hidden
-states — the synthetic trainability test proved capacity; this proves the real
-pipeline trains.
+Trains whichever heads have corpus labels. When the substrate-enriched graph
+(graphs/merged_graph_substrate.json, from the Substrate Population Pass) is
+present, it is preferred and PLANNING is supervised too — the trace's substrate
+nodes (strategy/failure_pattern/uncertain-epistemic/...) become labeled planning
+anchors. Without it, planning has no labels (base-graph anchors are evidence-pool)
+and is skipped; run `python -m v5.training.substrate` first to enable planning.
 
+This trains V5 heads on real graph states + real LM hidden states — the synthetic
+trainability test proved capacity; this proves the real pipeline trains end-to-end
+(train-fit on the small corpus, not a generalization claim).
+
+    python -m v5.training.substrate                      # build the enriched graph
     $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.stage1_real
-    ... --model Qwen/Qwen2.5-0.5B-Instruct   # lighter LM
+    ... --model Qwen/Qwen2.5-0.5B-Instruct               # lighter LM
 """
 from __future__ import annotations
 
