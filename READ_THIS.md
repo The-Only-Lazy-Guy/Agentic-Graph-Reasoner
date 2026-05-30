@@ -4,7 +4,7 @@
 > you don't have to dig through commits/logs. Updated each working session.
 
 **Last updated:** 2026-05-31
-**HEAD:** `7664f99` · branch `main`
+**HEAD:** `d84e074` · branch `main`
 
 ---
 
@@ -38,8 +38,14 @@
   **epistemic generalization (all-node 0.00)** → points to an architecture/label
   problem (the **support-pointer head**), NOT pure data scale. (n=10 still < 100–300
   bar; indicative not conclusive.)
-- ⏸️ **Held on purpose**: Stage 3 overlay, Stage 4 LoRA, any quality claim. **Next
-  indicated step: support-pointer head**, not just more data.
+- 🔬 **Oracle diagnostic OVERTURNED the support-pointer hypothesis**: feeding the
+  fallback gate the GOLD support node did NOT drop applicable fallback (7/7 → 7/7).
+  The real blocker is the **SLOT gate (fails 7/7)**, not epistemic (epi was 0.71
+  top / 0.86 gold-support, mostly ABOVE the 0.70 threshold). → **Do NOT build the
+  support-pointer head.** Fix = **slot calibration** (required slots sit ~0.7–0.8,
+  fail the ≥0.85 gate).
+- ⏸️ **Held on purpose**: support-pointer head (ruled out by oracle), Stage 3
+  overlay, Stage 4 LoRA, any quality claim.
 - ❌ NOT yet: V5 **generalizes** (corpus is 20 traces → train-fit only).
 - ❌ NOT yet: V5 **improves** generation (Stage 2 not yet on the real 1536-d adapter;
   LoRA untrained).
@@ -299,6 +305,34 @@ slot/shortcut generalize (0.89). BUT fallback-applicable stayed 1.00 and epi
 stayed 0.00 across BOTH scales -> the epistemic/fallback gate is an architecture/
 label issue (support-pointer head), not data-scale. Caveats: n=10 < 100-300;
 epi all-node match is strict (per-node metric added).
+
+---
+
+## 1h. Oracle support-pointer diagnostic — `v5.training.oracle_support_diag`
+
+Decisive pre-build test on 46-trace held-out applicable (n=7):
+```
+applicable fallback:  standard 7/7   ORACLE gold-support 7/7   (oracle does NOT help)
+trips:  slot 7/7  ·  inv 1/7  ·  epi_top 2/7
+mean epi:  top-attended 0.71 · gold-support 0.86   (mostly >= 0.70 threshold)
+VERDICT: NOT support selection -> SLOT calibration is the blocker.
+```
+=> support-pointer head is ruled out. Next fix is slot-head calibration (get
+required slots above 0.85), then re-check fallback.
+
+---
+
+## Multi-machine UNIQUE data gen (local + vast.ai) — push & merge
+
+```
+# bank is sharded by index (disjoint -> unique). 100 Qs -> 50 local / 50 vast1.
+LOCAL :  python run_gen_llama.py --run-id local --shard-index 0 --num-shards 2
+VAST  :  RUN_ID=vast1 SHARD_INDEX=1 NUM_SHARDS=2 bash gen_and_push.sh   # gens + pushes its shard
+LOCAL :  git pull ; python merge_shards.py ; \
+         python -m v5.training.corpus_scaling --corpus data/corpus_merged.jsonl
+```
+Each machine writes data/corpus_shards/<run-id>.jsonl (distinct file, no conflict;
+.gitignore exception lets these jsonl push). merge_shards de-dups by (session, question).
 
 ---
 
