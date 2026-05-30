@@ -70,3 +70,8 @@ traverse_threshold_draft_edit_result.txt
 # for merging. Re-included despite the global *.jsonl ignore.
 !data/corpus_shards/
 !data/corpus_shards/*.jsonl
+
+# Data-gen box-local (never push these from vast.ai; only the shard jsonl)
+.venv-datagen/
+models/
+*.log

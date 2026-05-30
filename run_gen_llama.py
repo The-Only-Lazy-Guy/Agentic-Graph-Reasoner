@@ -30,7 +30,12 @@ def main():
     ap.add_argument("--run-id", default="local", help="machine label (e.g. local, vast1) -> filename + metadata tag")
     ap.add_argument("--shard-index", type=int, default=0)
     ap.add_argument("--num-shards", type=int, default=1)
+    ap.add_argument("--openai-mode", action="store_true",
+                    help="generic OpenAI server (e.g. llama-cpp-python python -m llama_cpp.server): "
+                         "skips the /health probe + llama.cpp-only body fields. Use on vast.ai.")
     a = ap.parse_args()
+    if a.num_shards < 1 or not (0 <= a.shard_index < a.num_shards):
+        ap.error(f"need 0 <= shard-index < num-shards (got {a.shard_index}/{a.num_shards})")
 
     all_tasks = json.load(open(a.dataset, encoding="utf-8"))["tasks"]
     # disjoint shard so machines generate UNIQUE data
@@ -45,7 +50,7 @@ def main():
     print(f"run-id={a.run_id}  shard {a.shard_index}/{a.num_shards}  "
           f"-> {len(tasks)}/{len(all_tasks)} questions")
     cfg = V4ControllerConfig(base_url=a.base_url, temperature=0.2, max_tokens=2400,
-                             timeout=600.0, llamacpp_mode=True)
+                             timeout=600.0, llamacpp_mode=not a.openai_mode)
     print(f"backend={a.base_url}  tasks={len(tasks)}  out={out_dir/a.corpus_file}")
 
     ok = fail = 0
