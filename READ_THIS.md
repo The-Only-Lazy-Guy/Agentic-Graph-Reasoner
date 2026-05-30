@@ -4,7 +4,7 @@
 > you don't have to dig through commits/logs. Updated each working session.
 
 **Last updated:** 2026-05-30
-**HEAD:** `810e5ac` · branch `main`
+**HEAD:** `59a449b` · branch `main`
 
 ---
 
@@ -16,8 +16,14 @@
   stable (stays coherent even with untrained projections).
 - ✅ Random-init injection is **95% non-catastrophic** over 20 questions (perfect
   1/1 hook control) → Stage 2 starts from a stable injected-generation baseline.
+- ✅ **Stage 2 core (synthetic)**: residual gate + 2A/2B trainer learns attention
+  routing (plan/evid precision → 1.0) with bounded gated write (~11% of ‖h‖).
 - ❌ NOT yet: V5 **generalizes** (corpus is 20 traces → train-fit only).
-- ❌ NOT yet: V5 **improves** generation (cross-attn projections untrained — Stage 2/LoRA needed).
+- ❌ NOT yet: V5 **improves** generation (Stage 2 not yet on the real 1536-d adapter;
+  LoRA untrained).
+- ⏳ Staged from full Stage 2 spec: KL-vs-base-LM stability loss (use
+  `perturbation_baseline` on real LM), explicit head-retention loss, "no-graph"
+  negative cases, and real-LM post-Stage-2 catastrophic-rate check.
 
 ---
 
@@ -72,6 +78,29 @@ AGGREGATE (n=20):
 Read: random injection rarely breaks generation (1 catastrophic case, sim→0.43);
 moderate drift is expected with untrained projections; hook control perfect.
 => Stage 2 starts from a stable injected-generation baseline.
+
+---
+
+## 1c. Stage 2 core (raw) — `python -m v5.training.stage2`
+
+Synthetic, lm_dim=128, gate_init=0.02. Trains attention routing (2A) then gated
+write (2B). NOT answer-quality; proves the projections can learn where to look and
+write a bounded residual.
+
+```
+--- Stage 2A (learn to LOOK: train Q/K/V; W_o/gate frozen) ---
+  BEFORE:  plan_attn 0.10  evid_attn 0.53  write_ratio 0.017
+  AFTER 2A: plan_attn 1.00  evid_attn 1.00  write_ratio 0.111
+
+--- Stage 2B (learn to WRITE: train W_o + gate; Q/K/V on) ---
+  AFTER 2B: plan_attn 1.00  evid_attn 1.00  write_ratio 0.116
+            gates (plan/evid) = 0.002 / 0.023
+
+success criteria: plan>=0.9 OK · evid>=0.9 OK · write bounded (<=0.35) OK
+```
+
+Note: lr 1e-3 diverged (attn loss 1.8→9.6) on the small attention pool; lr 2e-4
+converges. Residual gate keeps the write ~11% of ‖h‖.
 
 ---
 
@@ -136,6 +165,7 @@ python -m v5.smoke_test_toy                         # deterministic invariants (
 python -m v5.training.trainability_test             # synthetic head trainability
 python -m v5.training.substrate                     # build substrate-enriched graph
 python -m v5.training.bridge                        # corpus -> Stage1Example + coverage
+python -m v5.training.stage2                         # Stage 2 (2A routing + 2B write), synthetic
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.realstack_test       # real-stack prefill
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.stage1_real # real Stage 1 (planning incl.)
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.infer_demo           # baseline vs injected generation
