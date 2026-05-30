@@ -1,12 +1,12 @@
 # V5 GNN + Recurrent Cross-Attention Adapter — Progress Log
 
-**Status:** Architecture implemented and validated end-to-end on a real stack
-(mpnet-768 + frozen Qwen2.5-1.5B + real graph). 7 initial correctness bugs +
-4 more caught by the toy and real-stack tests, all fixed. Phase 15 corpus
-collected, Phase 16 training pipeline built and converging on fake data. Loop
-mechanics, pool routing, invalidator gating, exit wiring, and V4 fallback all
-proven with real embeddings and real LM hidden states. Pending: train the heads
-on a substrate-populated graph; resolve the 4B GGUF path (Phase 18).
+**Status:** Architecture implemented, validated end-to-end on a real stack
+(mpnet-768 + frozen Qwen2.5-1.5B + real graph), and proven **trainable** — a
+teacher-forced test drives every aux head from chance (0.5) to 1.0 and makes
+fallback drop on easy tasks. 7 initial correctness bugs + 4 caught by the toy /
+real-stack tests + 4 architecture fixes caught by the trainability test, all
+fixed. Phase 15 corpus collected, Phase 16 pipeline built. Pending: joint
+end-to-end training recipe (lr staging); substrate-populated graph; 4B GGUF path.
 
 **Last updated:** 2026-05-30
 
@@ -342,6 +342,73 @@ untrained heads (V5 defers to the V4 path rather than answering on garbage).
 
 ---
 
+## 2026-05-30: Teacher-forced trainability test + 4 architecture fixes (commit `be42249`)
+
+`v5/training/trainability_test.py` — the "most important test before GPU spend":
+prove the heads can LEARN the intended semantics, not merely run. Two task
+families (**applicable** / **blocked**) on one synthetic graph, constructed
+per-head ground truth, fixed per-task `h_init` carrying the family signal.
+
+Result — every metric goes 0.5 → 1.0, fallback behaves correctly:
+
+| metric | before | after |
+|---|---|---|
+| plan_node_acc | 0.60 | **1.00** |
+| evid_node_acc | 0.50 | **1.00** |
+| slot_acc | 0.50 | **1.00** |
+| epi_acc | 0.00 | **1.00** |
+| inv_acc | 0.50 | **1.00** |
+| shortcut_acc | 0.50 | **1.00** |
+| fallback_applicable | 1.00 | **0.00** |
+| fallback_blocked | 1.00 | 1.00 |
+
+This covers the reviewer's full checklist: planning weights strategy/failure,
+evidence weights facts/verified, slots fill, epistemic rises only for supported
+paths, invalidator fires only when context activates it, shortcut rises only
+when preconditions match, and fallback drops on easy tasks while staying on
+blocked ones.
+
+### Four architecture bugs the trainability test exposed
+
+1. **Post-norm contraction erased the LM state.** The recurrent update was
+   `h_new = LayerNorm(h_r + W_o(A))`. With a fixed graph/goal context this is a
+   contraction to a fixed point — two very different `h_init` (diff L2 7.1)
+   collapsed to the same output (diff 1.7e-6), decoupling graph reasoning from
+   the LM hidden state. Switched to a **pre-norm residual stream**
+   `h_new = h_r + W_o(A)` (norm on the query input only); `h_init` now persists.
+
+2. **Residual stream saturated the heads.** The pure residual stream grows in
+   magnitude, saturating the sigmoid heads (both families read the same value).
+   Added a **head_norm** (GPT-style final `ln_f`) so heads read a
+   magnitude-bounded, direction-preserving `h`. Also **clamp node_scores in
+   StateOverlayHead** — the `-1e9` pool-mask sentinel was feeding the overlay
+   MLP and exploding `K_r/V_r` (`h_r` reached 4.6e8).
+
+3. **Bilinear heads too weak for context gating.** `EpistemicHead` and
+   `InvalidatorHead` were bilinear `h·n` — cannot hold one node's status constant
+   while gating another by context through the same `h`. Upgraded both to a
+   **concat-MLP over `[h, n, h⊙n]`**; both reach 1.0.
+
+4. **Exit/fallback epistemic gate too strict.** It required EVERY top-k attended
+   node to be epistemically confident, so an attended-but-contradicting node
+   (legitimately low confidence) blocked exit and forced fallback forever. Now
+   gate on the **primary (top-1) attended node**; the invalidator check stays
+   conservative over top-k.
+
+### What's proven vs what remains
+
+- **Proven:** the loop's final `h_r` is 100% family-separable (a fresh linear
+  probe fits it at loss 0.002); every head learns its target on that
+  representation; the four fixes above are correct (toy + real-stack tests still
+  pass).
+- **Remaining (training recipe, not capacity):** joint end-to-end training that
+  *unfreezes* the loop projections is unstable — the projections shift `h_r`
+  while the heads chase it. The trainability test trains heads on the frozen loop
+  representation (AdamW + cosine, lr 1e-3). End-to-end training needs lr warmup /
+  staged unfreezing — a Phase 16 recipe item.
+
+---
+
 ## What remains before real training
 
 1. **Substrate-populated graph**: run V4 (or apply Phase 15 scoped patches) so a
@@ -376,8 +443,9 @@ v5/
 ├── realstack_test.py   Phase 17 real-stack test (mpnet + Qwen2.5-1.5B + real graph)
 └── training/
     ├── __init__.py
-    ├── dataset.py      Phase15Dataset, Phase15Sample, CORPUS_SLOT_ALIAS
-    └── trainer.py      Phase16Trainer, FakeEmbedder, _masked_bce, TrainingConfig
+    ├── dataset.py             Phase15Dataset, Phase15Sample, CORPUS_SLOT_ALIAS
+    ├── trainer.py             Phase16Trainer, FakeEmbedder, _masked_bce, TrainingConfig
+    └── trainability_test.py   teacher-forced head-trainability proof (synthetic)
 ```
 
 ## Test commands
@@ -385,6 +453,9 @@ v5/
 ```powershell
 # deterministic invariant test (fast, no model)
 python -m v5.smoke_test_toy
+
+# trainability test (synthetic; heads 0.5 -> 1.0, fallback drops)
+python -m v5.training.trainability_test
 
 # real-stack test (real mpnet + Qwen2.5-1.5B; needs KMP workaround)
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.realstack_test
