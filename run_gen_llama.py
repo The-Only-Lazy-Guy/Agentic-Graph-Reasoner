@@ -42,6 +42,9 @@ def main():
     ap.add_argument("--backend", choices=["llama", "opencode"], default="llama",
                     help="llama=local GGUF server; opencode=big cloud model via opencode CLI")
     ap.add_argument("--opencode-config-dir", default="pure-opencode")
+    ap.add_argument("--opencode-model", default=None,
+                    help="opencode model alias (e.g. opencode/big-pickle). Default = controller default; "
+                         "set this to a BIG model for higher-quality traces.")
     a = ap.parse_args()
     if a.num_shards < 1 or not (0 <= a.shard_index < a.num_shards):
         ap.error(f"need 0 <= shard-index < num-shards (got {a.shard_index}/{a.num_shards})")
@@ -64,8 +67,13 @@ def main():
 
     def make_controller():
         if a.backend == "opencode":
-            return V4OpencodeController(config_dir=a.opencode_config_dir)
+            kw = {"config_dir": a.opencode_config_dir}
+            if a.opencode_model:
+                kw["model"] = a.opencode_model
+            return V4OpencodeController(**kw)
         return V4LlamaServerController(cfg)
+    if a.backend == "opencode":
+        print(f"opencode model = {a.opencode_model or '(controller default)'}")
 
     ok = fail = 0
     for i, task in enumerate(tasks):

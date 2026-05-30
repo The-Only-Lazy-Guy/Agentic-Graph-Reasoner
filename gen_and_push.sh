@@ -148,6 +148,7 @@ fi
 log "generating shard ($BACKEND) -> $SHARD_PATH"
 if [ "$BACKEND" = "opencode" ]; then
   python run_gen_llama.py --backend opencode --opencode-config-dir "${OPENCODE_CONFIG_DIR:-pure-opencode}" \
+    ${OPENCODE_MODEL:+--opencode-model "$OPENCODE_MODEL"} \
     --dataset data/question_bank.json --graph graphs/merged_graph.json \
     --out-dir data/corpus_shards --run-id "$RUN_ID" \
     --shard-index "$SHARD_INDEX" --num-shards "$NUM_SHARDS" ${LIMIT:+--limit "$LIMIT"}
