@@ -699,6 +699,1322 @@
       "question": "Why is dividing by zero undefined?",
       "max_steps": 4,
       "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_101_easy_physics",
+      "difficulty": "easy",
+      "question": "What is inertia and how does it relate to mass?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_102_easy_physics",
+      "difficulty": "easy",
+      "question": "Why does a heavier object not fall faster than a lighter one in vacuum?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_103_medium_physics",
+      "difficulty": "medium",
+      "question": "Explain conservation of momentum using a collision example.",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_104_medium_physics",
+      "difficulty": "medium",
+      "question": "Why does a diver tuck into a ball to spin faster?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_105_medium_physics",
+      "difficulty": "medium",
+      "question": "What is the difference between speed and velocity?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_106_medium_physics",
+      "difficulty": "medium",
+      "question": "Why does a capacitor block DC but pass AC?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_107_medium_physics",
+      "difficulty": "medium",
+      "question": "Explain why a ball thrown upward decelerates then accelerates downward.",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_108_hard_physics",
+      "difficulty": "hard",
+      "question": "Why does the photoelectric effect require a minimum frequency, not just intensity?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_109_hard_physics",
+      "difficulty": "hard",
+      "question": "Explain why entropy tends to increase in an isolated system.",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_110_hard_physics",
+      "difficulty": "hard",
+      "question": "Why does a blackbody emit a continuous spectrum that shifts with temperature?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_111_hard_physics",
+      "difficulty": "hard",
+      "question": "How does resonance amplify oscillations at a natural frequency?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_112_medium_physics",
+      "difficulty": "medium",
+      "question": "What determines the escape velocity of a planet?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_113_medium_physics",
+      "difficulty": "medium",
+      "question": "Why does pressure increase with depth in a fluid?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_114_easy_physics",
+      "difficulty": "easy",
+      "question": "What is the difference between conduction, convection, and radiation?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_115_hard_physics",
+      "difficulty": "hard",
+      "question": "Why can no information travel faster than light?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_116_easy_chem",
+      "difficulty": "easy",
+      "question": "What is a catalyst and how does it affect a reaction?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_117_medium_chem",
+      "difficulty": "medium",
+      "question": "How does a buffer solution resist changes in pH?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_118_medium_chem",
+      "difficulty": "medium",
+      "question": "What happens at the atomic level during oxidation and reduction?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_119_easy_chem",
+      "difficulty": "easy",
+      "question": "What is a mole in chemistry and why is it useful?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_120_medium_chem",
+      "difficulty": "medium",
+      "question": "How does electronegativity change across a period of the periodic table?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_121_easy_chem",
+      "difficulty": "easy",
+      "question": "What are isotopes and how do they differ from each other?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_122_medium_chem",
+      "difficulty": "medium",
+      "question": "Why is activation energy required even for exothermic reactions?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_123_medium_chem",
+      "difficulty": "medium",
+      "question": "What does the ideal gas law relate and when does it break down?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_124_hard_chem",
+      "difficulty": "hard",
+      "question": "Why does increasing pressure shift the Haber-process equilibrium toward ammonia?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_125_easy_chem",
+      "difficulty": "easy",
+      "question": "What is the difference between a physical and a chemical change?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_126_medium_chem",
+      "difficulty": "medium",
+      "question": "Why do metals conduct electricity?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_127_easy_bio",
+      "difficulty": "easy",
+      "question": "What is osmosis and which way does water move?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_128_medium_bio",
+      "difficulty": "medium",
+      "question": "Summarize how photosynthesis converts light into chemical energy.",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_129_hard_bio",
+      "difficulty": "hard",
+      "question": "How does an action potential propagate along a neuron?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_130_medium_bio",
+      "difficulty": "medium",
+      "question": "What is the difference between mitosis and meiosis?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_131_medium_bio",
+      "difficulty": "medium",
+      "question": "How does the immune system remember a pathogen after infection?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_132_hard_bio",
+      "difficulty": "hard",
+      "question": "Why does protein function depend on its three-dimensional folding?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_133_easy_bio",
+      "difficulty": "easy",
+      "question": "What is homeostasis and give one example in the human body.",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_134_medium_bio",
+      "difficulty": "medium",
+      "question": "How do dominant and recessive alleles determine a trait?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_135_medium_bio",
+      "difficulty": "medium",
+      "question": "Why does energy decrease at each level of a food chain?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_136_hard_bio",
+      "difficulty": "hard",
+      "question": "How does CRISPR-Cas9 target and edit a specific DNA sequence?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_137_easy_bio",
+      "difficulty": "easy",
+      "question": "What is the difference between prokaryotic and eukaryotic cells?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_138_easy_math",
+      "difficulty": "easy",
+      "question": "What does a limit describe in calculus?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_139_medium_math",
+      "difficulty": "medium",
+      "question": "What does a definite integral represent?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_140_medium_math",
+      "difficulty": "medium",
+      "question": "Why is the product of two negative numbers positive?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_141_hard_math",
+      "difficulty": "hard",
+      "question": "Prove that the square root of 2 is irrational.",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_142_medium_math",
+      "difficulty": "medium",
+      "question": "What is modular arithmetic and where is it used?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_143_medium_math",
+      "difficulty": "medium",
+      "question": "Explain the principle of mathematical induction.",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_144_easy_math",
+      "difficulty": "easy",
+      "question": "What is the difference between the dot product and the cross product?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_145_medium_math",
+      "difficulty": "medium",
+      "question": "When are two events statistically independent?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_146_medium_math",
+      "difficulty": "medium",
+      "question": "What does the expected value of a random variable mean?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_147_easy_math",
+      "difficulty": "easy",
+      "question": "Why is log(ab) = log a + log b?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_148_hard_math",
+      "difficulty": "hard",
+      "question": "What does the determinant of a matrix tell you geometrically?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_149_medium_math",
+      "difficulty": "medium",
+      "question": "How does the Euclidean algorithm find the GCD of two numbers?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_150_hard_math",
+      "difficulty": "hard",
+      "question": "Use stars and bars to count nonnegative integer solutions of x+y+z=10.",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_151_medium_math",
+      "difficulty": "medium",
+      "question": "What does the chain rule compute and why is it needed?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_152_extreme_math",
+      "difficulty": "extreme",
+      "question": "Explain intuitively why a Taylor series approximates a function locally.",
+      "max_steps": 10,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_153_easy_cs",
+      "difficulty": "easy",
+      "question": "What is the difference between recursion and iteration?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_154_medium_cs",
+      "difficulty": "medium",
+      "question": "What is a pointer and what problems can misusing one cause?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_155_medium_cs",
+      "difficulty": "medium",
+      "question": "Why does immutability simplify reasoning about concurrent code?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_156_medium_cs",
+      "difficulty": "medium",
+      "question": "What is database normalization and what does it prevent?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_157_medium_cs",
+      "difficulty": "medium",
+      "question": "What tradeoff does adding a database index introduce?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_158_hard_cs",
+      "difficulty": "hard",
+      "question": "How does a race condition arise and how does a mutex prevent it?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_159_medium_cs",
+      "difficulty": "medium",
+      "question": "What is the difference between a mutex and a semaphore?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_160_easy_cs",
+      "difficulty": "easy",
+      "question": "What is the difference between big-endian and little-endian?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_161_medium_cs",
+      "difficulty": "medium",
+      "question": "Why does UTF-8 use a variable number of bytes per character?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_162_easy_cs",
+      "difficulty": "easy",
+      "question": "What is the difference between a compiler and a linker?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_163_medium_cs",
+      "difficulty": "medium",
+      "question": "What causes a stack overflow in a program?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_164_medium_cs",
+      "difficulty": "medium",
+      "question": "What is a memory leak and how does it differ in GC vs non-GC languages?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_165_easy_cs",
+      "difficulty": "easy",
+      "question": "What is the difference between pass-by-value and pass-by-reference?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_166_hard_cs",
+      "difficulty": "hard",
+      "question": "How does CPU branch prediction speed up execution and when does it hurt?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_167_medium_cs",
+      "difficulty": "medium",
+      "question": "Why is premature optimization discouraged?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_168_medium_algo",
+      "difficulty": "medium",
+      "question": "When is the two-pointer technique applicable to an array problem?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_169_medium_algo",
+      "difficulty": "medium",
+      "question": "What problem does a sliding window solve efficiently?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_170_hard_algo",
+      "difficulty": "hard",
+      "question": "When does A* search outperform Dijkstra, and what does the heuristic require?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_171_hard_algo",
+      "difficulty": "hard",
+      "question": "What does a segment tree support that a prefix-sum array cannot?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_172_hard_algo",
+      "difficulty": "hard",
+      "question": "How does the KMP algorithm avoid re-scanning characters during string search?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_173_medium_algo",
+      "difficulty": "medium",
+      "question": "How does a binary heap support O(log n) insert and extract-min?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_174_hard_algo",
+      "difficulty": "hard",
+      "question": "How does quickselect find the k-th smallest element in average O(n)?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_175_medium_algo",
+      "difficulty": "medium",
+      "question": "When can counting sort beat comparison sorts, and what is its limitation?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_176_medium_algo",
+      "difficulty": "medium",
+      "question": "What is a trie and when is it preferable to a hash map?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_177_hard_algo",
+      "difficulty": "hard",
+      "question": "How does backtracking prune the search space in constraint problems?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_178_extreme_algo",
+      "difficulty": "extreme",
+      "question": "When is bitmask dynamic programming the right tool, and what bounds its size?",
+      "max_steps": 10,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_179_easy_algo",
+      "difficulty": "easy",
+      "question": "Why is appending to a dynamic array amortized O(1)?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_180_medium_algo",
+      "difficulty": "medium",
+      "question": "What is the difference between stable and unstable sorting?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_181_hard_algo",
+      "difficulty": "hard",
+      "question": "How does matrix exponentiation compute the n-th Fibonacci number in O(log n)?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_182_medium_algo",
+      "difficulty": "medium",
+      "question": "Why does breadth-first search find the shortest path in an unweighted graph?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_183_easy_logic",
+      "difficulty": "easy",
+      "question": "State modus ponens with an example.",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_184_medium_logic",
+      "difficulty": "medium",
+      "question": "What is modus tollens and how does it differ from affirming the consequent?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_185_medium_logic",
+      "difficulty": "medium",
+      "question": "Apply De Morgan's laws to negate 'A and B'.",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_186_medium_logic",
+      "difficulty": "medium",
+      "question": "What is a vacuously true statement?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_187_medium_logic",
+      "difficulty": "medium",
+      "question": "What is the difference between inductive and deductive reasoning?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_188_hard_logic",
+      "difficulty": "hard",
+      "question": "Explain the structure of a proof by contradiction.",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_189_easy_logic",
+      "difficulty": "easy",
+      "question": "What does a biconditional 'A if and only if B' assert?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_190_medium_logic",
+      "difficulty": "medium",
+      "question": "Why is 'affirming the consequent' a logical fallacy?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_191_hard_logic",
+      "difficulty": "hard",
+      "question": "Why does a single counterexample refute a universal claim but not an existential one?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_192_medium_logic",
+      "difficulty": "medium",
+      "question": "What is the converse of a conditional and why is it not equivalent?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_193_medium_sysdesign",
+      "difficulty": "medium",
+      "question": "Compare token-bucket and leaky-bucket rate limiting.",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_194_medium_sysdesign",
+      "difficulty": "medium",
+      "question": "What problem does a CDN solve and how?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_195_medium_sysdesign",
+      "difficulty": "medium",
+      "question": "Compare write-through and write-back caching.",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_196_hard_sysdesign",
+      "difficulty": "hard",
+      "question": "How does leader election work in a distributed system, and why is it needed?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_197_hard_sysdesign",
+      "difficulty": "hard",
+      "question": "What is a quorum and how does it ensure consistency across replicas?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_198_medium_sysdesign",
+      "difficulty": "medium",
+      "question": "How do idempotency keys prevent duplicate side effects on retries?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_199_hard_sysdesign",
+      "difficulty": "hard",
+      "question": "What does a circuit breaker protect against and how does it behave?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_200_medium_sysdesign",
+      "difficulty": "medium",
+      "question": "When is a Bloom filter the right data structure in a system?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_201_hard_sysdesign",
+      "difficulty": "hard",
+      "question": "What is a hot-key problem and how can you mitigate it?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_202_medium_sysdesign",
+      "difficulty": "medium",
+      "question": "What is fan-out on write vs fan-out on read in a feed system?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_203_extreme_sysdesign",
+      "difficulty": "extreme",
+      "question": "Why is exactly-once delivery hard, and what do systems do instead?",
+      "max_steps": 10,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_204_medium_sysdesign",
+      "difficulty": "medium",
+      "question": "Why might you denormalize data in a high-read system?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_205_hard_sysdesign",
+      "difficulty": "hard",
+      "question": "How does optimistic concurrency control detect conflicting writes?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_206_medium_sysdesign",
+      "difficulty": "medium",
+      "question": "What is the purpose of a heartbeat in a distributed cluster?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_207_hard_sysdesign",
+      "difficulty": "hard",
+      "question": "How does a log-structured merge tree make writes fast?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_208_medium_physics",
+      "difficulty": "medium",
+      "question": "Why do we always see the same side of the Moon from Earth?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_209_hard_physics",
+      "difficulty": "hard",
+      "question": "Why does a gyroscope resist changes to its orientation?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_210_medium_chem",
+      "difficulty": "medium",
+      "question": "Why does salt lower the freezing point of water?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_211_medium_bio",
+      "difficulty": "medium",
+      "question": "Why do red blood cells lack a nucleus in humans?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_212_medium_math",
+      "difficulty": "medium",
+      "question": "Why does the Monty Hall strategy of switching win 2/3 of the time?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_213_medium_cs",
+      "difficulty": "medium",
+      "question": "Why is hashing passwords with a salt better than hashing alone?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_214_medium_algo",
+      "difficulty": "medium",
+      "question": "Why does memoized Fibonacci run in O(n) instead of exponential time?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_215_medium_logic",
+      "difficulty": "medium",
+      "question": "Is 'all swans are white' falsifiable, and what would falsify it?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_216_medium_sysdesign",
+      "difficulty": "medium",
+      "question": "Why can adding more servers fail to linearly increase throughput?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_217_easy_physics",
+      "difficulty": "easy",
+      "question": "Why does a metal spoon feel colder than a wooden one at the same temperature?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_218_hard_chem",
+      "difficulty": "hard",
+      "question": "Why do noble gases rarely form chemical bonds?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_219_hard_bio",
+      "difficulty": "hard",
+      "question": "How does antibiotic resistance spread through a bacterial population?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_220_hard_math",
+      "difficulty": "hard",
+      "question": "Why does 0.999... equal exactly 1?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_221_hard_cs",
+      "difficulty": "hard",
+      "question": "Why is the halting problem undecidable, in intuitive terms?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_222_extreme_algo",
+      "difficulty": "extreme",
+      "question": "How does Floyd's cycle-detection (tortoise and hare) find a loop in O(1) space?",
+      "max_steps": 10,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_223_hard_logic",
+      "difficulty": "hard",
+      "question": "Why can a valid argument still have a false conclusion?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_224_extreme_sysdesign",
+      "difficulty": "extreme",
+      "question": "How would you design a globally consistent counter with high write throughput?",
+      "max_steps": 10,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_225_medium_physics",
+      "difficulty": "medium",
+      "question": "Why does a rainbow form, and why is it always opposite the sun?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_226_medium_chem",
+      "difficulty": "medium",
+      "question": "Why does iron rust faster in salty, humid air?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_227_medium_bio",
+      "difficulty": "medium",
+      "question": "Why does exercise increase the body's demand for oxygen?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_228_easy_math",
+      "difficulty": "easy",
+      "question": "What is the difference between mean, median, and mode?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_229_medium_cs",
+      "difficulty": "medium",
+      "question": "Why is JSON not a good format for very large numeric datasets?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_230_hard_algo",
+      "difficulty": "hard",
+      "question": "Why does Kruskal's algorithm need a union-find structure?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_231_easy_logic",
+      "difficulty": "easy",
+      "question": "What is the negation of 'some cats are black'?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_232_medium_sysdesign",
+      "difficulty": "medium",
+      "question": "Why is a single global lock a scalability bottleneck?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_233_hard_physics",
+      "difficulty": "hard",
+      "question": "Why does a superconductor expel magnetic fields (Meissner effect)?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_234_easy_chem",
+      "difficulty": "easy",
+      "question": "What is the difference between an atom and a molecule?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_235_medium_bio",
+      "difficulty": "medium",
+      "question": "How does natural selection differ from genetic drift?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_236_medium_math",
+      "difficulty": "medium",
+      "question": "Why is the empty set a subset of every set?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_237_medium_cs",
+      "difficulty": "medium",
+      "question": "Why does TCP use a three-way handshake?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_238_medium_algo",
+      "difficulty": "medium",
+      "question": "Why does Dijkstra fail with negative edge weights?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_239_medium_logic",
+      "difficulty": "medium",
+      "question": "What is the contrapositive of 'if n is even then n^2 is even'?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_240_hard_sysdesign",
+      "difficulty": "hard",
+      "question": "How does sharding by hash differ from sharding by range, in tradeoffs?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_241_medium_physics",
+      "difficulty": "medium",
+      "question": "Why does sound travel faster in water than in air?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_242_medium_chem",
+      "difficulty": "medium",
+      "question": "Why is graphite a conductor but diamond an insulator?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_243_easy_bio",
+      "difficulty": "easy",
+      "question": "What is the function of the cell membrane?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_244_hard_math",
+      "difficulty": "hard",
+      "question": "Why are there infinitely many twin-prime candidates but no proof yet?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_245_easy_cs",
+      "difficulty": "easy",
+      "question": "What is the difference between RAM and a hard disk?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_246_medium_algo",
+      "difficulty": "medium",
+      "question": "Why is binary search O(log n) and not O(n)?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_247_medium_logic",
+      "difficulty": "medium",
+      "question": "Why is 'this statement is false' paradoxical?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_248_medium_sysdesign",
+      "difficulty": "medium",
+      "question": "What is eventual vs strong consistency, with a use case for each?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_249_extreme_physics",
+      "difficulty": "extreme",
+      "question": "Why does quantum entanglement not allow faster-than-light signaling?",
+      "max_steps": 10,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_250_hard_chem",
+      "difficulty": "hard",
+      "question": "Why does adding a common ion decrease a salt's solubility?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_251_hard_bio",
+      "difficulty": "hard",
+      "question": "Why do mitochondria have their own DNA?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_252_extreme_math",
+      "difficulty": "extreme",
+      "question": "Why does the diagonal argument show the reals are uncountable?",
+      "max_steps": 10,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_253_hard_cs",
+      "difficulty": "hard",
+      "question": "Why does double-checked locking need memory barriers to be correct?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_254_hard_algo",
+      "difficulty": "hard",
+      "question": "How does topological sort enable scheduling tasks with dependencies?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_255_hard_logic",
+      "difficulty": "hard",
+      "question": "What distinguishes a necessary condition from a sufficient one, formally?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_256_hard_sysdesign",
+      "difficulty": "hard",
+      "question": "Why does the CAP theorem force a choice only during a network partition?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_257_medium_physics",
+      "difficulty": "medium",
+      "question": "Why does ice skating work — why is the ice slippery?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_258_medium_chem",
+      "difficulty": "medium",
+      "question": "Why does a reaction reach equilibrium rather than going to completion?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_259_medium_bio",
+      "difficulty": "medium",
+      "question": "How do vaccines train the immune system without causing disease?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_260_medium_math",
+      "difficulty": "medium",
+      "question": "What does the central limit theorem say and why is it useful?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_261_medium_cs",
+      "difficulty": "medium",
+      "question": "Why is UDP preferred for live video streaming?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_262_extreme_algo",
+      "difficulty": "extreme",
+      "question": "How does a suffix automaton or suffix array enable fast substring queries?",
+      "max_steps": 10,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_263_medium_logic",
+      "difficulty": "medium",
+      "question": "Why does correlation not imply causation, with an example?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_264_medium_sysdesign",
+      "difficulty": "medium",
+      "question": "What is the purpose of a message broker's dead-letter queue?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_265_hard_physics",
+      "difficulty": "hard",
+      "question": "Why does general relativity predict light bends around massive objects?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_266_medium_chem",
+      "difficulty": "medium",
+      "question": "Why are catalysts not consumed in a reaction?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_267_hard_bio",
+      "difficulty": "hard",
+      "question": "How does feedback inhibition regulate a metabolic pathway?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_268_hard_math",
+      "difficulty": "hard",
+      "question": "Why does the sum 1+2+...+n equal n(n+1)/2?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_269_medium_cs",
+      "difficulty": "medium",
+      "question": "Why can two's complement represent negative integers without a sign bit rule?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_270_medium_algo",
+      "difficulty": "medium",
+      "question": "Why is a hash collision unavoidable for large key spaces (pigeonhole)?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_271_easy_logic",
+      "difficulty": "easy",
+      "question": "If P implies Q and Q is false, what can you conclude about P?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_272_hard_sysdesign",
+      "difficulty": "hard",
+      "question": "How do you keep a cache consistent with the database it fronts?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_273_medium_physics",
+      "difficulty": "medium",
+      "question": "Why does a pendulum's period not depend on its mass?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_274_easy_chem",
+      "difficulty": "easy",
+      "question": "What is pH a measure of?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_275_medium_bio",
+      "difficulty": "medium",
+      "question": "Why is biodiversity important for ecosystem stability?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_276_medium_math",
+      "difficulty": "medium",
+      "question": "What is the difference between a permutation and a derangement?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_277_hard_cs",
+      "difficulty": "hard",
+      "question": "Why does a bloom filter have false positives but no false negatives?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_278_hard_algo",
+      "difficulty": "hard",
+      "question": "How does Dijkstra's algorithm guarantee correctness with a greedy choice?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_279_hard_logic",
+      "difficulty": "hard",
+      "question": "Why is proving 'there exists' easier than proving 'for all'?",
+      "max_steps": 8,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_280_extreme_sysdesign",
+      "difficulty": "extreme",
+      "question": "Design a deduplication layer for an at-least-once event pipeline.",
+      "max_steps": 10,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_281_medium_physics",
+      "difficulty": "medium",
+      "question": "Why does a wet cloth feel cool as it dries?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_282_medium_chem",
+      "difficulty": "medium",
+      "question": "Why does temperature affect the rate but not always the equilibrium constant?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_283_easy_bio",
+      "difficulty": "easy",
+      "question": "What is the difference between an artery and a vein?",
+      "max_steps": 4,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_284_medium_math",
+      "difficulty": "medium",
+      "question": "Why is division by zero undefined but 0/5 is fine?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_285_medium_cs",
+      "difficulty": "medium",
+      "question": "Why does append-only logging simplify crash recovery?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_286_medium_algo",
+      "difficulty": "medium",
+      "question": "What is the difference between greedy and dynamic programming approaches?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_287_medium_logic",
+      "difficulty": "medium",
+      "question": "What is the difference between a tautology and a contradiction?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
+    },
+    {
+      "id": "q_288_medium_sysdesign",
+      "difficulty": "medium",
+      "question": "Why use a read-through cache instead of caching manually in code?",
+      "max_steps": 6,
+      "expected": "graph-grounded explanation"
     }
   ]
 }
