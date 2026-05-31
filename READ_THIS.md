@@ -3,8 +3,44 @@
 > At-a-glance dump of the latest runs (raw outputs, numbers, repro commands) so
 > you don't have to dig through commits/logs. Updated each working session.
 
-**Last updated:** 2026-05-31
+**Last updated:** 2026-06-01
 **HEAD:** `d84e074` · branch `main`
+
+---
+
+## Session update (2026-06-01)
+
+- Corpus scale is now 288 unique traces after merging the local + vast.ai
+  shards.
+- We found a teacher mismatch: raw V4 rows over-expose the tool-call path,
+  while V5 wants `candidate subgraph -> planning -> evidence -> answer`.
+- Added `project_corpus_to_v5_targets.py` + `v5.training.projection` to attach
+  V5-native targets: `candidate_node_ids`, soft planning / evidence / support /
+  distractor maps, and per-loop targets.
+- `dataset.py` + `bridge.py` now prefer projected targets over raw anchor-only
+  masks, and the held-out eval paths were updated to treat soft labels as
+  positive when `> 0`.
+- Real projected-corpus stats on the merged 288 traces:
+  - planning rows 189
+  - evidence rows 288
+  - support rows 253
+  - loop-supervised rows 288
+  - mean candidate nodes 9.2
+- After substrate + bridge on the projected corpus: +685 substrate nodes,
+  +1151 relations, 288 examples, planning labels on 239/288 (83%), evidence
+  labels on 288/288, average subgraph size 29.38 nodes.
+- First held-out pilot completed end-to-end on the projected corpus
+  (`234 train / 59 held-out`, Qwen2.5-0.5B-Instruct, `e1=30 e2a=20 e2b=20`):
+  - plan P@1 0.28 / recall 0.25
+  - evidence P@1 0.88 / recall 0.54
+  - slot 0.66, epi all-node 0.30, shortcut 0.62, inv 0.00
+  - epi per-node 0.96
+  - fallback applicable=1.00, blocked=1.00, negative=1.00
+- Read: the projected pipeline is now real and end-to-end, evidence routing is
+  materially stronger than planning, and fallback still does not drop on
+  applicable held-out cases. The immediate blocker is planning / fallback
+  supervision and calibration on the projected corpus, not "can the architecture
+  train?" or "can we generate more raw traces?".
 
 ---
 
@@ -287,6 +323,9 @@ python -m v5.training.stage2                         # Stage 2 (2A routing + 2B 
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.stage2_real   # real Stage 2A + perturbation re-check
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.stage2b_real  # real Stage 2B write-safety milestone
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.stage_integrated  # integrated 1->2A->2B (7/8 gates)
+python merge_shards.py --out data/corpus_merged.jsonl
+python project_corpus_to_v5_targets.py --corpus data/corpus_merged.jsonl
+pytest reasoning/tests/test_v5_projection.py -q
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.corpus_scaling --corpus <corpus.jsonl>  # scale + held-out metrics
 ```
 
@@ -323,7 +362,7 @@ trips:  slot 7/7  ·  inv 1/7  ·  epi_top 2/7
 mean epi:  top-attended 0.71 · gold-support 0.86   (mostly >= 0.70 threshold)
 VERDICT: NOT support selection -> SLOT calibration is the blocker.
 ```
-=> support-pointer head is ruled out.
+=> under the old raw-anchor label regime, support-pointer alone was not the fix.
 
 ## 1i. Slot-calibration sweep — `v5.training.slot_calibration_diag`
 
@@ -333,11 +372,68 @@ SWEEP (held-out, applicable n=7):  applicable fallback = 1.00 at EVERY thresh 0.
 GOLD-SLOT ORACLE:  predicted@0.85 applicable 1.00  ->  GOLD slots applicable 0.86 (barely)
 RECOMMENDATION: no threshold helps; gold slots barely help -> NOT a slot-threshold fix.
 ```
-Combined with the oracle (support-pointer ruled out): the fallback gate is a
-CONJUNCTION (slots AND no-inv AND epi); multiple heads under-calibrate on held-out
-and the dominant failing condition VARIES between runs (n=7 = variance-dominated).
-=> data-scale problem. Scale corpus (vast.ai), get held-out n>=30, then calibrate
-per-condition. Stop n=7 diagnostics.
+Combined with the oracle, the fallback gate looked CONJUNCTIVE (slots AND
+no-inv AND epi); multiple heads under-calibrated on held-out and the dominant
+failing condition varied between runs (n=7 = variance-dominated). This was a
+useful historical diagnostic, but the later 288-trace inspection exposed a more
+basic teacher-projection mismatch too, so treat this section as small-n
+diagnostics, not the final verdict on the projected-label pipeline.
+
+---
+
+## 1j. V5-native corpus projection + 288-trace held-out pilot
+
+Multi-machine `opencode` generation produced 2 shard files (144 local + 144
+vast) which merged into 288 unique traces. Inspecting the raw rows showed the
+main new problem: V4 supervision was too tool-path-shaped for V5. We therefore
+added a projection pass that converts each row into V5-native targets before
+training.
+
+Repro:
+```
+python merge_shards.py --out data/corpus_merged.jsonl
+python project_corpus_to_v5_targets.py --corpus data/corpus_merged.jsonl
+pytest reasoning/tests/test_v5_projection.py -q
+$env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.corpus_scaling --corpus data/corpus_merged_v5proj.jsonl --model Qwen/Qwen2.5-0.5B-Instruct --e1 30 --e2a 20 --e2b 20
+```
+
+Projection / bridge stats:
+```
+merge_shards:
+  merged 288 unique traces  (46 dups dropped)
+
+project_corpus_to_v5_targets:
+  rows 288
+  planning rows 189
+  evidence rows 288
+  support rows 253
+  loop-supervised rows 288
+  mean candidate nodes 9.2
+
+substrate + bridge smoke:
+  +685 substrate nodes
+  +1151 relations
+  288 examples
+  planning labels 239/288 (83%)
+  evidence labels 288/288 (100%)
+  avg nodes/example 29.38
+```
+
+Held-out pilot (`234 train / 59 held-out`, shortened schedule for turnaround):
+```
+plan  node  precision@1=0.28  recall@gold=0.25  (n=47)
+evid  node  precision@1=0.88  recall@gold=0.54  (n=58)
+head acc (strict all-node): slot=0.66  epi=0.30  shortcut=0.62  inv=0.00
+epi per-node acc: 0.96
+fallback: applicable=1.00  blocked=1.00  negative=1.00
+write ratio: applicable=0.161  blocked=0.183  negative=0.197
+```
+
+Read: the projected pipeline is now real and end-to-end. Evidence routing
+generalizes much better than planning, but planning remains weak and fallback
+still fires on every held-out case type. So the immediate blocker is no longer
+"can we scale data?" or "can the architecture train?" - it is planning /
+fallback supervision and calibration on the projected corpus.
 
 ---
 
@@ -347,8 +443,9 @@ per-condition. Stop n=7 diagnostics.
 # bank is sharded by index (disjoint -> unique). 100 Qs -> 50 local / 50 vast1.
 LOCAL :  python run_gen_llama.py --run-id local --shard-index 0 --num-shards 2
 VAST  :  RUN_ID=vast1 SHARD_INDEX=1 NUM_SHARDS=2 bash gen_and_push.sh   # gens + pushes its shard
-LOCAL :  git pull ; python merge_shards.py ; \
-         python -m v5.training.corpus_scaling --corpus data/corpus_merged.jsonl
+LOCAL :  git pull ; python merge_shards.py --out data/corpus_merged.jsonl ; \
+         python project_corpus_to_v5_targets.py --corpus data/corpus_merged.jsonl ; \
+         python -m v5.training.corpus_scaling --corpus data/corpus_merged_v5proj.jsonl
 ```
 Each machine writes data/corpus_shards/<run-id>.jsonl (distinct file, no conflict;
 .gitignore exception lets these jsonl push). merge_shards de-dups by (session, question).
@@ -367,7 +464,9 @@ bash setup_datagen_env.sh        # Linux/cloud
 
 # generate traces, then scale + measure held-out calibration:
 python run_phase15_corpus.py --dataset <questions.json> --graph graphs/merged_graph.json --mode harvest
-python -m v5.training.corpus_scaling --corpus artifacts/phase15/phase15_corpus.jsonl
+python merge_shards.py --out data/corpus_merged.jsonl
+python project_corpus_to_v5_targets.py --corpus data/corpus_merged.jsonl
+python -m v5.training.corpus_scaling --corpus data/corpus_merged_v5proj.jsonl
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.realstack_test       # real-stack prefill
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.stage1_real # real Stage 1 (planning incl.)
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.infer_demo           # baseline vs injected generation
@@ -381,6 +480,17 @@ here — we use `transformers.AutoModel` for mpnet. Always set
 ---
 
 ## 6. Next true milestone
+
+UPDATE 2026-06-01:
+
+No longer raw corpus scale by itself - we now have 288 traces and a projected
+V5-shaped corpus. The next milestone is to improve held-out planning / fallback
+generalization on that projected corpus:
+
+1. tighten planning / support supervision in the projection pass
+2. rerun a longer held-out Stage 1 -> 2A -> 2B schedule on `data/corpus_merged_v5proj.jsonl`
+3. calibrate fallback conditions only after planning / epi stop collapsing on eval
+4. only then talk about LoRA / Stage 4 / inference-quality claims
 
 Not architecture. **Scale the V4 corpus** (more traces) → enables an 80/20
 held-out split and the first *generalization* metrics: node precision/recall by

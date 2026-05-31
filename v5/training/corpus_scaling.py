@@ -62,7 +62,7 @@ def _node_pr(adapter, examples, which):
         if not st.attn_history:
             continue
         attn = st.attn_history[-1].squeeze(0)
-        gold = (anchor.squeeze(0) > 0.5)
+        gold = (anchor.squeeze(0) > 0.0)
         n_gold = int(gold.sum().item())
         if n_gold == 0:
             continue

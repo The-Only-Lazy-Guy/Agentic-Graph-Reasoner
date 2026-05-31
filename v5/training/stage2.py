@@ -260,13 +260,13 @@ class Stage2Trainer:
             if ex.plan_anchor is not None and ps.attn_history:
                 plan_n += 1
                 idx = ps.attn_history[-1].argmax().item()
-                plan_hit += int(ex.plan_anchor[0, idx].item() == 1.0)
+                plan_hit += int(ex.plan_anchor[0, idx].item() > 0.0)
                 pos_plan_ent.append(float(attn_entropy(ps.attn_history[-1], pm).item()))
                 plan_top1.append(idx)
             if ex.evid_anchor is not None and es.attn_history:
                 evid_n += 1
                 idx = es.attn_history[-1].argmax().item()
-                evid_hit += int(ex.evid_anchor[0, idx].item() == 1.0)
+                evid_hit += int(ex.evid_anchor[0, idx].item() > 0.0)
                 pos_evid_ent.append(float(attn_entropy(es.attn_history[-1], em).item()))
                 evid_top1.append(idx)
             wrs += (ps.write_ratios or []) + (es.write_ratios or [])

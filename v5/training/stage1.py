@@ -201,10 +201,10 @@ class Stage1Trainer:
                 ps.h_r, ex.goal, ex.graph_kv, ex.node_ids, task_frame=ex.task_frame)
             if ex.plan_anchor is not None:
                 cnt["plan"] += 1
-                agg["plan"] += int(ex.plan_anchor[0, ps.node_scores_r.argmax()].item() == 1.0)
+                agg["plan"] += int(ex.plan_anchor[0, ps.node_scores_r.argmax()].item() > 0.0)
             if ex.evid_anchor is not None:
                 cnt["evid"] += 1
-                agg["evid"] += int(ex.evid_anchor[0, es.node_scores_r.argmax()].item() == 1.0)
+                agg["evid"] += int(ex.evid_anchor[0, es.node_scores_r.argmax()].item() > 0.0)
             if ex.slot_target is not None:
                 req = _required_slot_idx(ex.task_frame)
                 cnt["slot"] += 1

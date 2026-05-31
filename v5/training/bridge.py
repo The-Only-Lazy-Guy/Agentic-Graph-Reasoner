@@ -70,6 +70,15 @@ def _build_corpus_graph(sample: Phase15Sample, inv_node_ids: set) -> _CorpusGrap
                          sample.node_texts.get(nid, ""))
         for nid in sample.node_ids
     }
+    for nid, info in (sample.substrate_nodes or {}).items():
+        if nid in nodes:
+            continue
+        nodes[nid] = _CorpusNode(
+            nid,
+            info.get("type", "unknown"),
+            info.get("text", ""),
+            info.get("status", "unknown"),
+        )
     return _CorpusGraph(nodes, edges=[])  # no topology available from corpus row
 
 
@@ -180,20 +189,30 @@ def sample_to_stage1_example(
     if use_persisted:
         node_ids = _neighborhood(persisted_graph, anchor_ids, hops, max_nodes=max_nodes)
         graph = persisted_graph
+        projected_ids = [
+            nid for nid in sample.candidate_node_ids
+            if nid in graph.nodes
+        ]
         # Substrate the trace wrote, if present in the (enriched) graph: these are
         # the planning/evidence-pool nodes V4 engaged — the planning supervision
         # the base-graph anchors lack. Append the ones not already pulled in.
         substrate_ids = [nid for nid in sample.substrate_nodes if nid in graph.nodes]
         seen = set(node_ids)
+        node_ids = node_ids + [nid for nid in projected_ids if nid not in seen]
+        seen = set(node_ids)
         node_ids = node_ids + [s for s in substrate_ids if s not in seen]
         node_texts = {nid: (getattr(graph.nodes[nid], "text", "") or "") for nid in node_ids}
     else:
-        node_ids = anchor_ids
-        substrate_ids = []
-        inv_node_ids = {nid for i, nid in enumerate(anchor_ids)
-                        if sample.invalidator_target[i] > 0.5}
-        graph = _build_corpus_graph(sample, inv_node_ids)
+        graph = _build_corpus_graph(sample, {
+            nid for i, nid in enumerate(anchor_ids)
+            if sample.invalidator_target[i] > 0.5
+        })
+        substrate_ids = [nid for nid in sample.substrate_nodes if nid in graph.nodes]
+        node_ids = anchor_ids + [nid for nid in substrate_ids if nid not in set(anchor_ids)]
         node_texts = {nid: sample.node_texts.get(nid, "") for nid in node_ids}
+        for nid in substrate_ids:
+            if nid in sample.substrate_nodes:
+                node_texts[nid] = sample.substrate_nodes[nid].get("text", "")
 
     N = len(node_ids)
     text_emb = embedder.embed_nodes(node_texts)
@@ -210,6 +229,13 @@ def sample_to_stage1_example(
                 out[0, j] = float(values[anchor_pos[nid]])
         return out
 
+    def _remap_map(values: Dict[str, float]) -> Tensor:
+        out = torch.zeros(1, N, device=device)
+        for j, nid in enumerate(node_ids):
+            if nid in values:
+                out[0, j] = float(values[nid])
+        return out
+
     # "Anchored" = original anchors (accessed nodes) OR substrate nodes the trace
     # wrote. The pool split then routes substrate planning-type nodes to
     # plan_anchor and evidence-type substrate to evid_anchor.
@@ -224,8 +250,25 @@ def sample_to_stage1_example(
 
     plan_mask = kv.planning_mask.unsqueeze(0)
     evid_mask = kv.evidence_mask.unsqueeze(0)
-    plan_anchor = anchor * plan_mask.float()
-    evid_anchor = anchor * evid_mask.float()
+    fallback_plan_anchor = anchor * plan_mask.float()
+    fallback_evid_anchor = anchor * evid_mask.float()
+
+    if sample.planning_target_map:
+        plan_anchor = _remap_map(sample.planning_target_map)
+        if plan_anchor.sum() <= 0:
+            plan_anchor = fallback_plan_anchor
+    else:
+        plan_anchor = fallback_plan_anchor
+
+    if sample.evidence_target_map or sample.support_target_map:
+        evid_weights = dict(sample.evidence_target_map)
+        for nid, weight in sample.support_target_map.items():
+            evid_weights[nid] = max(float(weight), float(evid_weights.get(nid, 0.0)))
+        evid_anchor = _remap_map(evid_weights)
+        if evid_anchor.sum() <= 0:
+            evid_anchor = fallback_evid_anchor
+    else:
+        evid_anchor = fallback_evid_anchor
 
     # Epistemic support for FALLBACK: the evidence a FINALIZED trace relied on to
     # answer is epistemically supported. Without this, the corpus only marks
@@ -235,7 +278,10 @@ def sample_to_stage1_example(
     # anchors as supported so applicable fallback can correctly drop. (Non-finalized
     # / blocked traces are NOT marked -> their fallback correctly stays on.)
     if sample.finalized:
-        epi_t = torch.maximum(epi_t, (anchor * evid_mask.float()))
+        if sample.support_target_map:
+            epi_t = torch.maximum(epi_t, (_remap_map(sample.support_target_map) > 0).float())
+        else:
+            epi_t = torch.maximum(epi_t, (anchor * evid_mask.float()))
     plan_anchor = plan_anchor if plan_anchor.sum() > 0 else None
     evid_anchor = evid_anchor if evid_anchor.sum() > 0 else None
 

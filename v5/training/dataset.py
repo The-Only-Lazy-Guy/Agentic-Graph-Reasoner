@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from torch import Tensor
@@ -106,6 +106,16 @@ class Phase15Sample:
     # applied. Default factory keeps older constructors working.
     substrate_nodes: Dict[str, dict] = field(default_factory=dict)
 
+    # Optional V5-native projection targets. These are keyed by node_id so the
+    # bridge can remap them onto an expanded persisted-graph neighborhood rather
+    # than being limited to the raw V4 anchor list.
+    candidate_node_ids: List[str] = field(default_factory=list)
+    planning_target_map: Dict[str, float] = field(default_factory=dict)
+    evidence_target_map: Dict[str, float] = field(default_factory=dict)
+    support_target_map: Dict[str, float] = field(default_factory=dict)
+    distractor_target_map: Dict[str, float] = field(default_factory=dict)
+    projection_meta: Dict[str, Any] = field(default_factory=dict)
+
 
 class Phase15Dataset(Dataset):
     """Loads phase15_corpus.jsonl and exposes Phase15Sample instances.
@@ -178,6 +188,7 @@ def _parse_row(row: dict) -> Optional[Phase15Sample]:
     epistemic_nodes = _nodes_with_patch_type(patches, EPISTEMIC_PATCH_TYPES)
     invalidator_nodes = _nodes_with_patch_type(patches, INVALIDATOR_PATCH_TYPES)
     substrate_nodes = _extract_substrate_nodes(patches)
+    projection = row.get("v5_projection") or {}
 
     anchor_set = {n["id"] for n in anchors if isinstance(n, dict) and "id" in n}
 
@@ -208,6 +219,12 @@ def _parse_row(row: dict) -> Optional[Phase15Sample]:
         slot_fill_target=slot_fill_target,
         shortcut_valid=shortcut_valid,
         substrate_nodes=substrate_nodes,
+        candidate_node_ids=_extract_projection_node_ids(projection),
+        planning_target_map=_extract_projection_map(projection, "planning_target"),
+        evidence_target_map=_extract_projection_map(projection, "evidence_target"),
+        support_target_map=_extract_projection_map(projection, "support_target"),
+        distractor_target_map=_extract_projection_map(projection, "distractor_target"),
+        projection_meta=(projection.get("diagnostics") or {}),
     )
 
 
@@ -256,6 +273,31 @@ def _extract_nodes(
         node_texts[nid] = a.get("text") or ""
         node_types[nid] = a.get("node_type") or "unknown"
     return node_ids, node_texts, node_types
+
+
+def _extract_projection_node_ids(projection: dict) -> List[str]:
+    return [
+        str(node_id)
+        for node_id in (projection.get("candidate_node_ids") or [])
+        if isinstance(node_id, str) and node_id
+    ]
+
+
+def _extract_projection_map(projection: dict, key: str) -> Dict[str, float]:
+    raw = projection.get(key) or {}
+    out: Dict[str, float] = {}
+    if not isinstance(raw, dict):
+        return out
+    for node_id, weight in raw.items():
+        if not isinstance(node_id, str) or not node_id:
+            continue
+        try:
+            value = float(weight)
+        except (TypeError, ValueError):
+            continue
+        if value > 0.0:
+            out[node_id] = value
+    return out
 
 
 def _extract_task_frame(inp: dict, metrics: dict) -> dict:

@@ -61,8 +61,8 @@ def _conditions(es, ex):
     epi_top = float(epi[top[0]].item()) if top else 0.0
     epi_top_ok = epi_top >= EPISTEMIC_THRESHOLD
     # oracle: gold support = evidence-pool anchors the trace cited
-    if ex.evid_anchor is not None and (ex.evid_anchor > 0.5).any():
-        sup = (ex.evid_anchor.squeeze(0) > 0.5)
+    if ex.evid_anchor is not None and (ex.evid_anchor > 0.0).any():
+        sup = (ex.evid_anchor.squeeze(0) > 0.0)
         epi_oracle = float(epi[sup].max().item())
     else:
         epi_oracle = 0.0
