@@ -36,6 +36,18 @@
   - slot 0.66, epi all-node 0.30, shortcut 0.62, inv 0.00
   - epi per-node 0.96
   - fallback applicable=1.00, blocked=1.00, negative=1.00
+- Added `v5.training.fallback_write_diag` and found a slot-alias mismatch in
+  `task_frame.required_slots`: fallback was often checking the shared `unknown`
+  slot even though slot targets were trained on canonical names. Canonicalizing
+  task-frame slots moved projected-corpus fallback to applicable=0.83,
+  blocked=0.82, negative=1.00 on the same `30/20/20` diagnostic schedule.
+- Remaining failure after the alias fix: applicable still trips mostly on
+  missing slots (30/47), low epistemic (19/47), and top-k invalidators (12/47).
+  Gold-all oracle only drops applicable fallback to 0.64, so this is not one
+  isolated head.
+- Write remains suspicious: negative held-out total write is highest at 0.224
+  and planning write is especially high (0.449). Treat this as a write-safety
+  diagnostic target before Stage 3/4.
 - Read: the projected pipeline is now real and end-to-end, evidence routing is
   materially stronger than planning, and fallback still does not drop on
   applicable held-out cases. The immediate blocker is planning / fallback
@@ -327,6 +339,7 @@ python merge_shards.py --out data/corpus_merged.jsonl
 python project_corpus_to_v5_targets.py --corpus data/corpus_merged.jsonl
 pytest reasoning/tests/test_v5_projection.py -q
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.corpus_scaling --corpus <corpus.jsonl>  # scale + held-out metrics
+$env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.fallback_write_diag --corpus data/corpus_merged_v5proj.jsonl  # fallback/write diagnosis
 ```
 
 ## 1g. Corpus scaling 20 -> 46 traces (held-out) — `v5.training.corpus_scaling`
@@ -434,6 +447,38 @@ generalizes much better than planning, but planning remains weak and fallback
 still fires on every held-out case type. So the immediate blocker is no longer
 "can we scale data?" or "can the architecture train?" - it is planning /
 fallback supervision and calibration on the projected corpus.
+
+Follow-up diagnostic (`v5.training.fallback_write_diag`) found a concrete
+bug in the first pilot: `task_frame.required_slots` was not canonicalized even
+though `slot_fill_target` was. That made fallback check `unknown` for aliases
+like `answer`, `relationship`, and `explanation`. After canonicalizing task-frame
+slots, the same short diagnostic schedule reported:
+```
+fallback: applicable=0.83  blocked=0.82  negative=1.00
+
+applicable trip reasons:
+  missing_slot       30/47
+  low_epistemic      19/47
+  invalidator_active 12/47
+
+oracle fallback:
+  predicted_all     applicable=0.83
+  gold_slots_only   applicable=0.70
+  gold_epi_only     applicable=0.81
+  gold_inv_only     applicable=0.83
+  gold_all          applicable=0.64
+
+write ratio:
+  applicable fallback total=0.147
+  applicable no_fallback total=0.199
+  blocked fallback total=0.160
+  negative fallback total=0.224
+```
+
+Read after the diagnostic: the alias bug was real and fixing it helps, but the
+pipeline is still over-conservative. Gold labels do not fully rescue applicable
+fallback, and negative write remains the highest, especially in the planning
+block. Do not move to Stage 3/4 yet.
 
 ---
 

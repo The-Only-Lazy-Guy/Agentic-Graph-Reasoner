@@ -51,6 +51,8 @@ CORPUS_SLOT_ALIAS: Dict[str, str] = {
     "latency_budget": "complexity",
     "consistency_model": "condition",
     "failure_mode_fix": "alternative",
+    "instance_summary": "definition",
+    "precondition_results": "condition",
 }
 
 # Shortcut = finalized in ≤ half of max_steps
@@ -303,8 +305,8 @@ def _extract_projection_map(projection: dict, key: str) -> Dict[str, float]:
 def _extract_task_frame(inp: dict, metrics: dict) -> dict:
     """Build minimal task_frame compatible with GoalEncoder.encode_task_frame."""
     slot_stats = metrics.get("slot_fill_stats") or {}
-    required_slots = slot_stats.get("required_slots") or []
-    filled_slots = slot_stats.get("filled_slots") or []
+    required_slots = _canonicalize_slots(slot_stats.get("required_slots") or [])
+    filled_slots = _canonicalize_slots(slot_stats.get("filled_slots") or [])
 
     task_family = inp.get("controller_task_family") or inp.get("task_type") or "unknown"
     question_mode = inp.get("task_type") or "unknown"
@@ -315,6 +317,22 @@ def _extract_task_frame(inp: dict, metrics: dict) -> dict:
         "required_slots": required_slots,
         "filled_slots": filled_slots,
     }
+
+
+def _canonicalize_slots(slots: list) -> List[str]:
+    """Map corpus/task-specific slot names into the stable SLOT_VOCAB."""
+    out: List[str] = []
+    seen = set()
+    for raw in slots:
+        name = str(raw)
+        canonical = CORPUS_SLOT_ALIAS.get(name, name)
+        if canonical not in SLOT_ID:
+            canonical = "unknown"
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        out.append(canonical)
+    return out
 
 
 def _nodes_with_patch_type(patches: list, patch_types: frozenset) -> set:

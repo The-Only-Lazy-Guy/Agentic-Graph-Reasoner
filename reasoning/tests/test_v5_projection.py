@@ -139,6 +139,8 @@ def test_bridge_prefers_projected_plan_and_evidence_targets():
     row["v5_projection"] = project_corpus_row(row)
     sample = _parse_row(row)
     assert sample is not None
+    assert sample.task_frame["required_slots"] == ["definition", "reason"]
+    assert sample.task_frame["filled_slots"] == ["definition", "reason"]
 
     device = torch.device("cpu")
     gnn = RGCNEncoder().to(device).eval()
