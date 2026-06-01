@@ -38,6 +38,7 @@ from v5.exit_condition import (
     _primary_support_index,
     _required_slot_indices,
     _top_k_indices,
+    fallback_policy,
 )
 from v5.gnn_encoder import RGCNEncoder
 from v5.goal_encoder import SLOT_ID, SLOT_VOCAB
@@ -180,8 +181,12 @@ def fallback_bits(
     forced_fallback = _force_fallback(ex.task_frame)
 
     fallback = bool(forced_fallback or (max_loops and (empty_pool or not (slots_ok and no_inv and epi_ok))))
+    policy = fallback_policy(es, ex.task_frame)
     return {
         "fallback": fallback,
+        "policy_state": policy.state,
+        "hard_reasons": policy.hard_reasons,
+        "soft_reasons": policy.soft_reasons,
         "exit_reason": es.exit_reason,
         "forced_fallback": forced_fallback,
         "max_loops": max_loops,

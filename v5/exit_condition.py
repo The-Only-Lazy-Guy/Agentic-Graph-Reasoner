@@ -11,6 +11,7 @@ Fixes applied:
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import torch
@@ -24,6 +25,41 @@ EPISTEMIC_THRESHOLD = 0.70
 SHORTCUT_THRESHOLD = 0.85
 TOP_K_NODES = 3
 FORCE_FALLBACK_CONTEXTS = frozenset({"no_graph", "weak_evidence", "unsupported"})
+NORMAL_ANSWER = "normal_answer"
+SOFT_FALLBACK = "soft_fallback"
+HARD_FALLBACK = "hard_fallback"
+
+
+@dataclass(frozen=True)
+class FallbackPolicy:
+    """Three-state fallback classification for controller policy.
+
+    `fallback_needed()` remains the backward-compatible boolean. This richer
+    view lets runtime/controller code distinguish true hard unsafety from soft
+    neural underconfidence before deciding whether to answer, caveat, verify, or
+    fully fall back.
+    """
+
+    state: str
+    fallback_needed: bool
+    hard_reasons: List[str]
+    soft_reasons: List[str]
+    primary_idx: Optional[int]
+    slots_ok: bool
+    no_invalidators: bool
+    epistemic_ok: bool
+
+    def to_dict(self) -> dict:
+        return {
+            "state": self.state,
+            "fallback_needed": self.fallback_needed,
+            "hard_reasons": list(self.hard_reasons),
+            "soft_reasons": list(self.soft_reasons),
+            "primary_idx": self.primary_idx,
+            "slots_ok": self.slots_ok,
+            "no_invalidators": self.no_invalidators,
+            "epistemic_ok": self.epistemic_ok,
+        }
 
 
 def _attention_entropy(node_scores: Tensor) -> float:
@@ -173,27 +209,101 @@ def fallback_needed(
     task_frame: Optional[dict] = None,
 ) -> bool:
     """True when max_loops_reached but reasoning still incomplete."""
+    return fallback_policy(state, task_frame).fallback_needed
+
+
+def fallback_policy(
+    state: LoopState,
+    task_frame: Optional[dict] = None,
+) -> FallbackPolicy:
+    """Classify fallback as hard safety, soft calibration, or normal answer.
+
+    Hard fallback is reserved for explicit safety blockers: no/weak graph support
+    from the controller, empty node pool at the hard cap, or active invalidators.
+    Soft fallback means the old boolean gate would still fall back, but only
+    because learned confidence heads are below threshold.
+    """
+    hard_reasons: List[str] = []
+    soft_reasons: List[str] = []
+
     if _force_fallback(task_frame):
-        return True
+        hard_reasons.append("forced_fallback")
 
     if state.exit_reason != "max_loops_reached":
-        return False
+        if hard_reasons:
+            return FallbackPolicy(
+                state=HARD_FALLBACK,
+                fallback_needed=True,
+                hard_reasons=hard_reasons,
+                soft_reasons=[],
+                primary_idx=None,
+                slots_ok=False,
+                no_invalidators=True,
+                epistemic_ok=False,
+            )
+        return FallbackPolicy(
+            state=NORMAL_ANSWER,
+            fallback_needed=False,
+            hard_reasons=[],
+            soft_reasons=[],
+            primary_idx=None,
+            slots_ok=True,
+            no_invalidators=True,
+            epistemic_ok=True,
+        )
+
+    if state.node_scores_r.shape[-1] == 0:
+        hard_reasons.append("empty_pool")
 
     required_indices = _required_slot_indices(task_frame)
-    if not _all_slots_filled(state.slot_state_r, required_indices=required_indices):
-        return True
+    slots_ok = _all_slots_filled(state.slot_state_r, required_indices=required_indices)
+    if not slots_ok:
+        soft_reasons.append("missing_slot")
 
     top_k = _top_k_indices(state.node_scores_r)
     inv = state.invalidator_flags_r.squeeze(0)
-    if any(float(inv[i].item()) > 0.5 for i in top_k):
-        return True
+    no_invalidators = not any(float(inv[i].item()) > 0.5 for i in top_k)
+    if not no_invalidators:
+        hard_reasons.append("invalidator_active")
 
     # Primary (highest-attention) node must be epistemically confident; a
     # secondary attended node being uncertain is informative context, not a
     # reason to fall back. Mirrors the should_exit_loop epistemic gate.
     epi = state.epistemic_confidence_r.squeeze(0)
     primary = _primary_support_index(state, top_k)
-    if primary is None or float(epi[primary].item()) < EPISTEMIC_THRESHOLD:
-        return True
+    epistemic_ok = primary is not None and float(epi[primary].item()) >= EPISTEMIC_THRESHOLD
+    if not epistemic_ok:
+        soft_reasons.append("low_epistemic")
 
-    return False
+    if hard_reasons:
+        return FallbackPolicy(
+            state=HARD_FALLBACK,
+            fallback_needed=True,
+            hard_reasons=hard_reasons,
+            soft_reasons=soft_reasons,
+            primary_idx=primary,
+            slots_ok=slots_ok,
+            no_invalidators=no_invalidators,
+            epistemic_ok=epistemic_ok,
+        )
+    if soft_reasons:
+        return FallbackPolicy(
+            state=SOFT_FALLBACK,
+            fallback_needed=True,
+            hard_reasons=[],
+            soft_reasons=soft_reasons,
+            primary_idx=primary,
+            slots_ok=slots_ok,
+            no_invalidators=no_invalidators,
+            epistemic_ok=epistemic_ok,
+        )
+    return FallbackPolicy(
+        state=NORMAL_ANSWER,
+        fallback_needed=False,
+        hard_reasons=[],
+        soft_reasons=[],
+        primary_idx=primary,
+        slots_ok=slots_ok,
+        no_invalidators=no_invalidators,
+        epistemic_ok=epistemic_ok,
+    )

@@ -272,6 +272,18 @@
   0.77, slot-near-threshold 0.54, primary-epi-near-threshold 0.08, and
   best-gold-epi-near-threshold 0.46. This confirms the next blocker is selected
   support + epistemic/slot calibration, not removal of fallback.
+- Promoted the hard/soft split into runtime policy semantics. `fallback_needed()`
+  remains the backward-compatible boolean, but `fallback_policy()` now returns
+  `normal_answer`, `soft_fallback`, or `hard_fallback` with explicit hard/soft
+  reasons and gate bits. `GraphAttentionInjector.get_fallback_policy()` exposes
+  this to controller code. Runtime answering is still unchanged for now: soft
+  fallback is only first-class state, not automatic silent answering.
+- Control contract going forward: `hard_fallback` should route to full V4
+  fallback/tool loop; `soft_fallback` is eligible for answer-with-caveat or one
+  cheap verifier step; `normal_answer` is the current confident V5 path. Stage
+  3/4 stay held until this soft-exit policy is tested, because future training
+  should learn against the final three-state control semantics, not the old
+  "all uncertainty equals total fallback" behavior.
 - Read from the controlled pass: the cleaned projection restores strong evidence
   routing and safety, but the same `30/20/20` recipe does not reduce applicable
   fallback below the current band. The next lever is calibration/label quality

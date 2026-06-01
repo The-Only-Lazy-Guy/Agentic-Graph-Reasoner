@@ -251,6 +251,28 @@ class GraphAttentionInjector:
             return False
         return fallback_needed(self._evid_state, self._task_frame)
 
+    def get_fallback_policy(self) -> dict:
+        """Three-state fallback policy for controller routing.
+
+        States:
+          - normal_answer: V5 gate is satisfied.
+          - soft_fallback: no hard blocker, but confidence gates are low.
+          - hard_fallback: force/no-graph/invalidator/empty-pool safety blocker.
+        """
+        from v5.exit_condition import fallback_policy
+        if self._evid_state is None:
+            return {
+                "state": "not_ready",
+                "fallback_needed": False,
+                "hard_reasons": [],
+                "soft_reasons": [],
+                "primary_idx": None,
+                "slots_ok": False,
+                "no_invalidators": True,
+                "epistemic_ok": False,
+            }
+        return fallback_policy(self._evid_state, self._task_frame).to_dict()
+
 
 def _get_transformer_layers(model: nn.Module) -> List[nn.Module]:
     """Locate the ordered list of transformer decoder blocks in Qwen3-4B.

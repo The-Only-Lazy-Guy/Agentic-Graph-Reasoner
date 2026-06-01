@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import torch
 
-from v5.exit_condition import fallback_needed, should_exit_loop
+from v5.exit_condition import (
+    HARD_FALLBACK,
+    NORMAL_ANSWER,
+    SOFT_FALLBACK,
+    fallback_needed,
+    fallback_policy,
+    should_exit_loop,
+)
 from v5.goal_encoder import NUM_SLOTS, SLOT_ID
 from v5.loop_state import LoopState
 
@@ -29,6 +36,7 @@ def test_shortcut_verified_still_exits_for_supported_graph_context():
     assert should_exit is True
     assert reason == "shortcut_verified"
     assert fallback_needed(_confident_state(exit_reason="shortcut_verified"), task_frame) is False
+    assert fallback_policy(_confident_state(exit_reason="shortcut_verified"), task_frame).state == NORMAL_ANSWER
 
 
 def test_no_graph_task_frame_blocks_shortcut_and_forces_fallback():
@@ -48,6 +56,9 @@ def test_no_graph_task_frame_blocks_shortcut_and_forces_fallback():
     assert reason == "max_loops_reached"
     assert fallback_needed(_confident_state(exit_reason="shortcut_verified"), task_frame) is True
     assert fallback_needed(_confident_state(exit_reason="max_loops_reached"), task_frame) is True
+    policy = fallback_policy(_confident_state(exit_reason="max_loops_reached"), task_frame)
+    assert policy.state == HARD_FALLBACK
+    assert "forced_fallback" in policy.hard_reasons
 
 
 def test_support_primary_reranks_evidence_top_k_for_epistemic_gate():
@@ -59,3 +70,31 @@ def test_support_primary_reranks_evidence_top_k_for_epistemic_gate():
     task_frame = {"required_slots": ["verdict", "reason"]}
 
     assert fallback_needed(state, task_frame) is False
+    policy = fallback_policy(state, task_frame)
+    assert policy.state == NORMAL_ANSWER
+    assert policy.primary_idx == 1
+
+
+def test_low_confidence_max_loop_is_soft_fallback():
+    state = _confident_state(exit_reason="max_loops_reached")
+    state.epistemic_confidence_r = torch.tensor([[0.1, 0.1, 0.1]])
+    task_frame = {"required_slots": ["verdict", "reason"]}
+
+    policy = fallback_policy(state, task_frame)
+
+    assert fallback_needed(state, task_frame) is True
+    assert policy.state == SOFT_FALLBACK
+    assert policy.hard_reasons == []
+    assert "low_epistemic" in policy.soft_reasons
+
+
+def test_active_invalidator_is_hard_fallback():
+    state = _confident_state(exit_reason="max_loops_reached")
+    state.invalidator_flags_r = torch.tensor([[1.0, 0.0, 0.0]])
+    task_frame = {"required_slots": ["verdict", "reason"]}
+
+    policy = fallback_policy(state, task_frame)
+
+    assert fallback_needed(state, task_frame) is True
+    assert policy.state == HARD_FALLBACK
+    assert "invalidator_active" in policy.hard_reasons
