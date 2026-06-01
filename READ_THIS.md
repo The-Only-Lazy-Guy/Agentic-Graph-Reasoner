@@ -258,6 +258,20 @@
   verdict/reason=0.870/0.796. The remaining issue is still selected-support +
   epistemic calibration, but the reranker moved the bottleneck without breaking
   blocked/negative safety.
+- Added `hard vs soft fallback calibration` to `fallback_write_diag` (log:
+  `artifacts/run_logs/fallback_write_diag_20260602_hard_soft_seed7.log`). This
+  is diagnostic only; runtime fallback is unchanged. It classifies hard blockers
+  (`force_fallback`, empty evidence pool, invalidator active) separately from
+  soft underconfidence (slot/epi below threshold) and reports possible
+  answer-with-caveat/calibration candidates.
+- Hard/soft read: in this seeded CUDA run, applicable fallback was 0.55, while
+  blocked/negative remained 1.00. Among applicable fallbacks, hard=0.00 and
+  soft=1.00. Among blocked/negative fallbacks, hard=1.00 and soft=0.00. So the
+  remaining over-fallback is not hard safety doing too much; it is calibration
+  fallback. Applicable soft rows had support@1=0.50, support@3=0.65, evidence@3
+  0.77, slot-near-threshold 0.54, primary-epi-near-threshold 0.08, and
+  best-gold-epi-near-threshold 0.46. This confirms the next blocker is selected
+  support + epistemic/slot calibration, not removal of fallback.
 - Read from the controlled pass: the cleaned projection restores strong evidence
   routing and safety, but the same `30/20/20` recipe does not reduce applicable
   fallback below the current band. The next lever is calibration/label quality

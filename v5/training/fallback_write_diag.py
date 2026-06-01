@@ -10,6 +10,7 @@ held-out failures:
   - applicable failure focus: routing vs confidence calibration
   - direct_judgment routing audit with top-k plan/evidence label checks
   - direct_judgment failure table
+  - hard-vs-soft fallback calibration split
   - negative/no-graph safety table
   - one-condition-at-a-time oracle fallback ablations
   - write ratio by case type, fallback state, and block
@@ -1305,6 +1306,187 @@ def _support_hit_pair(rec: EvalRecord, k: int = 3) -> Tuple[bool, bool, bool]:
     return True, hit1, hitk
 
 
+def _slot_soft_summary(rec: EvalRecord, margin: float) -> Tuple[bool, float, List[str]]:
+    rows = _slot_rows(rec)
+    if not rows:
+        return True, 0.0, []
+    min_margin = min(row[4] for row in rows)
+    hard_failed = [name for _idx, name, _pred, _gold, row_margin, failed in rows
+                   if failed and row_margin < -margin]
+    return len(hard_failed) == 0, min_margin, hard_failed
+
+
+def _primary_epi_score(rec: EvalRecord, primary: Optional[int]) -> float:
+    if primary is None:
+        return float("nan")
+    pred_epi = rec.evidence_state.epistemic_confidence_r.squeeze(0)
+    return float(pred_epi[primary].item())
+
+
+def _hard_soft_fallback_report(
+    records: Sequence[EvalRecord],
+    *,
+    slot_margin: float = 0.10,
+    epi_margin: float = 0.15,
+    limit: int = 18,
+) -> None:
+    print("\n=== hard vs soft fallback calibration (held-out) ===")
+    print(
+        "  hard = forced/no-evidence/invalidator; soft = slot/epi underconfidence "
+        "with no hard blocker. Candidate rows are diagnostic only; runtime gate is unchanged."
+    )
+    print(
+        f"  soft margins: slot >= {SLOT_FILL_THRESHOLD - slot_margin:.2f} "
+        f"(within {slot_margin:.2f}); epi >= {EPISTEMIC_THRESHOLD - epi_margin:.2f} "
+        f"(within {epi_margin:.2f})"
+    )
+
+    by_tag = defaultdict(lambda: {
+        "n": 0,
+        "fallback": 0,
+        "runtime_hard": 0,
+        "soft_only": 0,
+        "support1": 0,
+        "support3": 0,
+        "evid3": 0,
+        "slot_soft": 0,
+        "epi_soft": 0,
+        "best_gold_epi_soft": 0,
+        "caveat_now": 0,
+        "rerank_or_epi": 0,
+    })
+    reason_counts: Counter[str] = Counter()
+    rows = []
+
+    for rec in records:
+        bits = fallback_bits(rec.evidence_state, rec.ex)
+        tag = rec.ex.tag
+        bucket = by_tag[tag]
+        bucket["n"] += 1
+        bucket["fallback"] += int(bits["fallback"])
+        if not bits["fallback"]:
+            continue
+
+        runtime_hard = [
+            name for name in ("forced_fallback", "empty_pool", "invalidator_active")
+            if bool(bits[name])
+        ]
+        has_support, support1, support3 = _support_hit_pair(rec)
+        evid1, evid3 = _routing_hit_pair(rec, "evid_anchor", "evidence_state", "evidence_mask")
+        slot_soft, min_slot_margin, hard_slot_names = _slot_soft_summary(rec, slot_margin)
+        primary_epi = _primary_epi_score(rec, bits["primary_idx"])
+        best_gold_id, best_gold_epi, _mean_gold_epi, _gold_n = _gold_evidence_summary(rec)
+        epi_soft = primary_epi >= EPISTEMIC_THRESHOLD - epi_margin
+        best_gold_epi_soft = best_gold_epi >= EPISTEMIC_THRESHOLD - epi_margin
+
+        if runtime_hard:
+            bucket["runtime_hard"] += 1
+            for reason in runtime_hard:
+                reason_counts[f"hard:{reason}"] += 1
+        else:
+            bucket["soft_only"] += 1
+            soft_reasons = []
+            if bits["missing_slot"]:
+                soft_reasons.append("slot")
+            if bits["low_epistemic"]:
+                soft_reasons.append("epi")
+            if not soft_reasons:
+                soft_reasons.append("other")
+            reason_counts["soft:" + "+".join(soft_reasons)] += 1
+
+        bucket["support1"] += int(has_support and support1)
+        bucket["support3"] += int(has_support and support3)
+        bucket["evid3"] += int(evid3)
+        bucket["slot_soft"] += int(slot_soft)
+        bucket["epi_soft"] += int(epi_soft)
+        bucket["best_gold_epi_soft"] += int(best_gold_epi_soft)
+
+        caveat_now = (
+            not runtime_hard
+            and support1
+            and evid3
+            and slot_soft
+            and epi_soft
+        )
+        rerank_or_epi = (
+            not runtime_hard
+            and support3
+            and evid3
+            and slot_soft
+            and best_gold_epi_soft
+        )
+        bucket["caveat_now"] += int(caveat_now)
+        bucket["rerank_or_epi"] += int(rerank_or_epi)
+
+        failures = _failure_names(bits, include_shortcut=True)
+        if tag == "applicable":
+            rows.append({
+                "rec": rec,
+                "hard": runtime_hard,
+                "failures": failures,
+                "support1": support1,
+                "support3": support3,
+                "evid1": evid1,
+                "evid3": evid3,
+                "slot_soft": slot_soft,
+                "min_slot_margin": min_slot_margin,
+                "hard_slot_names": hard_slot_names,
+                "primary_epi": primary_epi,
+                "best_gold_epi": best_gold_epi,
+                "best_gold_id": best_gold_id,
+                "epi_soft": epi_soft,
+                "best_gold_epi_soft": best_gold_epi_soft,
+                "caveat_now": caveat_now,
+                "rerank_or_epi": rerank_or_epi,
+            })
+
+    print(
+        f"{'tag':12s} {'n':>3s} {'fb':>5s} {'hard':>6s} {'soft':>6s} "
+        f"{'sup1':>6s} {'sup3':>6s} {'ev3':>6s} {'slot~':>6s} "
+        f"{'epi~':>6s} {'gold~':>6s} {'caveat':>7s} {'calib':>7s}"
+    )
+    for tag, vals in sorted(by_tag.items()):
+        fb_n = max(1, vals["fallback"])
+        print(
+            f"{tag[:12]:12s} {vals['n']:>3d} "
+            f"{vals['fallback'] / max(1, vals['n']):>5.2f} "
+            f"{vals['runtime_hard'] / fb_n:>6.2f} "
+            f"{vals['soft_only'] / fb_n:>6.2f} "
+            f"{vals['support1'] / fb_n:>6.2f} "
+            f"{vals['support3'] / fb_n:>6.2f} "
+            f"{vals['evid3'] / fb_n:>6.2f} "
+            f"{vals['slot_soft'] / fb_n:>6.2f} "
+            f"{vals['epi_soft'] / fb_n:>6.2f} "
+            f"{vals['best_gold_epi_soft'] / fb_n:>6.2f} "
+            f"{vals['caveat_now'] / fb_n:>7.2f} "
+            f"{vals['rerank_or_epi'] / fb_n:>7.2f}"
+        )
+    print(f"  reason split: {dict(reason_counts.most_common())}")
+
+    app_rows = [row for row in rows if not row["hard"]]
+    print("\n  applicable fallback soft rows:")
+    print(
+        f"{'case_id':34s} {'family':22s} {'failures':24s} "
+        f"{'sup':>5s} {'ev':>5s} {'slot_m':>8s} {'epi':>11s} "
+        f"{'gold_epi':>9s} {'cand':>6s} {'calib':>6s}"
+    )
+    for row in app_rows[:limit]:
+        rec = row["rec"]
+        case_id = (rec.ex.case_id or "unknown")[-34:]
+        support = f"{int(row['support1'])}/{int(row['support3'])}"
+        evidence = f"{int(row['evid1'])}/{int(row['evid3'])}"
+        failures = "+".join(row["failures"]) or "none"
+        print(
+            f"{case_id:34s} {_task_family(rec.ex)[:22]:22s} {failures[:24]:24s} "
+            f"{support:>5s} {evidence:>5s} {row['min_slot_margin']:>8.3f} "
+            f"{row['primary_epi']:>5.3f}/{EPISTEMIC_THRESHOLD:.2f} "
+            f"{row['best_gold_epi']:>9.3f} "
+            f"{int(row['caveat_now']):>6d} {int(row['rerank_or_epi']):>6d}"
+        )
+    if len(app_rows) > limit:
+        print(f"\n  ... {len(app_rows) - limit} more applicable soft rows omitted")
+
+
 def _direct_judgment_calibration_v2_report(records: Sequence[EvalRecord]) -> None:
     print("\n=== direct_judgment calibration v2: exit alignment ===")
     items = [rec for rec in records if _task_family(rec.ex) == "direct_judgment"]
@@ -1782,6 +1964,9 @@ def run(
     direct_routing_limit: int = 12,
     direct_limit: int = 18,
     negative_limit: int = 8,
+    soft_slot_margin: float = 0.10,
+    soft_epi_margin: float = 0.15,
+    soft_limit: int = 18,
     seed: int = 7,
 ) -> None:
     adapter, _train, ev, graph = _build_and_train(
@@ -1793,6 +1978,12 @@ def run(
     _task_family_report(records)
     _applicable_calibration_report(records, graph, applicable_limit)
     _applicable_failure_focus_report(records, graph, applicable_focus_limit)
+    _hard_soft_fallback_report(
+        records,
+        slot_margin=soft_slot_margin,
+        epi_margin=soft_epi_margin,
+        limit=soft_limit,
+    )
     _direct_judgment_routing_audit(records, graph, direct_routing_limit)
     _direct_judgment_failure_bucket_report(records)
     _direct_judgment_calibration_v2_report(records)
@@ -1820,6 +2011,9 @@ if __name__ == "__main__":
     ap.add_argument("--direct-routing-limit", type=int, default=12)
     ap.add_argument("--direct-limit", type=int, default=18)
     ap.add_argument("--negative-limit", type=int, default=8)
+    ap.add_argument("--soft-slot-margin", type=float, default=0.10)
+    ap.add_argument("--soft-epi-margin", type=float, default=0.15)
+    ap.add_argument("--soft-limit", type=int, default=18)
     ap.add_argument("--seed", type=int, default=7)
     args = ap.parse_args()
     run(
@@ -1837,5 +2031,8 @@ if __name__ == "__main__":
         args.direct_routing_limit,
         args.direct_limit,
         args.negative_limit,
+        args.soft_slot_margin,
+        args.soft_epi_margin,
+        args.soft_limit,
         args.seed,
     )
