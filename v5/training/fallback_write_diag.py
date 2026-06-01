@@ -6,6 +6,7 @@ held-out failures:
 
   - label distributions by split and case type
   - fallback trip reasons by case type
+  - applicable-only slot/epistemic/planning calibration breakdown
   - one-condition-at-a-time oracle fallback ablations
   - write ratio by case type, fallback state, and block
   - planning miss categories
@@ -16,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import random
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -58,6 +60,13 @@ SUPPORTIVE_RELATIONS = frozenset({
     "depend",
     "depends_on",
 })
+
+
+def _set_seed(seed: int) -> None:
+    random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 @dataclass
@@ -392,6 +401,225 @@ def _invalidator_case_report(records: Sequence[EvalRecord], limit: int, graph=No
         print("  no held-out cases had active invalidators on fallback top-k nodes")
 
 
+def _slot_rows(rec: EvalRecord) -> List[Tuple[int, str, float, float, float, bool]]:
+    req = _required_slots(rec.ex.task_frame)
+    pred = rec.evidence_state.slot_state_r.squeeze(0)
+    gold = rec.ex.slot_target.squeeze(0) if rec.ex.slot_target is not None else None
+    rows = []
+    for idx in req:
+        pred_val = float(pred[idx].item())
+        gold_val = float(gold[idx].item()) if gold is not None else float("nan")
+        rows.append((
+            idx,
+            SLOT_VOCAB[idx],
+            pred_val,
+            gold_val,
+            pred_val - SLOT_FILL_THRESHOLD,
+            pred_val < SLOT_FILL_THRESHOLD,
+        ))
+    return rows
+
+
+def _gold_indices(tensor: Optional[torch.Tensor]) -> List[int]:
+    if tensor is None:
+        return []
+    return torch.where(tensor.squeeze(0) > 0.0)[0].tolist()
+
+
+def _planning_hit_summary(rec: EvalRecord) -> Tuple[str, bool, bool]:
+    ex = rec.ex
+    ps = rec.planning_state
+    if ex.plan_anchor is None or not ps.attn_history:
+        return "none", False, False
+    attn = ps.attn_history[-1].squeeze(0)
+    top = int(attn.argmax().item())
+    gold = ex.plan_anchor.squeeze(0) > 0
+    top3 = attn.topk(min(3, attn.numel())).indices
+    top_id = ex.node_ids[top]
+    top_type = ex.graph_kv.node_types[top]
+    return f"{top_id} ({top_type})", bool(gold[top].item()), bool(gold[top3].any().item())
+
+
+def _epi_support_bucket(rec: EvalRecord, primary: Optional[int]) -> str:
+    if primary is None:
+        return "no_primary"
+    pred_epi = rec.evidence_state.epistemic_confidence_r.squeeze(0)
+    gold_evidence = _gold_indices(rec.ex.evid_anchor)
+    if not gold_evidence:
+        return "no_gold_evidence"
+    primary_is_gold = primary in set(gold_evidence)
+    best_gold_epi = max(float(pred_epi[idx].item()) for idx in gold_evidence)
+    primary_epi = float(pred_epi[primary].item())
+    if primary_is_gold and primary_epi < EPISTEMIC_THRESHOLD:
+        return "low_epi_on_gold_evidence"
+    if (not primary_is_gold) and best_gold_epi >= EPISTEMIC_THRESHOLD:
+        return "wrong_primary_gold_evidence_ok"
+    if best_gold_epi < EPISTEMIC_THRESHOLD:
+        return "all_gold_evidence_low"
+    return "other"
+
+
+def _format_slot_rows(rows: Sequence[Tuple[int, str, float, float, float, bool]]) -> str:
+    parts = []
+    for _idx, name, pred, gold, margin, failed in rows:
+        mark = "FAIL" if failed else "ok"
+        parts.append(f"{name}:pred={pred:.3f} gold={gold:.0f} margin={margin:+.3f} {mark}")
+    return "; ".join(parts) if parts else "none"
+
+
+def _applicable_calibration_report(
+    records: Sequence[EvalRecord],
+    graph=None,
+    limit: int = 18,
+) -> None:
+    print("\n=== applicable fallback calibration (held-out only) ===")
+    applicable = [rec for rec in records if rec.ex.tag == "applicable"]
+    if not applicable:
+        print("  no applicable held-out records")
+        return
+
+    combo_counts: Counter[str] = Counter()
+    shortcut_counts: Counter[str] = Counter()
+    slot_fail_counts: Counter[str] = Counter()
+    epi_buckets: Counter[str] = Counter()
+    family = defaultdict(lambda: {
+        "n": 0,
+        "fb": 0,
+        "slot": 0,
+        "epi": 0,
+        "shortcut": 0,
+        "primary_epi": [],
+        "best_gold_epi": [],
+        "failed_slot_margin": [],
+        "plan_hit": 0,
+        "plan_top3": 0,
+        "plan_n": 0,
+    })
+
+    for rec in applicable:
+        bits = fallback_bits(rec.evidence_state, rec.ex)
+        failures = [
+            name for name in ("empty_pool", "missing_slot", "low_epistemic", "invalidator_active")
+            if bool(bits[name])
+        ]
+        combo = "no_fallback" if not bits["fallback"] else ("+".join(failures) or "max_loops_only")
+        combo_counts[combo] += 1
+        shortcut_counts["shortcut_invalid" if bits["shortcut_invalid"] else "shortcut_ok"] += 1
+        for idx in bits["missing_slot_ids"]:
+            slot_fail_counts[SLOT_VOCAB[idx]] += 1
+        if bits["low_epistemic"]:
+            epi_buckets[_epi_support_bucket(rec, bits["primary_idx"])] += 1
+
+        fam = family[_task_family(rec.ex)]
+        fam["n"] += 1
+        fam["fb"] += int(bits["fallback"])
+        fam["slot"] += int(bits["missing_slot"])
+        fam["epi"] += int(bits["low_epistemic"])
+        fam["shortcut"] += int(bits["shortcut_invalid"])
+        primary = bits["primary_idx"]
+        pred_epi = rec.evidence_state.epistemic_confidence_r.squeeze(0)
+        if primary is not None:
+            fam["primary_epi"].append(float(pred_epi[primary].item()))
+        gold_evidence = _gold_indices(rec.ex.evid_anchor)
+        if gold_evidence:
+            fam["best_gold_epi"].append(max(float(pred_epi[idx].item()) for idx in gold_evidence))
+        for _idx, _name, _pred, _gold, margin, failed in _slot_rows(rec):
+            if failed:
+                fam["failed_slot_margin"].append(margin)
+        _plan_top, plan_hit, plan_top3 = _planning_hit_summary(rec)
+        if rec.ex.plan_anchor is not None:
+            fam["plan_n"] += 1
+            fam["plan_hit"] += int(plan_hit)
+            fam["plan_top3"] += int(plan_top3)
+
+    print(f"  applicable n={len(applicable)}")
+    print(f"  gate-failure combos: {dict(combo_counts.most_common())}")
+    print(f"  shortcut telemetry : {dict(shortcut_counts.most_common())}")
+    print(f"  failed slots       : {dict(slot_fail_counts.most_common())}")
+    print(f"  low-epi buckets    : {dict(epi_buckets.most_common())}")
+    print(
+        f"{'family':28s} {'n':>3s} {'fb':>5s} {'slot':>5s} {'epi':>5s} "
+        f"{'sc':>5s} {'prim_epi':>8s} {'gold_epi':>8s} {'fail_margin':>11s} "
+        f"{'plan@1':>7s} {'plan@3':>7s}"
+    )
+    for fam_name, vals in sorted(family.items(), key=lambda item: (-item[1]["n"], item[0])):
+        n = vals["n"]
+        plan_n = max(1, vals["plan_n"])
+        print(
+            f"{fam_name[:28]:28s} {n:>3d} "
+            f"{vals['fb'] / max(1, n):>5.2f} "
+            f"{vals['slot'] / max(1, n):>5.2f} "
+            f"{vals['epi'] / max(1, n):>5.2f} "
+            f"{vals['shortcut'] / max(1, n):>5.2f} "
+            f"{_mean(vals['primary_epi']):>8.3f} "
+            f"{_mean(vals['best_gold_epi']):>8.3f} "
+            f"{_mean(vals['failed_slot_margin']):>11.3f} "
+            f"{vals['plan_hit'] / plan_n:>7.2f} "
+            f"{vals['plan_top3'] / plan_n:>7.2f}"
+        )
+
+    print("\n  applicable fallback cases:")
+    shown = 0
+    for rec_idx, rec in enumerate(applicable, start=1):
+        bits = fallback_bits(rec.evidence_state, rec.ex)
+        if not bits["fallback"]:
+            continue
+        shown += 1
+        case_id = rec.ex.case_id or f"heldout_applicable_{rec_idx}"
+        failures = [
+            name for name in ("empty_pool", "missing_slot", "low_epistemic", "invalidator_active")
+            if bool(bits[name])
+        ]
+        primary = bits["primary_idx"]
+        pred_epi = rec.evidence_state.epistemic_confidence_r.squeeze(0)
+        pred_sc = float(rec.evidence_state.shortcut_validity_r.item())
+        primary_id = rec.ex.node_ids[primary] if primary is not None else "none"
+        primary_type = rec.ex.graph_kv.node_types[primary] if primary is not None else "none"
+        primary_epi = float(pred_epi[primary].item()) if primary is not None else float("nan")
+        primary_gold_epi = (
+            float(rec.ex.epi_target.squeeze(0)[primary].item())
+            if primary is not None and rec.ex.epi_target is not None
+            else float("nan")
+        )
+        primary_gold_evid = (
+            bool(rec.ex.evid_anchor.squeeze(0)[primary].item() > 0.0)
+            if primary is not None and rec.ex.evid_anchor is not None
+            else False
+        )
+        gold_evidence = _gold_indices(rec.ex.evid_anchor)
+        best_gold_epi = (
+            max(float(pred_epi[idx].item()) for idx in gold_evidence)
+            if gold_evidence else float("nan")
+        )
+        plan_top, plan_hit, plan_top3 = _planning_hit_summary(rec)
+        print(
+            f"\n  case {shown}: id={case_id} family={_task_family(rec.ex)} "
+            f"failures={failures} shortcut={pred_sc:.3f}/{SHORTCUT_THRESHOLD:.2f}"
+        )
+        print(f"    required_slots: {(rec.ex.task_frame or {}).get('required_slots') or []}")
+        print(f"    slots: {_format_slot_rows(_slot_rows(rec))}")
+        print(
+            f"    primary_evidence: id={primary_id} type={primary_type} "
+            f"pred_epi={primary_epi:.3f}/{EPISTEMIC_THRESHOLD:.2f} "
+            f"gold_epi={primary_gold_epi:.0f} gold_evidence={primary_gold_evid} "
+            f"best_gold_evidence_epi={best_gold_epi:.3f}"
+        )
+        persisted_type, persisted_text = _node_summary(graph, primary_id)
+        if persisted_text:
+            print(f"    primary_text: type={persisted_type} text={persisted_text}")
+        print(f"    planning_top: {plan_top} hit@1={plan_hit} hit@3={plan_top3}")
+        if rec.ex.question:
+            print(f"    question: {_short(rec.ex.question, 140)}")
+        if shown >= limit:
+            remaining = sum(
+                1 for rec2 in applicable
+                if fallback_bits(rec2.evidence_state, rec2.ex)["fallback"]
+            ) - shown
+            if remaining > 0:
+                print(f"\n  ... {remaining} more applicable fallback cases omitted")
+            break
+
+
 def _oracle_report(records: Sequence[EvalRecord]) -> None:
     print("\n=== oracle fallback ablations (held-out) ===")
     print("Shortcut is diagnostic telemetry in the current formula, so gold_shortcut_only should not move fallback.")
@@ -489,10 +717,12 @@ def _build_and_train(
     e1: int,
     e2a: int,
     e2b: int,
+    seed: int,
 ):
+    _set_seed(seed)
     device = torch.device(device_str or ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"device={device}  corpus={corpus_path}  model={model_name}")
-    print(f"schedule: e1={e1} e2a={e2a} e2b={e2b} eval_frac={eval_frac}")
+    print(f"schedule: e1={e1} e2a={e2a} e2b={e2b} eval_frac={eval_frac} seed={seed}")
 
     print("\n[1] substrate pass...")
     _, stats = build_substrate_graph(corpus_path=corpus_path, out_path=SUBSTRATE_OUT)
@@ -547,13 +777,17 @@ def run(
     e2b: int = 20,
     diffuse_threshold: float = 0.35,
     invalidator_limit: int = 12,
+    applicable_limit: int = 18,
+    seed: int = 7,
 ) -> None:
-    adapter, _train, ev, graph = _build_and_train(corpus_path, model_name, device_str, eval_frac, e1, e2a, e2b)
+    adapter, _train, ev, graph = _build_and_train(
+        corpus_path, model_name, device_str, eval_frac, e1, e2a, e2b, seed)
 
     print("\n[4] evaluating held-out records...")
     records = _eval_records(adapter, ev)
     _fallback_trip_report(records)
     _task_family_report(records)
+    _applicable_calibration_report(records, graph, applicable_limit)
     _invalidator_case_report(records, invalidator_limit, graph)
     _oracle_report(records)
     _write_ratio_report(records)
@@ -571,6 +805,8 @@ if __name__ == "__main__":
     ap.add_argument("--e2b", type=int, default=20)
     ap.add_argument("--diffuse-threshold", type=float, default=0.35)
     ap.add_argument("--invalidator-limit", type=int, default=12)
+    ap.add_argument("--applicable-limit", type=int, default=18)
+    ap.add_argument("--seed", type=int, default=7)
     args = ap.parse_args()
     run(
         args.corpus,
@@ -582,4 +818,6 @@ if __name__ == "__main__":
         args.e2b,
         args.diffuse_threshold,
         args.invalidator_limit,
+        args.applicable_limit,
+        args.seed,
     )

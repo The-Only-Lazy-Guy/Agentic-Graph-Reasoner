@@ -306,6 +306,8 @@ def sample_to_stage1_example(
         shortcut_target=shortcut_t,
         struct_inv_mask=struct if struct.any() else None,
         tag=("applicable" if sample.finalized else "blocked"),
+        case_id=sample.session_id,
+        question=sample.question,
     )
 
 

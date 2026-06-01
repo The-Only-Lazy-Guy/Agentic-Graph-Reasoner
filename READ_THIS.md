@@ -67,6 +67,20 @@
   is now 0.00 for applicable/blocked/negative, and `relational_explanation`
   moved from invalidator_active=0.93 to 0.00. Negative total write remains the
   lowest bucket at 0.150, but negative evidence-write is still worth watching.
+- Added an applicable-only calibration report plus deterministic `--seed`
+  support to `fallback_write_diag`. Seeded `30/20/20` read (`--seed 7`):
+  applicable fallback=0.64, blocked=0.91, negative=0.67. Applicable failures
+  are now mostly `missing_slot+low_epistemic` (24/47), with failed slots dominated
+  by `reason` (25) and `verdict` (16). `relational_explanation` applicable is
+  clean (`fallback=0.00`); direct_judgment remains the hard family.
+- Calibration read: the gate is not mainly too strict by threshold margin.
+  Failed slot margins are usually very negative, and low epistemic often occurs
+  on gold evidence (`low_epi_on_gold_evidence=18`). So the next fix is label /
+  head calibration for direct_judgment reason/verdict and support epistemic,
+  not another invalidator or threshold-only tweak.
+- Safety note: seeded negative fallback slipped to 2/3 held-out negatives (n=3).
+  Keep the negative write/fallback guard; do not move Stage 3/4 until negative
+  fallback is consistently high again.
 - Read: the projected pipeline is now real and end-to-end, evidence routing is
   materially stronger than planning. The false-invalidator blocker is repaired;
   the remaining fallback failures are mostly missing slots + low epistemic on
@@ -357,7 +371,7 @@ python merge_shards.py --out data/corpus_merged.jsonl
 python project_corpus_to_v5_targets.py --corpus data/corpus_merged.jsonl
 pytest reasoning/tests/test_v5_projection.py -q
 $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.corpus_scaling --corpus <corpus.jsonl>  # scale + held-out metrics
-$env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.fallback_write_diag --corpus data/corpus_merged_v5proj.jsonl  # fallback/write diagnosis
+$env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.fallback_write_diag --corpus data/corpus_merged_v5proj.jsonl --seed 7  # fallback/write + calibration diagnosis
 ```
 
 ## 1g. Corpus scaling 20 -> 46 traces (held-out) — `v5.training.corpus_scaling`
@@ -553,6 +567,57 @@ issue is fixed. The remaining fallback bottleneck is now slots + epistemic
 calibration, with planning misses still visible (`top3_near_miss`, `diffuse_miss`,
 `confident_miss`). Blocked/negative still fall back, so safety is retained, but
 do not move to Stage 3/4 yet.
+
+Applicable fallback calibration pass (`fallback_write_diag --seed 7`):
+```
+repro:
+  $env:KMP_DUPLICATE_LIB_OK="TRUE"; python -u -m v5.training.fallback_write_diag \
+    --corpus data/corpus_merged_v5proj.jsonl \
+    --model Qwen/Qwen2.5-0.5B-Instruct \
+    --e1 30 --e2a 20 --e2b 20 --seed 7 \
+    --invalidator-limit 4 --applicable-limit 14
+
+fallback:
+  applicable=30/47 (0.64)
+  blocked=10/11 (0.91)
+  negative=2/3 (0.67)
+
+applicable gate combos:
+  missing_slot+low_epistemic: 24
+  low_epistemic only:          4
+  missing_slot only:           2
+  no_fallback:                17
+
+failed applicable slots:
+  reason: 25
+  verdict: 16
+  condition/alternative/complexity: 1 each
+
+low-epi buckets:
+  low_epi_on_gold_evidence:          18
+  wrong_primary_gold_evidence_ok:     7
+  all_gold_evidence_low:              3
+
+family calibration:
+  direct_judgment        n=35 fallback=0.83 slot=0.71 epi=0.77 plan@1=0.14 plan@3=0.49
+  relational_explanation n=11 fallback=0.00 slot=0.00 epi=0.00 plan@1=0.64 plan@3=0.82
+  design_synthesis       n=1  fallback=1.00 slot=1.00 epi=1.00
+
+write:
+  applicable fallback total=0.189
+  applicable no_fallback total=0.190
+  blocked fallback total=0.194
+  negative fallback total=0.101
+  negative no_fallback total=0.089
+```
+
+Read after calibration: direct_judgment is the real remaining cluster. The
+failure is usually not "slot is barely under 0.85"; the failed reason/verdict
+slots are often near zero. Epistemic is also not just wrong-primary selection:
+18 low-epi cases are on gold evidence. This points to direct_judgment slot /
+epistemic target quality or head calibration. Also, the seeded run shows one
+negative held-out case did not fall back, so negative safety needs another guard
+check before any Stage 3/4 move.
 
 ---
 

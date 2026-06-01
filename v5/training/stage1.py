@@ -58,6 +58,8 @@ class Stage1Example:
     shortcut_target: Optional[Tensor] = None  # [1, 1]
     struct_inv_mask: Optional[Tensor] = None  # [1, N] bool, structural invalidator nodes
     tag: str = ""                          # free label (e.g. family) for reporting
+    case_id: str = ""                      # corpus/session id for diagnostics
+    question: str = ""                     # raw question text for diagnostics
 
 
 # ── freeze protocol ──────────────────────────────────────────────────────────
