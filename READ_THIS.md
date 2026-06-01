@@ -130,6 +130,26 @@
   The main remaining blocker is direct_judgment evidence/planning + epistemic
   calibration: direct_judgment applicable fallback is still 23/35 (0.66), mostly
   low epistemic / wrong primary evidence.
+- Added an applicable failure focus report to `fallback_write_diag`, splitting
+  held-out applicable failures into routing vs confidence buckets. It prints
+  predicted/gold plan nodes, predicted/gold evidence nodes, slot scores,
+  epistemic on predicted vs best-gold evidence, shortcut, and write ratio.
+- Latest seeded focused diagnostic
+  (`--seed 7 --e1 30 --e2a 20 --e2b 20`, log:
+  `artifacts/run_logs/fallback_write_diag_20260601_applicable_focus_seed7.log`):
+  applicable fallback=0.47, blocked=0.73, negative=1.00. Negative still fails
+  closed; no no-graph `shortcut_verified` leak returned. Oracle gold-all drops
+  applicable only to 0.36, so the remaining gap is not one head/threshold.
+- Focused read: applicable failures are now almost entirely direct_judgment:
+  21/22 applicable failures are direct_judgment, plus 1 design_synthesis.
+  In failed direct_judgment, slot failure is 0.38, low_epistemic is 0.90,
+  plan@1 is 0.10, plan@3 is 0.48, wrong_evidence_selected is 0.33,
+  right_evidence_low_epi is 0.43, and gold_evidence_low_epi is 0.14.
+  Translation: the next blocker is evidence/planning routing plus epistemic
+  confidence on selected evidence; slot is now secondary.
+- Safety caveat: negative total write is 0.154 in this run, which is still above
+  the early ideal. The forced fallback guard keeps no-graph cases safe, but write
+  pressure should remain monitored before Stage 3/4.
 - Read: the projected pipeline is now real and end-to-end, evidence routing is
   materially stronger than planning. The false-invalidator blocker is repaired;
   the remaining fallback failures are mostly missing slots + low epistemic on

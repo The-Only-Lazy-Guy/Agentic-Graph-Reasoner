@@ -7,6 +7,7 @@ held-out failures:
   - label distributions by split and case type
   - fallback trip reasons by case type
   - applicable-only slot/epistemic/planning calibration breakdown
+  - applicable failure focus: routing vs confidence calibration
   - direct_judgment failure table
   - negative/no-graph safety table
   - one-condition-at-a-time oracle fallback ablations
@@ -457,6 +458,34 @@ def _planning_hit_summary(rec: EvalRecord) -> Tuple[str, bool, bool]:
     return f"{top_id} ({top_type})", bool(gold[top].item()), bool(gold[top3].any().item())
 
 
+def _top_plan_detail(rec: EvalRecord) -> Tuple[str, str, float, bool, bool, str, float]:
+    ex = rec.ex
+    ps = rec.planning_state
+    if ex.plan_anchor is None or not ps.attn_history:
+        return "none", "none", float("nan"), False, False, "none", float("nan")
+    attn = ps.attn_history[-1].squeeze(0)
+    top = int(attn.argmax().item())
+    gold = ex.plan_anchor.squeeze(0) > 0
+    top3 = attn.topk(min(3, attn.numel())).indices
+    gold_idxs = torch.where(gold)[0].tolist()
+    if gold_idxs:
+        best_gold = max(gold_idxs, key=lambda idx: float(attn[idx].item()))
+        gold_desc = f"{ex.node_ids[best_gold]} ({ex.graph_kv.node_types[best_gold]})"
+        gold_score = float(attn[best_gold].item())
+    else:
+        gold_desc = "none"
+        gold_score = float("nan")
+    return (
+        ex.node_ids[top],
+        ex.graph_kv.node_types[top],
+        float(attn[top].item()),
+        bool(gold[top].item()),
+        bool(gold[top3].any().item()),
+        gold_desc,
+        gold_score,
+    )
+
+
 def _epi_support_bucket(rec: EvalRecord, primary: Optional[int]) -> str:
     if primary is None:
         return "no_primary"
@@ -474,6 +503,28 @@ def _epi_support_bucket(rec: EvalRecord, primary: Optional[int]) -> str:
     if best_gold_epi < EPISTEMIC_THRESHOLD:
         return "all_gold_evidence_low"
     return "other"
+
+
+def _evidence_focus(rec: EvalRecord, primary: Optional[int]) -> Tuple[str, str, float, bool, str, float, str]:
+    primary_id, primary_type, primary_epi, _primary_gold_epi, primary_gold_evid = _primary_summary(
+        rec, primary)
+    gold_evidence = _gold_indices(rec.ex.evid_anchor)
+    best_gold_id, best_gold_epi, _mean_gold_epi, _gold_n = _gold_evidence_summary(rec)
+    if not gold_evidence:
+        bucket = "no_gold_evidence"
+    elif primary_gold_evid and primary_epi < EPISTEMIC_THRESHOLD:
+        bucket = "right_evidence_low_epi"
+    elif primary_gold_evid:
+        bucket = "right_evidence_ok"
+    elif best_gold_epi >= EPISTEMIC_THRESHOLD:
+        bucket = "wrong_evidence_selected"
+    else:
+        bucket = "gold_evidence_low_epi"
+    return primary_id, primary_type, primary_epi, primary_gold_evid, best_gold_id, best_gold_epi, bucket
+
+
+def _slot_failure_names(rec: EvalRecord) -> List[str]:
+    return [name for _idx, name, _pred, _gold, _margin, failed in _slot_rows(rec) if failed]
 
 
 def _format_slot_rows(rows: Sequence[Tuple[int, str, float, float, float, bool]]) -> str:
@@ -677,6 +728,176 @@ def _applicable_calibration_report(
             if remaining > 0:
                 print(f"\n  ... {remaining} more applicable fallback cases omitted")
             break
+
+
+def _applicable_failure_focus_report(
+    records: Sequence[EvalRecord],
+    graph=None,
+    limit: int = 24,
+) -> None:
+    print("\n=== applicable failure focus: routing vs calibration ===")
+    failures = [
+        rec for rec in records
+        if rec.ex.tag == "applicable" and fallback_bits(rec.evidence_state, rec.ex)["fallback"]
+    ]
+    if not failures:
+        print("  no applicable fallback failures")
+        return
+
+    family = defaultdict(lambda: {
+        "n": 0,
+        "slot_fail": 0,
+        "low_epi": 0,
+        "plan_hit": 0,
+        "plan_top3": 0,
+        "wrong_evidence": 0,
+        "right_evidence_low_epi": 0,
+        "gold_evidence_low_epi": 0,
+        "pred_epi": [],
+        "gold_epi": [],
+        "plan_wr": [],
+        "evid_wr": [],
+    })
+    evidence_buckets: Counter[str] = Counter()
+    plan_buckets: Counter[str] = Counter()
+    slot_fail_counts: Counter[str] = Counter()
+
+    rows = []
+    for rec in failures:
+        bits = fallback_bits(rec.evidence_state, rec.ex)
+        fam = family[_task_family(rec.ex)]
+        fam["n"] += 1
+        fam["slot_fail"] += int(bits["missing_slot"])
+        fam["low_epi"] += int(bits["low_epistemic"])
+
+        pred_plan_id, pred_plan_type, pred_plan_score, plan_hit, plan_top3, gold_plan_desc, gold_plan_score = _top_plan_detail(rec)
+        if rec.ex.plan_anchor is None:
+            plan_bucket = "no_plan_label"
+        elif plan_hit:
+            plan_bucket = "plan_hit"
+        elif plan_top3:
+            plan_bucket = "plan_top3_near"
+        else:
+            plan_bucket = "plan_miss"
+        plan_buckets[plan_bucket] += 1
+        fam["plan_hit"] += int(plan_hit)
+        fam["plan_top3"] += int(plan_top3)
+
+        pred_evid_id, pred_evid_type, pred_epi, pred_evid_gold, best_gold_id, best_gold_epi, evid_bucket = _evidence_focus(
+            rec, bits["primary_idx"])
+        evidence_buckets[evid_bucket] += 1
+        fam["wrong_evidence"] += int(evid_bucket == "wrong_evidence_selected")
+        fam["right_evidence_low_epi"] += int(evid_bucket == "right_evidence_low_epi")
+        fam["gold_evidence_low_epi"] += int(evid_bucket == "gold_evidence_low_epi")
+        fam["pred_epi"].append(pred_epi)
+        fam["gold_epi"].append(best_gold_epi)
+        fam["plan_wr"].extend(rec.planning_state.write_ratios or [])
+        fam["evid_wr"].extend(rec.evidence_state.write_ratios or [])
+
+        failed_slots = _slot_failure_names(rec)
+        for slot in failed_slots:
+            slot_fail_counts[slot] += 1
+        rows.append({
+            "rec": rec,
+            "bits": bits,
+            "failures": _failure_names(bits, include_shortcut=True),
+            "failed_slots": failed_slots,
+            "pred_plan": f"{pred_plan_id} ({pred_plan_type})",
+            "pred_plan_score": pred_plan_score,
+            "plan_hit": plan_hit,
+            "plan_top3": plan_top3,
+            "gold_plan": gold_plan_desc,
+            "gold_plan_score": gold_plan_score,
+            "pred_evid": f"{pred_evid_id} ({pred_evid_type})",
+            "pred_epi": pred_epi,
+            "pred_evid_gold": pred_evid_gold,
+            "best_gold_evid": best_gold_id,
+            "best_gold_epi": best_gold_epi,
+            "evid_bucket": evid_bucket,
+            "shortcut": float(rec.evidence_state.shortcut_validity_r.item()),
+            "plan_wr": _mean(list(rec.planning_state.write_ratios or [])),
+            "evid_wr": _mean(list(rec.evidence_state.write_ratios or [])),
+        })
+
+    print(f"  applicable fallback failures n={len(failures)}")
+    print(f"  evidence buckets: {dict(evidence_buckets.most_common())}")
+    print(f"  planning buckets: {dict(plan_buckets.most_common())}")
+    print(f"  failed slots    : {dict(slot_fail_counts.most_common())}")
+    print(
+        f"{'family':28s} {'n':>3s} {'slot':>5s} {'low_epi':>7s} "
+        f"{'plan@1':>7s} {'plan@3':>7s} {'wrong_ev':>8s} "
+        f"{'right_low':>9s} {'gold_low':>8s} {'pred_epi':>8s} "
+        f"{'gold_epi':>8s} {'wr':>6s}"
+    )
+    for fam_name, vals in sorted(family.items(), key=lambda item: (-item[1]["n"], item[0])):
+        n = vals["n"]
+        wr_vals = vals["plan_wr"] + vals["evid_wr"]
+        print(
+            f"{fam_name[:28]:28s} {n:>3d} "
+            f"{vals['slot_fail'] / max(1, n):>5.2f} "
+            f"{vals['low_epi'] / max(1, n):>7.2f} "
+            f"{vals['plan_hit'] / max(1, n):>7.2f} "
+            f"{vals['plan_top3'] / max(1, n):>7.2f} "
+            f"{vals['wrong_evidence'] / max(1, n):>8.2f} "
+            f"{vals['right_evidence_low_epi'] / max(1, n):>9.2f} "
+            f"{vals['gold_evidence_low_epi'] / max(1, n):>8.2f} "
+            f"{_mean(vals['pred_epi']):>8.3f} "
+            f"{_mean(vals['gold_epi']):>8.3f} "
+            f"{_mean(wr_vals):>6.3f}"
+        )
+
+    print(
+        f"{'case_id':34s} {'family':22s} {'failures':32s} {'slots':20s} "
+        f"{'plan':18s} {'evidence':24s} {'epi':>13s} {'sc':>5s} {'wr':>5s}"
+    )
+    for row in rows[:limit]:
+        rec = row["rec"]
+        case_id = (rec.ex.case_id or "unknown")[-34:]
+        slots = ",".join(row["failed_slots"]) if row["failed_slots"] else "ok"
+        plan = "hit" if row["plan_hit"] else ("top3" if row["plan_top3"] else "miss")
+        evidence = row["evid_bucket"]
+        epi = f"{row['pred_epi']:.2f}/{row['best_gold_epi']:.2f}"
+        wr = _mean([row["plan_wr"], row["evid_wr"]])
+        print(
+            f"{case_id:34s} {_task_family(rec.ex)[:22]:22s} "
+            f"{'+'.join(row['failures'])[:32]:32s} {slots[:20]:20s} "
+            f"{plan:18s} {evidence[:24]:24s} {epi:>13s} "
+            f"{row['shortcut']:>5.2f} {wr:>5.3f}"
+        )
+
+    print("\n  applicable failure details:")
+    for idx, row in enumerate(rows[:limit], start=1):
+        rec = row["rec"]
+        print(
+            f"\n  case {idx}: id={rec.ex.case_id or 'unknown'} "
+            f"family={_task_family(rec.ex)} failures={row['failures']}"
+        )
+        if rec.ex.question:
+            print(f"    question: {_short(rec.ex.question, 150)}")
+        print(f"    required_slots: {(rec.ex.task_frame or {}).get('required_slots') or []}")
+        print(f"    slot_scores: {_format_slot_rows(_slot_rows(rec))}")
+        print(
+            f"    plan_pred: {row['pred_plan']} score={row['pred_plan_score']:.3f} "
+            f"hit@1={row['plan_hit']} hit@3={row['plan_top3']}"
+        )
+        print(f"    plan_gold_best: {row['gold_plan']} score={row['gold_plan_score']:.3f}")
+        print(
+            f"    evidence_pred: {row['pred_evid']} pred_epi={row['pred_epi']:.3f} "
+            f"gold_evidence={row['pred_evid_gold']}"
+        )
+        ptype, ptext = _node_summary(graph, row["pred_evid"].split(" (", 1)[0])
+        if ptext:
+            print(f"    evidence_pred_text: type={ptype} text={ptext}")
+        print(
+            f"    evidence_gold_best: {row['best_gold_evid']} "
+            f"pred_epi={row['best_gold_epi']:.3f} bucket={row['evid_bucket']}"
+        )
+        print(
+            f"    shortcut={row['shortcut']:.3f} "
+            f"write_plan={row['plan_wr']:.3f} write_evid={row['evid_wr']:.3f}"
+        )
+    if len(rows) > limit:
+        print(f"\n  ... {len(rows) - limit} more applicable failure rows omitted")
 
 
 def _direct_judgment_report(
@@ -995,6 +1216,7 @@ def run(
     diffuse_threshold: float = 0.35,
     invalidator_limit: int = 12,
     applicable_limit: int = 18,
+    applicable_focus_limit: int = 24,
     direct_limit: int = 18,
     negative_limit: int = 8,
     seed: int = 7,
@@ -1007,6 +1229,7 @@ def run(
     _fallback_trip_report(records)
     _task_family_report(records)
     _applicable_calibration_report(records, graph, applicable_limit)
+    _applicable_failure_focus_report(records, graph, applicable_focus_limit)
     _direct_judgment_report(records, graph, direct_limit)
     _negative_safety_report(records, graph, negative_limit)
     _invalidator_case_report(records, invalidator_limit, graph)
@@ -1027,6 +1250,7 @@ if __name__ == "__main__":
     ap.add_argument("--diffuse-threshold", type=float, default=0.35)
     ap.add_argument("--invalidator-limit", type=int, default=12)
     ap.add_argument("--applicable-limit", type=int, default=18)
+    ap.add_argument("--applicable-focus-limit", type=int, default=24)
     ap.add_argument("--direct-limit", type=int, default=18)
     ap.add_argument("--negative-limit", type=int, default=8)
     ap.add_argument("--seed", type=int, default=7)
@@ -1042,6 +1266,7 @@ if __name__ == "__main__":
         args.diffuse_threshold,
         args.invalidator_limit,
         args.applicable_limit,
+        args.applicable_focus_limit,
         args.direct_limit,
         args.negative_limit,
         args.seed,
