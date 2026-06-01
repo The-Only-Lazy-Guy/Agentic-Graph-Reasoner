@@ -481,6 +481,39 @@
   learn these as planning/control substrate, while V4 can retrieve them for
   better tool choice and verification behavior.
 
+## Session update (2026-06-02) — full-recipe control test: NOT undertraining; it's the label/gate contract
+
+- Ran the SAME diagnostic + corpus (`data/corpus_merged_v5proj.jsonl`, 288 proj,
+  Qwen2.5-0.5B, `--seed 7`) at the **full recipe `e1=200 e2a=120 e2b=150`** (vs the
+  `30/20/20` diagnostic schedule). Log:
+  `artifacts/run_logs/fallback_write_diag_fullrecipe_seed7.log`.
+- Stage 1 loss converged 7.53→1.48 (at epoch 40 it was 3.14 — i.e. `e1=30` quit at
+  ~2× final loss; the heads ARE better trained now), BUT:
+  **applicable fallback = 0.57** — same band as `30/20/20` (0.43–0.60).
+  **7× training did NOT move applicable fallback.** Undertraining hypothesis REFUTED.
+- Oracle ablations (held-out) are the decisive finding:
+  `predicted_all 0.57 · gold_slots_only 0.47 · gold_epi_only 0.55 · gold_inv_only
+  0.57 · gold_all 0.45`. **Even with ALL gold labels, applicable fallback floors at
+  0.45** → not a head/training/capacity problem; the **fallback gate's "answerable"
+  definition is inconsistent with the corpus labels** for ~45% of applicable cases.
+- Where the mismatch lives (both on direct_judgment + design_synthesis):
+  1. SLOTS: `failed slots reason 13 / verdict 10`; `gold_slots_only` only 0.47 →
+     the GOLD slot target itself under-marks required slots (same `reason`/`verdict`
+     underfill seen in the friend's opencode trace: `required=[answer,reason]`,
+     `filled=[answer]`). This is a **V4-side slot-detection** problem in the labels.
+  2. EPISTEMIC: `right_evidence_low_epi 12`; `gold_epi_only` barely moves (0.55) →
+     the epi-on-primary gate and the gold-epi-positive node don't align.
+- Safety floor holds at full training: blocked/negative fallback = 1.00 across
+  EVERY oracle variant; negative total write lowest at 0.102; no negative
+  `shortcut_verified` leaks. Combined with the earlier hard/soft result (applicable
+  fallback = 100% soft), **"applicable fallback rate" is a mis-specified Stage-3/4
+  gate.** The legitimate gate (safety) is met.
+- VERDICT / next step: do NOT chase this with more training, Stage 3/4, or a new
+  head. Fix the LABEL CONTRACT — V4 `reason`/`verdict` slot detection (mark filled
+  when the answer contains them) and the epi-on-primary definition — then either
+  applicable fallback drops because the gate matches labels, or proceed to Stage
+  3/4 on the (already-met) safety floor.
+
 ---
 
 ## TL;DR claim boundary
