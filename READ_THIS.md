@@ -298,6 +298,31 @@
   now treats an empty evidence pool as `hard_fallback`, and
   `GraphAttentionInjector` passes that evidence-mask signal through. This keeps
   runtime policy semantics aligned with the diagnostic hard blocker.
+- Checkpoint discipline update: from here on, every meaningful training,
+  diagnostic, or control-policy checkpoint should update this file and be pushed
+  to GitHub before the work is considered handed off. Treat chat-only metrics as
+  incomplete unless they are mirrored here.
+- Soft-exit seeded rerun complete (log:
+  `artifacts/run_logs/fallback_write_diag_20260602_soft_exit_seed7.log`). Split
+  stayed at 61 held-out rows: applicable=47, blocked=11, negative=3. Fallback is
+  now applicable=20/47 (0.43), blocked=11/11 (1.00), negative=3/3 (1.00).
+  Policy states are cleanly separated: applicable normal=0.57, soft=0.43,
+  hard=0.00; blocked/negative normal=0.00, soft=0.00, hard=1.00.
+- Soft-exit route simulation from that rerun: `old_full_fallback` answers 57% of
+  applicable rows with V5 and sends 43% to full V4 fallback (latency unit 1.43).
+  `answer_with_caveat` answers all applicable rows, but proxy acceptance remains
+  0.57 and proxy rejection is 0.43 (latency 1.00). `verify_once` uses the
+  verifier on 43% of applicable rows, accepts 60%, sends 40% to full fallback,
+  and has latency 1.51. Blocked/negative stay hard-fallback with no proxy safety
+  leaks on all three routes.
+- Stage 3/4 verdict after soft-exit rerun: still HOLD. The safety floor is good,
+  and applicable fallback improved, but soft-exit is not useful enough yet:
+  `verify_once` only moves applicable proxy acceptance from 0.57 to 0.60.
+  Direct_judgment soft rows remain the main blocker: support@1=0.38,
+  support@3=0.62, evidence@3=0.75, slot-near=0.56, primary-epi-near=0.06,
+  best-gold-epi-near=0.44, verifier-eligible only 0.06. Next work should improve
+  direct_judgment support/epistemic + verdict/reason slot calibration, then rerun
+  this exact soft-exit report.
 - Read from the controlled pass: the cleaned projection restores strong evidence
   routing and safety, but the same `30/20/20` recipe does not reduce applicable
   fallback below the current band. The next lever is calibration/label quality
