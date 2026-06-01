@@ -186,7 +186,7 @@
   still 288 rows, planning rows 189, evidence rows 288, support rows 253, loop
   rows 288, and mean candidate nodes now 8.5 (down from 9.2 after dropping
   direct epistemic-state evidence targets).
-- Latest guarded seeded diagnostic
+- Earlier guarded seeded diagnostic after pool alignment
   (`--seed 7 --e1 30 --e2a 20 --e2b 20`, log:
   `artifacts/run_logs/fallback_write_diag_20260601_pool_alignment_blocked_guard_seed7.log`):
   applicable fallback=0.51, blocked=1.00, negative=1.00. Oracle gold-all is
@@ -202,17 +202,34 @@
   evidence/epistemic calibration on selected in-pool evidence plus direct_judgment
   planning substrate quality, while preserving the blocked/negative forced
   fallback guard.
-- Added deterministic `--seed` plus plan/evidence `hit@3` reporting to
-  `v5.training.corpus_scaling`, then ran the controlled cleaned-label integrated
-  Stage 1 -> 2A -> 2B pass (`--seed 7 --e1 30 --e2a 20 --e2b 20`, log:
-  `artifacts/run_logs/corpus_scaling_20260601_clean_projection_seed7.log`).
+- Added deterministic `--seed`, adapter-init reseeding, and plan/evidence `hit@3`
+  reporting to the corpus/diagnostic harnesses. Provider/GNN setup can consume
+  RNG, so both `corpus_scaling` and `fallback_write_diag` now reseed immediately
+  before adapter construction. Canonical cleaned-label Stage 1 -> 2A -> 2B pass
+  (`--seed 7 --e1 30 --e2a 20 --e2b 20`, log:
+  `artifacts/run_logs/corpus_scaling_20260601_clean_projection_reseed_seed7.log`).
   Coverage over 288 positives: plan 189/288 (66%), evidence/slot/shortcut
   288/288, epi 227/288, inv 69/288.
-- Controlled held-out metrics: plan P@1=0.31, plan hit@3=0.60, plan R@gold=0.29;
-  evidence P@1=0.84, evidence hit@3=0.98, evidence R@gold=0.66; slot=0.72,
-  epi strict=0.30, epi per-node=0.96, shortcut=0.74, inv=0.85. Fallback remains
-  applicable=0.51, blocked=1.00, negative=1.00. Write ratio is applicable=0.193,
-  blocked=0.180, negative=0.138.
+- Controlled held-out metrics: plan P@1=0.34, plan hit@3=0.71, plan R@gold=0.34;
+  evidence P@1=0.83, evidence hit@3=0.98, evidence R@gold=0.66; slot=0.66,
+  epi strict=0.28, epi per-node=0.96, shortcut=0.69, inv=0.77. Fallback remains
+  applicable=0.60, blocked=1.00, negative=1.00. Write ratio is applicable=0.168,
+  blocked=0.160, negative=0.104.
+- Added `direct_judgment calibration v2` to `fallback_write_diag` and ran the
+  canonical diagnostic (log:
+  `artifacts/run_logs/fallback_write_diag_20260601_direct_cal_v2_reseed_seed7.log`).
+  Applicable direct_judgment split: no-fallback n=8 vs fallback n=24. No-fallback
+  has evidence P@1/hit@3=0.88/1.00, verdict/reason=1.000/1.000, primary
+  epi=0.920, best-gold epi=0.970. Fallback has evidence P@1/hit@3=0.46/0.79,
+  verdict/reason=0.833/0.786, primary epi=0.069, best-gold epi=0.614, and
+  best-gold epi clears threshold only 0.54 of the time.
+- Direct_judgment v2 read: the pool contract is clean (`poolCov=1.00`, no
+  out-of-pool gold targets), and evidence top-k is still useful, but fallback
+  cases are failing exit alignment: primary evidence is often wrong/low-epi, and
+  verdict/reason slot scores sit just below the 0.85 gate. Strict epi remains a
+  poor example-level conjunction metric (`epi exact` near zero while per-node is
+  ~0.94-0.96). Next pass should improve direct_judgment slot/epistemic
+  calibration and selected-evidence control before adding a learned fallback head.
 - Read from the controlled pass: the cleaned projection restores strong evidence
   routing and safety, but the same `30/20/20` recipe does not reduce applicable
   fallback below the current band. The next lever is calibration/label quality

@@ -38,7 +38,7 @@ from v5.exit_condition import (
     _top_k_indices,
 )
 from v5.gnn_encoder import RGCNEncoder
-from v5.goal_encoder import SLOT_VOCAB
+from v5.goal_encoder import SLOT_ID, SLOT_VOCAB
 from v5.training.bridge import corpus_to_stage1_examples, load_persisted_graph
 from v5.training.corpus_scaling import _stratified_split
 from v5.training.providers import FrozenQwenHInitProvider, RealEmbedder
@@ -1238,6 +1238,195 @@ def _direct_judgment_failure_bucket_report(records: Sequence[EvalRecord]) -> Non
     print(f"  raw flags         : {dict(raw_flags.most_common())}")
 
 
+def _slot_score(rec: EvalRecord, slot_name: str) -> Tuple[float, float, bool, bool]:
+    idx = SLOT_ID.get(slot_name)
+    if idx is None:
+        return float("nan"), float("nan"), False, False
+    req = set(_required_slots(rec.ex.task_frame))
+    pred = rec.evidence_state.slot_state_r.squeeze(0)
+    gold = rec.ex.slot_target.squeeze(0) if rec.ex.slot_target is not None else None
+    pred_val = float(pred[idx].item()) if idx < pred.numel() else float("nan")
+    gold_val = float(gold[idx].item()) if gold is not None and idx < gold.numel() else float("nan")
+    required = idx in req
+    ok = (not required) or pred_val >= SLOT_FILL_THRESHOLD
+    return pred_val, gold_val, required, ok
+
+
+def _epi_exact_match(rec: EvalRecord) -> bool:
+    if rec.ex.epi_target is None:
+        return False
+    pred = (rec.evidence_state.epistemic_confidence_r > 0.5).float()
+    return bool((pred == rec.ex.epi_target).all().item())
+
+
+def _epi_node_accuracy(rec: EvalRecord) -> float:
+    if rec.ex.epi_target is None:
+        return float("nan")
+    pred = (rec.evidence_state.epistemic_confidence_r > 0.5).float()
+    return float((pred == rec.ex.epi_target).float().mean().item())
+
+
+def _routing_hit_pair(
+    rec: EvalRecord,
+    anchor_attr: str,
+    state_attr: str,
+    mask_attr: str,
+    k: int = 3,
+) -> Tuple[bool, bool]:
+    anchor = getattr(rec.ex, anchor_attr)
+    scores = _state_scores(getattr(rec, state_attr))
+    if anchor is None or scores is None:
+        return False, False
+    mask = getattr(rec.ex.graph_kv, mask_attr)
+    gold = (anchor.squeeze(0) > 0.0) & mask.bool()
+    if not bool(gold.any().item()):
+        return False, False
+    top1 = _top_indices(scores, 1)
+    topk = _top_indices(scores, k)
+    hit1 = bool(gold[top1[0]].item()) if top1 else False
+    hitk = bool(gold[topk].any().item()) if topk else False
+    return hit1, hitk
+
+
+def _direct_judgment_calibration_v2_report(records: Sequence[EvalRecord]) -> None:
+    print("\n=== direct_judgment calibration v2: exit alignment ===")
+    items = [rec for rec in records if _task_family(rec.ex) == "direct_judgment"]
+    if not items:
+        print("  no direct_judgment held-out records")
+        return
+
+    subsets = [
+        (
+            "app_no_fb",
+            [
+                rec for rec in items
+                if rec.ex.tag == "applicable"
+                and not fallback_bits(rec.evidence_state, rec.ex)["fallback"]
+            ],
+        ),
+        (
+            "app_fb",
+            [
+                rec for rec in items
+                if rec.ex.tag == "applicable"
+                and fallback_bits(rec.evidence_state, rec.ex)["fallback"]
+            ],
+        ),
+        ("blocked", [rec for rec in items if rec.ex.tag == "blocked"]),
+        ("negative", [rec for rec in items if rec.ex.tag == "negative"]),
+    ]
+
+    print(
+        "  Compares applicable exits vs fallbacks. epi_exact is strict all-node "
+        "match; epi_node is per-node accuracy."
+    )
+    print(
+        f"{'subset':12s} {'n':>3s} {'fb':>5s} "
+        f"{'plan1':>6s} {'plan3':>6s} {'evid1':>6s} {'evid3':>6s} "
+        f"{'slot_ok':>7s} {'verdict':>7s} {'reason':>7s} "
+        f"{'prim_epi':>8s} {'gold_epi':>8s} {'gold_ok':>7s} {'prim_gold':>9s} "
+        f"{'epi_exact':>9s} {'epi_node':>8s} {'write':>6s}"
+    )
+
+    for name, subset in subsets:
+        if not subset:
+            continue
+        n = len(subset)
+        fb = 0
+        plan1 = plan3 = plan_n = 0
+        evid1 = evid3 = evid_n = 0
+        slot_ok = 0
+        verdict_scores: List[float] = []
+        reason_scores: List[float] = []
+        primary_epi: List[float] = []
+        best_gold_epi: List[float] = []
+        best_gold_ok = 0
+        best_gold_n = 0
+        primary_gold = 0
+        epi_exact = 0
+        epi_node: List[float] = []
+        write_ratios: List[float] = []
+
+        for rec in subset:
+            bits = fallback_bits(rec.evidence_state, rec.ex)
+            fb += int(bits["fallback"])
+            slot_ok += int(not bits["missing_slot"])
+            p1, p3 = _routing_hit_pair(rec, "plan_anchor", "planning_state", "planning_mask")
+            if rec.ex.plan_anchor is not None:
+                plan_n += 1
+                plan1 += int(p1)
+                plan3 += int(p3)
+            e1, e3 = _routing_hit_pair(rec, "evid_anchor", "evidence_state", "evidence_mask")
+            if rec.ex.evid_anchor is not None:
+                evid_n += 1
+                evid1 += int(e1)
+                evid3 += int(e3)
+
+            verdict_pred, _verdict_gold, verdict_required, _verdict_ok = _slot_score(rec, "verdict")
+            reason_pred, _reason_gold, reason_required, _reason_ok = _slot_score(rec, "reason")
+            if verdict_required:
+                verdict_scores.append(verdict_pred)
+            if reason_required:
+                reason_scores.append(reason_pred)
+
+            primary = bits["primary_idx"]
+            pred_epi = rec.evidence_state.epistemic_confidence_r.squeeze(0)
+            if primary is not None:
+                primary_epi.append(float(pred_epi[primary].item()))
+                gold_evid = rec.ex.evid_anchor.squeeze(0) if rec.ex.evid_anchor is not None else None
+                if gold_evid is not None:
+                    primary_gold += int(bool(gold_evid[primary].item() > 0.0))
+
+            gold_evidence = _gold_indices(rec.ex.evid_anchor)
+            if gold_evidence:
+                best = max(float(pred_epi[idx].item()) for idx in gold_evidence)
+                best_gold_epi.append(best)
+                best_gold_ok += int(best >= EPISTEMIC_THRESHOLD)
+                best_gold_n += 1
+
+            if rec.ex.epi_target is not None:
+                epi_exact += int(_epi_exact_match(rec))
+                epi_node.append(_epi_node_accuracy(rec))
+
+            write_ratios.extend(rec.planning_state.write_ratios or [])
+            write_ratios.extend(rec.evidence_state.write_ratios or [])
+
+        print(
+            f"{name[:12]:12s} {n:>3d} {fb / max(1, n):>5.2f} "
+            f"{plan1 / max(1, plan_n):>6.2f} {plan3 / max(1, plan_n):>6.2f} "
+            f"{evid1 / max(1, evid_n):>6.2f} {evid3 / max(1, evid_n):>6.2f} "
+            f"{slot_ok / max(1, n):>7.2f} "
+            f"{_mean(verdict_scores):>7.3f} {_mean(reason_scores):>7.3f} "
+            f"{_mean(primary_epi):>8.3f} {_mean(best_gold_epi):>8.3f} "
+            f"{best_gold_ok / max(1, best_gold_n):>7.2f} "
+            f"{primary_gold / max(1, n):>9.2f} "
+            f"{epi_exact / max(1, n):>9.2f} {_mean(epi_node):>8.3f} "
+            f"{_mean(write_ratios):>6.3f}"
+        )
+
+    print("\n  direct_judgment slot margins by applicable fallback state:")
+    print(f"{'state':12s} {'slot':10s} {'n':>3s} {'avg_pred':>8s} {'ok':>6s} {'avg_margin':>10s}")
+    for state_name, subset in subsets[:2]:
+        by_slot = defaultdict(lambda: {"pred": [], "ok": 0, "margin": []})
+        for rec in subset:
+            for _idx, slot, pred, _gold, margin, failed in _slot_rows(rec):
+                if slot not in ("verdict", "reason"):
+                    continue
+                by_slot[slot]["pred"].append(pred)
+                by_slot[slot]["ok"] += int(not failed)
+                by_slot[slot]["margin"].append(margin)
+        for slot in ("verdict", "reason"):
+            vals = by_slot[slot]
+            n = len(vals["pred"])
+            if n == 0:
+                continue
+            print(
+                f"{state_name[:12]:12s} {slot:10s} {n:>3d} "
+                f"{_mean(vals['pred']):>8.3f} {vals['ok'] / max(1, n):>6.2f} "
+                f"{_mean(vals['margin']):>10.3f}"
+            )
+
+
 def _direct_judgment_report(
     records: Sequence[EvalRecord],
     graph=None,
@@ -1497,7 +1686,7 @@ def _build_and_train(
 ):
     _set_seed(seed)
     device = torch.device(device_str or ("cuda" if torch.cuda.is_available() else "cpu"))
-    print(f"device={device}  corpus={corpus_path}  model={model_name}")
+    print(f"device={device}  corpus={corpus_path}  model={model_name}  seed={seed}")
     print(f"schedule: e1={e1} e2a={e2a} e2b={e2b} eval_frac={eval_frac} seed={seed}")
 
     print("\n[1] substrate pass...")
@@ -1526,12 +1715,14 @@ def _build_and_train(
     )
     negs = make_real_negatives(provider, embedder, gnn, graph, device, lm_dim, pos[0])
     examples = pos + negs
-    train, ev = _stratified_split(examples, eval_frac)
+    train, ev = _stratified_split(examples, eval_frac, seed=seed)
 
     _label_distribution("train", train)
     _label_distribution("held-out", ev)
 
     print("\n[3] integrated Stage 1 -> 2A -> 2B...")
+    # Providers/GNN setup can consume RNG; reseed so --seed controls adapter init.
+    _set_seed(seed)
     adapter = V5AttentionAdapter(r_plan=3, r_evidence=4, lm_hidden_dim=lm_dim, gate_init=GATE_INIT).to(device)
     Stage1Trainer(adapter, Stage1Config(epochs=e1, lr=1e-3)).train([ex for ex in train if ex.tag != "negative"])
     Stage2Trainer(adapter, Stage2Config(sub_stage="2A", epochs=e2a, lr=2e-4)).train(train)
@@ -1571,6 +1762,7 @@ def run(
     _applicable_failure_focus_report(records, graph, applicable_focus_limit)
     _direct_judgment_routing_audit(records, graph, direct_routing_limit)
     _direct_judgment_failure_bucket_report(records)
+    _direct_judgment_calibration_v2_report(records)
     _direct_judgment_report(records, graph, direct_limit)
     _negative_safety_report(records, graph, negative_limit)
     _invalidator_case_report(records, invalidator_limit, graph)

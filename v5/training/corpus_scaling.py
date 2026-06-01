@@ -34,7 +34,6 @@ import torch
 from v5.cross_attention import V5AttentionAdapter
 from v5.exit_condition import fallback_needed
 from v5.gnn_encoder import RGCNEncoder
-from v5.goal_encoder import GoalEncoder
 from v5.training.bridge import corpus_to_stage1_examples, load_persisted_graph
 from v5.training.providers import RealEmbedder, FrozenQwenHInitProvider
 from v5.training.stage1 import Stage1Trainer, Stage1Config, _required_slot_idx
@@ -161,8 +160,6 @@ def run(corpus_path, model_name=DEFAULT_LM, device_str=None, eval_frac=0.2,
     gnn = RGCNEncoder().to(device).eval()
     for p in gnn.parameters():
         p.requires_grad_(False)
-    goal_enc = GoalEncoder().to(device).eval()
-
     gpath = _graph_path()
     graph = load_persisted_graph(gpath)
     pos = corpus_to_stage1_examples(corpus_path, gnn=gnn, embedder=embedder,
@@ -190,6 +187,8 @@ def run(corpus_path, model_name=DEFAULT_LM, device_str=None, eval_frac=0.2,
 
     # 5. integrated Stage 1 -> 2A -> 2B on TRAIN
     print("\n[5] integrated Stage 1 -> 2A -> 2B (train split)...")
+    # Providers/GNN setup can consume RNG; reseed so --seed controls adapter init.
+    _set_seed(seed)
     adapter = V5AttentionAdapter(r_plan=3, r_evidence=4, lm_hidden_dim=lm_dim, gate_init=GATE_INIT).to(device)
     train_pos = [e for e in train if e.tag != "negative"]
     Stage1Trainer(adapter, Stage1Config(epochs=e1, lr=1e-3)).train(train_pos)
