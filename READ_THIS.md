@@ -433,6 +433,53 @@
   materially stronger than planning. The false-invalidator blocker is repaired;
   the remaining fallback failures are mostly missing slots + low epistemic on
   top evidence. Do not move to Stage 3/4 yet.
+- Graph growth/richness planning checkpoint: graph-growth machinery already
+  exists, but it is split across several paths. `answer_query_v4()` produces raw
+  `graph_edits`, scoped patches, validation summaries, and session artifacts;
+  `reasoning.scoped_edits` adds scope/evidence/risk/support validation;
+  `reasoning.graph_editor` can apply edits with backups and health checks;
+  `scripts/run_batch.py --apply-edits` supports inline accumulation;
+  `scripts/process_session.py --apply` supports offline reflection edits; and
+  `v5.training.substrate` can build a substrate-enriched graph for V5 from safe
+  scoped patches.
+- Baseline from `data/distillation_corpus/sessions.jsonl` on 2026-06-02:
+  175 rows, all with scoped patches. Patch statuses are `accept=1416`,
+  `soft_only=553`, `needs_review=643`, `reject=31`. Main patch types are
+  `add_relation=1229`, `reinforce_existing=674`, `add_epistemic_state=204`,
+  `add_strategy=153`, `add_fact=100`, `add_reasoning_atom=82`,
+  `add_control_rule=81`, and `add_solved_subgoal=78`.
+- Baseline graph richness: `graphs/merged_graph.json` is 831 nodes / 1454 edges.
+  Building substrate from the current 175-row corpus would add 464 safe substrate
+  nodes and 788 relations, yielding 1295 nodes / 2242 edges in
+  `graphs/merged_graph_substrate.json` if regenerated locally. This substrate
+  path is good for V5 planning/evidence supervision, but should remain separate
+  from persistent graph promotion.
+- Proposed graph-growth control contract: three lanes, not one giant apply
+  button. Lane A: persistent graph promotion, only high-confidence accepted
+  patches with good support, low review risk, no conflicts, and healthy graph
+  delta. Lane B: V5 substrate growth, broader accepted/soft patches including
+  strategy, solved_subgoal, reasoning_atom, failure_pattern, control_rule, and
+  epistemic_state. Lane C: manual review queue for `needs_review` patches,
+  especially creative design-synthesis analogies and weakly verified claims.
+- First implementation slice should be an offline `graph_growth_audit` /
+  promotion-queue report before mutating the graph. Acceptance criteria:
+  summarize patch status/type/risk by task family and session; compute proposed
+  substrate delta; list persistent-promotion candidates separately from review
+  candidates; flag rows with bad slot frames, weak finalization quality, or
+  old-schema missing `training_eligible` / `v5_label_status`; and write a JSON
+  report that can be used by a later safe-apply command.
+- Second implementation slice should be a conservative offline apply command:
+  load the queue, apply only Lane-A candidates into a graph copy, compute
+  before/after `graph_health`, write a backup and health report, and require an
+  explicit `--apply` flag to mutate `merged_graph.json`. Do not promote
+  design-synthesis analogy claims like `v4_a8816f136f9b` unless they pass manual
+  review or a stricter evidence audit.
+- Third implementation slice should add tool/procedure richness as graph nodes:
+  represent callable tools/procedures as typed nodes (`procedure`, `tool`,
+  `control_rule`) with edges such as `requires_slot`, `produces_slot`,
+  `invalidated_by`, `uses_tool`, `verifies`, and `fallback_route`. V5 should
+  learn these as planning/control substrate, while V4 can retrieve them for
+  better tool choice and verification behavior.
 
 ---
 
