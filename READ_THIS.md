@@ -348,6 +348,12 @@
   passes 4/4. A clean health import reports backend `graph_v5`, graph dir
   `graph_v5/graphs`, corpus `graph_v5/data/distillation_corpus/sessions.jsonl`,
   session root `graph_v5/data/session_subgraphs`, and `demo_collects_corpus=True`.
+- Push note: V5 backend/readme checkpoint is on Agentic-Graph-Reasoner `main`
+  at `9ea1a9f`. The frontend code checkpoint was pushed to
+  `The-Only-Lazy-Guy/PROJECT` branch `frontend-graph-v5-demo` at `e6dc85cc`.
+  I used this clean branch because the local `reasoning-architecture` branch is
+  12 commits ahead of `origin/main`; pushing it directly would drag unrelated
+  history instead of only this demo-collection change.
 - Read: the projected pipeline is now real and end-to-end, evidence routing is
   materially stronger than planning. The false-invalidator blocker is repaired;
   the remaining fallback failures are mostly missing slots + low epistemic on
