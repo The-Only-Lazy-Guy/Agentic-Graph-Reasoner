@@ -514,6 +514,35 @@
   applicable fallback drops because the gate matches labels, or proceed to Stage
   3/4 on the (already-met) safety floor.
 
+## Session update (2026-06-02 b) — EPI LABEL FIX is the unlock (gold_all 0.45 → 0.06)
+
+- 5-trace careful inspection (`data/corpus_inspect5.jsonl`, worst finalized
+  direct_judgment, raw `filled=[]`):
+  - SLOTS already correct (dataset.py finalized fix yields `[verdict,reason]`) →
+    stale-slot hypothesis REFUTED.
+  - EPISTEMIC under-marked: finalized traces cite 1-5 evidence nodes but
+    `epi_target` marked only the SINGLE support node. The gate checks epi on the
+    PRIMARY attended evidence node → routing onto any other cited node → epi 0 →
+    fallback. This was the `right_evidence_low_epi` bucket and the `gold_all=0.45` floor.
+- FIX (`bridge.py`, commit `ce24679`): for finalized traces mark ALL cited
+  evidence-pool anchors epi-supported (+ support node + raw accessed evidence).
+  No re-projection needed (applied at load time). Verified on the 5: epi now
+  covers all cited evidence.
+- End-to-end confirmation on full 288 (same diagnostic, `--seed 7 --e1 30 --e2a 20
+  --e2b 20`, log `fallback_write_diag_epifix_seed7.log`):
+  ```
+                    before    after
+  applicable fb      0.57  →  0.21
+  gold_slots_only    0.47  →  0.17
+  gold_epi_only      0.55  →  0.21
+  gold_all           0.45  →  0.06   <- label floor lifted
+  blocked/negative   1.00  →  1.00   <- safety preserved
+  ```
+  The 45% floor was a mislabeled epistemic contract, NOT training/capacity/Stage-3/4.
+- Remaining gap (predicted 0.21 vs gold-floor 0.06) is head calibration, which the
+  full recipe (loss 3.1→1.48) should close. Next: full-recipe rerun to push
+  predicted toward 0.06, then Stage 3/4 are genuinely unblocked (safety floor met).
+
 ---
 
 ## TL;DR claim boundary
