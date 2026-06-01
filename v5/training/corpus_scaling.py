@@ -46,11 +46,18 @@ from v5.training.substrate import build_substrate_graph, DEFAULT_OUT as SUBSTRAT
 DEFAULT_LM = "Qwen/Qwen2.5-1.5B"
 
 
+def _set_seed(seed: int) -> None:
+    random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
 # ── held-out metrics ─────────────────────────────────────────────────────────
 
 def _node_pr(adapter, examples, which):
-    """Precision@1 + recall@|gold| for plan/evid node attention on held-out."""
-    hit1 = tot = rec_num = rec_den = 0
+    """Precision@1 + hit@3 + recall@|gold| for plan/evid routing."""
+    hit1 = hit3 = tot = rec_num = rec_den = 0
     for ex in examples:
         anchor = ex.plan_anchor if which == "plan" else ex.evid_anchor
         if anchor is None:
@@ -68,9 +75,16 @@ def _node_pr(adapter, examples, which):
             continue
         tot += 1
         hit1 += int(gold[attn.argmax()].item())
+        top3 = attn.topk(min(3, attn.numel())).indices
+        hit3 += int(bool(gold[top3].any().item()))
         topk = attn.topk(min(n_gold, attn.numel())).indices
         rec_num += int(gold[topk].sum().item()); rec_den += n_gold
-    return {"precision@1": hit1 / max(1, tot), "recall@gold": rec_num / max(1, rec_den), "n": tot}
+    return {
+        "precision@1": hit1 / max(1, tot),
+        "hit@3": hit3 / max(1, tot),
+        "recall@gold": rec_num / max(1, rec_den),
+        "n": tot,
+    }
 
 
 @torch.no_grad()
@@ -127,9 +141,10 @@ def _stratified_split(examples, eval_frac, seed=0):
 
 
 def run(corpus_path, model_name=DEFAULT_LM, device_str=None, eval_frac=0.2,
-        e1=200, e2a=120, e2b=150):
+        e1=200, e2a=120, e2b=150, seed=7):
+    _set_seed(seed)
     device = torch.device(device_str or ("cuda" if torch.cuda.is_available() else "cpu"))
-    print(f"device={device}  corpus={corpus_path}  eval_frac={eval_frac}")
+    print(f"device={device}  corpus={corpus_path}  eval_frac={eval_frac}  seed={seed}")
 
     # 1. substrate pass (enriched graph from THIS corpus's patches)
     print("\n[1] substrate pass...")
@@ -167,7 +182,7 @@ def run(corpus_path, model_name=DEFAULT_LM, device_str=None, eval_frac=0.2,
         print(f"    {k:9s} {v}/{len(pos)} ({v/max(1,len(pos)):.0%})")
 
     # 4. split
-    train, ev = _stratified_split(examples, eval_frac)
+    train, ev = _stratified_split(examples, eval_frac, seed=seed)
     print(f"\n[4] split: {len(train)} train / {len(ev)} held-out  "
           f"(eval tags: {dict((t, sum(1 for e in ev if e.tag==t)) for t in set(e.tag for e in ev))})")
     if len(ev) < 5:
@@ -186,8 +201,10 @@ def run(corpus_path, model_name=DEFAULT_LM, device_str=None, eval_frac=0.2,
     print("\n[6] HELD-OUT METRICS")
     m = heldout_metrics(adapter, ev)
     print(f"    plan  node  precision@1={m['plan_node']['precision@1']:.2f} "
+          f"hit@3={m['plan_node']['hit@3']:.2f} "
           f"recall@gold={m['plan_node']['recall@gold']:.2f} (n={m['plan_node']['n']})")
     print(f"    evid  node  precision@1={m['evid_node']['precision@1']:.2f} "
+          f"hit@3={m['evid_node']['hit@3']:.2f} "
           f"recall@gold={m['evid_node']['recall@gold']:.2f} (n={m['evid_node']['n']})")
     print(f"    head acc (strict all-node): " + "  ".join(f"{k}={v:.2f}" for k, v in m["head_acc"].items()))
     print(f"    epi per-node acc: {m['epi_per_node_acc']:.2f}  (less strict than all-node)")
@@ -207,5 +224,6 @@ if __name__ == "__main__":
     ap.add_argument("--e1", type=int, default=200)
     ap.add_argument("--e2a", type=int, default=120)
     ap.add_argument("--e2b", type=int, default=150)
+    ap.add_argument("--seed", type=int, default=7)
     a = ap.parse_args()
-    run(a.corpus, a.model, a.device, a.eval_frac, a.e1, a.e2a, a.e2b)
+    run(a.corpus, a.model, a.device, a.eval_frac, a.e1, a.e2a, a.e2b, a.seed)

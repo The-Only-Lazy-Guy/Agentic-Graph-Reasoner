@@ -202,6 +202,22 @@
   evidence/epistemic calibration on selected in-pool evidence plus direct_judgment
   planning substrate quality, while preserving the blocked/negative forced
   fallback guard.
+- Added deterministic `--seed` plus plan/evidence `hit@3` reporting to
+  `v5.training.corpus_scaling`, then ran the controlled cleaned-label integrated
+  Stage 1 -> 2A -> 2B pass (`--seed 7 --e1 30 --e2a 20 --e2b 20`, log:
+  `artifacts/run_logs/corpus_scaling_20260601_clean_projection_seed7.log`).
+  Coverage over 288 positives: plan 189/288 (66%), evidence/slot/shortcut
+  288/288, epi 227/288, inv 69/288.
+- Controlled held-out metrics: plan P@1=0.31, plan hit@3=0.60, plan R@gold=0.29;
+  evidence P@1=0.84, evidence hit@3=0.98, evidence R@gold=0.66; slot=0.72,
+  epi strict=0.30, epi per-node=0.96, shortcut=0.74, inv=0.85. Fallback remains
+  applicable=0.51, blocked=1.00, negative=1.00. Write ratio is applicable=0.193,
+  blocked=0.180, negative=0.138.
+- Read from the controlled pass: the cleaned projection restores strong evidence
+  routing and safety, but the same `30/20/20` recipe does not reduce applicable
+  fallback below the current band. The next lever is calibration/label quality
+  on direct_judgment slots + epistemic confidence and planning substrate, not
+  Stage 3/4 or a blind second schedule.
 - Read: the projected pipeline is now real and end-to-end, evidence routing is
   materially stronger than planning. The false-invalidator blocker is repaired;
   the remaining fallback failures are mostly missing slots + low epistemic on
