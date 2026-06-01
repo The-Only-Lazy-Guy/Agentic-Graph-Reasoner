@@ -379,6 +379,28 @@
   confidence, and open questions. This is the useful V5 supervision signal; the
   goal is not more raw hidden CoT, but structured evidence/support/quality labels
   that prevent expensive post-hoc parsing.
+- V4 quality checkpoint after inspecting
+  `data/session_subgraphs/v4_a8816f136f9b`: the matching corpus sample is
+  `data/distillation_corpus/sessions.jsonl` line 175. Question:
+  "Design a better way to update neural network than back propogation." The run
+  finalized after 10/12 steps with 46 tool calls, but it is not a clean V5
+  positive. Slot coverage is only 2/10, controller action counts are
+  `REUSE=2 QUERY=3 DERIVE=1 VERIFY=0 FINALIZE=0`, and controller fallback was
+  used. The answer introduces external ML methods (`InfoNCE`, `SimCLR`,
+  forward-forward, predictive coding) while the graph support is mostly
+  analogy/bridge nodes from data structures, DP, topology, networking, and C++.
+- The `v4_a8816f136f9b` row shows a task-frame contract smell: a neural-network
+  design prompt was assigned required slots like `rank_query`, `pagination`,
+  `tie_policy`, `latency_budget`, and `consistency_model`. Those are poor slots
+  for this design question and would create noisy V5 slot labels. Treat this row
+  as `needs_review` / soft-fallback calibration, not answer-quality supervision.
+- Patch quality for `v4_a8816f136f9b` agrees with that read: 37 proposed scoped
+  patches, with `needs_review=23`, `accept=8`, `soft_only=6`; 20 were medium
+  risk. The accepted patches are mostly epistemic/failure-pattern scaffolding,
+  while the main claim/strategy patches inherit `needs_review` or have very low
+  evidence support. The row also predates the newest quality fields
+  (`training_eligible`, `v5_label_status`, `finalization_quality`), so it needs
+  post-hoc filtering if kept in the corpus.
 - Verification for this V4 checkpoint: `py_compile` passed for `answerer_v4.py`,
   `reasoning/distillation_corpus.py`, `reasoning/tests/test_v4_corpus_quality.py`,
   and `run_repeat_learning_experiment.py`. Targeted tests passed:
