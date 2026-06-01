@@ -108,6 +108,28 @@
   selection and epistemic calibration, not raw slot aliasing. Oracle gold-all
   only drops applicable fallback to 0.40 and leaves negative at 0.67, so do not
   treat this as solved by per-slot threshold tuning alone.
+- Added the negative shortcut safety pass. No-graph negatives now carry explicit
+  question/case ids, zero slot/epi/shortcut targets, and a task-frame contract:
+  `graph_context=no_graph`, `allow_shortcut_exit=False`, `force_fallback=True`.
+  `should_exit_loop()` refuses early graph-certification exits for forced-fallback
+  contexts, and `fallback_needed()` now receives the injector task frame.
+- Latest seeded diagnostic after the shortcut guard
+  (`--seed 7 --e1 30 --e2a 20 --e2b 20`, log:
+  `artifacts/run_logs/fallback_write_diag_20260601_negative_shortcut_guard_seed7.log`):
+  applicable fallback=0.53, blocked=0.82, negative=1.00. Negative exits are now
+  all `max_loops_reached`; no held-out no-graph case exits `shortcut_verified`.
+  Oracle gold-all is applicable=0.43, blocked=0.82, negative=1.00.
+- Negative audit now prints graph context, active node type counts, substrate
+  counts, top evidence nodes, question, slots, epi, shortcut, and write ratios.
+  The audit still shows irrelevant active substrate around negatives
+  (`strategy`, `solved_subgoal`, `reasoning_atom`), but the gate no longer lets
+  that substrate certify a no-graph answer. Negative total write is 0.132, lower
+  than applicable no-fallback 0.164 but still above the ideal early 0.03-0.07 band.
+- Current read after the negative shortcut safety pass: safety is repaired enough
+  that negatives no longer leak through shortcut, but Stage 3/4 still stay held.
+  The main remaining blocker is direct_judgment evidence/planning + epistemic
+  calibration: direct_judgment applicable fallback is still 23/35 (0.66), mostly
+  low epistemic / wrong primary evidence.
 - Read: the projected pipeline is now real and end-to-end, evidence routing is
   materially stronger than planning. The false-invalidator blocker is repaired;
   the remaining fallback failures are mostly missing slots + low epistemic on

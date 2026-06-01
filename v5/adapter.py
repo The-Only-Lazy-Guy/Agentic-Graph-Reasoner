@@ -249,7 +249,7 @@ class GraphAttentionInjector:
         from v5.exit_condition import fallback_needed
         if self._evid_state is None:
             return False
-        return fallback_needed(self._evid_state)
+        return fallback_needed(self._evid_state, self._task_frame)
 
 
 def _get_transformer_layers(model: nn.Module) -> List[nn.Module]:

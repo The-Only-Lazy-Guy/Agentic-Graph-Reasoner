@@ -23,6 +23,7 @@ SLOT_FILL_THRESHOLD = 0.85
 EPISTEMIC_THRESHOLD = 0.70
 SHORTCUT_THRESHOLD = 0.85
 TOP_K_NODES = 3
+FORCE_FALLBACK_CONTEXTS = frozenset({"no_graph", "weak_evidence", "unsupported"})
 
 
 def _attention_entropy(node_scores: Tensor) -> float:
@@ -40,6 +41,29 @@ def _required_slot_indices(task_frame: Optional[dict]) -> Optional[List[int]]:
         return None
     from v5.goal_encoder import SLOT_ID
     return [SLOT_ID.get(str(s), SLOT_ID["unknown"]) for s in slots]
+
+
+def _force_fallback(task_frame: Optional[dict]) -> bool:
+    """True when the controller already knows graph support is unavailable.
+
+    This is used for no-graph / weak-evidence prompts: even if the learned heads
+    hallucinate high slot, epistemic, or shortcut confidence on an irrelevant
+    node, the graph adapter must not self-certify the answer.
+    """
+    if not task_frame:
+        return False
+    if bool(task_frame.get("force_fallback")):
+        return True
+    context = str(task_frame.get("graph_context") or "").lower()
+    return context in FORCE_FALLBACK_CONTEXTS
+
+
+def _shortcut_exit_allowed(task_frame: Optional[dict]) -> bool:
+    if _force_fallback(task_frame):
+        return False
+    if task_frame and task_frame.get("allow_shortcut_exit") is False:
+        return False
+    return True
 
 
 def _all_slots_filled(
@@ -83,6 +107,9 @@ def should_exit_loop(
     if N == 0:
         return True, "empty_node_pool"
 
+    if _force_fallback(task_frame):
+        return False, ""
+
     top_k = _top_k_indices(state.node_scores_r)
     required_indices = _required_slot_indices(task_frame)
 
@@ -106,7 +133,13 @@ def should_exit_loop(
 
     # 6. Shortcut path
     shortcut_val = float(state.shortcut_validity_r.item())
-    if shortcut_val > SHORTCUT_THRESHOLD and no_invalidators and epistemic_ok and slots_ok:
+    if (
+        _shortcut_exit_allowed(task_frame)
+        and shortcut_val > SHORTCUT_THRESHOLD
+        and no_invalidators
+        and epistemic_ok
+        and slots_ok
+    ):
         return True, "shortcut_verified"
 
     if attention_stable and slots_ok and no_invalidators and epistemic_ok:
@@ -120,6 +153,9 @@ def fallback_needed(
     task_frame: Optional[dict] = None,
 ) -> bool:
     """True when max_loops_reached but reasoning still incomplete."""
+    if _force_fallback(task_frame):
+        return True
+
     if state.exit_reason != "max_loops_reached":
         return False
 

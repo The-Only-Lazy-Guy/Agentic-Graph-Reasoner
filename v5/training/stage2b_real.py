@@ -29,7 +29,7 @@ from v5.adapter import GraphAttentionInjector
 from v5.cross_attention import V5AttentionAdapter
 from v5.exit_condition import fallback_needed
 from v5.gnn_encoder import RGCNEncoder
-from v5.goal_encoder import GoalEncoder
+from v5.goal_encoder import GoalEncoder, NUM_SLOTS
 from v5.perturbation_baseline import evaluate_injection
 from v5.training.bridge import (corpus_to_stage1_examples, load_persisted_graph,
                                 _neighborhood, _goal_for)
@@ -65,20 +65,31 @@ def make_real_negatives(provider, embedder, gnn, graph, device, lm_dim, sample):
     """Real negatives: no-graph questions with real h_init over an irrelevant
     subgraph. Correct behavior: diffuse attention, small write, fallback."""
     node_ids = _neighborhood(graph, sample.node_ids, hops=1, max_nodes=18)
+    negative_task_frame = dict(sample.task_frame or {})
+    negative_task_frame.update({
+        "graph_context": "no_graph",
+        "allow_shortcut_exit": False,
+        "force_fallback": True,
+    })
     text_emb = embedder.embed_nodes({nid: (getattr(graph.nodes[nid], "text", "") or "") for nid in node_ids})
     from v5.subgraph import build_active_subgraph
-    asg = build_active_subgraph(graph, node_ids, text_emb, device, sample.task_frame)
+    asg = build_active_subgraph(graph, node_ids, text_emb, device, negative_task_frame)
     with torch.no_grad():
         kv = gnn.encode_to_kv(asg.encoder_inputs, asg)
     negs = []
-    for q in NO_GRAPH_QUESTIONS:
-        h = provider(q, sample.task_frame)
+    slot_zero = torch.zeros(1, NUM_SLOTS, dtype=torch.float32, device=device)
+    epi_zero = torch.zeros(1, len(node_ids), dtype=torch.float32, device=device)
+    shortcut_zero = torch.zeros(1, 1, dtype=torch.float32, device=device)
+    for idx, q in enumerate(NO_GRAPH_QUESTIONS):
+        h = provider(q, negative_task_frame)
         negs.append(Stage1Example(
-            h_init=h, graph_kv=kv, goal=_goal_for(sample.task_frame, device),
-            node_ids=node_ids, task_frame=sample.task_frame,
-            plan_anchor=None, evid_anchor=None, slot_target=None,
-            epi_target=None, inv_target=None, shortcut_target=None,
+            h_init=h, graph_kv=kv, goal=_goal_for(negative_task_frame, device),
+            node_ids=node_ids, task_frame=dict(negative_task_frame),
+            plan_anchor=None, evid_anchor=None, slot_target=slot_zero.clone(),
+            epi_target=epi_zero.clone(), inv_target=None, shortcut_target=shortcut_zero.clone(),
             tag="negative",
+            case_id=f"no_graph_{idx:02d}",
+            question=q,
         ))
     return negs
 

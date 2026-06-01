@@ -31,6 +31,7 @@ from v5.exit_condition import (
     EPISTEMIC_THRESHOLD,
     SHORTCUT_THRESHOLD,
     SLOT_FILL_THRESHOLD,
+    _force_fallback,
     _required_slot_indices,
     _top_k_indices,
 )
@@ -61,6 +62,16 @@ SUPPORTIVE_RELATIONS = frozenset({
     "refines",
     "depend",
     "depends_on",
+})
+SUBSTRATE_NODE_TYPES = frozenset({
+    "strategy",
+    "failure_pattern",
+    "control_rule",
+    "reasoning_atom",
+    "reasoning_chain",
+    "derived_reasoning",
+    "solved_subgoal",
+    "epistemic_state",
 })
 
 
@@ -162,11 +173,13 @@ def fallback_bits(
     no_inv = _no_inv_top(es, ex, top, gold=gold_inv)
     epi_ok = _epi_primary_ok(es, ex, primary, gold=gold_epi)
     shortcut_ok = _shortcut_ok(es, ex, gold=gold_shortcut)
+    forced_fallback = _force_fallback(ex.task_frame)
 
-    fallback = bool(max_loops and (empty_pool or not (slots_ok and no_inv and epi_ok)))
+    fallback = bool(forced_fallback or (max_loops and (empty_pool or not (slots_ok and no_inv and epi_ok))))
     return {
         "fallback": fallback,
         "exit_reason": es.exit_reason,
+        "forced_fallback": forced_fallback,
         "max_loops": max_loops,
         "empty_pool": empty_pool,
         "missing_slot": not slots_ok,
@@ -237,6 +250,7 @@ def _fallback_trip_report(records: Sequence[EvalRecord]) -> None:
         by_tag[rec.ex.tag].append(rec)
 
     reason_keys = [
+        "forced_fallback",
         "max_loops",
         "empty_pool",
         "missing_slot",
@@ -482,7 +496,7 @@ def _gold_evidence_summary(rec: EvalRecord) -> Tuple[str, float, float, int]:
 
 
 def _failure_names(bits: Dict[str, object], include_shortcut: bool = False) -> List[str]:
-    keys = ["empty_pool", "missing_slot", "low_epistemic", "invalidator_active"]
+    keys = ["forced_fallback", "empty_pool", "missing_slot", "low_epistemic", "invalidator_active"]
     if include_shortcut:
         keys.append("shortcut_invalid")
     return [name for name in keys if bool(bits[name])]
@@ -501,6 +515,15 @@ def _primary_summary(rec: EvalRecord, primary: Optional[int]) -> Tuple[str, str,
         float(gold_epi[primary].item()) if gold_epi is not None else float("nan"),
         bool(gold_evid[primary].item() > 0.0) if gold_evid is not None else False,
     )
+
+
+def _node_type_counts(rec: EvalRecord) -> Counter[str]:
+    return Counter(str(t) for t in rec.ex.graph_kv.node_types)
+
+
+def _substrate_type_counts(rec: EvalRecord) -> Dict[str, int]:
+    counts = _node_type_counts(rec)
+    return {name: counts[name] for name in sorted(SUBSTRATE_NODE_TYPES) if counts[name]}
 
 
 def _applicable_calibration_report(
@@ -770,10 +793,19 @@ def _negative_safety_report(
             rec, bits["primary_idx"])
         plan_wr = _mean(list(rec.planning_state.write_ratios or []))
         evid_wr = _mean(list(rec.evidence_state.write_ratios or []))
+        task_frame = rec.ex.task_frame or {}
+        node_counts = _node_type_counts(rec)
+        substrate_counts = _substrate_type_counts(rec)
         print(
             f"\n  negative {idx}: fallback={bits['fallback']} exit={bits['exit_reason']} "
             f"failures={_failure_names(bits, include_shortcut=True)} "
             f"plan_wr={plan_wr:.3f} evid_wr={evid_wr:.3f}"
+        )
+        print(
+            "    task_context: "
+            f"graph_context={task_frame.get('graph_context', 'graph')} "
+            f"force_fallback={bool(task_frame.get('force_fallback'))} "
+            f"allow_shortcut_exit={task_frame.get('allow_shortcut_exit', True)}"
         )
         print(f"    required_slots: {(rec.ex.task_frame or {}).get('required_slots') or []}")
         print(f"    slots: {_format_slot_rows(_slot_rows(rec))}")
@@ -782,6 +814,22 @@ def _negative_safety_report(
             f"gold_epi={primary_gold_epi:.0f} gold_evidence={primary_gold_evid} "
             f"shortcut={float(rec.evidence_state.shortcut_validity_r.item()):.3f}"
         )
+        print(
+            f"    active_nodes: n={len(rec.ex.node_ids)} "
+            f"types={dict(node_counts.most_common(8))} "
+            f"substrate={substrate_counts or {}}"
+        )
+        pred_epi = rec.evidence_state.epistemic_confidence_r.squeeze(0)
+        node_scores = rec.evidence_state.node_scores_r.squeeze(0)
+        print("    top_evidence_nodes:")
+        for rank, node_idx in enumerate(list(bits["top_indices"])[:5], start=1):
+            node_id = rec.ex.node_ids[node_idx]
+            node_type = rec.ex.graph_kv.node_types[node_idx]
+            print(
+                f"      {rank}. id={node_id} type={node_type} "
+                f"score={float(node_scores[node_idx].item()):.3f} "
+                f"epi={float(pred_epi[node_idx].item()):.3f}"
+            )
         ptype, ptext = _node_summary(graph, primary_id)
         if ptext:
             print(f"    primary_text: type={ptype} text={ptext}")
