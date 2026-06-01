@@ -34,6 +34,7 @@ from v5.exit_condition import (
     SHORTCUT_THRESHOLD,
     SLOT_FILL_THRESHOLD,
     _force_fallback,
+    _primary_support_index,
     _required_slot_indices,
     _top_k_indices,
 )
@@ -170,7 +171,7 @@ def fallback_bits(
     max_loops = es.exit_reason == "max_loops_reached"
     empty_pool = not bool(ex.graph_kv.evidence_mask.any().item())
     top = _top_k_indices(es.node_scores_r) if es.node_scores_r.shape[-1] else []
-    primary = top[0] if top else None
+    primary = _primary_support_index(es, top)
     slots_ok, missing_slots = _slots_ok(es, ex, gold=gold_slots)
     no_inv = _no_inv_top(es, ex, top, gold=gold_inv)
     epi_ok = _epi_primary_ok(es, ex, primary, gold=gold_epi)
@@ -1288,6 +1289,22 @@ def _routing_hit_pair(
     return hit1, hitk
 
 
+def _support_hit_pair(rec: EvalRecord, k: int = 3) -> Tuple[bool, bool, bool]:
+    target = rec.ex.support_anchor if rec.ex.support_anchor is not None else rec.ex.evid_anchor
+    scores = rec.evidence_state.support_scores_r
+    if target is None or scores is None:
+        return False, False, False
+    gold = (target.squeeze(0) > 0.0) & rec.ex.graph_kv.evidence_mask.bool()
+    if not bool(gold.any().item()):
+        return False, False, False
+    flat = scores.squeeze(0)
+    top1 = _top_indices(flat, 1)
+    topk = _top_indices(flat, k)
+    hit1 = bool(gold[top1[0]].item()) if top1 else False
+    hitk = bool(gold[topk].any().item()) if topk else False
+    return True, hit1, hitk
+
+
 def _direct_judgment_calibration_v2_report(records: Sequence[EvalRecord]) -> None:
     print("\n=== direct_judgment calibration v2: exit alignment ===")
     items = [rec for rec in records if _task_family(rec.ex) == "direct_judgment"]
@@ -1403,6 +1420,22 @@ def _direct_judgment_calibration_v2_report(records: Sequence[EvalRecord]) -> Non
             f"{epi_exact / max(1, n):>9.2f} {_mean(epi_node):>8.3f} "
             f"{_mean(write_ratios):>6.3f}"
         )
+
+    print("\n  support-primary rerank by direct_judgment subset:")
+    print(f"{'subset':12s} {'n':>3s} {'support@1':>10s} {'support@3':>10s}")
+    for name, subset in subsets:
+        if not subset:
+            continue
+        n = hit1 = hit3 = 0
+        for rec in subset:
+            has_target, s1, s3 = _support_hit_pair(rec)
+            if not has_target:
+                continue
+            n += 1
+            hit1 += int(s1)
+            hit3 += int(s3)
+        if n:
+            print(f"{name[:12]:12s} {n:>3d} {hit1 / n:>10.2f} {hit3 / n:>10.2f}")
 
     print("\n  direct_judgment slot margins by applicable fallback state:")
     print(f"{'state':12s} {'slot':10s} {'n':>3s} {'avg_pred':>8s} {'ok':>6s} {'avg_margin':>10s}")

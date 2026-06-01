@@ -218,6 +218,7 @@ class RecurrentAttentionBlock(nn.Module):
             shortcut_validity_r=torch.zeros(1, 1, device=device),
             epistemic_confidence_r=torch.zeros(1, N, device=device),
             invalidator_flags_r=init_inv,
+            support_scores_r=torch.zeros(1, N, device=device),
             loop_idx=0,
         )
 
@@ -253,6 +254,7 @@ class RecurrentAttentionBlock(nn.Module):
                 shortcut_validity_r=state.shortcut_validity_r,
                 epistemic_confidence_r=state.epistemic_confidence_r,
                 invalidator_flags_r=state.invalidator_flags_r,
+                support_scores_r=state.support_scores_r,
                 loop_idx=r,
             )
             state = self.aux.update_state(
@@ -268,6 +270,10 @@ class RecurrentAttentionBlock(nn.Module):
                 masked_scores = state.node_scores_r.clone()
                 masked_scores[:, ~node_mask] = _NEG_INF
                 state.node_scores_r = masked_scores
+                if state.support_scores_r is not None:
+                    masked_support = state.support_scores_r.clone()
+                    masked_support[:, ~node_mask] = _NEG_INF
+                    state.support_scores_r = masked_support
 
             # 4. Log
             loop_log.append(state.to_log_entry(node_ids or [], layer=self.layer_id))

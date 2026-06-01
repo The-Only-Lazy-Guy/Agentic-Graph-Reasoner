@@ -184,11 +184,13 @@ def test_bridge_prefers_projected_plan_and_evidence_targets():
     assert "strat_1" in ex.node_ids
     assert ex.plan_anchor is not None
     assert ex.evid_anchor is not None
+    assert ex.support_anchor is not None
 
     strat_idx = ex.node_ids.index("strat_1")
     fact_idx = ex.node_ids.index("fact_a")
     assert ex.plan_anchor[0, strat_idx].item() > 0.0
     assert ex.evid_anchor[0, fact_idx].item() > 0.0
+    assert ex.support_anchor[0, fact_idx].item() > 0.0
 
     adapter = V5AttentionAdapter(r_plan=1, r_evidence=1, lm_hidden_dim=128, gate_init=0.02).to(device)
     _, ps, _ = adapter.run_planning(ex.h_init, ex.goal, ex.graph_kv, ex.node_ids, task_frame=ex.task_frame)
@@ -238,6 +240,7 @@ def test_bridge_masks_projected_targets_to_block_pools():
     assert ex.evid_anchor is not None
     assert ex.evid_anchor[0, fact_idx].item() > 0.0
     assert ex.evid_anchor[0, example_idx].item() == 0.0
+    assert ex.support_anchor is None or ex.support_anchor[0, example_idx].item() == 0.0
 
 
 def test_finalized_required_slots_are_marked_filled_even_if_metric_omits_one():

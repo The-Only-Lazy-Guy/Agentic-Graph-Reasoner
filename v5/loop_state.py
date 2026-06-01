@@ -1,8 +1,9 @@
-"""LoopState dataclass and six auxiliary prediction heads.
+"""LoopState dataclass and auxiliary prediction heads.
 
 Auxiliary heads (all small MLPs trained jointly with LoRA):
   slot_head         -> slot fill confidence per slot name
   node_head         -> per-node attention logit adjustment
+  support_head      -> per-node support-primary rerank score
   state_overlay_head-> additive K, V deltas from loop state (no GNN re-run)
   epistemic_head    -> per-node epistemic confidence
   invalidator_head  -> which invalidator flags are active
@@ -37,6 +38,7 @@ class LoopState:
     shortcut_validity_r: Tensor                      # [1, 1] scalar 0-1
     epistemic_confidence_r: Tensor                   # [1, N] per-node belief confidence
     invalidator_flags_r: Tensor                      # [1, N] float (>0.5 = fired)
+    support_scores_r: Optional[Tensor] = None         # [1, N] evidence-primary rerank logits
     loop_idx: int = 0
     exit_reason: Optional[str] = None
     # Per-loop telemetry attached by RecurrentAttentionBlock for Stage 2:
@@ -54,6 +56,11 @@ class LoopState:
         scores = self.node_scores_r.squeeze(0).tolist()       # [N]
         epi = self.epistemic_confidence_r.squeeze(0).tolist() # [N]
         inv = self.invalidator_flags_r.squeeze(0).tolist()    # [N]
+        support = (
+            self.support_scores_r.squeeze(0).tolist()
+            if self.support_scores_r is not None
+            else None
+        )
         slots = self.slot_state_r.squeeze(0).tolist()         # [NUM_SLOTS]
 
         top_indices = sorted(range(len(scores)), key=lambda i: -scores[i])[:top_k]
@@ -68,6 +75,10 @@ class LoopState:
             "epistemic_confidence_top": {
                 node_ids[i]: round(epi[i], 3) for i in top_indices
             },
+            "support_primary_score_top": (
+                {node_ids[i]: round(support[i], 3) for i in top_indices}
+                if support is not None else {}
+            ),
             "invalidator_flags_top": {
                 node_ids[i]: bool(inv[i] > 0.5) for i in top_indices
             },
@@ -108,6 +119,15 @@ class NodeHead(nn.Module):
         h_p = self.h_proj(h)                    # [B, NODE_HEAD_DIM]
         n_p = self.n_proj(node_embeddings)      # [N, NODE_HEAD_DIM]
         return h_p @ n_p.T                      # [B, N]
+
+
+class SupportHead(NodeHead):
+    """(h_r, node_embeddings) -> [B, N] evidence-primary rerank logits.
+
+    The evidence attention score answers "what did the block look at?" This head
+    answers the narrower fallback question: among evidence top-k, which node is
+    the primary support the answer should rely on?
+    """
 
 
 class StateOverlayHead(nn.Module):
@@ -250,7 +270,7 @@ class ShortcutHead(nn.Module):
 
 
 class AuxHeads(nn.Module):
-    """Container for all six auxiliary heads. Trained jointly with LoRA."""
+    """Container for the auxiliary heads. Trained jointly with LoRA."""
 
     def __init__(
         self,
@@ -267,6 +287,7 @@ class AuxHeads(nn.Module):
         self.head_norm = nn.LayerNorm(lm_hidden_dim)
         self.slot = SlotHead(lm_hidden_dim)
         self.node = NodeHead(lm_hidden_dim, gnn_dim)
+        self.support = SupportHead(lm_hidden_dim, gnn_dim)
         self.overlay = StateOverlayHead(gnn_dim)
         self.epistemic = EpistemicHead(lm_hidden_dim, gnn_dim)
         self.invalidator = InvalidatorHead(lm_hidden_dim, gnn_dim)
@@ -294,6 +315,7 @@ class AuxHeads(nn.Module):
 
         new_slot = self.slot(h)                                # [1, NUM_SLOTS]
         new_node_adj = self.node(h, node_embeddings)           # [1, N]
+        new_support = self.support(h, node_embeddings)         # [1, N]
         new_shortcut = self.shortcut(h)                        # [1, 1]
         new_epistemic = self.epistemic(h, node_embeddings)     # [1, N]
         dynamic_inv = self.invalidator(h, node_embeddings)     # [1, N]  0-1
@@ -314,6 +336,7 @@ class AuxHeads(nn.Module):
             shortcut_validity_r=new_shortcut,
             epistemic_confidence_r=new_epistemic,
             invalidator_flags_r=combined_inv,
+            support_scores_r=new_support,
             loop_idx=state.loop_idx + 1,
             exit_reason=None,
         )

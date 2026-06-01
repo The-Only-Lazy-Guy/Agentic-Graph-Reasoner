@@ -86,11 +86,34 @@ def _node_pr(adapter, examples, which):
     }
 
 
+def _support_pr(adapter, examples):
+    """Primary-support rerank P@1/hit@3 against support/evidence targets."""
+    hit1 = hit3 = tot = 0
+    for ex in examples:
+        anchor = ex.support_anchor if ex.support_anchor is not None else ex.evid_anchor
+        if anchor is None:
+            continue
+        _, ps, _ = adapter.run_planning(ex.h_init, ex.goal, ex.graph_kv, ex.node_ids, task_frame=ex.task_frame)
+        _, es, _ = adapter.run_evidence(ps.h_r, ex.goal, ex.graph_kv, ex.node_ids, task_frame=ex.task_frame)
+        if es.support_scores_r is None:
+            continue
+        gold = anchor.squeeze(0) > 0.0
+        if not bool(gold.any().item()):
+            continue
+        scores = es.support_scores_r.squeeze(0)
+        tot += 1
+        hit1 += int(bool(gold[int(scores.argmax().item())].item()))
+        top3 = scores.topk(min(3, scores.numel())).indices
+        hit3 += int(bool(gold[top3].any().item()))
+    return {"precision@1": hit1 / max(1, tot), "hit@3": hit3 / max(1, tot), "n": tot}
+
+
 @torch.no_grad()
 def heldout_metrics(adapter, examples):
     adapter.eval()
     plan_pr = _node_pr(adapter, examples, "plan")
     evid_pr = _node_pr(adapter, examples, "evid")
+    support_pr = _support_pr(adapter, examples)
     head = defaultdict(lambda: [0, 0])     # name -> [hit, n]  (strict all-node match)
     fb = defaultdict(lambda: [0, 0])       # tag -> [fb, n]
     wr = defaultdict(list)
@@ -117,7 +140,7 @@ def heldout_metrics(adapter, examples):
         fb[ex.tag][0] += int(fallback_needed(es, ex.task_frame)); fb[ex.tag][1] += 1
         wr[ex.tag] += (ps.write_ratios or []) + (es.write_ratios or [])
     return {
-        "plan_node": plan_pr, "evid_node": evid_pr,
+        "plan_node": plan_pr, "evid_node": evid_pr, "support_node": support_pr,
         "head_acc": {k: v[0] / max(1, v[1]) for k, v in head.items()},
         "fallback": {k: v[0] / max(1, v[1]) for k, v in fb.items()},
         "write_ratio": {k: (sum(v) / max(1, len(v))) for k, v in wr.items()},
@@ -169,9 +192,10 @@ def run(corpus_path, model_name=DEFAULT_LM, device_str=None, eval_frac=0.2,
     examples = pos + negs
 
     # 3. coverage report
-    cov = {"plan": 0, "evid": 0, "slot": 0, "epi": 0, "inv": 0, "shortcut": 0}
+    cov = {"plan": 0, "evid": 0, "support": 0, "slot": 0, "epi": 0, "inv": 0, "shortcut": 0}
     for e in pos:
         cov["plan"] += int(e.plan_anchor is not None); cov["evid"] += int(e.evid_anchor is not None)
+        cov["support"] += int(e.support_anchor is not None)
         cov["slot"] += int(e.slot_target is not None); cov["epi"] += int(e.epi_target is not None)
         cov["inv"] += int(e.inv_target is not None); cov["shortcut"] += int(e.shortcut_target is not None)
     print(f"\n[3] coverage over {len(pos)} positive traces:")
@@ -205,6 +229,8 @@ def run(corpus_path, model_name=DEFAULT_LM, device_str=None, eval_frac=0.2,
     print(f"    evid  node  precision@1={m['evid_node']['precision@1']:.2f} "
           f"hit@3={m['evid_node']['hit@3']:.2f} "
           f"recall@gold={m['evid_node']['recall@gold']:.2f} (n={m['evid_node']['n']})")
+    print(f"    support primary precision@1={m['support_node']['precision@1']:.2f} "
+          f"hit@3={m['support_node']['hit@3']:.2f} (n={m['support_node']['n']})")
     print(f"    head acc (strict all-node): " + "  ".join(f"{k}={v:.2f}" for k, v in m["head_acc"].items()))
     print(f"    epi per-node acc: {m['epi_per_node_acc']:.2f}  (less strict than all-node)")
     print(f"    fallback: " + "  ".join(f"{k}={v:.2f}" for k, v in m["fallback"].items()))

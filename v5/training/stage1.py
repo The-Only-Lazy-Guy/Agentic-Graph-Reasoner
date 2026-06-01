@@ -52,6 +52,7 @@ class Stage1Example:
 
     plan_anchor: Optional[Tensor] = None   # [1, N] planning node target
     evid_anchor: Optional[Tensor] = None   # [1, N] evidence node target
+    support_anchor: Optional[Tensor] = None # [1, N] primary-support rerank target
     slot_target: Optional[Tensor] = None   # [1, NUM_SLOTS]
     epi_target: Optional[Tensor] = None    # [1, N]
     inv_target: Optional[Tensor] = None    # [1, N] (structural nodes only)
@@ -67,8 +68,8 @@ class Stage1Example:
 def prepare_stage1(adapter: V5AttentionAdapter, freeze_overlay: bool = False) -> List[Tensor]:
     """Freeze everything except the prediction heads; return trainable params.
 
-    Stage 1 trains the aux prediction heads (slot/node/epistemic/invalidator/
-    shortcut + head_norm). The cross-attention projections (W_q/W_k/W_v/W_o and
+    Stage 1 trains the aux prediction heads (slot/node/support/epistemic/
+    invalidator/shortcut + head_norm). The cross-attention projections (W_q/W_k/W_v/W_o and
     K/V proj) are frozen — they are Stage 2. The StateOverlayHead is frozen here
     when `freeze_overlay=True` (strict staging: overlay is Stage 3); the proven
     recipe also works with it trainable, so it defaults to trainable.
@@ -106,6 +107,19 @@ def pool_ce(scores: Tensor, target_onehot: Tensor, pool_mask: Tensor) -> Tensor:
     return -(tgt * logp).sum()
 
 
+def pool_bce_logits(scores: Tensor, target: Tensor, pool_mask: Tensor) -> Tensor:
+    """Multi-label BCE on nodes inside a pool.
+
+    Support-primary reranking can have more than one valid support node, so this
+    head should not force positives to split one softmax probability mass.
+    """
+    if pool_mask is None or not pool_mask.any():
+        return scores.sum() * 0.0
+    m = pool_mask.bool()
+    target_binary = (target > 0.0).float()
+    return F.binary_cross_entropy_with_logits(scores[m], target_binary[m])
+
+
 # ── trainer ──────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -118,6 +132,7 @@ class Stage1Config:
     # per-head loss weights
     w_plan: float = 1.0
     w_evid: float = 1.0
+    w_support: float = 1.0
     w_slot: float = 2.0
     w_epi: float = 1.0
     w_inv: float = 2.0
@@ -151,6 +166,10 @@ class Stage1Trainer:
         if ex.evid_anchor is not None:
             loss = loss + cfg.w_evid * pool_ce(
                 es.node_scores_r, ex.evid_anchor, kv.evidence_mask.unsqueeze(0))
+        support_target = ex.support_anchor if ex.support_anchor is not None else ex.evid_anchor
+        if support_target is not None and es.support_scores_r is not None:
+            loss = loss + cfg.w_support * pool_bce_logits(
+                es.support_scores_r, support_target, kv.evidence_mask.unsqueeze(0))
         if ex.slot_target is not None:
             req = _required_slot_idx(ex.task_frame)
             loss = loss + cfg.w_slot * F.binary_cross_entropy(
@@ -192,7 +211,7 @@ class Stage1Trainer:
     def evaluate(self, examples: List[Stage1Example]) -> Dict[str, float]:
         from v5.exit_condition import fallback_needed
         self.adapter.eval()
-        agg = {k: 0 for k in ("plan", "evid", "slot", "epi", "inv", "sc")}
+        agg = {k: 0 for k in ("plan", "evid", "support", "slot", "epi", "inv", "sc")}
         cnt = {k: 0 for k in agg}
         fb = {}
         fbn = {}
@@ -207,6 +226,10 @@ class Stage1Trainer:
             if ex.evid_anchor is not None:
                 cnt["evid"] += 1
                 agg["evid"] += int(ex.evid_anchor[0, es.node_scores_r.argmax()].item() > 0.0)
+            support_target = ex.support_anchor if ex.support_anchor is not None else ex.evid_anchor
+            if support_target is not None and es.support_scores_r is not None:
+                cnt["support"] += 1
+                agg["support"] += int(support_target[0, es.support_scores_r.argmax()].item() > 0.0)
             if ex.slot_target is not None:
                 req = _required_slot_idx(ex.task_frame)
                 cnt["slot"] += 1
@@ -262,6 +285,7 @@ def synthetic_examples(n_per_family: int, device, lm_dim: int,
             h_init=t.h_init, graph_kv=kv, goal=goal,
             node_ids=NODE_IDS, task_frame=TASK_FRAME,
             plan_anchor=t.plan_anchor, evid_anchor=t.evid_anchor,
+            support_anchor=t.evid_anchor,
             slot_target=t.slot_target, epi_target=t.epi_target,
             inv_target=t.inv_target, shortcut_target=t.shortcut_target,
             struct_inv_mask=struct, tag=t.family,
@@ -317,6 +341,7 @@ def run():
 
     assert after["slot_acc"] >= 0.9 and after["epi_acc"] >= 0.9 and after["inv_acc"] >= 0.9
     assert after["sc_acc"] >= 0.9 and after["plan_acc"] >= 0.9 and after["evid_acc"] >= 0.9
+    assert after["support_acc"] >= 0.9
     assert after.get("fallback_applicable", 1.0) <= 0.1
     assert after.get("fallback_blocked", 0.0) >= 0.9
     print("\nSTAGE 1 SCAFFOLD OK — heads train to target on the frozen loop representation")

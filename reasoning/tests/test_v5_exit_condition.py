@@ -48,3 +48,14 @@ def test_no_graph_task_frame_blocks_shortcut_and_forces_fallback():
     assert reason == "max_loops_reached"
     assert fallback_needed(_confident_state(exit_reason="shortcut_verified"), task_frame) is True
     assert fallback_needed(_confident_state(exit_reason="max_loops_reached"), task_frame) is True
+
+
+def test_support_primary_reranks_evidence_top_k_for_epistemic_gate():
+    state = _confident_state(exit_reason="max_loops_reached")
+    state.node_scores_r = torch.tensor([[4.0, 3.5, 0.0]])
+    state.support_scores_r = torch.tensor([[0.1, 2.0, -1.0]])
+    state.epistemic_confidence_r = torch.tensor([[0.1, 0.95, 0.1]])
+
+    task_frame = {"required_slots": ["verdict", "reason"]}
+
+    assert fallback_needed(state, task_frame) is False

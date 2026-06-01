@@ -273,6 +273,11 @@ def sample_to_stage1_example(
             evid_anchor = fallback_evid_anchor
     else:
         evid_anchor = fallback_evid_anchor
+    support_anchor = None
+    if sample.support_target_map:
+        support_anchor = _remap_map(sample.support_target_map) * evid_mask.float()
+        if support_anchor.sum() <= 0:
+            support_anchor = None
 
     # Epistemic support for FALLBACK: the evidence a FINALIZED trace relied on to
     # answer is epistemically supported. Without this, the corpus only marks
@@ -300,7 +305,7 @@ def sample_to_stage1_example(
     return Stage1Example(
         h_init=h_init.to(device), graph_kv=kv, goal=_goal_for(sample.task_frame, device),
         node_ids=node_ids, task_frame=sample.task_frame,
-        plan_anchor=plan_anchor, evid_anchor=evid_anchor,
+        plan_anchor=plan_anchor, evid_anchor=evid_anchor, support_anchor=support_anchor,
         slot_target=slot_t,
         epi_target=epi_t if epi_t.sum() > 0 else None,
         inv_target=inv_t if struct.any() else None,
@@ -373,10 +378,11 @@ def corpus_to_stage1_examples(
 # ── demo / coverage report on the real corpus ────────────────────────────────
 
 def _coverage(examples):
-    cov = {"plan": 0, "evid": 0, "slot": 0, "epi": 0, "inv": 0, "shortcut": 0}
+    cov = {"plan": 0, "evid": 0, "support": 0, "slot": 0, "epi": 0, "inv": 0, "shortcut": 0}
     for ex in examples:
         cov["plan"] += int(ex.plan_anchor is not None)
         cov["evid"] += int(ex.evid_anchor is not None)
+        cov["support"] += int(ex.support_anchor is not None)
         cov["slot"] += int(ex.slot_target is not None)
         cov["epi"] += int(ex.epi_target is not None)
         cov["inv"] += int(ex.inv_target is not None)

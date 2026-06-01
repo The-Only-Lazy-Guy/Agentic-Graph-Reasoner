@@ -230,6 +230,34 @@
   poor example-level conjunction metric (`epi exact` near zero while per-node is
   ~0.94-0.96). Next pass should improve direct_judgment slot/epistemic
   calibration and selected-evidence control before adding a learned fallback head.
+- Added a narrow support-primary reranker head. It is trained from projected
+  `support_target` labels as a binary in-pool evidence target, then fallback
+  chooses the primary evidence node by reranking only the existing evidence top-k.
+  This is not Stage 3 and not a broad learned fallback head: hard safety rules
+  still force no-graph/weak-evidence fallback and invalidators/slots/epi remain
+  explicit gates.
+- Important implementation note: support-primary uses BCE-with-logits over
+  binary targets (`target > 0`), not softmax CE over weighted projection scores.
+  The first attempt let weighted labels like 25.75 enter BCE, producing negative
+  Stage 1 loss and unsafe write ratios. The support head is also kept frozen
+  during Stage 2B so it cannot buy exits by pushing the residual write path.
+- Canonical support-primary run (`--seed 7 --e1 30 --e2a 20 --e2b 20`, logs:
+  `artifacts/run_logs/corpus_scaling_20260601_support_primary_binary_seed7.log`
+  and
+  `artifacts/run_logs/fallback_write_diag_20260601_support_primary_binary_seed7.log`):
+  coverage over 288 positives now includes support 236/288 (82%). Held-out
+  corpus metrics: plan P@1/hit@3=0.34/0.63, evidence P@1/hit@3=0.83/0.98,
+  support-primary P@1/hit@3=0.62/0.78, slot=0.72, epi strict=0.28,
+  epi per-node=0.96, shortcut=0.74, inv=0.85. Fallback is applicable=0.49,
+  blocked=1.00, negative=1.00. Write ratio is applicable=0.191, blocked=0.166,
+  negative=0.130.
+- Direct_judgment support-primary diagnostic: applicable fallback improved from
+  0.75 to 0.44; no-fallback direct_judgment has support@1/@3=0.83/0.94,
+  primary epi=0.960, verdict/reason=1.000/1.000. Remaining fallback direct
+  judgment has support@1/@3=0.43/0.64, primary epi=0.144, best-gold epi=0.496,
+  verdict/reason=0.870/0.796. The remaining issue is still selected-support +
+  epistemic calibration, but the reranker moved the bottleneck without breaking
+  blocked/negative safety.
 - Read from the controlled pass: the cleaned projection restores strong evidence
   routing and safety, but the same `30/20/20` recipe does not reduce applicable
   fallback below the current band. The next lever is calibration/label quality

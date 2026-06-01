@@ -56,6 +56,14 @@ def _pool_ce(scores: Tensor, target_onehot: Tensor, pool_mask: Tensor) -> Tensor
     tgt = tgt / tgt.sum()
     return -(tgt * logp).sum()
 
+
+def _pool_bce_logits(scores: Tensor, target: Tensor, pool_mask: Tensor) -> Tensor:
+    if pool_mask is None or not pool_mask.any():
+        return scores.sum() * 0.0
+    m = pool_mask.bool()
+    target_binary = (target > 0.0).float()
+    return F.binary_cross_entropy_with_logits(scores[m], target_binary[m])
+
 LM_DIM = 128          # small LM width for a fast trainability probe
 GNN_NOISE = 0.0       # node embeddings deterministic
 H_NOISE = 0.15        # per-task noise on h_init (keeps it non-trivial)
@@ -213,7 +221,8 @@ REQ_IDX = [SLOT_ID[s] for s in REQUIRED_SLOTS]
 @torch.no_grad()
 def evaluate(adapter, kv, goal, tasks) -> Dict[str, float]:
     adapter.eval()
-    plan_hit = evid_hit = slot_ok = epi_ok = inv_ok = sc_ok = 0
+    plan_hit = evid_hit = support_hit = slot_ok = epi_ok = inv_ok = sc_ok = 0
+    support_n = 0
     fb_app = fb_blk = 0
     n_app = n_blk = 0
     from v5.exit_condition import fallback_needed
@@ -226,6 +235,10 @@ def evaluate(adapter, kv, goal, tasks) -> Dict[str, float]:
         evid_pred = es.node_scores_r.argmax(dim=-1).item()
         plan_hit += int(t.plan_anchor[0, plan_pred].item() == 1.0)
         evid_hit += int(t.evid_anchor[0, evid_pred].item() == 1.0)
+        if es.support_scores_r is not None:
+            support_pred = es.support_scores_r.argmax(dim=-1).item()
+            support_hit += int(t.evid_anchor[0, support_pred].item() == 1.0)
+            support_n += 1
 
         # slot: required slots within 0.5 of target
         slot_ok += int(((es.slot_state_r[0, REQ_IDX] - t.slot_target[0, REQ_IDX]).abs() < 0.5).all().item())
@@ -253,6 +266,7 @@ def evaluate(adapter, kv, goal, tasks) -> Dict[str, float]:
     return {
         "plan_node_acc": plan_hit / T,
         "evid_node_acc": evid_hit / T,
+        "support_node_acc": support_hit / max(1, support_n),
         "slot_acc": slot_ok / T,
         "epi_acc": epi_ok / T,
         "inv_acc": inv_ok / T,
@@ -301,6 +315,7 @@ def train(adapter, kv, goal, tasks, epochs=300, lr=1e-3, freeze_loop=True):
 
             l_plan = _pool_ce(ps.node_scores_r, t.plan_anchor, plan_pool)
             l_evid = _pool_ce(es.node_scores_r, t.evid_anchor, evid_pool)
+            l_support = _pool_bce_logits(es.support_scores_r, t.evid_anchor, evid_pool)
             l_slot = F.binary_cross_entropy(es.slot_state_r[0, REQ_IDX],
                                             t.slot_target[0, REQ_IDX])
             l_epi  = F.binary_cross_entropy(es.epistemic_confidence_r, t.epi_target)
@@ -309,7 +324,7 @@ def train(adapter, kv, goal, tasks, epochs=300, lr=1e-3, freeze_loop=True):
             l_inv = F.binary_cross_entropy(inv_p[struct.bool()], t.inv_target[struct.bool()])
             l_sc  = F.binary_cross_entropy(es.shortcut_validity_r, t.shortcut_target)
 
-            loss = l_plan + l_evid + 2.0 * l_slot + l_epi + 2.0 * l_inv + l_sc
+            loss = l_plan + l_evid + l_support + 2.0 * l_slot + l_epi + 2.0 * l_inv + l_sc
             opt.zero_grad(); loss.backward()
             torch.nn.utils.clip_grad_norm_(params, 0.5)
             opt.step()
@@ -350,6 +365,7 @@ def run():
     assert after["inv_acc"] >= 0.9, "invalidator head did not learn context gating"
     assert after["plan_node_acc"] >= 0.9, "planning node scoring did not learn"
     assert after["evid_node_acc"] >= 0.9, "evidence node scoring did not learn"
+    assert after["support_node_acc"] >= 0.9, "support-primary rerank did not learn"
     assert after["epi_acc"] >= 0.9, "epistemic head did not learn context-gated support"
     assert after["fallback_applicable"] <= 0.1, "fallback did not drop on applicable tasks"
     assert after["fallback_blocked"] >= 0.9, "blocked tasks should still need fallback"

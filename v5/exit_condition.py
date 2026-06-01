@@ -88,6 +88,26 @@ def _top_k_indices(node_scores: Tensor, k: int = TOP_K_NODES) -> List[int]:
     return scores.topk(k).indices.tolist()
 
 
+def _primary_support_index(state: LoopState, top_k: Optional[List[int]] = None) -> Optional[int]:
+    """Return the evidence node used for epistemic/fallback gating.
+
+    The attention top-1 is not always the best support node: diagnostics showed
+    many direct_judgment failures where gold evidence was in top-k but not rank
+    one. When available, support_scores_r reranks only the existing top-k so the
+    gate can choose nearby support without expanding its safety surface.
+    """
+    top_k = top_k if top_k is not None else _top_k_indices(state.node_scores_r)
+    if not top_k:
+        return None
+    support = state.support_scores_r
+    if support is None:
+        return int(top_k[0])
+    scores = support.squeeze(0)
+    if scores.numel() <= max(top_k):
+        return int(top_k[0])
+    return int(max(top_k, key=lambda idx: float(scores[idx].item())))
+
+
 def should_exit_loop(
     state: LoopState,
     loop_idx: int,
@@ -128,8 +148,8 @@ def should_exit_loop(
     # contradicting / uncertain evidence, which would block exit forever. The
     # answer rests on the primary attended node, so gate on that one.
     epi = state.epistemic_confidence_r.squeeze(0)
-    primary = top_k[0] if top_k else 0
-    epistemic_ok = float(epi[primary].item()) >= EPISTEMIC_THRESHOLD
+    primary = _primary_support_index(state, top_k)
+    epistemic_ok = primary is not None and float(epi[primary].item()) >= EPISTEMIC_THRESHOLD
 
     # 6. Shortcut path
     shortcut_val = float(state.shortcut_validity_r.item())
@@ -172,8 +192,8 @@ def fallback_needed(
     # secondary attended node being uncertain is informative context, not a
     # reason to fall back. Mirrors the should_exit_loop epistemic gate.
     epi = state.epistemic_confidence_r.squeeze(0)
-    primary = top_k[0] if top_k else 0
-    if float(epi[primary].item()) < EPISTEMIC_THRESHOLD:
+    primary = _primary_support_index(state, top_k)
+    if primary is None or float(epi[primary].item()) < EPISTEMIC_THRESHOLD:
         return True
 
     return False
