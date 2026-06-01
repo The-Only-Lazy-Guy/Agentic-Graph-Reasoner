@@ -4,6 +4,7 @@ from pathlib import Path
 import torch
 
 from project_corpus_to_v5_targets import _default_out
+from v5.cross_attention import V5AttentionAdapter
 from v5.training.bridge import MockHInitProvider, ZeroEmbedder, sample_to_stage1_example
 from v5.training.dataset import _parse_row
 from v5.training.projection import project_corpus_row
@@ -165,6 +166,12 @@ def test_bridge_prefers_projected_plan_and_evidence_targets():
     fact_idx = ex.node_ids.index("fact_a")
     assert ex.plan_anchor[0, strat_idx].item() > 0.0
     assert ex.evid_anchor[0, fact_idx].item() > 0.0
+
+    adapter = V5AttentionAdapter(r_plan=1, r_evidence=1, lm_hidden_dim=128, gate_init=0.02).to(device)
+    _, ps, _ = adapter.run_planning(ex.h_init, ex.goal, ex.graph_kv, ex.node_ids, task_frame=ex.task_frame)
+    assert ps.write_ratios
+    assert ps.write_ratio_tensors
+    assert ps.write_ratio_tensors[-1].requires_grad
 
 
 def test_default_out_suffix():

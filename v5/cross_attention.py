@@ -126,8 +126,9 @@ class CrossAttentionProjections(nn.Module):
         A = attn_weights @ V_r                                  # [B, attn_dim]
         write = self.gate * self.W_o(A)                        # gated residual write
         h_new = h_r + write                                    # residual stream preserves h_r
-        self._last_write_ratio = float(                        # ||gate*W_o(A)|| / ||h||  (telemetry)
-            (write.norm() / (h_r.norm() + 1e-9)).item())
+        ratio = write.norm() / (h_r.detach().norm() + 1e-9)     # ||gate*W_o(A)|| / ||h||  (telemetry)
+        self._last_write_ratio_tensor = ratio
+        self._last_write_ratio = float(ratio.detach().item())
         return h_new, attn_weights
 
 
@@ -223,6 +224,7 @@ class RecurrentAttentionBlock(nn.Module):
         loop_log: List[dict] = []
         attn_history: List[Tensor] = []     # per-loop softmax attention (Stage 2 supervision)
         write_ratios: List[float] = []      # per-loop ||gate*W_o(A)||/||h|| (telemetry)
+        write_ratio_tensors: List[Tensor] = []  # differentiable ratios for Stage 2 penalties
 
         for r in range(r_max):
             # 1. Dynamic K/V overlay from current loop state
@@ -237,6 +239,11 @@ class RecurrentAttentionBlock(nn.Module):
             )
             attn_history.append(attn_weights)
             write_ratios.append(getattr(self.proj, "_last_write_ratio", 0.0))
+            write_ratio_tensors.append(getattr(
+                self.proj,
+                "_last_write_ratio_tensor",
+                torch.zeros((), device=device),
+            ))
 
             # 3. Update loop state
             state = LoopState(
@@ -283,6 +290,7 @@ class RecurrentAttentionBlock(nn.Module):
         # Stash per-loop attention + write telemetry for Stage 2 supervision.
         state.attn_history = attn_history
         state.write_ratios = write_ratios
+        state.write_ratio_tensors = write_ratio_tensors
 
         return state.h_r, state, loop_log
 

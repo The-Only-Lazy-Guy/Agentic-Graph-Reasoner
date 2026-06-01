@@ -48,6 +48,16 @@ NO_GRAPH_QUESTIONS = [
     "What is 2 + 2?",
     "Translate 'good morning' into French.",
     "Tell me a fun fact about cats.",
+    "Give me three words that rhyme with light.",
+    "Rewrite this sentence more politely: close the door.",
+    "What is the capital of France?",
+    "Convert 15 minutes into seconds.",
+    "List two colors commonly found in traffic lights.",
+    "Write a one-line greeting for a teammate.",
+    "Spell the word responsibility backwards.",
+    "What day comes after Tuesday?",
+    "Name one common use of a calendar.",
+    "Turn the phrase 'fast response' into a short title.",
 ]
 
 

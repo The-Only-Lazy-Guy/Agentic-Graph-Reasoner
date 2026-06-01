@@ -42,6 +42,7 @@ class LoopState:
     # Per-loop telemetry attached by RecurrentAttentionBlock for Stage 2:
     attn_history: Optional[list] = None              # list of [1, N] softmax attention
     write_ratios: Optional[list] = None              # list of ||gate*W_o(A)||/||h|| floats
+    write_ratio_tensors: Optional[list] = None        # differentiable ratios for training penalties
 
     # Readable snapshot for logging / corpus
     def to_log_entry(

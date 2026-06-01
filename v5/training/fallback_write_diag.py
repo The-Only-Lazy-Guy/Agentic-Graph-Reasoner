@@ -60,6 +60,10 @@ def _fmt_rate(num: int, den: int) -> str:
     return f"{num}/{den} ({num / max(1, den):.2f})"
 
 
+def _task_family(ex: Stage1Example) -> str:
+    return str((ex.task_frame or {}).get("task_family") or "unknown")
+
+
 def _required_slots(task_frame: Optional[dict]) -> List[int]:
     return _required_slot_indices(task_frame) or []
 
@@ -233,6 +237,85 @@ def _fallback_trip_report(records: Sequence[EvalRecord]) -> None:
             print(f"    missing slots      {dict(missing_slots)}")
 
 
+def _task_family_report(records: Sequence[EvalRecord]) -> None:
+    print("\n=== fallback/write by task_family (held-out) ===")
+    buckets = defaultdict(lambda: {
+        "n": 0,
+        "fb": 0,
+        "missing_slot": 0,
+        "low_epistemic": 0,
+        "invalidator_active": 0,
+        "plan_wr": [],
+        "evid_wr": [],
+    })
+    tags_by_family: Dict[str, Counter[str]] = defaultdict(Counter)
+    for rec in records:
+        family = _task_family(rec.ex)
+        bits = fallback_bits(rec.evidence_state, rec.ex)
+        bucket = buckets[family]
+        bucket["n"] += 1
+        bucket["fb"] += int(bits["fallback"])
+        bucket["missing_slot"] += int(bits["missing_slot"])
+        bucket["low_epistemic"] += int(bits["low_epistemic"])
+        bucket["invalidator_active"] += int(bits["invalidator_active"])
+        bucket["plan_wr"].extend(rec.planning_state.write_ratios or [])
+        bucket["evid_wr"].extend(rec.evidence_state.write_ratios or [])
+        tags_by_family[family][rec.ex.tag] += 1
+
+    print(
+        f"{'family':28s} {'n':>4s} {'fallback':>8s} {'slot':>8s} "
+        f"{'epi':>8s} {'inv':>8s} {'plan_wr':>8s} {'evid_wr':>8s} {'tags':>24s}"
+    )
+    for family, bucket in sorted(buckets.items(), key=lambda item: (-item[1]["n"], item[0])):
+        n = bucket["n"]
+        print(
+            f"{family[:28]:28s} {n:>4d} "
+            f"{bucket['fb'] / max(1, n):>8.2f} "
+            f"{bucket['missing_slot'] / max(1, n):>8.2f} "
+            f"{bucket['low_epistemic'] / max(1, n):>8.2f} "
+            f"{bucket['invalidator_active'] / max(1, n):>8.2f} "
+            f"{_mean(bucket['plan_wr']):>8.3f} "
+            f"{_mean(bucket['evid_wr']):>8.3f} "
+            f"{str(dict(tags_by_family[family])):>24s}"
+        )
+
+
+def _invalidator_case_report(records: Sequence[EvalRecord], limit: int) -> None:
+    print("\n=== invalidator-active cases for manual inspection ===")
+    shown = 0
+    for rec in records:
+        bits = fallback_bits(rec.evidence_state, rec.ex)
+        if not bits["invalidator_active"]:
+            continue
+        shown += 1
+        top = list(bits["top_indices"])[:3]
+        missing = [SLOT_VOCAB[idx] for idx in bits["missing_slot_ids"]]
+        print(
+            f"\ncase {shown}: tag={rec.ex.tag} family={_task_family(rec.ex)} "
+            f"fallback={bits['fallback']} missing_slots={missing}"
+        )
+        pred_inv = rec.evidence_state.invalidator_flags_r.squeeze(0)
+        pred_epi = rec.evidence_state.epistemic_confidence_r.squeeze(0)
+        gold_inv = rec.ex.inv_target.squeeze(0) if rec.ex.inv_target is not None else None
+        gold_epi = rec.ex.epi_target.squeeze(0) if rec.ex.epi_target is not None else None
+        attn = rec.evidence_state.attn_history[-1].squeeze(0) if rec.evidence_state.attn_history else None
+        for rank, idx in enumerate(top, start=1):
+            node_id = rec.ex.node_ids[idx]
+            node_type = rec.ex.graph_kv.node_types[idx]
+            inv_gold = float(gold_inv[idx].item()) if gold_inv is not None else float("nan")
+            epi_gold = float(gold_epi[idx].item()) if gold_epi is not None else float("nan")
+            attn_val = float(attn[idx].item()) if attn is not None else float("nan")
+            print(
+                f"  top{rank}: id={node_id} type={node_type} attn={attn_val:.3f} "
+                f"pred_inv={float(pred_inv[idx].item()):.3f} gold_inv={inv_gold:.1f} "
+                f"pred_epi={float(pred_epi[idx].item()):.3f} gold_epi={epi_gold:.1f}"
+            )
+        if shown >= limit:
+            break
+    if shown == 0:
+        print("  no held-out cases had active invalidators on fallback top-k nodes")
+
+
 def _oracle_report(records: Sequence[EvalRecord]) -> None:
     print("\n=== oracle fallback ablations (held-out) ===")
     print("Shortcut is diagnostic telemetry in the current formula, so gold_shortcut_only should not move fallback.")
@@ -387,12 +470,15 @@ def run(
     e2a: int = 20,
     e2b: int = 20,
     diffuse_threshold: float = 0.35,
+    invalidator_limit: int = 12,
 ) -> None:
     adapter, _train, ev = _build_and_train(corpus_path, model_name, device_str, eval_frac, e1, e2a, e2b)
 
     print("\n[4] evaluating held-out records...")
     records = _eval_records(adapter, ev)
     _fallback_trip_report(records)
+    _task_family_report(records)
+    _invalidator_case_report(records, invalidator_limit)
     _oracle_report(records)
     _write_ratio_report(records)
     _planning_miss_report(records, diffuse_threshold)
@@ -408,5 +494,16 @@ if __name__ == "__main__":
     ap.add_argument("--e2a", type=int, default=20)
     ap.add_argument("--e2b", type=int, default=20)
     ap.add_argument("--diffuse-threshold", type=float, default=0.35)
+    ap.add_argument("--invalidator-limit", type=int, default=12)
     args = ap.parse_args()
-    run(args.corpus, args.model, args.device, args.eval_frac, args.e1, args.e2a, args.e2b, args.diffuse_threshold)
+    run(
+        args.corpus,
+        args.model,
+        args.device,
+        args.eval_frac,
+        args.e1,
+        args.e2a,
+        args.e2b,
+        args.diffuse_threshold,
+        args.invalidator_limit,
+    )

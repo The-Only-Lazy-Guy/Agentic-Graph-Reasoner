@@ -48,6 +48,14 @@
 - Write remains suspicious: negative held-out total write is highest at 0.224
   and planning write is especially high (0.449). Treat this as a write-safety
   diagnostic target before Stage 3/4.
+- Added differentiable write-ratio tensors plus a Stage 2B negative penalty:
+  no-graph negatives now train for low write, low slots, low epistemic, and low
+  shortcut. Expanded no-graph negatives from 5 to 15 prompts so held-out negative
+  metrics are less single-example fragile.
+- Latest `fallback_write_diag` with that penalty (`30/20/20`, 288 projected rows):
+  applicable fallback=0.83, blocked=0.73, negative=1.00; negative write is now
+  the lowest bucket again at total=0.107, though still above the ideal 0.00-0.05
+  target. Main remaining issue is relational_explanation invalidator over-firing.
 - Read: the projected pipeline is now real and end-to-end, evidence routing is
   materially stronger than planning, and fallback still does not drop on
   applicable held-out cases. The immediate blocker is planning / fallback
@@ -479,6 +487,28 @@ Read after the diagnostic: the alias bug was real and fixing it helps, but the
 pipeline is still over-conservative. Gold labels do not fully rescue applicable
 fallback, and negative write remains the highest, especially in the planning
 block. Do not move to Stage 3/4 yet.
+
+Follow-up fix: Stage 2B now applies a differentiable negative write penalty plus
+negative head suppression, and the no-graph negative bank is larger (15 prompts).
+The comparable diagnostic now reports:
+```
+fallback: applicable=0.83  blocked=0.73  negative=1.00
+
+write ratio:
+  applicable fallback total=0.143
+  applicable no_fallback total=0.180
+  blocked fallback total=0.183
+  blocked no_fallback total=0.160
+  negative fallback total=0.107
+
+task-family signal:
+  relational_explanation fallback=1.00, invalidator_active=0.93
+```
+
+Read after the write fix: the safety ordering is sane again (negative writes
+least and still falls back), but the target is not yet met. The next bottleneck
+is invalidator over-firing in `relational_explanation`, where high-confidence
+support claims are being marked invalidators without gold invalidator labels.
 
 ---
 

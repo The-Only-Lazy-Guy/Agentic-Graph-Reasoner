@@ -137,6 +137,10 @@ class Stage2Config:
     lambda_neg: float = 0.5        # diffuse-attention penalty on negative cases
     lambda_head: float = 1.0       # 2B head-retention loss weight (keep Stage-1 semantics)
     target_write_ratio: float = 0.05   # keep ||gate*W_o(A)||/||h|| around here
+    negative_target_write_ratio: float = 0.05
+    lambda_neg_plan_write: float = 8.0
+    lambda_neg_evid_write: float = 2.0
+    lambda_neg_head: float = 1.0
     qkv_lr_scale: float = 0.3      # 2B: Q/K/V at lower LR than the write path (W_o/gate)
     wo_weight_decay: float = 1e-3  # 2B: extra decay on W_o to keep the write bounded
     log_every: int = 50
@@ -198,11 +202,28 @@ class Stage2Trainer:
             gate_pen = (self.adapter.planning_block.proj.gate ** 2
                         + self.adapter.evidence_block.proj.gate ** 2)
             loss = loss + self.cfg.lambda_delta * gate_pen
+            if is_neg:
+                target = self.cfg.negative_target_write_ratio
+                for ratio in (getattr(ps, "write_ratio_tensors", None) or []):
+                    loss = loss + self.cfg.lambda_neg_plan_write * F.relu(ratio - target).pow(2)
+                for ratio in (getattr(es, "write_ratio_tensors", None) or []):
+                    loss = loss + self.cfg.lambda_neg_evid_write * F.relu(ratio - target).pow(2)
+                loss = loss + self.cfg.lambda_neg_head * self._negative_head_loss(es)
             # head-retention: heads are slightly trainable in 2B so they track the h
             # that the write path shifts. Keep Stage-1 semantics (slot/epi/shortcut).
             if not is_neg:
                 loss = loss + self.cfg.lambda_head * self._head_retention(es, ex)
         return loss, mean_wr
+
+    def _negative_head_loss(self, es) -> Tensor:
+        """No-graph negatives should remain unsupported and fail the fallback gate."""
+        loss = es.slot_state_r.sum() * 0.0
+        loss = loss + F.binary_cross_entropy(es.slot_state_r, torch.zeros_like(es.slot_state_r))
+        loss = loss + F.binary_cross_entropy(
+            es.epistemic_confidence_r, torch.zeros_like(es.epistemic_confidence_r))
+        loss = loss + F.binary_cross_entropy(
+            es.shortcut_validity_r, torch.zeros_like(es.shortcut_validity_r))
+        return loss
 
     def _head_retention(self, es, ex: Stage1Example) -> Tensor:
         """Stage-1 head losses on the current (2B-shifted) state, so frozen-semantics
