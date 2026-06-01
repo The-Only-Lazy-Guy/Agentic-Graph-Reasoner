@@ -9,6 +9,8 @@ from v5.training.bridge import MockHInitProvider, ZeroEmbedder, sample_to_stage1
 from v5.training.dataset import _parse_row
 from v5.training.projection import project_corpus_row
 from v5.gnn_encoder import RGCNEncoder
+from v5.subgraph import build_active_subgraph
+from reasoning.graph_relations import Rel
 
 
 def _row() -> dict:
@@ -123,6 +125,19 @@ class _Graph:
         self.edges = []
 
 
+class _Edge:
+    def __init__(self, src: str, dst: str, relation: str):
+        self.src = src
+        self.dst = dst
+        self.relation = relation
+
+
+class _InvalidatorGraph(_Graph):
+    def __init__(self):
+        super().__init__()
+        self.edges = [_Edge("fact_a", "fact_b", Rel.INVALIDATED_BY)]
+
+
 def test_project_row_builds_architecture_shaped_targets():
     proj = project_corpus_row(_row())
 
@@ -172,6 +187,70 @@ def test_bridge_prefers_projected_plan_and_evidence_targets():
     assert ps.write_ratios
     assert ps.write_ratio_tensors
     assert ps.write_ratio_tensors[-1].requires_grad
+
+
+def test_invalidator_candidates_require_well_formed_active_edges():
+    device = torch.device("cpu")
+    graph = _Graph()
+    graph.nodes.update({
+        "support_claim": _Node("claim", "Supportive claim"),
+        "real_claim": _Node("claim", "Claim with an active condition"),
+        "condition": _Node("claim", "Condition node"),
+        "missing_condition_claim": _Node("claim", "Claim whose condition is absent"),
+        "contradict_src": _Node("claim", "Contradiction source"),
+        "contradict_dst": _Node("claim", "Contradiction destination"),
+    })
+    graph.edges = [
+        _Edge("support_claim", "support_claim", Rel.INVALIDATED_BY),
+        _Edge("real_claim", "condition", Rel.INVALIDATED_BY),
+        _Edge("missing_condition_claim", "missing_condition", Rel.INVALIDATED_BY),
+        _Edge("contradict_src", "contradict_dst", Rel.CONTRADICTS),
+    ]
+    node_ids = [
+        "support_claim",
+        "real_claim",
+        "condition",
+        "missing_condition_claim",
+        "contradict_src",
+        "contradict_dst",
+    ]
+    text_emb = {nid: [0.0] * 768 for nid in node_ids}
+    asg = build_active_subgraph(graph, node_ids, text_emb, device)
+    flags = {nid: float(asg.invalidator_flags[i].item()) for i, nid in enumerate(node_ids)}
+
+    assert flags["support_claim"] == 0.0
+    assert flags["real_claim"] == 1.0
+    assert flags["missing_condition_claim"] == 0.0
+    assert flags["contradict_src"] == 1.0
+    assert flags["contradict_dst"] == 0.0
+
+
+def test_bridge_trains_inactive_structural_invalidators_as_zero():
+    row = _row()
+    row["v5_projection"] = project_corpus_row(row)
+    sample = _parse_row(row)
+    assert sample is not None
+
+    device = torch.device("cpu")
+    gnn = RGCNEncoder().to(device).eval()
+    for p in gnn.parameters():
+        p.requires_grad_(False)
+    ex = sample_to_stage1_example(
+        sample,
+        gnn=gnn,
+        embedder=ZeroEmbedder(device),
+        h_init_provider=MockHInitProvider(128, device),
+        device=device,
+        lm_dim=128,
+        persisted_graph=_InvalidatorGraph(),
+        hops=1,
+    )
+    assert ex is not None
+    fact_idx = ex.node_ids.index("fact_a")
+    assert ex.struct_inv_mask is not None
+    assert ex.inv_target is not None
+    assert bool(ex.struct_inv_mask[0, fact_idx].item())
+    assert ex.inv_target[0, fact_idx].item() == 0.0
 
 
 def test_default_out_suffix():

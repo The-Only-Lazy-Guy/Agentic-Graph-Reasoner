@@ -4,7 +4,7 @@
 > you don't have to dig through commits/logs. Updated each working session.
 
 **Last updated:** 2026-06-01
-**HEAD:** `d84e074` · branch `main`
+**HEAD:** latest pushed commit on branch `main`
 
 ---
 
@@ -56,11 +56,21 @@
   applicable fallback=0.83, blocked=0.73, negative=1.00; negative write is now
   the lowest bucket again at total=0.107, though still above the ideal 0.00-0.05
   target. Main remaining issue is relational_explanation invalidator over-firing.
+- Added the invalidator semantics pass:
+  `invalidator_candidate_nodes()` now only marks well-formed active-subgraph
+  negative edges, ignores self-invalidating graph noise, and the bridge now
+  trains inactive structural invalidators as zero instead of only supervising
+  positive deprecate labels. `fallback_write_diag` also dumps edge context for
+  manual invalidator inspection.
+- Latest comparable `fallback_write_diag` (`30/20/20`, 288 projected rows):
+  applicable fallback=0.74, blocked=1.00, negative=1.00. `invalidator_active`
+  is now 0.00 for applicable/blocked/negative, and `relational_explanation`
+  moved from invalidator_active=0.93 to 0.00. Negative total write remains the
+  lowest bucket at 0.150, but negative evidence-write is still worth watching.
 - Read: the projected pipeline is now real and end-to-end, evidence routing is
-  materially stronger than planning, and fallback still does not drop on
-  applicable held-out cases. The immediate blocker is planning / fallback
-  supervision and calibration on the projected corpus, not "can the architecture
-  train?" or "can we generate more raw traces?".
+  materially stronger than planning. The false-invalidator blocker is repaired;
+  the remaining fallback failures are mostly missing slots + low epistemic on
+  top evidence. Do not move to Stage 3/4 yet.
 
 ---
 
@@ -509,6 +519,40 @@ Read after the write fix: the safety ordering is sane again (negative writes
 least and still falls back), but the target is not yet met. The next bottleneck
 is invalidator over-firing in `relational_explanation`, where high-confidence
 support claims are being marked invalidators without gold invalidator labels.
+
+Invalidator semantics pass:
+```
+changes:
+  invalidator candidate = source of INVALIDATED_BY/CONTRADICTS edge
+                          only when the destination is also in the active subgraph
+  self invalidated_by edges ignored as malformed graph noise
+  bridge invalidator loss now uses the structural candidate mask
+  inactive structural candidates train as inv=0
+
+diagnostic after pass:
+  fallback: applicable=0.74  blocked=1.00  negative=1.00
+  invalidator_active: applicable=0.00  blocked=0.00  negative=0.00
+  relational_explanation: fallback=0.50  invalidator_active=0.00
+
+write ratio:
+  applicable fallback total=0.161
+  applicable no_fallback total=0.166
+  blocked fallback total=0.173
+  negative fallback total=0.150
+
+oracle fallback:
+  predicted_all applicable=0.74
+  gold_slots_only applicable=0.68
+  gold_epi_only applicable=0.74
+  gold_inv_only applicable=0.74
+  gold_all applicable=0.60
+```
+
+Read after invalidator semantics: the `relational_explanation` false-invalidator
+issue is fixed. The remaining fallback bottleneck is now slots + epistemic
+calibration, with planning misses still visible (`top3_near_miss`, `diffuse_miss`,
+`confident_miss`). Blocked/negative still fall back, so safety is retained, but
+do not move to Stage 3/4 yet.
 
 ---
 

@@ -41,8 +41,23 @@ from v5.training.stage2 import GATE_INIT, Stage2Config, Stage2Trainer
 from v5.training.stage2b_real import make_real_negatives
 from v5.training.substrate import DEFAULT_OUT as SUBSTRATE_OUT
 from v5.training.substrate import build_substrate_graph
+from v5.subgraph import INVALIDATOR_RELATIONS
 
 DEFAULT_LM = "Qwen/Qwen2.5-0.5B-Instruct"
+SUPPORTIVE_RELATIONS = frozenset({
+    "support",
+    "supports",
+    "entails",
+    "leveraged",
+    "derived_from",
+    "epistemic_of",
+    "related",
+    "overlaps",
+    "refine",
+    "refines",
+    "depend",
+    "depends_on",
+})
 
 
 @dataclass
@@ -280,7 +295,60 @@ def _task_family_report(records: Sequence[EvalRecord]) -> None:
         )
 
 
-def _invalidator_case_report(records: Sequence[EvalRecord], limit: int) -> None:
+def _short(text: object, limit: int = 110) -> str:
+    s = " ".join(str(text or "").split())
+    return s if len(s) <= limit else s[: limit - 3] + "..."
+
+
+def _node_summary(graph, node_id: str) -> Tuple[str, str]:
+    if graph is None or node_id not in graph.nodes:
+        return "unknown", ""
+    node = graph.nodes[node_id]
+    return str(getattr(node, "node_type", "unknown")), _short(getattr(node, "text", ""))
+
+
+def _edge_context_lines(
+    graph,
+    node_id: str,
+    active_ids: Optional[Sequence[str]] = None,
+    limit: int = 8,
+) -> List[str]:
+    if graph is None:
+        return []
+    edges = [
+        edge for edge in getattr(graph, "edges", []) or []
+        if edge.src == node_id or edge.dst == node_id
+    ]
+    if not edges:
+        return ["    edges: none touching persisted graph node"]
+
+    counts = Counter(
+        f"{'out' if edge.src == node_id else 'in'}:{edge.relation}"
+        for edge in edges
+    )
+    lines = [f"    edge_counts: {dict(counts.most_common(10))}"]
+
+    interesting = [
+        edge for edge in edges
+        if edge.relation in INVALIDATOR_RELATIONS or edge.relation in SUPPORTIVE_RELATIONS
+    ]
+    interesting.sort(key=lambda e: (e.relation not in INVALIDATOR_RELATIONS, e.relation, e.src, e.dst))
+    active_set = set(active_ids or [])
+    for edge in interesting[:limit]:
+        direction = "out" if edge.src == node_id else "in"
+        other_id = edge.dst if direction == "out" else edge.src
+        other_type, other_text = _node_summary(graph, other_id)
+        malformed = " self_edge" if edge.src == edge.dst else ""
+        in_scope = " active_peer" if other_id in active_set else ""
+        if direction == "out":
+            rel = f"{node_id} --{edge.relation}--> {other_id}"
+        else:
+            rel = f"{other_id} --{edge.relation}--> {node_id}"
+        lines.append(f"    {direction}: {rel}{malformed}{in_scope} other_type={other_type} text={other_text}")
+    return lines
+
+
+def _invalidator_case_report(records: Sequence[EvalRecord], limit: int, graph=None) -> None:
     print("\n=== invalidator-active cases for manual inspection ===")
     shown = 0
     for rec in records:
@@ -302,14 +370,22 @@ def _invalidator_case_report(records: Sequence[EvalRecord], limit: int) -> None:
         for rank, idx in enumerate(top, start=1):
             node_id = rec.ex.node_ids[idx]
             node_type = rec.ex.graph_kv.node_types[idx]
+            static_inv = float(rec.ex.graph_kv.invalidator_flags[idx].item())
             inv_gold = float(gold_inv[idx].item()) if gold_inv is not None else float("nan")
             epi_gold = float(gold_epi[idx].item()) if gold_epi is not None else float("nan")
             attn_val = float(attn[idx].item()) if attn is not None else float("nan")
+            persisted_type, persisted_text = _node_summary(graph, node_id)
             print(
                 f"  top{rank}: id={node_id} type={node_type} attn={attn_val:.3f} "
+                f"static_inv={static_inv:.0f} "
                 f"pred_inv={float(pred_inv[idx].item()):.3f} gold_inv={inv_gold:.1f} "
                 f"pred_epi={float(pred_epi[idx].item()):.3f} gold_epi={epi_gold:.1f}"
             )
+            if persisted_text:
+                print(f"    persisted_type={persisted_type} text={persisted_text}")
+            if float(pred_inv[idx].item()) > 0.5 or static_inv > 0.5:
+                for line in _edge_context_lines(graph, node_id, rec.ex.node_ids):
+                    print(line)
         if shown >= limit:
             break
     if shown == 0:
@@ -458,7 +534,7 @@ def _build_and_train(
         Stage2Config(sub_stage="2B", epochs=e2b, lr=1e-4, lambda_delta=1.0, qkv_lr_scale=0.3),
     ).train(train)
 
-    return adapter, train, ev
+    return adapter, train, ev, graph
 
 
 def run(
@@ -472,13 +548,13 @@ def run(
     diffuse_threshold: float = 0.35,
     invalidator_limit: int = 12,
 ) -> None:
-    adapter, _train, ev = _build_and_train(corpus_path, model_name, device_str, eval_frac, e1, e2a, e2b)
+    adapter, _train, ev, graph = _build_and_train(corpus_path, model_name, device_str, eval_frac, e1, e2a, e2b)
 
     print("\n[4] evaluating held-out records...")
     records = _eval_records(adapter, ev)
     _fallback_trip_report(records)
     _task_family_report(records)
-    _invalidator_case_report(records, invalidator_limit)
+    _invalidator_case_report(records, invalidator_limit, graph)
     _oracle_report(records)
     _write_ratio_report(records)
     _planning_miss_report(records, diffuse_threshold)

@@ -16,7 +16,7 @@ See V5_ARCHITECTURE.md §6 for planning vs evidence node pool definitions.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 import torch
 from torch import Tensor
@@ -121,12 +121,7 @@ def build_active_subgraph(
     evidence_flags: List[bool] = []
     inv_flags: List[float] = []
 
-    # Pre-build outgoing invalidator set: nodes that ARE the source of
-    # an invalidated_by or contradicts edge
-    invalidator_sources = {
-        e.src for e in graph.edges
-        if e.relation in INVALIDATOR_RELATIONS and e.src in set(node_ids)
-    }
+    invalidator_sources = invalidator_candidate_nodes(graph, node_ids)
 
     for nid in node_ids:
         node = graph.nodes.get(nid)
@@ -191,3 +186,25 @@ def _compute_slot_relevance(graph, node_ids: List[str], required_slots: List[str
         hits = sum(1 for tok in slot_tokens if tok in combined)
         scores.append(min(1.0, hits / max(1, len(slot_tokens))))
     return scores
+
+
+def invalidator_candidate_nodes(graph, node_ids: List[str]) -> Set[str]:
+    """Return nodes that may legally fire the invalidator head in this subgraph.
+
+    The dynamic invalidator head is a context gate, not a free classifier. The
+    static mask decides which nodes can ever fire. A candidate must be the source
+    of a negative relation whose destination is also present in the active
+    subgraph; otherwise the model cannot inspect the invalidating condition.
+    Self-invalidating edges are ignored as malformed graph noise.
+    """
+    node_set = set(node_ids)
+    out: Set[str] = set()
+    for edge in getattr(graph, "edges", []) or []:
+        if edge.relation not in INVALIDATOR_RELATIONS:
+            continue
+        if edge.src == edge.dst:
+            continue
+        if edge.src not in node_set or edge.dst not in node_set:
+            continue
+        out.add(edge.src)
+    return out

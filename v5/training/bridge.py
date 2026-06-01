@@ -246,7 +246,11 @@ def sample_to_stage1_example(
             anchor[0, j] = 1.0
     epi_t = _remap(sample.epistemic_target)
     inv_t = _remap(sample.invalidator_target)
-    struct = (inv_t > 0.5)
+    struct = (kv.invalidator_flags.unsqueeze(0) > 0.5)
+    # Invalidator supervision is only meaningful on structural candidates. Non-
+    # candidates are masked out by the runtime gate and should not teach the head
+    # that ordinary support/evidence nodes can become blockers.
+    inv_t = inv_t * struct.float()
 
     plan_mask = kv.planning_mask.unsqueeze(0)
     evid_mask = kv.evidence_mask.unsqueeze(0)
