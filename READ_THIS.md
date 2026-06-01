@@ -150,6 +150,30 @@
 - Safety caveat: negative total write is 0.154 in this run, which is still above
   the early ideal. The forced fallback guard keeps no-graph cases safe, but write
   pressure should remain monitored before Stage 3/4.
+- Added a direct_judgment routing audit to `fallback_write_diag`. It reports
+  plan/evidence P@1, hit@3, R@3, R@gold, pool coverage, raw/predicted node-type
+  buckets, and per-case top-3 plan/evidence vs gold anchors with `pool=0/1`.
+- Latest pool-aware seeded diagnostic
+  (`--seed 7 --e1 30 --e2a 20 --e2b 20`, log:
+  `artifacts/run_logs/fallback_write_diag_20260601_direct_routing_pool_seed7.log`):
+  applicable fallback=0.49, blocked=0.73, negative=1.00. Oracle gold-all is
+  applicable=0.36, blocked=0.73, negative=1.00. Negative total write is 0.128.
+- Direct_judgment routing audit read:
+  applicable direct_judgment has plan P@1=0.17, plan hit@3=0.46, plan R@gold=0.20;
+  evidence P@1=0.80, evidence hit@3=0.97, evidence R@gold=0.61. For applicable
+  fallback direct_judgment, plan P@1=0.14, plan hit@3=0.52, evidence P@1=0.67,
+  evidence hit@3=0.95. So evidence top-k is usually near a usable in-pool anchor,
+  while planning rank remains weak.
+- Projection/pool warning exposed by the audit: direct_judgment plan labels are
+  fully selectable (`planCov=1.00`), but evidence labels only have ~0.69-0.70
+  in-pool coverage. The out-of-pool gold evidence labels are mostly
+  `epistemic_state` (20), `example` (7), plus principle/equation/summary/etc.
+  This is a label-contract smell: do not treat those out-of-pool anchors as
+  model routing misses until projection or evidence-pool semantics are aligned.
+- Current read after the routing audit: the next blocker is direct_judgment
+  projection/pool alignment plus epistemic calibration on selected evidence.
+  Do not strengthen direct_judgment planning loss until the label contract is
+  cleaned or explicitly scoped to in-pool anchors.
 - Read: the projected pipeline is now real and end-to-end, evidence routing is
   materially stronger than planning. The false-invalidator blocker is repaired;
   the remaining fallback failures are mostly missing slots + low epistemic on

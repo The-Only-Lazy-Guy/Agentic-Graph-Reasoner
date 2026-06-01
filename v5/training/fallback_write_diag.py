@@ -8,6 +8,7 @@ held-out failures:
   - fallback trip reasons by case type
   - applicable-only slot/epistemic/planning calibration breakdown
   - applicable failure focus: routing vs confidence calibration
+  - direct_judgment routing audit with top-k plan/evidence label checks
   - direct_judgment failure table
   - negative/no-graph safety table
   - one-condition-at-a-time oracle fallback ablations
@@ -442,6 +443,136 @@ def _gold_indices(tensor: Optional[torch.Tensor]) -> List[int]:
     if tensor is None:
         return []
     return torch.where(tensor.squeeze(0) > 0.0)[0].tolist()
+
+
+def _state_scores(state) -> Optional[torch.Tensor]:
+    scores = getattr(state, "node_scores_r", None)
+    if scores is None:
+        return None
+    flat = scores.squeeze(0)
+    if flat.numel() == 0:
+        return None
+    return flat
+
+
+def _top_indices(scores: Optional[torch.Tensor], k: int) -> List[int]:
+    if scores is None:
+        return []
+    k = min(k, int(scores.numel()))
+    if k <= 0:
+        return []
+    return [int(idx) for idx in scores.topk(k).indices.tolist()]
+
+
+def _sorted_gold_indices(tensor: Optional[torch.Tensor], limit: int = 5) -> List[int]:
+    indices = _gold_indices(tensor)
+    if tensor is None:
+        return indices[:limit]
+    weights = tensor.squeeze(0)
+    indices.sort(key=lambda idx: (-float(weights[idx].item()), idx))
+    return indices[:limit]
+
+
+def _routing_metrics(
+    records: Sequence[EvalRecord],
+    anchor_attr: str,
+    state_attr: str,
+    mask_attr: str,
+    k: int = 3,
+) -> Dict[str, float]:
+    total = 0
+    p1 = 0
+    hit_k = 0
+    recall_k = 0.0
+    recall_gold = 0.0
+    gold_total = 0
+    raw_gold_total = 0
+    in_pool_gold_total = 0
+    for rec in records:
+        anchor = getattr(rec.ex, anchor_attr)
+        scores = _state_scores(getattr(rec, state_attr))
+        if anchor is None or scores is None:
+            continue
+        raw_gold = anchor.squeeze(0) > 0.0
+        if not bool(raw_gold.any().item()):
+            continue
+        mask = getattr(rec.ex.graph_kv, mask_attr)
+        gold = raw_gold & mask.bool()
+        raw_gold_total += int(raw_gold.sum().item())
+        in_pool_gold_total += int(gold.sum().item())
+        if not bool(gold.any().item()):
+            continue
+        n_gold = int(gold.sum().item())
+        top1 = _top_indices(scores, 1)
+        topk = _top_indices(scores, k)
+        top_gold = _top_indices(scores, n_gold)
+        if not top1:
+            continue
+        total += 1
+        gold_total += n_gold
+        p1 += int(bool(gold[top1[0]].item()))
+        hit_k += int(bool(gold[topk].any().item())) if topk else 0
+        recall_k += float(gold[topk].float().sum().item()) / max(1, n_gold) if topk else 0.0
+        recall_gold += (
+            float(gold[top_gold].float().sum().item()) / max(1, n_gold)
+            if top_gold else 0.0
+        )
+    return {
+        "n": float(total),
+        "avg_gold": gold_total / max(1, total),
+        "pool_cov": in_pool_gold_total / max(1, raw_gold_total),
+        "p1": p1 / max(1, total),
+        f"hit{k}": hit_k / max(1, total),
+        f"r{k}": recall_k / max(1, total),
+        "rgold": recall_gold / max(1, total),
+    }
+
+
+def _node_detail_lines(
+    rec: EvalRecord,
+    indices: Sequence[int],
+    *,
+    graph=None,
+    score_tensor: Optional[torch.Tensor] = None,
+    gold_tensor: Optional[torch.Tensor] = None,
+    epi_tensor: Optional[torch.Tensor] = None,
+    pool_tensor: Optional[torch.Tensor] = None,
+    prefix: str = "      ",
+) -> List[str]:
+    if not indices:
+        return [f"{prefix}none"]
+    lines = []
+    for rank, idx in enumerate(indices, start=1):
+        node_id = rec.ex.node_ids[idx]
+        node_type = rec.ex.graph_kv.node_types[idx]
+        score = (
+            float(score_tensor[idx].item())
+            if score_tensor is not None and idx < score_tensor.numel()
+            else float("nan")
+        )
+        gold = (
+            float(gold_tensor[idx].item())
+            if gold_tensor is not None and idx < gold_tensor.numel()
+            else float("nan")
+        )
+        epi = (
+            float(epi_tensor[idx].item())
+            if epi_tensor is not None and idx < epi_tensor.numel()
+            else float("nan")
+        )
+        pool = (
+            bool(pool_tensor[idx].item())
+            if pool_tensor is not None and idx < pool_tensor.numel()
+            else False
+        )
+        persisted_type, persisted_text = _node_summary(graph, node_id)
+        text = persisted_text or ""
+        lines.append(
+            f"{prefix}{rank}. id={node_id} type={node_type} "
+            f"score={score:.3f} gold={gold:.2f} epi={epi:.3f} pool={int(pool)} "
+            f"persisted_type={persisted_type} text={_short(text, 90)}"
+        )
+    return lines
 
 
 def _planning_hit_summary(rec: EvalRecord) -> Tuple[str, bool, bool]:
@@ -900,6 +1031,155 @@ def _applicable_failure_focus_report(
         print(f"\n  ... {len(rows) - limit} more applicable failure rows omitted")
 
 
+def _direct_judgment_routing_audit(
+    records: Sequence[EvalRecord],
+    graph=None,
+    limit: int = 12,
+) -> None:
+    print("\n=== direct_judgment routing audit (held-out) ===")
+    items = [rec for rec in records if _task_family(rec.ex) == "direct_judgment"]
+    if not items:
+        print("  no direct_judgment held-out records")
+        return
+
+    subsets = [
+        ("all_direct", items),
+        ("applicable", [rec for rec in items if rec.ex.tag == "applicable"]),
+        (
+            "applicable_fb",
+            [
+                rec for rec in items
+                if rec.ex.tag == "applicable"
+                and fallback_bits(rec.evidence_state, rec.ex)["fallback"]
+            ],
+        ),
+        ("blocked", [rec for rec in items if rec.ex.tag == "blocked"]),
+        ("negative", [rec for rec in items if rec.ex.tag == "negative"]),
+    ]
+
+    print("  metrics use final node_scores_r over in-pool gold anchors, matching trainable/fallback top-k.")
+    print(
+        f"{'subset':16s} {'n':>4s} "
+        f"{'plan_n':>6s} {'planCov':>7s} {'planP@1':>8s} {'planH@3':>8s} "
+        f"{'planR@3':>8s} {'planR@g':>8s} "
+        f"{'evid_n':>6s} {'evidCov':>7s} {'evidP@1':>8s} {'evidH@3':>8s} "
+        f"{'evidR@3':>8s} {'evidR@g':>8s}"
+    )
+    for name, subset in subsets:
+        if not subset:
+            continue
+        plan = _routing_metrics(subset, "plan_anchor", "planning_state", "planning_mask", k=3)
+        evid = _routing_metrics(subset, "evid_anchor", "evidence_state", "evidence_mask", k=3)
+        print(
+            f"{name[:16]:16s} {len(subset):>4d} "
+            f"{int(plan['n']):>6d} {plan['pool_cov']:>7.2f} "
+            f"{plan['p1']:>8.2f} {plan['hit3']:>8.2f} "
+            f"{plan['r3']:>8.2f} {plan['rgold']:>8.2f} "
+            f"{int(evid['n']):>6d} {evid['pool_cov']:>7.2f} "
+            f"{evid['p1']:>8.2f} {evid['hit3']:>8.2f} "
+            f"{evid['r3']:>8.2f} {evid['rgold']:>8.2f}"
+        )
+
+    failure_items = [
+        rec for rec in items
+        if rec.ex.tag == "applicable" and fallback_bits(rec.evidence_state, rec.ex)["fallback"]
+    ]
+    if not failure_items:
+        print("  no applicable direct_judgment fallback failures to audit")
+        return
+
+    plan_gold_types: Counter[str] = Counter()
+    plan_oop_types: Counter[str] = Counter()
+    plan_pred_types: Counter[str] = Counter()
+    evid_gold_types: Counter[str] = Counter()
+    evid_oop_types: Counter[str] = Counter()
+    evid_pred_types: Counter[str] = Counter()
+    for rec in failure_items:
+        plan_scores = _state_scores(rec.planning_state)
+        evid_scores = _state_scores(rec.evidence_state)
+        for idx in _gold_indices(rec.ex.plan_anchor):
+            plan_gold_types[rec.ex.graph_kv.node_types[idx]] += 1
+            if not bool(rec.ex.graph_kv.planning_mask[idx].item()):
+                plan_oop_types[rec.ex.graph_kv.node_types[idx]] += 1
+        for idx in _gold_indices(rec.ex.evid_anchor):
+            evid_gold_types[rec.ex.graph_kv.node_types[idx]] += 1
+            if not bool(rec.ex.graph_kv.evidence_mask[idx].item()):
+                evid_oop_types[rec.ex.graph_kv.node_types[idx]] += 1
+        top_plan = _top_indices(plan_scores, 1)
+        top_evid = _top_indices(evid_scores, 1)
+        if top_plan:
+            plan_pred_types[rec.ex.graph_kv.node_types[top_plan[0]]] += 1
+        if top_evid:
+            evid_pred_types[rec.ex.graph_kv.node_types[top_evid[0]]] += 1
+
+    print(f"  applicable direct_judgment fallback failures n={len(failure_items)}")
+    print(f"  gold plan types   : {dict(plan_gold_types.most_common(8))}")
+    print(f"  gold plan pool=0 : {dict(plan_oop_types.most_common(8))}")
+    print(f"  pred plan@1 types : {dict(plan_pred_types.most_common(8))}")
+    print(f"  gold evid types   : {dict(evid_gold_types.most_common(8))}")
+    print(f"  gold evid pool=0 : {dict(evid_oop_types.most_common(8))}")
+    print(f"  pred evid@1 types : {dict(evid_pred_types.most_common(8))}")
+
+    print("\n  direct_judgment routing label details:")
+    for row_idx, rec in enumerate(failure_items[:limit], start=1):
+        bits = fallback_bits(rec.evidence_state, rec.ex)
+        plan_scores = _state_scores(rec.planning_state)
+        evid_scores = _state_scores(rec.evidence_state)
+        plan_gold = rec.ex.plan_anchor.squeeze(0) if rec.ex.plan_anchor is not None else None
+        evid_gold = rec.ex.evid_anchor.squeeze(0) if rec.ex.evid_anchor is not None else None
+        plan_pool = rec.ex.graph_kv.planning_mask
+        evid_pool = rec.ex.graph_kv.evidence_mask
+        pred_epi = rec.evidence_state.epistemic_confidence_r.squeeze(0)
+        gold_epi = rec.ex.epi_target.squeeze(0) if rec.ex.epi_target is not None else None
+
+        plan_top3 = _top_indices(plan_scores, 3)
+        evid_top3 = _top_indices(evid_scores, 3)
+        gold_plan = _sorted_gold_indices(rec.ex.plan_anchor, limit=5)
+        gold_evid = _sorted_gold_indices(rec.ex.evid_anchor, limit=5)
+        gold_epi_nodes = _sorted_gold_indices(rec.ex.epi_target, limit=5)
+
+        print(
+            f"\n  case {row_idx}: id={rec.ex.case_id or 'unknown'} "
+            f"failures={_failure_names(bits, include_shortcut=True)}"
+        )
+        if rec.ex.question:
+            print(f"    question: {_short(rec.ex.question, 160)}")
+        print(f"    required_slots: {(rec.ex.task_frame or {}).get('required_slots') or []}")
+        print(f"    slots: {_format_slot_rows(_slot_rows(rec))}")
+        print("    pred_plan_top3:")
+        for line in _node_detail_lines(
+            rec, plan_top3, graph=graph, score_tensor=plan_scores,
+            gold_tensor=plan_gold, epi_tensor=pred_epi, pool_tensor=plan_pool,
+        ):
+            print(line)
+        print("    gold_plan_anchors:")
+        for line in _node_detail_lines(
+            rec, gold_plan, graph=graph, score_tensor=plan_scores,
+            gold_tensor=plan_gold, epi_tensor=pred_epi, pool_tensor=plan_pool,
+        ):
+            print(line)
+        print("    pred_evidence_top3:")
+        for line in _node_detail_lines(
+            rec, evid_top3, graph=graph, score_tensor=evid_scores,
+            gold_tensor=evid_gold, epi_tensor=pred_epi, pool_tensor=evid_pool,
+        ):
+            print(line)
+        print("    gold_evidence_anchors:")
+        for line in _node_detail_lines(
+            rec, gold_evid, graph=graph, score_tensor=evid_scores,
+            gold_tensor=evid_gold, epi_tensor=pred_epi, pool_tensor=evid_pool,
+        ):
+            print(line)
+        print("    gold_epistemic_nodes:")
+        for line in _node_detail_lines(
+            rec, gold_epi_nodes, graph=graph, score_tensor=evid_scores,
+            gold_tensor=gold_epi, epi_tensor=pred_epi, pool_tensor=evid_pool,
+        ):
+            print(line)
+    if len(failure_items) > limit:
+        print(f"\n  ... {len(failure_items) - limit} more direct_judgment routing rows omitted")
+
+
 def _direct_judgment_report(
     records: Sequence[EvalRecord],
     graph=None,
@@ -1217,6 +1497,7 @@ def run(
     invalidator_limit: int = 12,
     applicable_limit: int = 18,
     applicable_focus_limit: int = 24,
+    direct_routing_limit: int = 12,
     direct_limit: int = 18,
     negative_limit: int = 8,
     seed: int = 7,
@@ -1230,6 +1511,7 @@ def run(
     _task_family_report(records)
     _applicable_calibration_report(records, graph, applicable_limit)
     _applicable_failure_focus_report(records, graph, applicable_focus_limit)
+    _direct_judgment_routing_audit(records, graph, direct_routing_limit)
     _direct_judgment_report(records, graph, direct_limit)
     _negative_safety_report(records, graph, negative_limit)
     _invalidator_case_report(records, invalidator_limit, graph)
@@ -1251,6 +1533,7 @@ if __name__ == "__main__":
     ap.add_argument("--invalidator-limit", type=int, default=12)
     ap.add_argument("--applicable-limit", type=int, default=18)
     ap.add_argument("--applicable-focus-limit", type=int, default=24)
+    ap.add_argument("--direct-routing-limit", type=int, default=12)
     ap.add_argument("--direct-limit", type=int, default=18)
     ap.add_argument("--negative-limit", type=int, default=8)
     ap.add_argument("--seed", type=int, default=7)
@@ -1267,6 +1550,7 @@ if __name__ == "__main__":
         args.invalidator_limit,
         args.applicable_limit,
         args.applicable_focus_limit,
+        args.direct_routing_limit,
         args.direct_limit,
         args.negative_limit,
         args.seed,
