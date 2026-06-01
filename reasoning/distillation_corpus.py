@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, TYPE_CHECKING
@@ -44,6 +45,11 @@ DEFAULT_CORPUS_FILE = "sessions.jsonl"
 #     trajectory_reward_score). V2 is a strict superset of V1 — old readers
 #     that ignore unknown fields remain compatible.
 CORPUS_SCHEMA_VERSION = 2
+
+_TOOL_BLOCK_RE = re.compile(r"<(?:tool|graph_action)>\s*(.*?)\s*</(?:tool|graph_action)>", re.DOTALL)
+_ANSWER_BLOCK_RE = re.compile(r"<answer\b", re.IGNORECASE)
+_PATCH_BLOCK_RE = re.compile(r"<patch\b", re.IGNORECASE)
+_EVIDENCE_AUDIT_BLOCK_RE = re.compile(r"<evidence_audit\b", re.IGNORECASE)
 
 
 def _now_iso() -> str:
@@ -76,6 +82,68 @@ def _build_node_type_counts(nodes_accessed_log: list) -> Dict[str, int]:
     return counts
 
 
+def _tool_names_from_turn(text: str) -> list[str]:
+    names: list[str] = []
+    for match in _TOOL_BLOCK_RE.finditer(str(text or "")):
+        try:
+            payload = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            names.append("<parse_error>")
+            continue
+        name = payload.get("name")
+        names.append(str(name) if isinstance(name, str) else "<shape_error>")
+    return names
+
+
+def _turn_summaries(cot_log: list[str]) -> list[Dict[str, Any]]:
+    summaries: list[Dict[str, Any]] = []
+    for idx, text in enumerate(cot_log):
+        raw = str(text or "")
+        tool_names = _tool_names_from_turn(raw)
+        counts: Dict[str, int] = {}
+        for name in tool_names:
+            counts[name] = counts.get(name, 0) + 1
+        summaries.append({
+            "turn_index": idx,
+            "chars": len(raw),
+            "tool_call_count": len(tool_names),
+            "tool_names": tool_names[:20],
+            "tool_counts": counts,
+            "has_answer": bool(_ANSWER_BLOCK_RE.search(raw)),
+            "has_patch": bool(_PATCH_BLOCK_RE.search(raw)),
+            "has_evidence_audit": bool(_EVIDENCE_AUDIT_BLOCK_RE.search(raw)),
+            "preview": raw[:500],
+        })
+    return summaries
+
+
+def _controller_raw_trace_summary(raw_trace: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+    out: list[Dict[str, Any]] = []
+    for idx, entry in enumerate(raw_trace):
+        if not isinstance(entry, dict):
+            out.append({
+                "turn_index": idx,
+                "mode": None,
+                "elapsed_sec": None,
+                "session_id_after": None,
+                "assistant_chars": 0,
+                "assistant_nonempty": False,
+                "event_count": 0,
+            })
+            continue
+        assistant_text = str(entry.get("assistant_text", "") or "")
+        out.append({
+            "turn_index": idx,
+            "mode": entry.get("mode"),
+            "elapsed_sec": entry.get("elapsed_sec"),
+            "session_id_after": entry.get("session_id_after"),
+            "assistant_chars": len(assistant_text),
+            "assistant_nonempty": bool(assistant_text.strip()),
+            "event_count": len(entry.get("events", []) or []),
+        })
+    return out
+
+
 
 def packet_to_corpus_row(
     pkt: "V4Packet",
@@ -93,6 +161,12 @@ def packet_to_corpus_row(
     and trajectory_reward_score. These fields are None-safe: if graph is
     unavailable or nodes_accessed_log is empty, fields are written as empty.
     """
+    finalization_quality = _serialize_obj(getattr(pkt, "finalization_quality", {}) or {})
+    training_eligible = bool(
+        finalization_quality.get("training_eligible", getattr(pkt, "finalized", False))
+    )
+    controller_raw_trace = _serialize_obj(getattr(pkt, "controller_raw_trace", []) or [])
+
     # Resolve anchor snippets so the row is self-contained (you can train on
     # it without re-loading the original graph).
     anchor_records = []
@@ -126,6 +200,11 @@ def packet_to_corpus_row(
             "plan_tree": pkt.plan_tree_summary,
             "tool_calls": _serialize_obj(pkt.tool_log),
             "cot_log": list(pkt.cot_log),
+            "turn_summaries": _turn_summaries(list(pkt.cot_log)),
+            "controller_raw_trace": controller_raw_trace,
+            "controller_raw_trace_summary": _controller_raw_trace_summary(
+                controller_raw_trace if isinstance(controller_raw_trace, list) else []
+            ),
             "hypotheses": dict(pkt.hypotheses),
             "failures": [_serialize_obj(f) for f in pkt.failures],
             "session_objects": {
@@ -165,6 +244,10 @@ def packet_to_corpus_row(
             "slot_fill_stats": _serialize_obj(getattr(pkt, "slot_fill_stats", {})),
             "controller_action_counts": _serialize_obj(getattr(pkt, "controller_action_counts", {})),
             "controller_fallback_used": bool(getattr(pkt, "controller_fallback_used", False)),
+            "controller_call_count": getattr(pkt, "controller_call_count", 0),
+            "controller_total_elapsed_sec": getattr(pkt, "controller_total_elapsed_sec", 0.0),
+            "controller_nonempty_turns": getattr(pkt, "controller_nonempty_turns", 0),
+            "finalization_quality": finalization_quality,
             "polish_applied": pkt.polish_applied,
             "budget_summary": pkt.budget_summary,
             "meta_signals_count": len(pkt.meta_signals),
@@ -180,6 +263,9 @@ def packet_to_corpus_row(
             "finalized": pkt.finalized,
             "coverage_pct": pkt.coverage_addressed_pct,
             "had_polish": pkt.polish_applied,
+            "training_eligible": training_eligible,
+            "v5_label_status": "positive" if training_eligible else "needs_review",
+            "finalization_quality": finalization_quality,
             # Crude "interesting" heuristic: hard tasks tend to produce
             # objects/hypotheses/failures; easy tasks don't.
             "complexity_proxy_score": (

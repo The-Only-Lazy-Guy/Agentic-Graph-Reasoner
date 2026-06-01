@@ -21,7 +21,7 @@ import urllib.error
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from graph_core import MemoryGraph
 from anchor_retrieval import retrieve_anchors_v2
@@ -189,6 +189,7 @@ class V4Session:
     coverage_rounds: int           = 0
     coverage: Optional[Dict[str, Any]] = None
     design_evidence_gate_rounds: int = 0
+    finalization_quality_rounds: int = 0
     hypothesis_verify_prompted: bool = False    # Phase 4: have we asked the model to verify?
     read_grounding_prompted: bool = False       # have we asked the model to read nodes before answering?
     graph_only_answer: bool = False            # strict mode: answer from graph content only
@@ -686,6 +687,65 @@ class V4Tools:
             return 0.0
         return inter / len(a | b)
 
+    def _read_node_ids(self) -> List[str]:
+        seen: Set[str] = set()
+        ordered: List[str] = []
+        for entry in self.call_log:
+            if entry.get("name") != "read_node":
+                continue
+            args = entry.get("args") if isinstance(entry.get("args"), dict) else {}
+            node_id = str(args.get("node_id", "") or "")
+            if not node_id:
+                continue
+            real_id = self._deanon(node_id)
+            if real_id.startswith("__blocked_") or real_id not in self.graph.nodes:
+                continue
+            if real_id not in seen:
+                seen.add(real_id)
+                ordered.append(real_id)
+        return ordered
+
+    def _cited_read_node_ids(self, evidence: str) -> List[str]:
+        evidence_text = str(evidence or "")
+        cited: List[str] = []
+        for real_id in self._read_node_ids():
+            visible_id = self._anon(real_id)
+            if real_id in evidence_text or visible_id in evidence_text:
+                cited.append(real_id)
+        return cited
+
+    def _verification_quality(
+        self,
+        *,
+        hypothesis_text: str,
+        evidence: str,
+    ) -> Dict[str, Any]:
+        cited = self._cited_read_node_ids(evidence)
+        cited_text = " ".join(
+            self.graph.nodes[node_id].text
+            for node_id in cited
+            if node_id in self.graph.nodes
+        )
+        question_tokens = content_tokens(self.session.question)
+        cited_tokens = content_tokens(cited_text)
+        question_overlap = sorted(question_tokens & cited_tokens)
+        support_overlap = lexical_overlap(hypothesis_text, cited_text)
+        accepted = bool(cited) and bool(question_overlap) and support_overlap >= 0.08
+        reasons: List[str] = []
+        if not cited:
+            reasons.append("no_read_node_cited")
+        if not question_overlap:
+            reasons.append("no_question_overlap_in_cited_evidence")
+        if support_overlap < 0.08:
+            reasons.append("low_hypothesis_support_overlap")
+        return {
+            "accepted": accepted,
+            "cited_node_ids": cited,
+            "question_overlap_tokens": question_overlap[:12],
+            "support_overlap": round(float(support_overlap), 3),
+            "reasons": reasons,
+        }
+
     # ── graph read ──────────────────────────────────────────────────────────
 
     def read_node(self, node_id: str) -> Dict[str, Any]:
@@ -855,9 +915,26 @@ class V4Tools:
             if not evidence:
                 results.append({"id": hid, "error": "evidence is required"})
                 continue
+            quality = self._verification_quality(
+                hypothesis_text=str(self.session.hypotheses[hid].get("text", "")),
+                evidence=evidence,
+            )
+            if verdict == "verified" and not quality["accepted"]:
+                results.append({
+                    "id": hid,
+                    "error": "verified hypotheses must cite a read node that overlaps the question",
+                    "verification_quality": quality,
+                })
+                continue
             self.session.hypotheses[hid]["verdict"] = verdict
             self.session.hypotheses[hid]["evidence"] = evidence
-            results.append({"id": hid, "status": "stamped", "verdict": verdict})
+            self.session.hypotheses[hid]["verification_quality"] = quality
+            results.append({
+                "id": hid,
+                "status": "stamped",
+                "verdict": verdict,
+                "verification_quality": quality,
+            })
         unverified = [hid for hid, h in self.session.hypotheses.items() if h.get("verdict") is None]
         out = {"results": results, "remaining_unverified": unverified}
         self._rec("verify_hypotheses", {"count": len(verdicts)}, out)
@@ -2065,6 +2142,110 @@ def validate_design_answer_support(
     }
 
 
+def _slot_ratio(stats: Mapping[str, Any]) -> float:
+    required = int(stats.get("required_count", 0) or 0)
+    filled = int(stats.get("filled_count", 0) or 0)
+    if required <= 0:
+        return 1.0
+    return filled / required
+
+
+def evaluate_finalization_quality(
+    *,
+    answer: str,
+    session: V4Session,
+    tool_log: List[Dict[str, Any]],
+    micro_outcome: Any,
+    controller_fallback_used: bool,
+    task_family: str,
+) -> Dict[str, Any]:
+    """Compact quality contract for runtime confidence and V5 corpus filtering."""
+    _ = answer
+    stats = (
+        micro_outcome.slot_fill_stats()
+        if hasattr(micro_outcome, "slot_fill_stats") else {}
+    )
+    slot_ratio = _slot_ratio(stats)
+    read_count = sum(1 for e in tool_log if e.get("name") == "read_node")
+    search_count = sum(1 for e in tool_log if e.get("name") == "search_nodes")
+    verify_count = sum(1 for e in tool_log if e.get("name") == "verify_hypotheses")
+    verified = {
+        hid: h for hid, h in session.hypotheses.items()
+        if h.get("verdict") == "verified"
+    }
+    discarded = {
+        hid: h for hid, h in session.hypotheses.items()
+        if h.get("verdict") == "discarded"
+    }
+    unverified = [
+        hid for hid, h in session.hypotheses.items()
+        if h.get("verdict") is None
+    ]
+    weak_verified = [
+        hid for hid, h in verified.items()
+        if not (h.get("verification_quality") or {}).get("accepted", False)
+    ]
+
+    issues: List[str] = []
+    if read_count == 0:
+        issues.append("no_read_nodes")
+    if session.hypotheses and verify_count == 0:
+        issues.append("hypotheses_without_verify_tool")
+    if unverified:
+        issues.append("unverified_hypotheses")
+    if weak_verified:
+        issues.append("weak_verified_hypotheses")
+    if controller_fallback_used:
+        issues.append("controller_fallback_used")
+    if task_family == "design_synthesis" and slot_ratio < 0.5:
+        issues.append("low_design_slot_coverage")
+
+    hard_issues = {
+        "no_read_nodes",
+        "unverified_hypotheses",
+        "weak_verified_hypotheses",
+        "low_design_slot_coverage",
+    }
+    training_eligible = not any(issue in hard_issues for issue in issues)
+    confidence_hint = "high" if training_eligible and not issues else "low" if issues else "medium"
+    return {
+        "training_eligible": bool(training_eligible),
+        "confidence_hint": confidence_hint,
+        "issues": issues,
+        "read_count": read_count,
+        "search_count": search_count,
+        "verify_hypotheses_count": verify_count,
+        "verified_hypotheses": sorted(verified),
+        "discarded_hypotheses": sorted(discarded),
+        "unverified_hypotheses": unverified,
+        "weak_verified_hypotheses": weak_verified,
+        "slot_fill_ratio": round(float(slot_ratio), 3),
+        "slot_fill_stats": stats,
+        "controller_fallback_used": bool(controller_fallback_used),
+        "task_family": task_family,
+    }
+
+
+def _finalization_quality_message(quality: Mapping[str, Any]) -> str:
+    issues = ", ".join(str(x) for x in quality.get("issues", [])) or "unknown"
+    return (
+        "Do not finalize yet. The answer is currently useful but too weak for "
+        "a high-confidence V4/V5 training trace.\n\n"
+        f"Quality issues: {issues}\n\n"
+        "Repair instructions:\n"
+        "1. For every verified hypothesis, cite at least one node ID you already "
+        "read whose text overlaps the user's actual question. If support is only "
+        "an analogy, discard or hedge the hypothesis instead of marking it verified.\n"
+        "2. For design tasks, fill the missing design slots explicitly: problem "
+        "frame, core structure, update rule, failure modes, and what remains "
+        "unsupported.\n"
+        "3. Before the final <answer>, include an <evidence_audit> JSON object "
+        "with: claims, support_node_ids, status, confidence, open_questions.\n"
+        "4. Re-emit <answer> only after weak claims are verified, discarded, or "
+        "clearly labeled as speculative/caveated."
+    )
+
+
 def _micro_recommended_finalize(outcome: Any) -> bool:
     if not getattr(outcome, "finalizable", False):
         return False
@@ -2278,7 +2459,10 @@ Track ungrounded ideas explicitly -- do not assert them as facts:
 
 EVERY hypothesis you record must be either verified or discarded before you
 finalize. Use verify_hypotheses with concrete evidence (a node id you read,
-or a short reason for discarding):
+or a short reason for discarding). A hypothesis is "verified" only when the
+evidence cites a read node whose text overlaps the user's actual question.
+If support is merely an analogy or transfer, mark the hypothesis discarded,
+or keep it in the final answer only as a caveated/speculative design idea:
   <tool>{"name": "verify_hypotheses", "args": {"verdicts": [
     {"id": "h_1", "verdict": "verified", "evidence": "confirmed by `fenwick_pagination_apply`"},
     {"id": "h_2", "verdict": "discarded", "evidence": "no graph support; out of scope"}
@@ -2376,9 +2560,23 @@ Multiple tool calls in one response are fine. Results arrive in the next message
 
 When your plan is complete, write your final answer:
 
+  <evidence_audit>
+  {"claims":[
+    {"claim":"short factual claim",
+     "support_node_ids":["node_id_you_read"],
+     "status":"verified|caveated|unsupported",
+     "confidence":0.0,
+     "open_questions":["what would need external verification"]}
+  ]}
+  </evidence_audit>
+
   <answer>
   Clear, natural explanation. No node IDs or graph references.
   </answer>
+
+For design or speculative tasks, the evidence audit is required before the
+answer. It is private working memory for corpus quality; only the <answer>
+block is user-facing.
 
 Example of a GOOD answer:
   "No. Dijkstra cannot be trusted with even a single negative edge.
@@ -3250,6 +3448,7 @@ class V4Packet:
     controller_call_count: int = 0
     controller_total_elapsed_sec: float = 0.0
     controller_nonempty_turns: int = 0
+    finalization_quality: Dict[str, Any] = field(default_factory=dict)
     reflection: Optional[Dict[str, Any]] = None         # Phase 14: parsed ReflectionResult.to_dict()
     reflection_edits: List[Dict[str, Any]] = field(default_factory=list)  # Phase 14
     reflection_applied: bool = False                    # Phase 14
@@ -3836,7 +4035,7 @@ def answer_query_v4(
             # Phase 4: deterministic gate. If any hypothesis is still unverified,
             # block finalization until verify_hypotheses is called.
             unverified = [hid for hid, h in session.hypotheses.items() if h.get("verdict") is None]
-            if unverified and not session.hypothesis_verify_prompted:
+            if unverified and step + 1 < max_steps:
                 session.hypothesis_verify_prompted = True
                 hyp_lines = "\n".join(
                     f"  - {hid}: {session.hypotheses[hid]['text']}" for hid in unverified
@@ -3866,6 +4065,26 @@ def answer_query_v4(
                     messages.append({"role": "user", "content": design_support_issue["message"]})
                     continue
                 ans = _strip_unsupported_design_lines(ans, design_support_issue["issues"])
+
+            finalization_quality_preview = evaluate_finalization_quality(
+                answer=ans,
+                session=session,
+                tool_log=tools.call_log,
+                micro_outcome=micro_outcome,
+                controller_fallback_used=controller_fallback_used and not micro_shortcut_used,
+                task_family=controller_task_family,
+            )
+            if (
+                finalization_quality_preview.get("issues")
+                and session.finalization_quality_rounds == 0
+                and step + 1 < max_steps
+            ):
+                session.finalization_quality_rounds += 1
+                messages.append({
+                    "role": "user",
+                    "content": _finalization_quality_message(finalization_quality_preview),
+                })
+                continue
 
             # Phase 3: surface coverage to the model once. Model self-judges whether
             # to revise. Cap at 1 round (budget enforcement, not heuristic gate).
@@ -4334,6 +4553,14 @@ def answer_query_v4(
         1 for entry in controller_raw_trace
         if str(entry.get("assistant_text", "") or "").strip()
     )
+    finalization_quality = evaluate_finalization_quality(
+        answer=final_answer or "",
+        session=session,
+        tool_log=tools.call_log,
+        micro_outcome=micro_outcome,
+        controller_fallback_used=controller_fallback_used and not micro_shortcut_used,
+        task_family=controller_task_family,
+    )
 
     # Phase 15: append to distillation corpus.
     _pkt = V4Packet(
@@ -4399,6 +4626,7 @@ def answer_query_v4(
         controller_call_count=controller_call_count,
         controller_total_elapsed_sec=controller_total_elapsed_sec,
         controller_nonempty_turns=controller_nonempty_turns,
+        finalization_quality=finalization_quality,
         reflection=reflection_dict,
         reflection_edits=reflection_edits,
         reflection_applied=reflection_applied,

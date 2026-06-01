@@ -354,6 +354,36 @@
   I used this clean branch because the local `reasoning-architecture` branch is
   12 commits ahead of `origin/main`; pushing it directly would drag unrelated
   history instead of only this demo-collection change.
+- V4 quality checkpoint after inspecting
+  `data/session_subgraphs/v4_bb5257d3c6e3`: the matching corpus sample is
+  `data/distillation_corpus/sessions.jsonl` line 174. The run was creative but
+  overconfident: `finalized=True`, `coverage_pct=1.0`, 54 tool calls, 12
+  searches, one model-supplied `verify_hypotheses`, controller `VERIFY=0`,
+  `controller_fallback_used=True`, and design slot fill only 2/10. This is not
+  a clean V5 positive even though it produced an answer.
+- V4 verification/finalization fix: `verify_hypotheses()` now only accepts a
+  `verified` verdict when the evidence cites a node already read in the session,
+  the cited node overlaps the user's question, and the cited text has minimal
+  lexical support for the hypothesis. Weak analogies should be discarded or
+  caveated, not stamped as verified. The finalization loop also adds one repair
+  round when quality issues are present (`unverified_hypotheses`,
+  `weak_verified_hypotheses`, `low_design_slot_coverage`, etc.).
+- V5 data-shape fix: corpus rows now persist `trace.turn_summaries`,
+  `trace.controller_raw_trace`, `trace.controller_raw_trace_summary`,
+  `metrics.finalization_quality`, and `quality.training_eligible` /
+  `quality.v5_label_status`. This makes downstream filtering cheap: train on
+  rows where support/verification is clean; keep creative-but-weak rows as
+  `needs_review` or negative/soft-fallback calibration data.
+- Prompt/data guidance added for V4: complex/design tasks should emit a private
+  `<evidence_audit>` before `<answer>` with claims, support node IDs, status,
+  confidence, and open questions. This is the useful V5 supervision signal; the
+  goal is not more raw hidden CoT, but structured evidence/support/quality labels
+  that prevent expensive post-hoc parsing.
+- Verification for this V4 checkpoint: `py_compile` passed for `answerer_v4.py`,
+  `reasoning/distillation_corpus.py`, `reasoning/tests/test_v4_corpus_quality.py`,
+  and `run_repeat_learning_experiment.py`. Targeted tests passed:
+  `pytest -q reasoning/tests/test_v4_corpus_quality.py reasoning/tests/test_model_patch_extraction.py test_raw_trace_capture.py`
+  -> 12/12.
 - Read: the projected pipeline is now real and end-to-end, evidence routing is
   materially stronger than planning. The false-invalidator blocker is repaired;
   the remaining fallback failures are mostly missing slots + low epistemic on

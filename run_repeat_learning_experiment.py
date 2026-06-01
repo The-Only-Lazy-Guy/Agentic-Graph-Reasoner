@@ -196,8 +196,8 @@ def _run_once(
     server_url: str,
     timeout: float,
     out_dir: Path,
-    enable_signature_live_bias: bool,
-    signature_stats_dir: str | Path,
+    enable_signature_live_bias: bool = False,
+    signature_stats_dir: str | Path = "data/signature_stats",
 ) -> Dict[str, Any]:
     before_nodes = _node_snapshot(graph)
     before_edge_count = len(graph.edges)
