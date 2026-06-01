@@ -3,7 +3,7 @@
 > At-a-glance dump of the latest runs (raw outputs, numbers, repro commands) so
 > you don't have to dig through commits/logs. Updated each working session.
 
-**Last updated:** 2026-06-01
+**Last updated:** 2026-06-02
 **HEAD:** latest pushed commit on branch `main`
 
 ---
@@ -328,6 +328,26 @@
   fallback below the current band. The next lever is calibration/label quality
   on direct_judgment slots + epistemic confidence and planning substrate, not
   Stage 3/4 or a blind second schedule.
+- Frontend demo collection checkpoint: the requested `E:\PROJECT\front-end`
+  path is actually `E:\PROJECT\graph-front-end` in this workspace. That demo API
+  now defaults to `GRAPH_BACKEND_DIR=..\graph_v5` instead of `..\graph_final`,
+  imports the V5 `answerer_v4` / `V4OpencodeController`, and passes
+  `collect_corpus=True` with explicit V5 paths. Finalized demo/test runs append
+  to `graph_v5/data/distillation_corpus/sessions.jsonl`; persisted session
+  subgraphs go to `graph_v5/data/session_subgraphs`; live signature stats use
+  `graph_v5/data/signature_stats`.
+- `answer_query_v4()` now accepts explicit `corpus_root`, `corpus_file`,
+  `corpus_extra_metadata`, and `session_root` arguments. This prevents frontend
+  demo runs from accidentally writing generated data under the frontend cwd.
+  The frontend `/api/health` response also reports `backend_name`, `corpus_path`,
+  `session_subgraph_root`, and `demo_collects_corpus` so the team can verify the
+  demo is harvesting into V5 before running public tests.
+- Verification for the frontend collection checkpoint: `py_compile` passed for
+  `graph-front-end/api/frontend_api.py`, `graph-front-end/api/test_frontend_api.py`,
+  and `graph_v5/answerer_v4.py`; `python -m unittest api.test_frontend_api -v`
+  passes 4/4. A clean health import reports backend `graph_v5`, graph dir
+  `graph_v5/graphs`, corpus `graph_v5/data/distillation_corpus/sessions.jsonl`,
+  session root `graph_v5/data/session_subgraphs`, and `demo_collects_corpus=True`.
 - Read: the projected pipeline is now real and end-to-end, evidence routing is
   materially stronger than planning. The false-invalidator blocker is repaired;
   the remaining fallback failures are mostly missing slots + low epistemic on

@@ -3290,6 +3290,10 @@ def answer_query_v4(
     polish_answer: bool = True,
     run_reflection_inline: bool = False,
     collect_corpus: bool = True,
+    corpus_root: str | Path = "data/distillation_corpus",
+    corpus_file: str = "sessions.jsonl",
+    corpus_extra_metadata: Optional[Dict[str, Any]] = None,
+    session_root: str | Path = "data/session_subgraphs",
     controller_label: str = "",
     auto_config: bool = False,
     classifier: Optional["TaskClassifier"] = None,
@@ -3978,7 +3982,7 @@ def answer_query_v4(
     consolidation_decisions: List[Dict[str, Any]] = []
     if session.controller is not None:
         try:
-            sess_dir = session.controller.close(Path("data/session_subgraphs"))
+            sess_dir = session.controller.close(Path(session_root))
             session.session_dir = str(sess_dir)
             # Also persist the raw CoT log so reasoning can be inspected later.
             try:
@@ -4486,7 +4490,10 @@ def answer_query_v4(
         try:
             append_session_to_corpus(
                 _pkt, graph,
+                corpus_root=Path(corpus_root),
+                corpus_file=corpus_file,
                 controller_label=controller_label,
+                extra_metadata=corpus_extra_metadata,
             )
         except Exception:
             pass
