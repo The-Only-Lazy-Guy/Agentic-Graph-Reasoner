@@ -21,7 +21,7 @@ import urllib.error
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from graph_core import MemoryGraph
 from anchor_retrieval import retrieve_anchors_v2
@@ -3493,6 +3493,7 @@ def answer_query_v4(
     corpus_file: str = "sessions.jsonl",
     corpus_extra_metadata: Optional[Dict[str, Any]] = None,
     session_root: str | Path = "data/session_subgraphs",
+    event_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None,
     controller_label: str = "",
     auto_config: bool = False,
     classifier: Optional["TaskClassifier"] = None,
@@ -3663,6 +3664,14 @@ def answer_query_v4(
         session.dispatcher = Dispatcher(procedure_index=proc_index)
     tools = V4Tools(graph, session, use_failure_boost=use_failure_boost, llm_controller=controller, anonymize_ids=anonymize_ids)
     node_ids: Set[str] = set(graph.nodes.keys())
+
+    def emit_event(event: str, data: Dict[str, Any]) -> None:
+        if event_callback is None:
+            return
+        try:
+            event_callback(event, data)
+        except Exception:
+            pass
 
     if micro_outcome is None:
         micro_outcome = run_micro_epistemic_controller(
@@ -3951,6 +3960,14 @@ def answer_query_v4(
 
         cot_log.append(content)
         messages.append({"role": "assistant", "content": content})
+        parsed_tool_calls_for_event = parse_tool_calls(content)
+        emit_event("model_turn", {
+            "step": step + 1,
+            "content_chars": len(content),
+            "tool_call_count": len(parsed_tool_calls_for_event),
+            "has_answer": parse_answer(content) is not None,
+            "has_patch": "<patch>" in content,
+        })
 
         # 1. Parse plan / replan (before tool execution so plan is enforced)
         if not session.planned:
@@ -3958,6 +3975,11 @@ def answer_query_v4(
             if plan:
                 session.plan = plan
                 session.planned = True
+                emit_event("plan_update", {
+                    "step": step + 1,
+                    "kind": "plan",
+                    "plan": [{"text": sg.text, "done": sg.done} for sg in session.plan],
+                })
                 # Phase 9: seed the plan_tree from the linear subgoals when enabled.
                 if enable_plan_tree:
                     _seed_plan_tree(session, question, plan)
@@ -3981,6 +4003,11 @@ def answer_query_v4(
             replan = parse_replan(content)
             if replan:
                 session.plan = replan
+                emit_event("plan_update", {
+                    "step": step + 1,
+                    "kind": "replan",
+                    "plan": [{"text": sg.text, "done": sg.done} for sg in session.plan],
+                })
                 if enable_plan_tree:
                     # Re-plan: replace existing tree with a fresh one from the new linear plan.
                     _seed_plan_tree(session, question, replan)
@@ -3999,11 +4026,19 @@ def answer_query_v4(
         # 3. Execute tool calls (always, even when answer is also present in this response)
         # Phase 5: stamp triggered_by source for write-through audit entries.
         tools._last_triggered_by = _strip_structured_tags(content)[:200] or f"step {step}"
-        tool_calls = parse_tool_calls(content)
+        tool_calls = parsed_tool_calls_for_event
         tool_result_parts: List[str] = []
         for call in tool_calls:
             result = execute_tool(tools, call)
             label = call.get("name", "<bad_call>")
+            emit_event("tool_result", {
+                "step": step + 1,
+                "tool_name": label,
+                "action": label,
+                "success": not (isinstance(result, dict) and "error" in result),
+                "summary": _summarize(result) if isinstance(result, dict) else str(result)[:220],
+                "args": call.get("args", {}),
+            })
             # Phase 7: catch budget exhaustion. After hitting a cap, the next
             # turn will instruct the model to finalize.
             if isinstance(result, dict) and "_budget_exhausted" in result:
@@ -4015,6 +4050,12 @@ def answer_query_v4(
         # 4. Check for final answer (after tools run so state mutations take effect)
         ans = parse_answer(content)
         if ans is not None:
+            emit_event("answer_candidate", {
+                "step": step + 1,
+                "answer_chars": len(ans),
+                "tool_call_count": len(tools.call_log),
+                "hypothesis_count": len(session.hypotheses),
+            })
             read_grounding_error = validate_answer_reads(ans, tools.call_log)
             if read_grounding_error:
                 session.read_grounding_prompted = True

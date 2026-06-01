@@ -384,6 +384,24 @@
   and `run_repeat_learning_experiment.py`. Targeted tests passed:
   `pytest -q reasoning/tests/test_v4_corpus_quality.py reasoning/tests/test_model_patch_extraction.py test_raw_trace_capture.py`
   -> 12/12.
+- Frontend live-steps checkpoint: V4 `answer_query_v4()` now accepts an
+  `event_callback` and emits public progress events while the run is still in
+  flight: `model_turn`, `plan_update`, `tool_result`, and `answer_candidate`.
+  These events intentionally carry summaries, counts, tool names, and small
+  metadata only; they do not expose raw hidden reasoning. The frontend V4 stream
+  path now uses the same threaded SSE queue as the other modes, so V4 events are
+  forwarded immediately instead of waiting for the final payload.
+- Demo UI live-step behavior: `graph-front-end` renders a "Live steps" timeline
+  during streaming and mirrors those events into the synthetic live session
+  graph. This makes the demo show search/read/verify-style progress and answer
+  candidates while still collecting finalized V4 rows into
+  `graph_v5/data/distillation_corpus/sessions.jsonl`.
+- Verification for the live-steps checkpoint: `python -m py_compile
+  answerer_v4.py` passed; `python -m unittest api.test_frontend_api -v` passed
+  4/4 with the frontend API wired to pass the event callback into V4;
+  `npm.cmd run typecheck` passed; `npm.cmd run build` passed with only Vite's
+  large chunk warning. Stage 3/4 remain held; this is a demo/data-collection and
+  observability checkpoint, not a V5 training-quality gate.
 - Read: the projected pipeline is now real and end-to-end, evidence routing is
   materially stronger than planning. The false-invalidator blocker is repaired;
   the remaining fallback failures are mostly missing slots + low epistemic on
