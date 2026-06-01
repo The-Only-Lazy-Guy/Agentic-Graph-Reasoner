@@ -287,11 +287,18 @@ def sample_to_stage1_example(
     # anchors as supported so applicable fallback can correctly drop. (Non-finalized
     # / blocked traces are NOT marked -> their fallback correctly stays on.)
     if sample.finalized:
+        # The evidence a finalized trace CITED is its support. Mark ALL cited
+        # evidence-pool anchors supported (not just the single support node):
+        # the fallback gate checks epi on whichever evidence node routing makes
+        # primary, so every real cited evidence node must be epi-positive or the
+        # gate fires whenever routing lands on a cited-but-unmarked node
+        # (the right_evidence_low_epi / gold_all=0.45 floor). Also fold in the
+        # projected support node + raw accessed evidence as a safety net.
+        epi_t = torch.maximum(epi_t, (evid_anchor > 0).float())
         if sample.support_target_map:
-            support_epi = (_remap_map(sample.support_target_map) * evid_mask.float() > 0).float()
-            epi_t = torch.maximum(epi_t, support_epi)
-        else:
-            epi_t = torch.maximum(epi_t, (anchor * evid_mask.float()))
+            epi_t = torch.maximum(
+                epi_t, (_remap_map(sample.support_target_map) * evid_mask.float() > 0).float())
+        epi_t = torch.maximum(epi_t, (anchor * evid_mask.float()))
     plan_anchor = plan_anchor if plan_anchor.sum() > 0 else None
     evid_anchor = evid_anchor if evid_anchor.sum() > 0 else None
 
