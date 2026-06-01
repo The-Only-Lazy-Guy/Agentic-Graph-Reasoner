@@ -208,6 +208,13 @@ def _parse_row(row: dict) -> Optional[Phase15Sample]:
             task_frame.get("filled_slots") or [],
             task_frame.get("required_slots") or [],
         )
+    else:
+        # Non-finalized traces did not establish enough graph support to answer.
+        # Keep them as training/eval context, but do not let the graph adapter
+        # self-certify through a lucky slot/epi/shortcut conjunction.
+        task_frame["graph_context"] = "weak_evidence"
+        task_frame["allow_shortcut_exit"] = False
+        task_frame["force_fallback"] = True
 
     # Shortcut: finalized AND steps <= SHORTCUT_STEP_RATIO * max_steps
     steps = metrics.get("steps", 99)
@@ -242,8 +249,8 @@ def _extract_substrate_nodes(patches: list) -> Dict[str, dict]:
     """Collect safe substrate add_node patches: node_id -> {type, text, status}.
 
     Only `accept`/`soft_only` patches are taken (needs_review/reject are held
-    back, matching V4's apply gate). Fresh epistemic_state nodes default to
-    'uncertain' status -> planning pool (an asserted-but-unverified belief).
+    back, matching V4's apply gate). Epistemic nodes preserve their projected
+    status so verified/support states do not become planning-pool distractors.
     """
     out: Dict[str, dict] = {}
     for p in patches:
@@ -259,9 +266,19 @@ def _extract_substrate_nodes(patches: list) -> Dict[str, dict]:
         nid = raw.get("node_id") or p.get("target_id")
         if not nid:
             continue
-        epi_status = "uncertain" if ntype == "epistemic_state" else "unknown"
+        epi_status = _epistemic_status_from_patch(p) if ntype == "epistemic_state" else "unknown"
         out[nid] = {"type": ntype, "text": p.get("text") or "", "status": epi_status}
     return out
+
+
+def _epistemic_status_from_patch(patch: dict) -> str:
+    raw = patch.get("raw_edit") or {}
+    payload_meta = ((patch.get("payload") or {}).get("metadata") or {})
+    for source in (raw.get("metadata") or {}, patch.get("metadata") or {}, payload_meta):
+        status = source.get("status") if isinstance(source, dict) else None
+        if isinstance(status, str) and status:
+            return status.lower()
+    return "uncertain"
 
 
 def _extract_nodes(

@@ -1180,6 +1180,64 @@ def _direct_judgment_routing_audit(
         print(f"\n  ... {len(failure_items) - limit} more direct_judgment routing rows omitted")
 
 
+def _direct_judgment_failure_bucket_report(records: Sequence[EvalRecord]) -> None:
+    print("\n=== direct_judgment applicable failure buckets ===")
+    items = [
+        rec for rec in records
+        if _task_family(rec.ex) == "direct_judgment"
+        and rec.ex.tag == "applicable"
+        and fallback_bits(rec.evidence_state, rec.ex)["fallback"]
+    ]
+    if not items:
+        print("  no applicable direct_judgment fallback failures")
+        return
+
+    buckets: Counter[str] = Counter()
+    raw_flags: Counter[str] = Counter()
+    for rec in items:
+        bits = fallback_bits(rec.evidence_state, rec.ex)
+        _plan_top, plan_hit, plan_top3 = _planning_hit_summary(rec)
+        _pred_evid_id, _pred_evid_type, _pred_epi, _pred_evid_gold, _best_gold_id, _best_gold_epi, evid_bucket = _evidence_focus(
+            rec, bits["primary_idx"])
+
+        flags: List[str] = []
+        if bits["missing_slot"]:
+            flags.append("slot_failed")
+        if rec.ex.plan_anchor is not None and not plan_top3:
+            flags.append("wrong_plan")
+        if evid_bucket == "wrong_evidence_selected":
+            flags.append("wrong_evidence")
+        elif evid_bucket == "right_evidence_low_epi":
+            flags.append("right_evidence_low_epi")
+        elif evid_bucket == "gold_evidence_low_epi":
+            flags.append("gold_evidence_low_epi")
+        if bits["invalidator_active"]:
+            flags.append("invalidator_active")
+        if bits["low_epistemic"] and not any(
+            flag in flags for flag in ("right_evidence_low_epi", "gold_evidence_low_epi")
+        ):
+            flags.append("other_low_epistemic")
+
+        for flag in flags:
+            raw_flags[flag] += 1
+
+        if not flags:
+            bucket = "other"
+        elif len(flags) > 1:
+            bucket = "multi_failure"
+        elif flags[0] == "wrong_plan":
+            bucket = "wrong_plan_only"
+        elif flags[0] == "wrong_evidence":
+            bucket = "wrong_evidence_only"
+        else:
+            bucket = flags[0]
+        buckets[bucket] += 1
+
+    print(f"  failures n={len(items)}")
+    print(f"  mutually exclusive: {dict(buckets.most_common())}")
+    print(f"  raw flags         : {dict(raw_flags.most_common())}")
+
+
 def _direct_judgment_report(
     records: Sequence[EvalRecord],
     graph=None,
@@ -1512,6 +1570,7 @@ def run(
     _applicable_calibration_report(records, graph, applicable_limit)
     _applicable_failure_focus_report(records, graph, applicable_focus_limit)
     _direct_judgment_routing_audit(records, graph, direct_routing_limit)
+    _direct_judgment_failure_bucket_report(records)
     _direct_judgment_report(records, graph, direct_limit)
     _negative_safety_report(records, graph, negative_limit)
     _invalidator_case_report(records, invalidator_limit, graph)

@@ -144,10 +144,18 @@ def test_project_row_builds_architecture_shaped_targets():
     assert "strat_1" in proj["planning_target"]
     assert "fact_a" in proj["evidence_target"]
     assert "ssg_1" in proj["evidence_target"]
+    assert "epis_1" not in proj["evidence_target"]
     assert "fact_a" in proj["support_target"]
     assert "fact_b" in proj["distractor_target"]
     assert "strat_1" in proj["candidate_node_ids"]
     assert proj["evidence_loop_targets"]
+
+
+def test_epistemic_substrate_preserves_verified_status():
+    sample = _parse_row(_row())
+
+    assert sample is not None
+    assert sample.substrate_nodes["epis_1"]["status"] == "verified"
 
 
 def test_bridge_prefers_projected_plan_and_evidence_targets():
@@ -189,6 +197,49 @@ def test_bridge_prefers_projected_plan_and_evidence_targets():
     assert ps.write_ratio_tensors[-1].requires_grad
 
 
+def test_bridge_masks_projected_targets_to_block_pools():
+    row = _row()
+    projection = project_corpus_row(row)
+    projection["candidate_node_ids"] = ["example_1", "fact_a", "strat_1"]
+    projection["planning_target"] = {"fact_a": 99.0, "strat_1": 1.0}
+    projection["evidence_target"] = {"example_1": 99.0, "fact_a": 1.0}
+    projection["support_target"] = {"example_1": 99.0}
+    row["v5_projection"] = projection
+    sample = _parse_row(row)
+    assert sample is not None
+
+    graph = _Graph()
+    graph.nodes["example_1"] = _Node("example", "Context example")
+
+    device = torch.device("cpu")
+    gnn = RGCNEncoder().to(device).eval()
+    for p in gnn.parameters():
+        p.requires_grad_(False)
+    ex = sample_to_stage1_example(
+        sample,
+        gnn=gnn,
+        embedder=ZeroEmbedder(device),
+        h_init_provider=MockHInitProvider(128, device),
+        device=device,
+        lm_dim=128,
+        persisted_graph=graph,
+        hops=1,
+    )
+
+    assert ex is not None
+    fact_idx = ex.node_ids.index("fact_a")
+    strat_idx = ex.node_ids.index("strat_1")
+    example_idx = ex.node_ids.index("example_1")
+
+    assert ex.plan_anchor is not None
+    assert ex.plan_anchor[0, strat_idx].item() > 0.0
+    assert ex.plan_anchor[0, fact_idx].item() == 0.0
+
+    assert ex.evid_anchor is not None
+    assert ex.evid_anchor[0, fact_idx].item() > 0.0
+    assert ex.evid_anchor[0, example_idx].item() == 0.0
+
+
 def test_finalized_required_slots_are_marked_filled_even_if_metric_omits_one():
     row = _row()
     row["metrics"]["finalized"] = True
@@ -204,6 +255,18 @@ def test_finalized_required_slots_are_marked_filled_even_if_metric_omits_one():
     assert sample.task_frame["filled_slots"] == ["definition", "reason"]
     assert sample.slot_fill_target[SLOT_ID["definition"]] == 1.0
     assert sample.slot_fill_target[SLOT_ID["reason"]] == 1.0
+
+
+def test_blocked_rows_are_marked_for_forced_fallback():
+    row = _row()
+    row["metrics"]["finalized"] = False
+
+    sample = _parse_row(row)
+
+    assert sample is not None
+    assert sample.task_frame["graph_context"] == "weak_evidence"
+    assert sample.task_frame["force_fallback"] is True
+    assert sample.task_frame["allow_shortcut_exit"] is False
 
 
 def test_invalidator_candidates_require_well_formed_active_edges():

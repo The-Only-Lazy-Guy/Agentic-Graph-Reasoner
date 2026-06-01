@@ -174,6 +174,34 @@
   projection/pool alignment plus epistemic calibration on selected evidence.
   Do not strengthen direct_judgment planning loss until the label contract is
   cleaned or explicitly scoped to in-pool anchors.
+- Added the direct_judgment projection/pool alignment pass:
+  `projection.py` no longer makes `add_epistemic_state` nodes direct evidence
+  targets; `dataset.py` preserves epistemic substrate status instead of
+  defaulting all epistemic states to planning-pool `uncertain`; `bridge.py`
+  masks projected plan/evidence labels to the block's legal pool; non-finalized
+  blocked rows are marked `graph_context=weak_evidence`,
+  `allow_shortcut_exit=False`, `force_fallback=True`. Regression tests cover
+  status preservation, pool masking, and blocked forced-fallback task frames.
+- Reprojected the local 288-row corpus after the projection cleanup. Stats are
+  still 288 rows, planning rows 189, evidence rows 288, support rows 253, loop
+  rows 288, and mean candidate nodes now 8.5 (down from 9.2 after dropping
+  direct epistemic-state evidence targets).
+- Latest guarded seeded diagnostic
+  (`--seed 7 --e1 30 --e2a 20 --e2b 20`, log:
+  `artifacts/run_logs/fallback_write_diag_20260601_pool_alignment_blocked_guard_seed7.log`):
+  applicable fallback=0.51, blocked=1.00, negative=1.00. Oracle gold-all is
+  applicable=0.40, blocked=1.00, negative=1.00. Negative total write is 0.129.
+- Pool alignment result: direct_judgment plan/evidence `poolCov` is now 1.00
+  and `gold evid pool=0` is empty. Direct_judgment applicable plan P@1/hit@3
+  improved to 0.40/0.73, while evidence P@1/hit@3 is 0.60/0.83 under the cleaner
+  in-pool target contract. This is a label-contract win, not a final quality
+  win: applicable fallback remains too high.
+- New direct_judgment bucket report shows the remaining applicable failures are
+  mostly multi-condition: raw flags are wrong_evidence=11, other_low_epistemic=11,
+  slot_failed=10, right_evidence_low_epi=9, wrong_plan=8. Next likely pass is
+  evidence/epistemic calibration on selected in-pool evidence plus direct_judgment
+  planning substrate quality, while preserving the blocked/negative forced
+  fallback guard.
 - Read: the projected pipeline is now real and end-to-end, evidence routing is
   materially stronger than planning. The false-invalidator blocker is repaired;
   the remaining fallback failures are mostly missing slots + low epistemic on

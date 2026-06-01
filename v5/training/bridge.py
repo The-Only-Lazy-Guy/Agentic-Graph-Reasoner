@@ -258,7 +258,7 @@ def sample_to_stage1_example(
     fallback_evid_anchor = anchor * evid_mask.float()
 
     if sample.planning_target_map:
-        plan_anchor = _remap_map(sample.planning_target_map)
+        plan_anchor = _remap_map(sample.planning_target_map) * plan_mask.float()
         if plan_anchor.sum() <= 0:
             plan_anchor = fallback_plan_anchor
     else:
@@ -268,7 +268,7 @@ def sample_to_stage1_example(
         evid_weights = dict(sample.evidence_target_map)
         for nid, weight in sample.support_target_map.items():
             evid_weights[nid] = max(float(weight), float(evid_weights.get(nid, 0.0)))
-        evid_anchor = _remap_map(evid_weights)
+        evid_anchor = _remap_map(evid_weights) * evid_mask.float()
         if evid_anchor.sum() <= 0:
             evid_anchor = fallback_evid_anchor
     else:
@@ -283,7 +283,8 @@ def sample_to_stage1_example(
     # / blocked traces are NOT marked -> their fallback correctly stays on.)
     if sample.finalized:
         if sample.support_target_map:
-            epi_t = torch.maximum(epi_t, (_remap_map(sample.support_target_map) > 0).float())
+            support_epi = (_remap_map(sample.support_target_map) * evid_mask.float() > 0).float()
+            epi_t = torch.maximum(epi_t, support_epi)
         else:
             epi_t = torch.maximum(epi_t, (anchor * evid_mask.float()))
     plan_anchor = plan_anchor if plan_anchor.sum() > 0 else None

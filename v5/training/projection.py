@@ -45,7 +45,6 @@ PLANNING_PATCH_WEIGHTS: Dict[str, float] = {
 }
 EVIDENCE_PATCH_WEIGHTS: Dict[str, float] = {
     "add_solved_subgoal": 2.5,
-    "add_epistemic_state": 1.0,
 }
 ACTION_EVIDENCE_WEIGHTS: Dict[str, float] = {
     "REUSE": 2.5,
