@@ -402,6 +402,11 @@
   `npm.cmd run typecheck` passed; `npm.cmd run build` passed with only Vite's
   large chunk warning. Stage 3/4 remain held; this is a demo/data-collection and
   observability checkpoint, not a V5 training-quality gate.
+- Push note for the live-steps checkpoint: V5 backend/docs are on
+  Agentic-Graph-Reasoner `main` at `1eef435`. Frontend demo code is on
+  `The-Only-Lazy-Guy/PROJECT` branch `frontend-graph-v5-demo` at `7a782108`.
+  The frontend push stayed on that clean branch to avoid dragging unrelated
+  local `reasoning-architecture` history.
 - Read: the projected pipeline is now real and end-to-end, evidence routing is
   materially stronger than planning. The false-invalidator blocker is repaired;
   the remaining fallback failures are mostly missing slots + low epistemic on
