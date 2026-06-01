@@ -61,6 +61,7 @@ class Stage1Example:
     tag: str = ""                          # free label (e.g. family) for reporting
     case_id: str = ""                      # corpus/session id for diagnostics
     question: str = ""                     # raw question text for diagnostics
+    answer_text: str = ""                  # teacher/final answer text for outcome audits
 
 
 # ── freeze protocol ──────────────────────────────────────────────────────────

@@ -284,6 +284,20 @@
   3/4 stay held until this soft-exit policy is tested, because future training
   should learn against the final three-state control semantics, not the old
   "all uncertainty equals total fallback" behavior.
+- Added the first `soft-exit runtime policy simulation` report to
+  `fallback_write_diag`. It compares three held-out routes:
+  `old_full_fallback`, `answer_with_caveat`, and `verify_once`. The report tracks
+  policy state by case type, V5-answer rate, verifier-needed rate, full-V4 rate,
+  accept/reject proxy, safety-leak proxy, changed-to-hard rate, write ratio, and
+  relative latency units. This is explicitly offline: it uses routing/slot/epi
+  labels as proxy outcomes because the current 288-row corpus does not include
+  rubric terms and the harness does not generate fresh V5 answers. Real
+  accepted/rejected, catastrophic, and gibberish rates still require a later
+  real-LM runtime run.
+- Small control alignment fix: `fallback_policy(..., evidence_pool_empty=True)`
+  now treats an empty evidence pool as `hard_fallback`, and
+  `GraphAttentionInjector` passes that evidence-mask signal through. This keeps
+  runtime policy semantics aligned with the diagnostic hard blocker.
 - Read from the controlled pass: the cleaned projection restores strong evidence
   routing and safety, but the same `30/20/20` recipe does not reduce applicable
   fallback below the current band. The next lever is calibration/label quality

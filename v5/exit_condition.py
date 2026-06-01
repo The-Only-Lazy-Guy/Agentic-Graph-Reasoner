@@ -207,14 +207,22 @@ def should_exit_loop(
 def fallback_needed(
     state: LoopState,
     task_frame: Optional[dict] = None,
+    *,
+    evidence_pool_empty: bool = False,
 ) -> bool:
     """True when max_loops_reached but reasoning still incomplete."""
-    return fallback_policy(state, task_frame).fallback_needed
+    return fallback_policy(
+        state,
+        task_frame,
+        evidence_pool_empty=evidence_pool_empty,
+    ).fallback_needed
 
 
 def fallback_policy(
     state: LoopState,
     task_frame: Optional[dict] = None,
+    *,
+    evidence_pool_empty: bool = False,
 ) -> FallbackPolicy:
     """Classify fallback as hard safety, soft calibration, or normal answer.
 
@@ -252,7 +260,7 @@ def fallback_policy(
             epistemic_ok=True,
         )
 
-    if state.node_scores_r.shape[-1] == 0:
+    if state.node_scores_r.shape[-1] == 0 or evidence_pool_empty:
         hard_reasons.append("empty_pool")
 
     required_indices = _required_slot_indices(task_frame)

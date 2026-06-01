@@ -314,6 +314,7 @@ def sample_to_stage1_example(
         tag=("applicable" if sample.finalized else "blocked"),
         case_id=sample.session_id,
         question=sample.question,
+        answer_text=sample.answer_text,
     )
 
 

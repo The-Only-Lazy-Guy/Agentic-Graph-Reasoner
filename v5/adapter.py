@@ -249,7 +249,15 @@ class GraphAttentionInjector:
         from v5.exit_condition import fallback_needed
         if self._evid_state is None:
             return False
-        return fallback_needed(self._evid_state, self._task_frame)
+        evidence_pool_empty = (
+            self._graph_kv is not None
+            and not bool(self._graph_kv.evidence_mask.any().item())
+        )
+        return fallback_needed(
+            self._evid_state,
+            self._task_frame,
+            evidence_pool_empty=evidence_pool_empty,
+        )
 
     def get_fallback_policy(self) -> dict:
         """Three-state fallback policy for controller routing.
@@ -271,7 +279,15 @@ class GraphAttentionInjector:
                 "no_invalidators": True,
                 "epistemic_ok": False,
             }
-        return fallback_policy(self._evid_state, self._task_frame).to_dict()
+        evidence_pool_empty = (
+            self._graph_kv is not None
+            and not bool(self._graph_kv.evidence_mask.any().item())
+        )
+        return fallback_policy(
+            self._evid_state,
+            self._task_frame,
+            evidence_pool_empty=evidence_pool_empty,
+        ).to_dict()
 
 
 def _get_transformer_layers(model: nn.Module) -> List[nn.Module]:

@@ -11,6 +11,7 @@ held-out failures:
   - direct_judgment routing audit with top-k plan/evidence label checks
   - direct_judgment failure table
   - hard-vs-soft fallback calibration split
+  - soft-exit route simulation for old fallback vs caveat vs verify-once
   - negative/no-graph safety table
   - one-condition-at-a-time oracle fallback ablations
   - write ratio by case type, fallback state, and block
@@ -32,8 +33,11 @@ import torch
 from v5.cross_attention import V5AttentionAdapter
 from v5.exit_condition import (
     EPISTEMIC_THRESHOLD,
+    HARD_FALLBACK,
+    NORMAL_ANSWER,
     SHORTCUT_THRESHOLD,
     SLOT_FILL_THRESHOLD,
+    SOFT_FALLBACK,
     _force_fallback,
     _primary_support_index,
     _required_slot_indices,
@@ -181,7 +185,7 @@ def fallback_bits(
     forced_fallback = _force_fallback(ex.task_frame)
 
     fallback = bool(forced_fallback or (max_loops and (empty_pool or not (slots_ok and no_inv and epi_ok))))
-    policy = fallback_policy(es, ex.task_frame)
+    policy = fallback_policy(es, ex.task_frame, evidence_pool_empty=empty_pool)
     return {
         "fallback": fallback,
         "policy_state": policy.state,
@@ -1492,6 +1496,342 @@ def _hard_soft_fallback_report(
         print(f"\n  ... {len(app_rows) - limit} more applicable soft rows omitted")
 
 
+def _teacher_checker_result(rec: EvalRecord) -> Tuple[bool, Optional[bool], str]:
+    """Best-effort deterministic checker on the teacher answer, when available.
+
+    The current 288-row corpus does not include rubric terms, and this harness
+    does not generate a fresh V5 answer. This checker signal is therefore
+    auxiliary only: useful when a domain checker plugin matches the question,
+    but absent for most generic rows.
+    """
+    answer = getattr(rec.ex, "answer_text", "") or ""
+    if not answer:
+        return False, None, "no_answer_text"
+    try:
+        from reasoning.deterministic_scorer import score_by_checker
+        result = score_by_checker(
+            answer,
+            {
+                "question": rec.ex.question,
+                "kind": _task_family(rec.ex),
+                "hard_constraints": [],
+            },
+        )
+    except Exception as exc:  # pragma: no cover - diagnostic should not fail training.
+        return False, None, f"checker_error:{type(exc).__name__}"
+    if result is None:
+        return False, None, "no_matching_checker"
+    return True, bool(result.correct), result.source
+
+
+def _soft_exit_signal(
+    rec: EvalRecord,
+    *,
+    slot_margin: float,
+    epi_margin: float,
+) -> Dict[str, object]:
+    bits = fallback_bits(rec.evidence_state, rec.ex)
+    policy = fallback_policy(
+        rec.evidence_state,
+        rec.ex.task_frame,
+        evidence_pool_empty=bool(bits["empty_pool"]),
+    )
+    has_support, support1, support3 = _support_hit_pair(rec)
+    evid1, evid3 = _routing_hit_pair(rec, "evid_anchor", "evidence_state", "evidence_mask")
+    slot_soft, min_slot_margin, hard_slot_names = _slot_soft_summary(rec, slot_margin)
+    primary_epi = _primary_epi_score(rec, bits["primary_idx"])
+    _best_gold_id, best_gold_epi, _mean_gold_epi, _gold_n = _gold_evidence_summary(rec)
+    epi_soft = primary_epi >= EPISTEMIC_THRESHOLD - epi_margin
+    best_gold_epi_soft = best_gold_epi >= EPISTEMIC_THRESHOLD - epi_margin
+    checker_available, checker_pass, checker_source = _teacher_checker_result(rec)
+    write_ratio = _mean(
+        list(rec.planning_state.write_ratios or [])
+        + list(rec.evidence_state.write_ratios or [])
+    )
+
+    # Conservative offline proxies:
+    # - caveat accepts only if the selected support is already right-ish.
+    # - verify-once may accept if the right support is nearby and gold evidence
+    #   has enough epistemic confidence to be recovered by a cheap verifier.
+    caveat_accept_proxy = (
+        rec.ex.tag == "applicable"
+        and policy.state == SOFT_FALLBACK
+        and has_support
+        and support1
+        and evid3
+        and slot_soft
+        and epi_soft
+    )
+    verifier_accept_proxy = (
+        rec.ex.tag == "applicable"
+        and policy.state == SOFT_FALLBACK
+        and has_support
+        and support3
+        and evid3
+        and slot_soft
+        and best_gold_epi_soft
+    )
+
+    return {
+        "policy_state": policy.state,
+        "tag": rec.ex.tag,
+        "family": _task_family(rec.ex),
+        "soft_reasons": tuple(policy.soft_reasons),
+        "hard_reasons": tuple(policy.hard_reasons),
+        "support1": bool(has_support and support1),
+        "support3": bool(has_support and support3),
+        "evid1": bool(evid1),
+        "evid3": bool(evid3),
+        "slot_soft": bool(slot_soft),
+        "epi_soft": bool(epi_soft),
+        "best_gold_epi_soft": bool(best_gold_epi_soft),
+        "min_slot_margin": float(min_slot_margin),
+        "primary_epi": float(primary_epi),
+        "best_gold_epi": float(best_gold_epi),
+        "hard_slot_names": tuple(hard_slot_names),
+        "caveat_accept_proxy": bool(caveat_accept_proxy),
+        "verifier_accept_proxy": bool(verifier_accept_proxy),
+        "checker_available": bool(checker_available),
+        "checker_pass": checker_pass,
+        "checker_source": checker_source,
+        "write_ratio": float(write_ratio),
+    }
+
+
+def _simulate_soft_exit_route(sig: Dict[str, object], route: str) -> Dict[str, object]:
+    state = str(sig["policy_state"])
+    tag = str(sig["tag"])
+    v5_answered = False
+    verifier_needed = False
+    full_v4_needed = False
+    accepted_proxy = False
+    rejected_proxy = False
+    safety_leak_proxy = False
+    changed_to_hard = False
+    action = "normal_answer"
+
+    if route == "old_full_fallback":
+        if state == NORMAL_ANSWER:
+            v5_answered = True
+            accepted_proxy = tag == "applicable"
+            rejected_proxy = tag != "applicable"
+            safety_leak_proxy = tag != "applicable"
+        else:
+            full_v4_needed = True
+            action = "full_v4_fallback"
+    elif route == "answer_with_caveat":
+        if state == HARD_FALLBACK:
+            full_v4_needed = True
+            action = "full_v4_fallback"
+        elif state == SOFT_FALLBACK:
+            v5_answered = True
+            action = "answer_with_caveat"
+            accepted_proxy = bool(sig["caveat_accept_proxy"])
+            rejected_proxy = not accepted_proxy
+            safety_leak_proxy = tag != "applicable"
+        else:
+            v5_answered = True
+            accepted_proxy = tag == "applicable"
+            rejected_proxy = tag != "applicable"
+            safety_leak_proxy = tag != "applicable"
+    elif route == "verify_once":
+        if state == HARD_FALLBACK:
+            full_v4_needed = True
+            action = "full_v4_fallback"
+        elif state == SOFT_FALLBACK:
+            verifier_needed = True
+            if bool(sig["verifier_accept_proxy"]):
+                v5_answered = True
+                accepted_proxy = True
+                action = "verified_answer"
+            else:
+                full_v4_needed = True
+                changed_to_hard = True
+                action = "verify_reject_full_fallback"
+        else:
+            v5_answered = True
+            accepted_proxy = tag == "applicable"
+            rejected_proxy = tag != "applicable"
+            safety_leak_proxy = tag != "applicable"
+    else:
+        raise ValueError(f"unknown soft-exit route: {route}")
+
+    # Relative units only: base V5 pass = 1.0, one verifier = +0.25, full V4
+    # fallback/tool loop = +1.0. Real wall-clock belongs in runtime benchmarks.
+    latency_units = 1.0
+    if verifier_needed:
+        latency_units += 0.25
+    if full_v4_needed:
+        latency_units += 1.0
+
+    return {
+        "action": action,
+        "v5_answered": v5_answered,
+        "verifier_needed": verifier_needed,
+        "full_v4_needed": full_v4_needed,
+        "accepted_proxy": accepted_proxy,
+        "rejected_proxy": rejected_proxy,
+        "safety_leak_proxy": safety_leak_proxy,
+        "changed_to_hard": changed_to_hard,
+        "latency_units": latency_units,
+    }
+
+
+def _soft_exit_runtime_experiment_report(
+    records: Sequence[EvalRecord],
+    *,
+    slot_margin: float = 0.10,
+    epi_margin: float = 0.15,
+) -> None:
+    print("\n=== soft-exit runtime policy simulation (held-out, offline) ===")
+    print(
+        "  Routes: old_full_fallback, answer_with_caveat, verify_once. "
+        "This is not answer generation: accept/reject is a routing-label proxy, "
+        "and catastrophic/gibberish must be measured in a later real-LM run."
+    )
+    print(
+        f"  Proxy margins: slot >= {SLOT_FILL_THRESHOLD - slot_margin:.2f}; "
+        f"primary/gold epi >= {EPISTEMIC_THRESHOLD - epi_margin:.2f}. "
+        "Latency units: V5=1.00, verifier=+0.25, full V4 fallback=+1.00."
+    )
+
+    signals = [
+        _soft_exit_signal(rec, slot_margin=slot_margin, epi_margin=epi_margin)
+        for rec in records
+    ]
+    state_counts: Dict[Tuple[str, str], int] = Counter(
+        (str(sig["tag"]), str(sig["policy_state"])) for sig in signals
+    )
+    tags = sorted({str(sig["tag"]) for sig in signals})
+    states = [NORMAL_ANSWER, SOFT_FALLBACK, HARD_FALLBACK]
+    print("\n  policy_state by case type:")
+    print(f"  {'tag':12s} {'n':>3s} " + " ".join(f"{state[:6]:>8s}" for state in states))
+    for tag in tags:
+        n = sum(1 for sig in signals if sig["tag"] == tag)
+        cells = [
+            f"{state_counts[(tag, state)] / max(1, n):>8.2f}"
+            for state in states
+        ]
+        print(f"  {tag[:12]:12s} {n:>3d} " + " ".join(cells))
+
+    routes = ["old_full_fallback", "answer_with_caveat", "verify_once"]
+
+    def _bucket() -> Dict[str, object]:
+        return {
+            "n": 0,
+            "normal": 0,
+            "soft": 0,
+            "hard": 0,
+            "v5_answer": 0,
+            "verifier": 0,
+            "full_v4": 0,
+            "accepted": 0,
+            "rejected": 0,
+            "safety_leak": 0,
+            "changed_hard": 0,
+            "checker_avail": 0,
+            "checker_pass": 0,
+            "write": [],
+            "latency": [],
+        }
+
+    by_route_tag = defaultdict(_bucket)
+    for route in routes:
+        for sig in signals:
+            out = _simulate_soft_exit_route(sig, route)
+            key = (route, str(sig["tag"]))
+            b = by_route_tag[key]
+            b["n"] += 1
+            b["normal"] += int(sig["policy_state"] == NORMAL_ANSWER)
+            b["soft"] += int(sig["policy_state"] == SOFT_FALLBACK)
+            b["hard"] += int(sig["policy_state"] == HARD_FALLBACK)
+            b["v5_answer"] += int(out["v5_answered"])
+            b["verifier"] += int(out["verifier_needed"])
+            b["full_v4"] += int(out["full_v4_needed"])
+            b["accepted"] += int(out["accepted_proxy"])
+            b["rejected"] += int(out["rejected_proxy"])
+            b["safety_leak"] += int(out["safety_leak_proxy"])
+            b["changed_hard"] += int(out["changed_to_hard"])
+            if bool(sig["checker_available"]):
+                b["checker_avail"] += 1
+                b["checker_pass"] += int(bool(sig["checker_pass"]))
+            b["write"].append(float(sig["write_ratio"]))
+            b["latency"].append(float(out["latency_units"]))
+
+    print("\n  route summary by case type:")
+    print(
+        f"  {'route':20s} {'tag':12s} {'n':>3s} {'norm':>5s} {'soft':>5s} "
+        f"{'hard':>5s} {'v5':>5s} {'ver':>5s} {'v4':>5s} "
+        f"{'acc~':>5s} {'rej~':>5s} {'leak~':>6s} {'toHard':>6s} "
+        f"{'wr':>6s} {'lat':>6s} {'chk':>9s}"
+    )
+    for route in routes:
+        for tag in tags:
+            b = by_route_tag[(route, tag)]
+            n = int(b["n"])
+            chk = f"{int(b['checker_pass'])}/{int(b['checker_avail'])}"
+            print(
+                f"  {route[:20]:20s} {tag[:12]:12s} {n:>3d} "
+                f"{int(b['normal']) / max(1, n):>5.2f} "
+                f"{int(b['soft']) / max(1, n):>5.2f} "
+                f"{int(b['hard']) / max(1, n):>5.2f} "
+                f"{int(b['v5_answer']) / max(1, n):>5.2f} "
+                f"{int(b['verifier']) / max(1, n):>5.2f} "
+                f"{int(b['full_v4']) / max(1, n):>5.2f} "
+                f"{int(b['accepted']) / max(1, n):>5.2f} "
+                f"{int(b['rejected']) / max(1, n):>5.2f} "
+                f"{int(b['safety_leak']) / max(1, n):>6.2f} "
+                f"{int(b['changed_hard']) / max(1, n):>6.2f} "
+                f"{_mean(b['write']):>6.3f} {_mean(b['latency']):>6.2f} "
+                f"{chk:>9s}"
+            )
+
+    soft_rows = [sig for sig in signals if sig["policy_state"] == SOFT_FALLBACK]
+    by_family = defaultdict(lambda: Counter())
+    for sig in soft_rows:
+        fam = str(sig["family"])
+        c = by_family[fam]
+        c["n"] += 1
+        c["applicable"] += int(sig["tag"] == "applicable")
+        c["support1"] += int(bool(sig["support1"]))
+        c["support3"] += int(bool(sig["support3"]))
+        c["evid3"] += int(bool(sig["evid3"]))
+        c["slot_soft"] += int(bool(sig["slot_soft"]))
+        c["epi_soft"] += int(bool(sig["epi_soft"]))
+        c["best_gold_epi_soft"] += int(bool(sig["best_gold_epi_soft"]))
+        c["caveat_accept"] += int(bool(sig["caveat_accept_proxy"]))
+        c["verifier_accept"] += int(bool(sig["verifier_accept_proxy"]))
+
+    print("\n  soft_fallback family eligibility:")
+    print(
+        f"  {'family':24s} {'n':>3s} {'app':>5s} {'sup1':>5s} {'sup3':>5s} "
+        f"{'ev3':>5s} {'slot~':>6s} {'epi~':>6s} {'gold~':>6s} "
+        f"{'cav~':>6s} {'ver~':>6s}"
+    )
+    for fam, c in sorted(by_family.items()):
+        n = max(1, int(c["n"]))
+        print(
+            f"  {fam[:24]:24s} {int(c['n']):>3d} "
+            f"{int(c['applicable']) / n:>5.2f} "
+            f"{int(c['support1']) / n:>5.2f} "
+            f"{int(c['support3']) / n:>5.2f} "
+            f"{int(c['evid3']) / n:>5.2f} "
+            f"{int(c['slot_soft']) / n:>6.2f} "
+            f"{int(c['epi_soft']) / n:>6.2f} "
+            f"{int(c['best_gold_epi_soft']) / n:>6.2f} "
+            f"{int(c['caveat_accept']) / n:>6.2f} "
+            f"{int(c['verifier_accept']) / n:>6.2f}"
+        )
+
+    checker_avail = sum(int(bool(sig["checker_available"])) for sig in signals)
+    checker_pass = sum(int(bool(sig["checker_pass"])) for sig in signals if bool(sig["checker_available"]))
+    print(
+        f"\n  checker plugin coverage on teacher answers: {checker_pass}/{checker_avail} "
+        f"passed (available for {checker_avail}/{len(signals)} rows). "
+        "Actual V5 answer accepted/rejected, catastrophic, and gibberish rates remain unmeasured here."
+    )
+
+
 def _direct_judgment_calibration_v2_report(records: Sequence[EvalRecord]) -> None:
     print("\n=== direct_judgment calibration v2: exit alignment ===")
     items = [rec for rec in records if _task_family(rec.ex) == "direct_judgment"]
@@ -1988,6 +2328,11 @@ def run(
         slot_margin=soft_slot_margin,
         epi_margin=soft_epi_margin,
         limit=soft_limit,
+    )
+    _soft_exit_runtime_experiment_report(
+        records,
+        slot_margin=soft_slot_margin,
+        epi_margin=soft_epi_margin,
     )
     _direct_judgment_routing_audit(records, graph, direct_routing_limit)
     _direct_judgment_failure_bucket_report(records)

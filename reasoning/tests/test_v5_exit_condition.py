@@ -98,3 +98,14 @@ def test_active_invalidator_is_hard_fallback():
     assert fallback_needed(state, task_frame) is True
     assert policy.state == HARD_FALLBACK
     assert "invalidator_active" in policy.hard_reasons
+
+
+def test_empty_evidence_pool_is_hard_fallback():
+    state = _confident_state(exit_reason="max_loops_reached")
+    task_frame = {"required_slots": ["verdict", "reason"]}
+
+    policy = fallback_policy(state, task_frame, evidence_pool_empty=True)
+
+    assert fallback_needed(state, task_frame, evidence_pool_empty=True) is True
+    assert policy.state == HARD_FALLBACK
+    assert "empty_pool" in policy.hard_reasons
