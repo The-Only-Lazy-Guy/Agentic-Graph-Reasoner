@@ -198,8 +198,16 @@ def _parse_row(row: dict) -> Optional[Phase15Sample]:
     epistemic_target = [1.0 if nid in epistemic_nodes else 0.0 for nid in node_ids]
     invalidator_target = [1.0 if nid in invalidator_nodes else 0.0 for nid in node_ids]
 
-    # Slot fill target
+    # Slot fill target. If a trace finalized, the fallback gate's required
+    # slots must be treated as filled; otherwise we train the slot head to leave
+    # empty a slot that runtime later requires to avoid fallback.
     slot_fill_target = _build_slot_fill_target(metrics)
+    if finalized:
+        _mark_required_slots_filled(slot_fill_target, task_frame.get("required_slots") or [])
+        task_frame["filled_slots"] = _merge_slots(
+            task_frame.get("filled_slots") or [],
+            task_frame.get("required_slots") or [],
+        )
 
     # Shortcut: finalized AND steps <= SHORTCUT_STEP_RATIO * max_steps
     steps = metrics.get("steps", 99)
@@ -333,6 +341,24 @@ def _canonicalize_slots(slots: list) -> List[str]:
         seen.add(canonical)
         out.append(canonical)
     return out
+
+
+def _merge_slots(primary: List[str], extra: List[str]) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for slot in list(primary) + list(extra):
+        if slot in seen:
+            continue
+        seen.add(slot)
+        out.append(slot)
+    return out
+
+
+def _mark_required_slots_filled(target: List[float], required_slots: List[str]) -> None:
+    for slot_name in required_slots:
+        idx = SLOT_ID.get(str(slot_name))
+        if idx is not None:
+            target[idx] = 1.0
 
 
 def _nodes_with_patch_type(patches: list, patch_types: frozenset) -> set:

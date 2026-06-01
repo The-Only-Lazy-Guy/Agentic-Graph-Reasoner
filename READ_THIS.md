@@ -81,6 +81,33 @@
 - Safety note: seeded negative fallback slipped to 2/3 held-out negatives (n=3).
   Keep the negative write/fallback guard; do not move Stage 3/4 until negative
   fallback is consistently high again.
+- Added the direct_judgment calibration pass to `v5.training.fallback_write_diag`:
+  held-out direct_judgment failure table, per-case question/required slots/slot
+  scores/primary evidence/best gold evidence/planning hit, plus a negative
+  no-graph safety table that dumps false `shortcut_verified` cases.
+- Found and fixed another label/contract mismatch: finalized rows sometimes had
+  `required_slots=['verdict','reason']` while the gold slot target still had one
+  of those slots at 0. For finalized traces, `dataset.py` now marks all
+  canonical required slots as filled and mirrors them into `task_frame.filled_slots`.
+  Regression coverage was added in `reasoning/tests/test_v5_projection.py`.
+- Post-fix seeded diagnostic
+  (`--seed 7 --e1 30 --e2a 20 --e2b 20`, log:
+  `artifacts/run_logs/fallback_write_diag_20260601_finalized_slot_fix_seed7.log`):
+  applicable fallback=0.51, blocked=0.73, negative=0.67. Applicable missing-slot
+  failures dropped to 9/47; remaining applicable failures are mostly
+  low_epistemic 23/47. Direct_judgment applicable is now slot=0.23 but epi=0.63;
+  relational_explanation applicable remains clean at fallback=0.00.
+- Negative safety is still not solved: one held-out no-graph case exits
+  `shortcut_verified` on an irrelevant but plausible chemistry node
+  (`bond_polarity_depends_on_electronegativity_difference`) with slots near 1.0,
+  epi=1.0, shortcut=0.998. This is now the clearest safety blocker before any
+  Stage 3/4 move: protect negatives/shortcut verification before lowering
+  thresholds or chasing answer quality.
+- Current read after the direct_judgment pass: slot labels are much healthier;
+  the remaining direct_judgment failures are primarily evidence/planning
+  selection and epistemic calibration, not raw slot aliasing. Oracle gold-all
+  only drops applicable fallback to 0.40 and leaves negative at 0.67, so do not
+  treat this as solved by per-slot threshold tuning alone.
 - Read: the projected pipeline is now real and end-to-end, evidence routing is
   materially stronger than planning. The false-invalidator blocker is repaired;
   the remaining fallback failures are mostly missing slots + low epistemic on

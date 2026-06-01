@@ -6,7 +6,7 @@ import torch
 from project_corpus_to_v5_targets import _default_out
 from v5.cross_attention import V5AttentionAdapter
 from v5.training.bridge import MockHInitProvider, ZeroEmbedder, sample_to_stage1_example
-from v5.training.dataset import _parse_row
+from v5.training.dataset import SLOT_ID, _parse_row
 from v5.training.projection import project_corpus_row
 from v5.gnn_encoder import RGCNEncoder
 from v5.subgraph import build_active_subgraph
@@ -187,6 +187,23 @@ def test_bridge_prefers_projected_plan_and_evidence_targets():
     assert ps.write_ratios
     assert ps.write_ratio_tensors
     assert ps.write_ratio_tensors[-1].requires_grad
+
+
+def test_finalized_required_slots_are_marked_filled_even_if_metric_omits_one():
+    row = _row()
+    row["metrics"]["finalized"] = True
+    row["metrics"]["slot_fill_stats"] = {
+        "required_slots": ["relationship", "explanation"],
+        "filled_slots": ["relationship"],
+    }
+
+    sample = _parse_row(row)
+
+    assert sample is not None
+    assert sample.task_frame["required_slots"] == ["definition", "reason"]
+    assert sample.task_frame["filled_slots"] == ["definition", "reason"]
+    assert sample.slot_fill_target[SLOT_ID["definition"]] == 1.0
+    assert sample.slot_fill_target[SLOT_ID["reason"]] == 1.0
 
 
 def test_invalidator_candidates_require_well_formed_active_edges():

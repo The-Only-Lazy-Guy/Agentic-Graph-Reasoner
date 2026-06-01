@@ -7,6 +7,8 @@ held-out failures:
   - label distributions by split and case type
   - fallback trip reasons by case type
   - applicable-only slot/epistemic/planning calibration breakdown
+  - direct_judgment failure table
+  - negative/no-graph safety table
   - one-condition-at-a-time oracle fallback ablations
   - write ratio by case type, fallback state, and block
   - planning miss categories
@@ -164,6 +166,7 @@ def fallback_bits(
     fallback = bool(max_loops and (empty_pool or not (slots_ok and no_inv and epi_ok)))
     return {
         "fallback": fallback,
+        "exit_reason": es.exit_reason,
         "max_loops": max_loops,
         "empty_pool": empty_pool,
         "missing_slot": not slots_ok,
@@ -467,6 +470,39 @@ def _format_slot_rows(rows: Sequence[Tuple[int, str, float, float, float, bool]]
     return "; ".join(parts) if parts else "none"
 
 
+def _gold_evidence_summary(rec: EvalRecord) -> Tuple[str, float, float, int]:
+    pred_epi = rec.evidence_state.epistemic_confidence_r.squeeze(0)
+    gold_evidence = _gold_indices(rec.ex.evid_anchor)
+    if not gold_evidence:
+        return "none", float("nan"), float("nan"), 0
+    best_idx = max(gold_evidence, key=lambda idx: float(pred_epi[idx].item()))
+    best = float(pred_epi[best_idx].item())
+    mean = _mean([float(pred_epi[idx].item()) for idx in gold_evidence])
+    return f"{rec.ex.node_ids[best_idx]} ({rec.ex.graph_kv.node_types[best_idx]})", best, mean, len(gold_evidence)
+
+
+def _failure_names(bits: Dict[str, object], include_shortcut: bool = False) -> List[str]:
+    keys = ["empty_pool", "missing_slot", "low_epistemic", "invalidator_active"]
+    if include_shortcut:
+        keys.append("shortcut_invalid")
+    return [name for name in keys if bool(bits[name])]
+
+
+def _primary_summary(rec: EvalRecord, primary: Optional[int]) -> Tuple[str, str, float, float, bool]:
+    if primary is None:
+        return "none", "none", float("nan"), float("nan"), False
+    pred_epi = rec.evidence_state.epistemic_confidence_r.squeeze(0)
+    gold_epi = rec.ex.epi_target.squeeze(0) if rec.ex.epi_target is not None else None
+    gold_evid = rec.ex.evid_anchor.squeeze(0) if rec.ex.evid_anchor is not None else None
+    return (
+        rec.ex.node_ids[primary],
+        rec.ex.graph_kv.node_types[primary],
+        float(pred_epi[primary].item()),
+        float(gold_epi[primary].item()) if gold_epi is not None else float("nan"),
+        bool(gold_evid[primary].item() > 0.0) if gold_evid is not None else False,
+    )
+
+
 def _applicable_calibration_report(
     records: Sequence[EvalRecord],
     graph=None,
@@ -618,6 +654,139 @@ def _applicable_calibration_report(
             if remaining > 0:
                 print(f"\n  ... {remaining} more applicable fallback cases omitted")
             break
+
+
+def _direct_judgment_report(
+    records: Sequence[EvalRecord],
+    graph=None,
+    limit: int = 18,
+) -> None:
+    print("\n=== direct_judgment calibration detail (held-out) ===")
+    items = [rec for rec in records if _task_family(rec.ex) == "direct_judgment"]
+    if not items:
+        print("  no direct_judgment held-out records")
+        return
+
+    by_tag: Dict[str, List[EvalRecord]] = defaultdict(list)
+    combos: Counter[str] = Counter()
+    slot_fail_counts: Counter[str] = Counter()
+    epi_buckets: Counter[str] = Counter()
+    for rec in items:
+        bits = fallback_bits(rec.evidence_state, rec.ex)
+        by_tag[rec.ex.tag].append(rec)
+        combo = "no_fallback" if not bits["fallback"] else ("+".join(_failure_names(bits)) or "max_loops_only")
+        combos[combo] += 1
+        for idx in bits["missing_slot_ids"]:
+            slot_fail_counts[SLOT_VOCAB[idx]] += 1
+        if bits["low_epistemic"]:
+            epi_buckets[_epi_support_bucket(rec, bits["primary_idx"])] += 1
+
+    print(f"  total n={len(items)} tags={dict((tag, len(vals)) for tag, vals in by_tag.items())}")
+    for tag, vals in sorted(by_tag.items()):
+        fb = sum(int(fallback_bits(rec.evidence_state, rec.ex)["fallback"]) for rec in vals)
+        print(f"  {tag:10s} fallback={_fmt_rate(fb, len(vals))}")
+    print(f"  gate combos       : {dict(combos.most_common())}")
+    print(f"  failed slots      : {dict(slot_fail_counts.most_common())}")
+    print(f"  low-epi buckets   : {dict(epi_buckets.most_common())}")
+
+    print(
+        f"{'case_id':34s} {'tag':10s} {'fb':>3s} {'failures':34s} "
+        f"{'slots':52s} {'primary_epi':>11s} {'best_gold':>10s} {'plan@1':>7s} {'plan@3':>7s}"
+    )
+    rows = []
+    for rec in items:
+        bits = fallback_bits(rec.evidence_state, rec.ex)
+        if not bits["fallback"] and rec.ex.tag == "applicable":
+            continue
+        primary_id, primary_type, primary_epi, _primary_gold_epi, _primary_gold_evid = _primary_summary(
+            rec, bits["primary_idx"])
+        best_gold_id, best_gold_epi, _mean_gold_epi, _gold_n = _gold_evidence_summary(rec)
+        _plan_top, plan_hit, plan_top3 = _planning_hit_summary(rec)
+        slot_str = _format_slot_rows(_slot_rows(rec))
+        rows.append((rec, bits, primary_id, primary_type, primary_epi, best_gold_id, best_gold_epi, plan_hit, plan_top3, slot_str))
+
+    for rec, bits, _primary_id, _primary_type, primary_epi, _best_gold_id, best_gold_epi, plan_hit, plan_top3, slot_str in rows[:limit]:
+        case_id = (rec.ex.case_id or "unknown")[-34:]
+        failures = "+".join(_failure_names(bits, include_shortcut=True)) or "none"
+        print(
+            f"{case_id:34s} {rec.ex.tag:10s} {int(bits['fallback']):>3d} "
+            f"{failures[:34]:34s} {slot_str[:52]:52s} "
+            f"{primary_epi:>11.3f} {best_gold_epi:>10.3f} "
+            f"{str(plan_hit):>7s} {str(plan_top3):>7s}"
+        )
+
+    print("\n  direct_judgment failure details:")
+    for idx, (rec, bits, primary_id, primary_type, primary_epi, best_gold_id, best_gold_epi, plan_hit, plan_top3, slot_str) in enumerate(rows[:limit], start=1):
+        primary_gold_epi = _primary_summary(rec, bits["primary_idx"])[3]
+        primary_gold_evid = _primary_summary(rec, bits["primary_idx"])[4]
+        print(
+            f"\n  case {idx}: id={rec.ex.case_id or 'unknown'} tag={rec.ex.tag} "
+            f"finalized={rec.ex.tag == 'applicable'} exit={bits['exit_reason']} "
+            f"fallback={bits['fallback']} failures={_failure_names(bits, include_shortcut=True)}"
+        )
+        print(f"    question: {_short(rec.ex.question, 150)}")
+        print(f"    required_slots: {(rec.ex.task_frame or {}).get('required_slots') or []}")
+        print(f"    slot_scores: {slot_str}")
+        print(
+            f"    primary: {primary_id} ({primary_type}) pred_epi={primary_epi:.3f} "
+            f"gold_epi={primary_gold_epi:.0f} gold_evidence={primary_gold_evid}"
+        )
+        ptype, ptext = _node_summary(graph, primary_id)
+        if ptext:
+            print(f"    primary_text: type={ptype} text={ptext}")
+        print(f"    best_gold_evidence: {best_gold_id} pred_epi={best_gold_epi:.3f}")
+        print(f"    planning_hit: hit@1={plan_hit} hit@3={plan_top3}")
+    if len(rows) > limit:
+        print(f"\n  ... {len(rows) - limit} more direct_judgment rows omitted")
+
+
+def _negative_safety_report(
+    records: Sequence[EvalRecord],
+    graph=None,
+    limit: int = 8,
+) -> None:
+    print("\n=== negative safety detail (held-out no-graph cases) ===")
+    items = [rec for rec in records if rec.ex.tag == "negative"]
+    if not items:
+        print("  no negative held-out records")
+        return
+
+    exit_counts: Counter[str] = Counter()
+    combo_counts: Counter[str] = Counter()
+    fb = 0
+    for rec in items:
+        bits = fallback_bits(rec.evidence_state, rec.ex)
+        fb += int(bits["fallback"])
+        exit_counts[str(bits["exit_reason"])] += 1
+        combo = "fallback" if bits["fallback"] else "no_fallback"
+        combo_counts[f"{combo}:{'+'.join(_failure_names(bits, include_shortcut=True)) or 'no_failed_gate'}"] += 1
+    print(f"  fallback={_fmt_rate(fb, len(items))}")
+    print(f"  exit reasons: {dict(exit_counts.most_common())}")
+    print(f"  gate combos : {dict(combo_counts.most_common())}")
+
+    for idx, rec in enumerate(items[:limit], start=1):
+        bits = fallback_bits(rec.evidence_state, rec.ex)
+        primary_id, primary_type, primary_epi, primary_gold_epi, primary_gold_evid = _primary_summary(
+            rec, bits["primary_idx"])
+        plan_wr = _mean(list(rec.planning_state.write_ratios or []))
+        evid_wr = _mean(list(rec.evidence_state.write_ratios or []))
+        print(
+            f"\n  negative {idx}: fallback={bits['fallback']} exit={bits['exit_reason']} "
+            f"failures={_failure_names(bits, include_shortcut=True)} "
+            f"plan_wr={plan_wr:.3f} evid_wr={evid_wr:.3f}"
+        )
+        print(f"    required_slots: {(rec.ex.task_frame or {}).get('required_slots') or []}")
+        print(f"    slots: {_format_slot_rows(_slot_rows(rec))}")
+        print(
+            f"    primary: {primary_id} ({primary_type}) pred_epi={primary_epi:.3f} "
+            f"gold_epi={primary_gold_epi:.0f} gold_evidence={primary_gold_evid} "
+            f"shortcut={float(rec.evidence_state.shortcut_validity_r.item()):.3f}"
+        )
+        ptype, ptext = _node_summary(graph, primary_id)
+        if ptext:
+            print(f"    primary_text: type={ptype} text={ptext}")
+        if rec.ex.question:
+            print(f"    question: {_short(rec.ex.question, 150)}")
 
 
 def _oracle_report(records: Sequence[EvalRecord]) -> None:
@@ -778,6 +947,8 @@ def run(
     diffuse_threshold: float = 0.35,
     invalidator_limit: int = 12,
     applicable_limit: int = 18,
+    direct_limit: int = 18,
+    negative_limit: int = 8,
     seed: int = 7,
 ) -> None:
     adapter, _train, ev, graph = _build_and_train(
@@ -788,6 +959,8 @@ def run(
     _fallback_trip_report(records)
     _task_family_report(records)
     _applicable_calibration_report(records, graph, applicable_limit)
+    _direct_judgment_report(records, graph, direct_limit)
+    _negative_safety_report(records, graph, negative_limit)
     _invalidator_case_report(records, invalidator_limit, graph)
     _oracle_report(records)
     _write_ratio_report(records)
@@ -806,6 +979,8 @@ if __name__ == "__main__":
     ap.add_argument("--diffuse-threshold", type=float, default=0.35)
     ap.add_argument("--invalidator-limit", type=int, default=12)
     ap.add_argument("--applicable-limit", type=int, default=18)
+    ap.add_argument("--direct-limit", type=int, default=18)
+    ap.add_argument("--negative-limit", type=int, default=8)
     ap.add_argument("--seed", type=int, default=7)
     args = ap.parse_args()
     run(
@@ -819,5 +994,7 @@ if __name__ == "__main__":
         args.diffuse_threshold,
         args.invalidator_limit,
         args.applicable_limit,
+        args.direct_limit,
+        args.negative_limit,
         args.seed,
     )
