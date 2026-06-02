@@ -295,6 +295,7 @@ def extract_documents(
     dup_threshold: float = 0.92,
     attach_threshold: float = 0.80,
     judge_fn: Optional[Callable[[Mapping[str, Any]], Any]] = None,
+    collect_sft: bool = False,
 ) -> Dict[str, Any]:
     """Run the extractor over documents -> candidates + stats.
 
@@ -315,10 +316,11 @@ def extract_documents(
         extract_fn = lambda chunk, mode: _llm_extract(chunk, mode, controller)
 
     candidates: List[Dict[str, Any]] = []
+    sft_pairs: List[Dict[str, Any]] = []
     stats = {"docs": len(docs), "chunks": 0, "nodes": 0, "edges": 0,
              "dropped_non_atomic": 0, "dropped_empty": 0, "dropped_bad_edge": 0,
              "deduped_existing": 0, "attached_existing": 0, "merged_existing": 0,
-             "judged_out": 0}
+             "judged_out": 0, "sft_pairs": 0}
     # map a dropped/duplicate/merged stable id -> existing graph node id, to remap edges
     remap: Dict[str, str] = {}
 
@@ -330,6 +332,14 @@ def extract_documents(
             stats["dropped_non_atomic"] += conformed["dropped"]["non_atomic"]
             stats["dropped_empty"] += conformed["dropped"]["empty"]
             stats["dropped_bad_edge"] += conformed["dropped"]["bad_edge"]
+
+            # Distillation: capture (chunk -> conformed extraction) as an SFT pair
+            # for training a local Qwen-0.5B extractor to replace the big teacher.
+            if collect_sft:
+                pair = _sft_pair(chunk, doc, conformed)
+                if pair is not None:
+                    sft_pairs.append(pair)
+                    stats["sft_pairs"] += 1
 
             kept_nodes: List[Dict[str, Any]] = []
             attach_edges: List[Dict[str, Any]] = []
@@ -372,7 +382,36 @@ def extract_documents(
                 candidates.append(_to_candidate(ee, doc, idx + len(kept_nodes)))
                 stats["edges"] += 1
 
-    return {"candidates": candidates, "stats": stats}
+    return {"candidates": candidates, "stats": stats, "sft_pairs": sft_pairs}
+
+
+def _sft_pair(chunk: str, doc: Document, conformed: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    """Build one (chunk -> conformed extraction) chat SFT pair for distillation.
+
+    The target is the CLEAN conformed extraction (atomic, vocab-correct), with
+    local node ids (n0, n1, ...) so the student learns structure, not hashes.
+    Returns None for empty extractions (nothing to learn)."""
+    node_edits = conformed.get("node_edits") or []
+    if not node_edits:
+        return None
+    stable_to_local = {ne["node_id"]: f"n{i}" for i, ne in enumerate(node_edits)}
+    nodes = [{"id": stable_to_local[ne["node_id"]], "node_type": ne["node_type"], "text": ne["text"]}
+             for ne in node_edits]
+    edges = []
+    for ee in conformed.get("edge_edits") or []:
+        src, dst = stable_to_local.get(ee["src"]), stable_to_local.get(ee["dst"])
+        if src and dst:
+            edges.append({"src": src, "dst": dst, "relation": ee["relation"]})
+    target = json.dumps({"nodes": nodes, "edges": edges}, ensure_ascii=False)
+    return {
+        "messages": [
+            {"role": "system", "content": _system_prompt(doc.mode)},
+            {"role": "user", "content": chunk},
+            {"role": "assistant", "content": target},
+        ],
+        "meta": {"doc_id": doc.id, "mode": doc.mode, "teacher": "opencode",
+                 "n_nodes": len(nodes), "n_edges": len(edges)},
+    }
 
 
 def _judge_decision(verdict: Any) -> tuple:
@@ -432,6 +471,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--attach-threshold", type=float, default=0.80)
     parser.add_argument("--judge", action="store_true",
                         help="LLM-judge each new node (accept/reject/merge_into); implies --link-graph")
+    parser.add_argument("--collect-sft", action="store_true",
+                        help="append (chunk -> conformed extraction) chat pairs for Qwen-0.5B distillation")
+    parser.add_argument("--sft-out", default="data/external_kb/extractor_sft.jsonl",
+                        help="SFT corpus path (appended across runs)")
     args = parser.parse_args(argv)
 
     docs = load_documents(args.docs)
@@ -449,9 +492,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     result = extract_documents(
         docs, controller=controller, dedupe_index=dedupe_index,
         dup_threshold=args.dup_threshold, attach_threshold=args.attach_threshold,
-        judge_fn=judge_fn,
+        judge_fn=judge_fn, collect_sft=args.collect_sft,
     )
     out = write_candidate_queue(result["candidates"], args.out)
+
+    sft_out = None
+    if args.collect_sft and result["sft_pairs"]:
+        sft_out = Path(args.sft_out)
+        sft_out.parent.mkdir(parents=True, exist_ok=True)
+        with sft_out.open("a", encoding="utf-8") as h:   # append across runs
+            for pair in result["sft_pairs"]:
+                h.write(json.dumps(pair, ensure_ascii=False) + "\n")
 
     s = result["stats"]
     print("External Knowledge Extraction")
@@ -462,6 +513,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"  linking: deduped {s['deduped_existing']}, attached {s['attached_existing']}, "
           f"merged {s['merged_existing']}, judged_out {s['judged_out']}"
           + ("" if (dedupe_index is not None) else "  (linking OFF - pass --link-graph)"))
+    if args.collect_sft:
+        print(f"  sft pairs: {s['sft_pairs']}" + (f" -> appended {sft_out}" if sft_out else " (none)"))
     print(f"  queue: {out}")
     print(f"  next: python -m v5.graph_grower.apply --candidates {out} --graph {args.graph} --out graphs/grown_graph.json")
     return 0

@@ -81,3 +81,8 @@ graphs/grown_graph.json
 graphs/grown_graph.json.bak_*
 graphs/*.bak_*
 artifacts/graph_growth/
+
+# External-KB docs + extractor distillation corpus ARE collected (multi-machine,
+# like corpus_shards) -- re-include despite the global *.jsonl ignore.
+!data/external_kb/
+!data/external_kb/*.jsonl

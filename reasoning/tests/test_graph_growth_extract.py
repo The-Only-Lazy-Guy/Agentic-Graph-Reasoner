@@ -138,6 +138,20 @@ def test_judge_merge_into_remaps_and_drops():
     assert result["stats"]["nodes"] == 1                  # scalar merged out, vector kept
 
 
+def test_collect_sft_builds_chat_pairs():
+    docs = [Document(id="d", text="p", domain="physics", mode="fact")]   # 1 chunk
+    result = extract_documents(docs, extract_fn=_stub, collect_sft=True)
+    pairs = result["sft_pairs"]
+    assert len(pairs) == 1
+    msgs = pairs[0]["messages"]
+    assert [m["role"] for m in msgs] == ["system", "user", "assistant"]
+    target = json.loads(msgs[2]["content"])
+    assert len(target["nodes"]) == 2 and target["nodes"][0]["id"] == "n0"
+    assert target["edges"][0]["relation"] == "contradicts"     # remapped to local ids
+    assert {e["src"] for e in target["edges"]} <= {"n0", "n1"}
+    assert pairs[0]["meta"]["n_nodes"] == 2
+
+
 def test_extract_then_apply_grows_graph(tmp_path):
     graph_path = tmp_path / "g.json"
     out_path = tmp_path / "grown.json"
