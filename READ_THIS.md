@@ -8,6 +8,34 @@
 
 ---
 
+## Session update (2026-06-02c) — graph grower Phase B: gated apply
+
+- Built `v5/graph_grower/apply.py` — turns audit queues into actual graph growth,
+  non-destructive. `python -m v5.graph_grower.apply --lanes substrate`.
+- Why it matters: bridge.py keeps a substrate node only if `nid in graph.nodes`
+  (lines ~199/210); proposed-but-unpersisted substrate nodes float with NO edges
+  ("R-GCN message passing is shallow"). Phase B persists them so they gain
+  TOPOLOGY for real message passing.
+- First real apply (substrate lane, on the 179-row sessions.jsonl):
+  - `graphs/merged_graph.json` 831 nodes / 1454 edges
+    → `graphs/grown_graph.json` **1305 nodes / 2218 edges** (+474 nodes, +764 edges)
+  - **health 0.6948 → 0.7208 (delta +0.0259, gate PASS)** — growth improves health
+  - 88 dangling edges dropped (session-local `claim_v4_*_h_1` hypothesis endpoints)
+  - every grown node/edge stamped `metadata.auto_grown / batch_id / grow_lane /
+    grow_source_session` → ablatable / rollback-by-batch
+- Safety: refuses to write onto the base graph (`--out` must differ); health gate
+  (`degradation_threshold=-0.02`, `--force` to override); backup of `--out` if it
+  exists; `--dry-run`. Generated graph + reports are gitignored (regenerable).
+- 6 graph-growth tests pass (3 audit + 3 apply).
+- **Critical-path note:** this ran on the OLD-schema corpus (175/179 rows lack the
+  new quality schema). Substrate growth is permissive so that's OK, but persistent
+  promotion (strict lane) and the true gate read still wait on the 288→1000 regen
+  with override-detection labels. Order remains: GROW → REGEN CORPUS → TRAIN.
+- Next: point the V5 bridge/training at `graphs/grown_graph.json` (vs merged) and
+  measure whether substrate topology lifts planning-label coverage / plan P@1.
+
+---
+
 ## Session update (2026-06-02b) — V4 1-sample verify + override-detection fix
 
 - Generated 1 V4 sample via opencode (free big default model, cost 0) to verify

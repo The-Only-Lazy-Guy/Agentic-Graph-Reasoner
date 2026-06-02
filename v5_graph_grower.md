@@ -6,9 +6,12 @@
 > trace generation. Goal: raise graph coverage so more questions have real
 > support → better positive:negative balance for V5 (see READ_THIS 2026-06-02b).
 
-Status: **Phase A audit/queue skeleton implemented**. The current code is
-non-mutating by design: it audits scoped patches and writes queues, but does not
-apply or promote graph edits.
+Status: **Phase A audit + Phase B gated apply implemented.** Phase A
+(`v5/graph_grower/audit.py`) is non-mutating: audits scoped patches into
+persistent/substrate/review queues. Phase B (`v5/graph_grower/apply.py`) applies
+the queues to a SEPARATE grown graph (never the base graph), with provenance
+stamps, dangling-edge filtering, and a health gate. First substrate apply:
+831→1305 nodes / 1454→2218 edges, health 0.695→0.721 (gate PASS).
 
 ---
 

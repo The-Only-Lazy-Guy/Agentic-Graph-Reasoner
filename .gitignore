@@ -75,3 +75,9 @@ traverse_threshold_draft_edit_result.txt
 .venv-datagen/
 models/
 *.log
+
+# Graph-grower generated artifacts (regenerable from corpus + base graph)
+graphs/grown_graph.json
+graphs/grown_graph.json.bak_*
+graphs/*.bak_*
+artifacts/graph_growth/
