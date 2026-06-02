@@ -8,6 +8,32 @@
 
 ---
 
+## Session update (2026-06-02g) — extractor --link-graph + --judge (no more islands)
+
+- Answered: at apply, the model only saw graph state for exact-id skip + edge-
+  endpoint validation; paraphrases DUPLICATED (id=sha1(text)) and external nodes
+  attached only to each other → ISLANDS (the −0.008 health dip). Fixed.
+- `extract.py` now does entity resolution vs the TARGET graph (`--link-graph`):
+  - cosine ≥ dup_threshold (0.92) → "duplicate": drop new node, remap its edges
+    onto the existing node.
+  - attach_threshold..dup (0.80–0.92) → "ambiguous": KEEP node + add a `related`
+    attach edge to the nearest existing node → joins topology, no island.
+  - `--judge`: edit_judge accept/reject/merge_into (merge → remap onto target).
+- Live smoke (sample docs vs merged_graph, --link-graph): **3 nodes attached** to
+  the existing dijkstra/bellman cluster:
+  - "Dijkstra assumes non-negative weights" → `dijkstra_requires_nonnegative_edge_weights` (0.86)
+  - "Dijkstra can produce wrong paths" → `wrong_shortest_path_may_be_negative_edge_hyp` (0.87)
+  - "Bellman-Ford handles negative edges" → `bellman_ford_handles_negative_edges` (0.82)
+  - scalar/vector facts: no existing match → stay a valid NEW component (correct —
+    can't link to knowledge that isn't there yet; interlinks as more physics lands).
+- epistemic_state: confirmed the extractor correctly does NOT emit it — it's a V4
+  runtime verification judgment (16-d status embedding, status-conditioned pool),
+  not external fact content. Owned by the session/substrate path.
+- 9 extract tests pass (incl. attach / dedupe-remap / judge-merge, offline stubs).
+- Full clean chain: `fetch_cot → extract --link-graph [--judge] → apply --candidates`.
+
+---
+
 ## Session update (2026-06-02f) — FIX: extractor node types must match GNN design
 
 - Verification caught a real bug: the extractor emitted `concept` (fact mode) and

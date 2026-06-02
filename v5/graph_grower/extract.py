@@ -275,6 +275,17 @@ def _to_candidate(raw_edit: Mapping[str, Any], doc: Document, idx: int) -> Dict[
 
 
 # ── orchestration ────────────────────────────────────────────────────────────
+def _attach_edge(new_id: str, existing_id: str, similarity: float, doc: Document) -> Dict[str, Any]:
+    """Edge from a new node to a near-but-not-duplicate existing graph node, so
+    the new knowledge joins the topology instead of forming an island."""
+    return {
+        "op": "add_edge", "src": new_id, "dst": existing_id,
+        "relation": "related", "tier": "add",
+        "metadata": {"kb_source_doc": doc.id, "kb_link": "ambiguous",
+                     "kb_link_sim": round(float(similarity), 4)},
+    }
+
+
 def extract_documents(
     docs: Sequence[Document],
     *,
@@ -282,14 +293,21 @@ def extract_documents(
     extract_fn: Optional[Callable[[str, str], str]] = None,
     dedupe_index: Any = None,
     dup_threshold: float = 0.92,
-    judge: Optional[Callable[[Mapping[str, Any]], str]] = None,
+    attach_threshold: float = 0.80,
+    judge_fn: Optional[Callable[[Mapping[str, Any]], Any]] = None,
 ) -> Dict[str, Any]:
     """Run the extractor over documents -> candidates + stats.
 
     extract_fn(chunk, mode) -> raw model string. If None, uses the LLM controller.
-    dedupe_index (optional): a built semantic_dedupe.DedupeIndex over the target
-    graph; nodes classified as exact duplicates are dropped (their edges remap to
-    the existing node). judge (optional): fn(node_raw_edit) -> accept|reject|merge_into.
+
+    dedupe_index (optional, semantic_dedupe.DedupeIndex over the TARGET graph):
+      - cosine >= dup_threshold  -> "duplicate": drop the new node, remap its
+        edges onto the existing node.
+      - attach_threshold..dup    -> "ambiguous": KEEP the new node AND add an
+        attach edge (related) to the nearest existing node, so it joins the
+        graph topology rather than islanding.
+    judge_fn (optional) -> object/tuple with (decision, merge_target):
+      reject -> drop; merge_into -> drop + remap edges onto merge_target; accept -> keep.
     """
     if extract_fn is None:
         if controller is None:
@@ -299,8 +317,9 @@ def extract_documents(
     candidates: List[Dict[str, Any]] = []
     stats = {"docs": len(docs), "chunks": 0, "nodes": 0, "edges": 0,
              "dropped_non_atomic": 0, "dropped_empty": 0, "dropped_bad_edge": 0,
-             "deduped_existing": 0, "judged_out": 0}
-    # map a dropped/duplicate stable id -> existing graph node id, to remap edges
+             "deduped_existing": 0, "attached_existing": 0, "merged_existing": 0,
+             "judged_out": 0}
+    # map a dropped/duplicate/merged stable id -> existing graph node id, to remap edges
     remap: Dict[str, str] = {}
 
     for doc in docs:
@@ -313,24 +332,40 @@ def extract_documents(
             stats["dropped_bad_edge"] += conformed["dropped"]["bad_edge"]
 
             kept_nodes: List[Dict[str, Any]] = []
+            attach_edges: List[Dict[str, Any]] = []
             for ne in conformed["node_edits"]:
+                nid = ne["node_id"]
+                ambiguous_match = None
                 # entity resolution vs existing graph
                 if dedupe_index is not None:
-                    kind, match = dedupe_index.classify(ne["text"], dup_threshold=dup_threshold)
+                    kind, match = dedupe_index.classify(
+                        ne["text"], dup_threshold=dup_threshold, ambiguous_threshold=attach_threshold)
                     if kind == "duplicate" and match is not None:
-                        remap[ne["node_id"]] = match.node_id
+                        remap[nid] = match.node_id
                         stats["deduped_existing"] += 1
                         continue
-                # optional judge gate
-                if judge is not None and judge(ne) == "reject":
-                    stats["judged_out"] += 1
-                    continue
+                    if kind == "ambiguous" and match is not None:
+                        ambiguous_match = match
+                # optional LLM judge gate
+                if judge_fn is not None:
+                    decision, target = _judge_decision(judge_fn(ne))
+                    if decision == "reject":
+                        stats["judged_out"] += 1
+                        continue
+                    if decision == "merge_into" and target:
+                        remap[nid] = target
+                        stats["merged_existing"] += 1
+                        continue
                 kept_nodes.append(ne)
+                if ambiguous_match is not None:
+                    attach_edges.append(_attach_edge(nid, ambiguous_match.node_id,
+                                                      ambiguous_match.similarity, doc))
+                    stats["attached_existing"] += 1
 
             for idx, ne in enumerate(kept_nodes):
                 candidates.append(_to_candidate(ne, doc, idx))
                 stats["nodes"] += 1
-            for idx, ee in enumerate(conformed["edge_edits"]):
+            for idx, ee in enumerate(list(conformed["edge_edits"]) + attach_edges):
                 ee = dict(ee)
                 ee["src"] = remap.get(ee["src"], ee["src"])
                 ee["dst"] = remap.get(ee["dst"], ee["dst"])
@@ -338,6 +373,15 @@ def extract_documents(
                 stats["edges"] += 1
 
     return {"candidates": candidates, "stats": stats}
+
+
+def _judge_decision(verdict: Any) -> tuple:
+    """Normalize a judge return (JudgeVerdict | tuple | str) -> (decision, target)."""
+    if isinstance(verdict, tuple):
+        return (verdict[0], verdict[1] if len(verdict) > 1 else None)
+    if isinstance(verdict, str):
+        return (verdict, None)
+    return (getattr(verdict, "decision", "accept"), getattr(verdict, "merge_target", None))
 
 
 def write_candidate_queue(candidates: Sequence[Mapping[str, Any]], path: str | Path) -> str:
@@ -354,6 +398,24 @@ def _build_opencode_controller(model: Optional[str], config_dir: str):
     return V4OpencodeController(config_dir=config_dir, model=model, server_url=None)
 
 
+def _build_dedupe_index(graph_path: str):
+    """Build a DedupeIndex over the target graph (loads embeddings)."""
+    from graph_core import MemoryGraph
+    from reasoning.semantic_dedupe import build_dedupe_index
+    graph = MemoryGraph.load_json(graph_path)
+    basename = Path(graph_path).stem
+    return graph, build_dedupe_index(graph, graph_basename=basename)
+
+
+def _make_judge_fn(graph, dedupe_index, controller):
+    """Wrap edit_judge.judge_edit -> (decision, merge_target)."""
+    from reasoning.edit_judge import judge_edit
+    def fn(node_edit: Mapping[str, Any]):
+        v = judge_edit(dict(node_edit), graph, dedupe_index, controller)
+        return v.decision, v.merge_target
+    return fn
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Extract external knowledge (facts/CoT) into graph-edit candidates.")
     parser.add_argument("--docs", required=True, help="input jsonl: {id, text, domain?, mode?}")
@@ -362,13 +424,33 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--opencode-config-dir", default="pure-opencode")
     parser.add_argument("--opencode-model", default=None)
     parser.add_argument("--limit", type=int, default=0, help="cap number of documents (0 = all)")
+    parser.add_argument("--graph", default="graphs/merged_graph.json",
+                        help="target graph for linking (the graph apply will grow)")
+    parser.add_argument("--link-graph", action="store_true",
+                        help="dedup new nodes against --graph (drop exact dups, attach near-dups)")
+    parser.add_argument("--dup-threshold", type=float, default=0.92)
+    parser.add_argument("--attach-threshold", type=float, default=0.80)
+    parser.add_argument("--judge", action="store_true",
+                        help="LLM-judge each new node (accept/reject/merge_into); implies --link-graph")
     args = parser.parse_args(argv)
 
     docs = load_documents(args.docs)
     if args.limit:
         docs = docs[: args.limit]
     controller = _build_opencode_controller(args.opencode_model, args.opencode_config_dir)
-    result = extract_documents(docs, controller=controller)
+
+    dedupe_index = None
+    judge_fn = None
+    if args.link_graph or args.judge:
+        graph, dedupe_index = _build_dedupe_index(args.graph)
+        if args.judge:
+            judge_fn = _make_judge_fn(graph, dedupe_index, controller)
+
+    result = extract_documents(
+        docs, controller=controller, dedupe_index=dedupe_index,
+        dup_threshold=args.dup_threshold, attach_threshold=args.attach_threshold,
+        judge_fn=judge_fn,
+    )
     out = write_candidate_queue(result["candidates"], args.out)
 
     s = result["stats"]
@@ -376,9 +458,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"  docs: {s['docs']}  chunks: {s['chunks']}")
     print(f"  candidates: {len(result['candidates'])}  (nodes {s['nodes']} / edges {s['edges']})")
     print(f"  dropped: non_atomic {s['dropped_non_atomic']}, empty {s['dropped_empty']}, "
-          f"bad_edge {s['dropped_bad_edge']}, deduped {s['deduped_existing']}, judged_out {s['judged_out']}")
+          f"bad_edge {s['dropped_bad_edge']}")
+    print(f"  linking: deduped {s['deduped_existing']}, attached {s['attached_existing']}, "
+          f"merged {s['merged_existing']}, judged_out {s['judged_out']}"
+          + ("" if (dedupe_index is not None) else "  (linking OFF - pass --link-graph)"))
     print(f"  queue: {out}")
-    print(f"  next: python -m v5.graph_grower.apply --candidates {out} --out graphs/grown_graph.json")
+    print(f"  next: python -m v5.graph_grower.apply --candidates {out} --graph {args.graph} --out graphs/grown_graph.json")
     return 0
 
 

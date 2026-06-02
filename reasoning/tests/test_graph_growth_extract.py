@@ -89,6 +89,55 @@ def test_extract_documents_emits_apply_compatible_candidates():
     assert "raw_edit" in node_c and "patch_id" in node_c
 
 
+class _Match:
+    def __init__(self, node_id, similarity):
+        self.node_id = node_id
+        self.similarity = similarity
+
+
+class _StubIndex:
+    """Stub DedupeIndex: returns a fixed classification for every query."""
+    def __init__(self, kind, node_id="existing_node", sim=0.85):
+        self.kind, self.node_id, self.sim = kind, node_id, sim
+
+    def classify(self, text, dup_threshold=0.92, ambiguous_threshold=0.80):
+        if self.kind == "novel":
+            return "novel", None
+        return self.kind, _Match(self.node_id, self.sim)
+
+
+def test_link_ambiguous_keeps_node_and_adds_attach_edge():
+    docs = [Document(id="d", text="p", domain="physics", mode="fact")]   # 1 chunk
+    result = extract_documents(docs, extract_fn=_stub, dedupe_index=_StubIndex("ambiguous"))
+    assert result["stats"]["nodes"] == 2                  # both kept
+    assert result["stats"]["attached_existing"] == 2      # one attach edge each
+    attach = [c for c in result["candidates"]
+              if c["raw_edit"]["op"] == "add_edge" and c["raw_edit"]["metadata"].get("kb_link") == "ambiguous"]
+    assert len(attach) == 2
+    assert all(a["raw_edit"]["dst"] == "existing_node" for a in attach)
+
+
+def test_link_duplicate_drops_node_and_remaps():
+    docs = [Document(id="d", text="p", domain="physics", mode="fact")]
+    result = extract_documents(docs, extract_fn=_stub, dedupe_index=_StubIndex("duplicate"))
+    assert result["stats"]["nodes"] == 0                  # both dropped as duplicates
+    assert result["stats"]["deduped_existing"] == 2
+    # the intra-batch edge survives, remapped onto the existing node
+    edges = [c for c in result["candidates"] if c["raw_edit"]["op"] == "add_edge"]
+    assert edges and all(e["raw_edit"]["dst"] == "existing_node" for e in edges)
+
+
+def test_judge_merge_into_remaps_and_drops():
+    def judge_fn(ne):
+        if "scalar" in ne["text"].lower():
+            return ("merge_into", "existing_scalar")
+        return ("accept", None)
+    docs = [Document(id="d", text="p", domain="physics", mode="fact")]
+    result = extract_documents(docs, extract_fn=_stub, judge_fn=judge_fn)
+    assert result["stats"]["merged_existing"] == 1
+    assert result["stats"]["nodes"] == 1                  # scalar merged out, vector kept
+
+
 def test_extract_then_apply_grows_graph(tmp_path):
     graph_path = tmp_path / "g.json"
     out_path = tmp_path / "grown.json"
