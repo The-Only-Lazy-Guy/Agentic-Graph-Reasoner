@@ -520,13 +520,32 @@
   strategy, solved_subgoal, reasoning_atom, failure_pattern, control_rule, and
   epistemic_state. Lane C: manual review queue for `needs_review` patches,
   especially creative design-synthesis analogies and weakly verified claims.
-- First implementation slice should be an offline `graph_growth_audit` /
-  promotion-queue report before mutating the graph. Acceptance criteria:
-  summarize patch status/type/risk by task family and session; compute proposed
-  substrate delta; list persistent-promotion candidates separately from review
-  candidates; flag rows with bad slot frames, weak finalization quality, or
-  old-schema missing `training_eligible` / `v5_label_status`; and write a JSON
-  report that can be used by a later safe-apply command.
+- First implementation slice is now live as `v5.graph_grower.audit`. It is
+  intentionally non-mutating: it reads session/corpus JSONL, computes base graph
+  health, summarizes patch status/type/risk by task family and session, flags
+  row-quality issues, and writes three queues: Lane A persistent promotion,
+  Lane B V5 substrate, and Lane C review.
+  ```
+  $env:PYTHONPATH="E:\PROJECT\graph_v5"
+  python -m v5.graph_grower.audit ^
+    --corpus data/distillation_corpus/sessions.jsonl ^
+    --graph graphs/merged_graph.json ^
+    --out artifacts/graph_growth/graph_growth_audit.json
+  ```
+- Graph-growth audit result on 2026-06-02: 179 rows, all with scoped patches;
+  2707 scoped patches total (`accept=1467`, `soft_only=561`,
+  `needs_review=647`, `reject=32`). Base graph is still 831 nodes / 1454 edges.
+  Strict Lane A found only 2 persistent candidates; Lane B found 1419 substrate
+  candidates with an estimated +472 nodes / +762 edges; Lane C found 1837
+  review/blocked candidates. Row flags: `missing_quality_schema=175`,
+  `controller_fallback_used=97`, `low_slot_coverage=57`,
+  `suspicious_design_slots=17`, `answer_overrides_graph=1`,
+  `weak_label_status=1`.
+- Read: this is the right conservative shape. Old-schema rows and weak V4 runs
+  can still provide V5 substrate signals with warnings, but they are blocked
+  from persistent graph promotion. Do not auto-promote design-synthesis analogy
+  claims like `v4_a8816f136f9b`; send them through review or a stricter evidence
+  audit first.
 - Second implementation slice should be a conservative offline apply command:
   load the queue, apply only Lane-A candidates into a graph copy, compute
   before/after `graph_health`, write a backup and health report, and require an

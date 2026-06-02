@@ -6,7 +6,9 @@
 > trace generation. Goal: raise graph coverage so more questions have real
 > support → better positive:negative balance for V5 (see READ_THIS 2026-06-02b).
 
-Status: **design only** (no code yet). Owner decision pending on Phase order.
+Status: **Phase A audit/queue skeleton implemented**. The current code is
+non-mutating by design: it audits scoped patches and writes queues, but does not
+apply or promote graph edits.
 
 ---
 
@@ -150,10 +152,24 @@ First job is a miner that pulls them into SFT format (see §6 Phase B).
 
 ## 6. Suggested build order (each = one PR, gated)
 
-- **Phase A — Service skeleton.** `v5/graph_grower/` standalone module wiring the
-  existing §2 stages into one offline entry point + staging graph + provenance.
-  Judge = big model. No fine-tune. Run on existing session shards; produce a
-  staged-but-not-promoted batch + health/balance report.
+- **Phase A - audit/queue skeleton. IMPLEMENTED.** `v5.graph_grower.audit`
+  reads session/corpus JSONL rows, computes base graph health, classifies scoped
+  patches into three lanes, and writes a compact report plus queue JSONL files:
+  `promotion_queue.jsonl`, `substrate_queue.jsonl`, and `review_queue.jsonl`.
+  It does not mutate the graph.
+  ```
+  $env:PYTHONPATH="E:\PROJECT\graph_v5"
+  python -m v5.graph_grower.audit ^
+    --corpus data/distillation_corpus/sessions.jsonl ^
+    --graph graphs/merged_graph.json ^
+    --out artifacts/graph_growth/graph_growth_audit.json
+  ```
+  First audit run on 2026-06-02: 179 rows, 2707 scoped patches, base graph
+  831 nodes / 1454 edges, 2 strict persistent candidates, 1419 substrate
+  candidates, and 1837 review/blocked candidates. Persistent promotion is
+  intentionally strict: old-schema rows, controller fallback rows, weak labels,
+  low slot coverage, and suspicious design-synthesis slot frames are blocked
+  from long-term promotion.
 - **Phase B — Extractor data miner.** Pull session edits + judge verdicts → SFT
   pairs; external-doc ingestion + chunker; big-model bootstrap extractions.
 - **Phase C — 0.5B extractor SFT.** Fine-tune + constrained decode + validate;
@@ -173,3 +189,6 @@ improves (more questions gain real support) **without** health regression.
 - Promote cadence: per-N-sessions auto, or manual review of each staged batch?
 - Keep grown nodes in a separate graph file (union at load) or merge into
   `graphs/merged_graph.json`? (Separate file = cleaner ablation.)
+- Should Lane B substrate warnings block V5 substrate builds, or only persistent
+  promotion? Current audit lets safe substrate patches through with row warnings,
+  while blocking those rows from Lane A.
