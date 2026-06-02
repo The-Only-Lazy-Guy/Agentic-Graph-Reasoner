@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence
 
 # question-bank domain -> camel-ai dataset
 DATASET_MAP = {
@@ -69,24 +70,46 @@ def stream_camel(
     keywords: Optional[Sequence[str]] = None,
     limit: int = 0,
     min_solution_chars: int = MIN_SOLUTION_CHARS,
+    per_subtopic: int = 2,
+    scan_limit: int = 6000,
 ) -> Iterator[Dict[str, Any]]:
-    """Stream + filter a camel-ai science dataset into extractor docs."""
+    """Stream + filter a camel-ai science dataset into DIVERSE extractor docs.
+
+    camel-ai is ordered by topic, so naive first-N streaming returns one cluster
+    (e.g. 12x "Schrodinger equation") that matches almost no question-bank Qs.
+    Instead: scan a pool (up to ``scan_limit`` rows), bucket by ``sub_topic``, then
+    round-robin <= ``per_subtopic`` docs per sub_topic so the batch spans many
+    topics. Stops scanning early once enough distinct sub_topics are collected.
+    """
     from datasets import load_dataset  # lazy: only needed when actually fetching
 
     dataset = DATASET_MAP.get(domain.lower())
     if dataset is None:
         raise ValueError(f"unknown camel domain {domain!r}; choose from {sorted(DATASET_MAP)}")
-    ds = load_dataset(dataset, split="train", streaming=True)
-    kept = 0
+    # NON-streaming: camel-ai is ordered by topic (one giant block per sub_topic),
+    # so streaming first-N / scan gives a single cluster. Load the (cached) table
+    # once and bucket all rows in memory -> true round-robin diversity, fast.
+    ds = load_dataset(dataset, split="train")
+
+    buckets: "OrderedDict[str, List[Dict[str, Any]]]" = OrderedDict()
     for idx, row in enumerate(ds):
         doc = row_to_doc(row, idx, domain=_canon(domain), keywords=keywords,
                          min_solution_chars=min_solution_chars)
         if doc is None:
             continue
-        yield doc
-        kept += 1
-        if limit and kept >= limit:
-            break
+        b = buckets.setdefault(doc["meta"].get("sub_topic") or "?", [])
+        if len(b) < per_subtopic:
+            b.append(doc)
+
+    # round-robin: one per sub_topic per tier, so diversity comes first
+    emitted = 0
+    for tier in range(per_subtopic):
+        for docs in buckets.values():
+            if tier < len(docs):
+                yield docs[tier]
+                emitted += 1
+                if limit and emitted >= limit:
+                    return
 
 
 def _canon(domain: str) -> str:
@@ -114,13 +137,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--keywords", default="",
                         help="comma-sep keywords; keep only rows mentioning one")
     parser.add_argument("--limit", type=int, default=12, help="max kept rows (0 = all)")
+    parser.add_argument("--per-subtopic", type=int, default=2, help="max docs per sub_topic (diversity)")
+    parser.add_argument("--scan-limit", type=int, default=6000, help="max rows to stream while pooling")
     parser.add_argument("--min-solution-chars", type=int, default=MIN_SOLUTION_CHARS)
     args = parser.parse_args(argv)
 
     keywords = [k.strip() for k in args.keywords.split(",") if k.strip()]
     out = args.out or f"data/external_kb/camel_{_canon(args.domain)}.jsonl"
-    docs = stream_camel(args.domain, keywords=keywords or None,
-                        limit=args.limit, min_solution_chars=args.min_solution_chars)
+    docs = list(stream_camel(args.domain, keywords=keywords or None,
+                             limit=args.limit, min_solution_chars=args.min_solution_chars,
+                             per_subtopic=args.per_subtopic, scan_limit=args.scan_limit))
     n = write_docs(docs, out)
     print("Fetch camel-ai science CoT")
     print(f"  domain: {args.domain} -> {_canon(args.domain)}  keywords: {keywords or '(none)'}  limit: {args.limit}")
