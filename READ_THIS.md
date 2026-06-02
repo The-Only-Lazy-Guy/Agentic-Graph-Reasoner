@@ -8,6 +8,28 @@
 
 ---
 
+## Session update (2026-06-02e) — CoT dataset chosen + HF adapter
+
+- Question-bank domain mix (from ids): cs 42, physics 39, algo 39, math 36,
+  sysdesign 36, logic 28, chem 27, bio 27 (+ extreme variants). STEM + reasoning.
+- Dataset → domain map decided:
+  - **`open-thoughts/OpenThoughts-114k`** (primary) → math/algo/cs + partial science
+  - `camel-ai/{physics,chemistry,biology}` (CC-BY-NC) → science depth
+  - `csitfun/LogiCoT` → logic
+  - sysdesign → NO CoT dataset exists; synthesize via opencode or use fact mode
+- Built `v5/graph_grower/fetch_cot.py` — streams OpenThoughts-114k **metadata**
+  config (`problem` + `deepseek_reasoning` + `deepseek_solution` + `domain`),
+  filters by OT domain + optional keywords, emits `{id,text,domain,mode:"cot"}`
+  for the extractor. Streaming = no 3.5 GB download.
+- Live smoke (datasets 4.8.5 installed): fetched 3 real math traces; HF dep is
+  lazy so the transform is unit-tested offline (5 tests pass).
+- Caution: OT reasoning traces are long (12k–42k chars) → many chunks/LLM calls;
+  use modest `--limit` + keyword targeting so growth lands on question-bank topics.
+- Full chain now runnable:
+  `fetch_cot → extract → apply --candidates → grown graph`.
+
+---
+
 ## Session update (2026-06-02d) — Source B: external-knowledge extractor (facts + CoT)
 
 - Built `v5/graph_grower/extract.py` — external docs (Wikipedia/paragraph OR CoT
