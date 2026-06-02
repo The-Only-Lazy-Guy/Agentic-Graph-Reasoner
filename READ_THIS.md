@@ -543,6 +543,35 @@
   full recipe (loss 3.1→1.48) should close. Next: full-recipe rerun to push
   predicted toward 0.06, then Stage 3/4 are genuinely unblocked (safety floor met).
 
+## Session update (2026-06-02 c) — full recipe does NOT beat short; epi-fix is the lever, residual is data/variance
+
+- Full recipe (200/120/150) WITH the epi fix, same `--seed 7` 47-applicable split,
+  log `fallback_write_diag_epifix_fullrecipe_seed7.log`:
+  ```
+                  30/20/20+epifix   full+epifix    pre-epifix full
+  applicable fb        0.21      →     0.30            0.57
+  gold_all             0.06      →     0.13            0.45
+  gold_epi_only        0.21      →     0.28            0.55
+  blocked/negative     1.00            1.00            1.00
+  ```
+- Reads:
+  1. The EPI LABEL FIX is the confirmed major lever (0.57→0.21-0.30; gold_all
+     0.45→0.06-0.13). Solid.
+  2. Training length is NOT the remaining lever: full recipe (0.30) did not beat
+     30/20/20 (0.21) on the same split — my "train longer -> 0.06 floor"
+     prediction was WRONG. ~4 cases / 47 = within variance.
+  3. Residual: `gold_all=0.13` = ~13% of applicable cases the model's PRIMARY
+     attended node lands OUTSIDE cited evidence (routing/support gap), so even
+     gold epi (now marking all cited evidence) can't rescue it. Plus persistent
+     direct_judgment/design_synthesis missing_slot+low_epistemic.
+  4. n=47 single-seed held-out is noisy; can't separate 0.21 from 0.30.
+- Verdict: label contract was the dominant blocker (FIXED). What's left is
+  (a) small-held-out variance and (b) a smaller routing/support + slot/epi
+  calibration gap — NOT epochs. Next levers: SCALE the corpus (bigger held-out
+  -> stable number; opencode shards) + the V4 data-quality fixes (answer-cited
+  evidence/support labels, answer-content slot fills) which target exactly the
+  residual routing/slot gap. Safety floor still met (blocked/negative 1.00).
+
 ---
 
 ## TL;DR claim boundary
