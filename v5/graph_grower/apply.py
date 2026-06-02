@@ -158,9 +158,43 @@ def apply_growth(
             f"refusing to overwrite the base graph {graph_path} -- choose a different --out"
         )
 
-    batch_id = _batch_id()
     report = audit_corpus(corpus_path=corpus_path, graph_path=graph_path, config=audit_config)
     candidates = _candidates_for_lanes(report, lanes)
+    result = apply_candidates(
+        candidates,
+        graph_path=graph_path,
+        out_path=out_path,
+        allowed_tiers=allowed_tiers,
+        degradation_threshold=degradation_threshold,
+        force=force,
+        dry_run=dry_run,
+    )
+    result["corpus_path"] = str(corpus_path)
+    result["lanes"] = list(lanes)
+    return result
+
+
+def apply_candidates(
+    candidates: Sequence[Mapping[str, Any]],
+    *,
+    graph_path: str | Path,
+    out_path: str | Path,
+    allowed_tiers: Sequence[str] = DEFAULT_ALLOWED_TIERS,
+    degradation_threshold: float = DEFAULT_DEGRADATION_THRESHOLD,
+    force: bool = False,
+    dry_run: bool = False,
+    batch_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Health-gated apply of an arbitrary candidate list (audit lanes OR an
+    external extractor queue). Non-destructive: refuses to write the base graph.
+    """
+    graph_path = Path(graph_path)
+    out_path = Path(out_path)
+    if out_path.resolve() == graph_path.resolve():
+        raise ValueError(
+            f"refusing to overwrite the base graph {graph_path} -- choose a different --out"
+        )
+    batch_id = batch_id or _batch_id()
 
     graph = MemoryGraph.load_json(str(graph_path))
     health_before = compute_health(graph)
@@ -188,13 +222,11 @@ def apply_growth(
         graph.save_json(str(out_path))
         persisted = True
 
-    result = {
+    return {
         "batch_id": batch_id,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "corpus_path": str(corpus_path),
         "graph_path": str(graph_path),
         "out_path": str(out_path),
-        "lanes": list(lanes),
         "candidate_count": len(candidates),
         "edit_stats": edit_stats,
         "apply_summary": apply_summary,
@@ -210,7 +242,6 @@ def apply_growth(
         "graph_before": {"nodes": nodes_before, "edges": edges_before},
         "graph_after": {"nodes": len(graph.nodes), "edges": len(graph.edges)},
     }
-    return result
 
 
 def _write_report(result: Mapping[str, Any], report_path: str | Path) -> str:
@@ -228,21 +259,36 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--report", default="artifacts/graph_growth/graph_growth_apply.json")
     parser.add_argument("--lanes", default="substrate",
                         help="comma-separated: substrate,persistent_promote")
+    parser.add_argument("--candidates", default=None,
+                        help="apply an external candidate queue jsonl (e.g. from extract.py) "
+                             "instead of auditing a corpus")
     parser.add_argument("--degradation-threshold", type=float, default=DEFAULT_DEGRADATION_THRESHOLD)
     parser.add_argument("--force", action="store_true", help="persist even if the health gate fails")
     parser.add_argument("--dry-run", action="store_true", help="audit + apply in memory, do not write the graph")
     args = parser.parse_args(argv)
 
     lanes = [s.strip() for s in args.lanes.split(",") if s.strip()]
-    result = apply_growth(
-        corpus_path=args.corpus,
-        graph_path=args.graph,
-        out_path=args.out,
-        lanes=lanes,
-        degradation_threshold=args.degradation_threshold,
-        force=args.force,
-        dry_run=args.dry_run,
-    )
+    if args.candidates:
+        candidates = [json.loads(ln) for ln in Path(args.candidates).read_text(encoding="utf-8").splitlines() if ln.strip()]
+        result = apply_candidates(
+            candidates,
+            graph_path=args.graph,
+            out_path=args.out,
+            degradation_threshold=args.degradation_threshold,
+            force=args.force,
+            dry_run=args.dry_run,
+        )
+        result.setdefault("lanes", ["external"])
+    else:
+        result = apply_growth(
+            corpus_path=args.corpus,
+            graph_path=args.graph,
+            out_path=args.out,
+            lanes=lanes,
+            degradation_threshold=args.degradation_threshold,
+            force=args.force,
+            dry_run=args.dry_run,
+        )
     report_path = _write_report(result, args.report)
 
     es = result["edit_stats"]

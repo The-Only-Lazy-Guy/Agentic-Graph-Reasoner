@@ -6,12 +6,23 @@
 > trace generation. Goal: raise graph coverage so more questions have real
 > support → better positive:negative balance for V5 (see READ_THIS 2026-06-02b).
 
-Status: **Phase A audit + Phase B gated apply implemented.** Phase A
-(`v5/graph_grower/audit.py`) is non-mutating: audits scoped patches into
-persistent/substrate/review queues. Phase B (`v5/graph_grower/apply.py`) applies
-the queues to a SEPARATE grown graph (never the base graph), with provenance
-stamps, dangling-edge filtering, and a health gate. First substrate apply:
-831→1305 nodes / 1454→2218 edges, health 0.695→0.721 (gate PASS).
+Status: **Phase A audit + Phase B gated apply + Source-B external extractor
+implemented.** Phase A (`v5/graph_grower/audit.py`) is non-mutating: audits
+scoped patches into persistent/substrate/review queues. Phase B
+(`v5/graph_grower/apply.py`) applies any candidate set (audit lanes OR an
+external queue, via `apply_candidates`) to a SEPARATE grown graph (never the base
+graph), with provenance stamps, dangling-edge filtering, and a health gate.
+Source B (`v5/graph_grower/extract.py`) turns external docs (Wikipedia/paragraph
+facts AND CoT traces) into atomic graph-edit candidates in the SAME `raw_edit`
+schema, so it plugs straight into `apply_candidates`.
+
+Results: substrate apply 831→1305 nodes (health 0.695→0.721); external smoke on
+a scalar/vector paragraph + a Dijkstra CoT → 16 atomic nodes / 15 edges, all
+typed + linked (the "scalar vs vector" coverage gap is now fillable). Entity
+resolution (`semantic_dedupe.classify`) and the LLM judge (`edit_judge`) are
+wired into `extract_documents` as optional steps; not yet exposed on the CLI
+(next enhancement — links new facts to existing nodes, avoids dup bloat, lifts
+health).
 
 ---
 

@@ -8,6 +8,37 @@
 
 ---
 
+## Session update (2026-06-02d) — Source B: external-knowledge extractor (facts + CoT)
+
+- Built `v5/graph_grower/extract.py` — external docs (Wikipedia/paragraph OR CoT
+  traces) → ATOMIC graph-edit candidates in the SAME `raw_edit` schema, so it
+  plugs straight into the existing apply path. Shared extractor, two modes:
+  - `fact`: paragraph → atomic claim/concept nodes + entails/supports/contradicts/related
+  - `cot` : reasoning steps → reasoning_atom/chain_step/solved_subgoal + chain_step/leveraged
+- Refactored `apply.py`: new `apply_candidates(...)` core + `--candidates <queue>`
+  CLI, so external queues apply through the same health gate / provenance / staging.
+- Pipeline: chunk → LLM extract (opencode big, injectable) → conform (vocab +
+  atomicity 12–400 chars + stable sha1 ids) → [optional] entity-resolve
+  (`semantic_dedupe.classify`) → [optional] judge (`edit_judge`) → candidate queue.
+- **Why this matters:** session/Phase-B growth only adds reasoning substrate, NOT
+  new facts. This is the first path that injects atomic declarative knowledge —
+  the thing that was missing (e.g. "scalar vs vector" had no node → false grounding).
+- Smoke (opencode) on `data/external_kb/sample_docs.jsonl` (1 physics paragraph +
+  1 Dijkstra CoT): **16 atomic nodes / 15 edges**, all typed + LINKED:
+  - `[concept] A scalar is a physical quantity described by magnitude alone` (5 edges)
+  - `[concept] A vector ... has both magnitude and direction` (5 edges)
+  - `[concept] Vectors require direction ...; scalars do not` (2 edges)
+  - CoT: reasoning_atom/chain_step/solved_subgoal for Dijkstra→Bellman-Ford choice
+  - apply onto merged: 831→847 nodes, health 0.695→0.687 (delta −0.008, gate PASS)
+- The scalar/vector gap is now FILLABLE: that question would anchor to the scalar
+  concept node instead of bond_polarity.
+- 10 graph-growth tests pass (3 audit + 3 apply + 4 extract).
+- **Next:** expose `--link-graph` (build dedupe index → link new facts to existing
+  nodes; lifts health, kills dup bloat) + `--judge`; then point V5 training at the
+  grown graph and measure coverage / override-negative-rate drop.
+
+---
+
 ## Session update (2026-06-02c) — graph grower Phase B: gated apply
 
 - Built `v5/graph_grower/apply.py` — turns audit queues into actual graph growth,
