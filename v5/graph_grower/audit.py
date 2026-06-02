@@ -173,6 +173,12 @@ def audit_rows(
             "substrate": _lane_report(substrate, graph, cfg.max_candidates),
             "review": _lane_report(review, graph, cfg.max_candidates),
         },
+        "lanes_note": (
+            "Lanes are non-exclusive views, not a partition: a patch may appear in "
+            "more than one lane (e.g. a safe substrate patch whose row carries a "
+            "persistent-blocking flag also lands in review). Lane counts therefore "
+            "need not sum to the total patch count."
+        ),
         "sessions": session_summaries[: cfg.max_candidates],
     }
 
@@ -585,6 +591,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"  persistent: {lanes['persistent_promote']['count']} candidates")
     print(f"  substrate:   {lanes['substrate']['count']} candidates")
     print(f"  review:      {lanes['review']['count']} candidates")
+    print("  note: lanes are non-exclusive views (a patch may appear in >1 lane); "
+          "counts need not sum to total patches")
     print(f"  report: {written['report']}")
     if not args.no_queues:
         print(f"  queues: {written['persistent_promote']}, {written['substrate']}, {written['review']}")
