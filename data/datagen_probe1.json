@@ -1,0 +1,1 @@
+{"tasks":[{"id":"probe_dj_dijkstra","difficulty":"medium","question":"Can I use Dijkstra's algorithm to find the longest path in a graph with positive edge weights?","max_steps":6,"expected":"verdict + reason"}]}

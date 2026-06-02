@@ -176,6 +176,31 @@ def packet_to_corpus_row(
         ntype = getattr(n, "node_type", "") if n else ""
         anchor_records.append({"id": aid, "node_type": ntype, "text": snippet[:600]})
 
+    # ── answer-grounded SUPPORT label ───────────────────────────────────────
+    # The nodes the ANSWER actually rests on (not the full tool-search trajectory):
+    #   - finalize path: shortcut_anchor_ids (the evidence the controller read)
+    #   - loop path:     anchors whose id appears in the answer/explanation text
+    # This is the clean support/evidence target for V5 (fixes the trajectory-vs-
+    # citation label noise). De-noises support-pointer + epistemic supervision.
+    _answer_text = " ".join(str(t) for t in (
+        getattr(pkt, "answer_raw", ""), getattr(pkt, "answer", ""),
+        getattr(pkt, "explanation", "")) if t)
+    answer_support_ids = list(dict.fromkeys(getattr(pkt, "shortcut_anchor_ids", []) or []))
+    for aid in pkt.anchors:
+        if aid not in answer_support_ids and aid in _answer_text:
+            answer_support_ids.append(aid)
+    # Loop-FINALIZED fallback: finalize-shortcut traces carry clean
+    # shortcut_anchor_ids, but loop-finalized answers cite by CONTENT (no node-id
+    # string), so the scan above is empty. Use the nodes actually read_node'd as
+    # the evidence base. Gated on finalized so non-finalized/weak-evidence traces
+    # correctly keep empty support.
+    if getattr(pkt, "finalized", False) and not answer_support_ids:
+        for c in (getattr(pkt, "tool_log", []) or []):
+            if isinstance(c, dict) and c.get("name") == "read_node":
+                nid = (c.get("args") or {}).get("node_id")
+                if nid and nid not in answer_support_ids:
+                    answer_support_ids.append(nid)
+
     row: Dict[str, Any] = {
         # ── envelope ──
         "schema_version": CORPUS_SCHEMA_VERSION,
@@ -222,6 +247,9 @@ def packet_to_corpus_row(
             "answer_polished": pkt.answer,
             "explanation": pkt.explanation,
             "reflection": pkt.reflection,
+            # answer-grounded support: the nodes the answer rests on (for V5
+            # support/evidence targets — see projection).
+            "answer_support_ids": answer_support_ids,
         },
 
         # ── metrics ──

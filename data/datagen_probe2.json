@@ -1,0 +1,1 @@
+{"tasks":[{"id":"probe_loop_design","difficulty":"hard","question":"Design a distributed rate limiter that supports 100,000 requests per second across 50 nodes with strict accuracy and 100ms propagation. What data structures and tradeoffs would you use?","max_steps":8,"expected":"design with structures + tradeoffs"}]}
