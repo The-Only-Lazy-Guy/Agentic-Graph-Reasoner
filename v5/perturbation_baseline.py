@@ -111,12 +111,11 @@ def run(corpus_path=CORPUS, model_name=DEFAULT_LM, device_str=None, n=20, max_ne
     graph = load_persisted_graph(graph_path)
     print(f"graph={graph_path} ({len(graph.nodes)} nodes)")
 
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoTokenizer
+    from v5.lm_loader import load_frozen_lm
     print("loading frozen LM...")
     tok = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float32).to(device).eval()
-    for p in model.parameters():
-        p.requires_grad_(False)
+    model = load_frozen_lm(model_name, device=device)   # V5_LM_QUANT=4bit for the 6GB 4B target
     lm_dim = model.config.hidden_size
 
     embedder = RealEmbedder(device)

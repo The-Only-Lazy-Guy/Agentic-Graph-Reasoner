@@ -61,14 +61,14 @@ class FrozenQwenHInitProvider:
 
     def __init__(self, model_name: str = DEFAULT_LM, anchor_layer: int = ANCHOR_LAYER,
                  device: Optional[torch.device] = None):
-        from transformers import AutoModelForCausalLM, AutoTokenizer
+        from transformers import AutoTokenizer
+        from v5.lm_loader import load_frozen_lm
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.anchor_layer = anchor_layer
         self.tok = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name, torch_dtype=torch.float32).to(self.device).eval()
-        for p in self.model.parameters():
-            p.requires_grad_(False)
+        # precision via V5_LM_QUANT/V5_LM_DTYPE -- must match deploy (4bit for the
+        # 6GB Qwen3-4B) so the cached h_init distribution matches inference.
+        self.model = load_frozen_lm(model_name, device=self.device)
         self.hidden_size = self.model.config.hidden_size
         n_layers = self.model.config.num_hidden_layers
         assert anchor_layer < n_layers, f"anchor_layer {anchor_layer} >= {n_layers} layers"

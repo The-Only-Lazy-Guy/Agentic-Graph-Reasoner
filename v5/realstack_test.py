@@ -140,17 +140,15 @@ def run(graph_path: str = "graphs/algo3_binary_search.json",
 
     # 3. real frozen LM
     print(f"\nloading frozen LM {model_name}...")
-    from transformers import AutoModelForCausalLM, AutoConfig, AutoTokenizer
+    from transformers import AutoConfig, AutoTokenizer
+    from v5.lm_loader import load_frozen_lm
     cfg = AutoConfig.from_pretrained(model_name)
     lm_dim = cfg.hidden_size
     n_layers = cfg.num_hidden_layers
     assert n_layers > max(PLANNING_LAYER, EVIDENCE_LAYER), \
         f"model has {n_layers} layers; need >{max(PLANNING_LAYER, EVIDENCE_LAYER)}"
     tok = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float32)
-    model.to(device).eval()
-    for p in model.parameters():
-        p.requires_grad_(False)
+    model = load_frozen_lm(model_name, device=device)   # V5_LM_QUANT=4bit for the 6GB 4B target
     print(f"  loaded: hidden={lm_dim}, layers={n_layers} (hooks at L{PLANNING_LAYER}/L{EVIDENCE_LAYER})")
 
     # 4. V5 adapter sized to the LM

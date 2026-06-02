@@ -46,12 +46,10 @@ def run(model_name: str = DEFAULT_LM, device_str: str = None, max_new_tokens: in
     print(f"subgraph: {len(node_ids)} nodes")
 
     print("\nloading frozen LM...")
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoTokenizer
+    from v5.lm_loader import load_frozen_lm
     tok = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float32)
-    model.to(device).eval()
-    for p in model.parameters():
-        p.requires_grad_(False)
+    model = load_frozen_lm(model_name, device=device)   # V5_LM_QUANT=4bit for the 6GB 4B target
     lm_dim = model.config.hidden_size
 
     print("embedding nodes (mpnet)...")
