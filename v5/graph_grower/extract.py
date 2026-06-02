@@ -286,6 +286,153 @@ def _attach_edge(new_id: str, existing_id: str, similarity: float, doc: Document
     }
 
 
+def _stitch_bridge_candidate(src: str, dst: str, relation: str, doc_id: str,
+                             family: str, idx: int) -> Dict[str, Any]:
+    """A minimal bridge edge that joins two otherwise-disconnected batch nodes."""
+    raw = {"op": "add_edge", "src": src, "dst": dst, "relation": relation,
+           "tier": "add", "metadata": {"kb_stitch": True}}
+    return {
+        "lane": "external", "session_id": doc_id, "task_family": family,
+        "patch_id": f"{doc_id}_stitch_{idx:04d}", "patch_type": "add_relation",
+        "target_id": dst, "status": "accept", "risk_level": "low",
+        "support_score": None, "text": "", "raw_edit": raw,
+        "reasons": ["stitch_fragment"], "warnings": [],
+    }
+
+
+def stitch_candidates(candidates: List[Dict[str, Any]]) -> int:
+    """Connect a fragmented extraction in place.
+
+    Per-chunk extraction only links nodes WITHIN a chunk, so each chunk becomes
+    its own graph component (235 chunks -> ~242 islands), which collapses graph
+    connectivity/reachability and creates orphans at apply time. This walks the
+    batch nodes in emission order (which preserves doc + chunk locality) and adds
+    a minimal bridge edge whenever two consecutive nodes are still in different
+    components, unioning the whole batch into one component. Within a CoT doc the
+    bridge is a ``chain_step`` (sequential reasoning); across docs it is
+    ``related``. Bridges are stamped ``metadata.kb_stitch`` so they are ablatable.
+
+    Mutates ``candidates`` (appends bridge candidates) and returns the count added.
+    """
+    node_cands = [c for c in candidates if c.get("raw_edit", {}).get("op") == "add_node"]
+    edge_cands = [c for c in candidates if c.get("raw_edit", {}).get("op") == "add_edge"]
+
+    parent: Dict[str, str] = {}
+
+    def find(x: str) -> str:
+        parent.setdefault(x, x)
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != root:        # path compression
+            parent[x], x = root, parent[x]
+        return root
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for c in node_cands:
+        find(c["raw_edit"]["node_id"])
+    for c in edge_cands:
+        e = c["raw_edit"]
+        if e.get("src") in parent and e.get("dst") in parent:
+            union(e["src"], e["dst"])
+
+    bridges: List[Dict[str, Any]] = []
+    prev_id: Optional[str] = None
+    prev_doc: Optional[str] = None
+    for c in node_cands:
+        nid = c["raw_edit"]["node_id"]
+        doc_id = c.get("session_id")
+        mode = c["raw_edit"].get("metadata", {}).get("kb_mode", "fact")
+        if prev_id is not None and find(prev_id) != find(nid):
+            same_doc = (prev_doc == doc_id)
+            relation = "chain_step" if (same_doc and mode == "cot") else "related"
+            bridges.append(_stitch_bridge_candidate(
+                prev_id, nid, relation, doc_id or "external_kb",
+                c.get("task_family") or "external_kb", len(bridges)))
+            union(prev_id, nid)
+        prev_id, prev_doc = nid, doc_id
+
+    candidates.extend(bridges)
+    return len(bridges)
+
+
+def _hub_node_candidate(hub_id: str, text: str, doc_id: str, family: str) -> Dict[str, Any]:
+    raw = {"op": "add_node", "node_id": hub_id, "node_type": "hub", "text": text,
+           "tier": "add", "metadata": {"kb_hub": True, "kb_source_doc": doc_id}}
+    return {
+        "lane": "external", "session_id": doc_id, "task_family": family,
+        "patch_id": f"{doc_id}_hub", "patch_type": "add_fact", "target_id": hub_id,
+        "status": "accept", "risk_level": "low", "support_score": None, "text": text,
+        "raw_edit": raw, "reasons": ["hub_wiring"], "warnings": [],
+    }
+
+
+def _hub_edge_candidate(hub_id: str, member_id: str, doc_id: str, family: str,
+                        idx: int, relation: str = "related") -> Dict[str, Any]:
+    raw = {"op": "add_edge", "src": hub_id, "dst": member_id, "relation": relation,
+           "tier": "add", "metadata": {"kb_hub_edge": True}}
+    return {
+        "lane": "external", "session_id": doc_id, "task_family": family,
+        "patch_id": f"{doc_id}_hubedge_{idx:04d}", "patch_type": "add_relation",
+        "target_id": member_id, "status": "accept", "risk_level": "low",
+        "support_score": None, "text": "", "raw_edit": raw,
+        "reasons": ["hub_wiring"], "warnings": [],
+    }
+
+
+def wire_hubs(candidates: List[Dict[str, Any]], *,
+              parent_hub_id: str = "kb_hub_external_root",
+              parent_hub_text: str = "External-knowledge reasoning index",
+              link_existing_hub: Optional[str] = None) -> int:
+    """Give bulk-grown knowledge a hub layer so it scores on hub-reachability.
+
+    ``graph_health.hub_reachability_3hop`` only counts nodes within 3 hops of a
+    ``node_type == "hub"`` node, and all existing hubs live in the old domain, so
+    a freshly injected domain scores ~0 there no matter how well it is stitched.
+    This adds, per source doc, one topical ``hub`` node linked to every node of
+    that doc (so each new node is 1 hop from a hub), then threads the per-doc hubs
+    into the existing hub mesh through a single parent hub (and optionally an
+    existing hub id), mirroring the graph's ``*_hub --part_of--> *_hub`` design.
+    Hub nodes/edges are stamped ``kb_hub`` and are ablatable. Returns hubs added.
+    """
+    from collections import OrderedDict
+    by_doc: "OrderedDict[str, List[Dict[str, Any]]]" = OrderedDict()
+    family: Dict[str, str] = {}
+    for c in candidates:
+        e = c.get("raw_edit", {})
+        if e.get("op") == "add_node" and not e.get("metadata", {}).get("kb_hub"):
+            d = c.get("session_id") or "external_kb"
+            by_doc.setdefault(d, []).append(e)
+            family[d] = c.get("task_family") or "external_kb"
+    if not by_doc:
+        return 0
+
+    added: List[Dict[str, Any]] = [
+        _hub_node_candidate(parent_hub_id, parent_hub_text, "external_kb", "external_kb")
+    ]
+    if link_existing_hub:
+        added.append(_hub_edge_candidate(link_existing_hub, parent_hub_id,
+                                         "external_kb", "external_kb", 0))
+    n_hubs = 0
+    for doc_id, node_edits in by_doc.items():
+        hub_id = f"kb_hub_{doc_id}"
+        htext = next((e.get("text") for e in node_edits
+                      if e.get("node_type") in ("strategy", "solved_subgoal")), None)
+        htext = f"[{family[doc_id]}] " + (htext or node_edits[0].get("text", "") or "knowledge cluster")
+        added.append(_hub_node_candidate(hub_id, htext[:300], doc_id, family[doc_id]))
+        for i, e in enumerate(node_edits):
+            added.append(_hub_edge_candidate(hub_id, e["node_id"], doc_id, family[doc_id], i))
+        added.append(_hub_edge_candidate(parent_hub_id, hub_id, doc_id, family[doc_id], 9000))
+        n_hubs += 1
+
+    candidates.extend(added)
+    return n_hubs
+
+
 def extract_documents(
     docs: Sequence[Document],
     *,
@@ -296,6 +443,9 @@ def extract_documents(
     attach_threshold: float = 0.80,
     judge_fn: Optional[Callable[[Mapping[str, Any]], Any]] = None,
     collect_sft: bool = False,
+    stitch: bool = True,
+    wire_hub_layer: bool = True,
+    link_existing_hub: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run the extractor over documents -> candidates + stats.
 
@@ -320,7 +470,7 @@ def extract_documents(
     stats = {"docs": len(docs), "chunks": 0, "nodes": 0, "edges": 0,
              "dropped_non_atomic": 0, "dropped_empty": 0, "dropped_bad_edge": 0,
              "deduped_existing": 0, "attached_existing": 0, "merged_existing": 0,
-             "judged_out": 0, "sft_pairs": 0}
+             "judged_out": 0, "sft_pairs": 0, "stitch_bridges": 0, "hub_nodes": 0}
     # map a dropped/duplicate/merged stable id -> existing graph node id, to remap edges
     remap: Dict[str, str] = {}
 
@@ -381,6 +531,12 @@ def extract_documents(
                 ee["dst"] = remap.get(ee["dst"], ee["dst"])
                 candidates.append(_to_candidate(ee, doc, idx + len(kept_nodes)))
                 stats["edges"] += 1
+
+    if stitch:
+        stats["stitch_bridges"] = stitch_candidates(candidates)
+        stats["edges"] += stats["stitch_bridges"]
+    if wire_hub_layer:
+        stats["hub_nodes"] = wire_hubs(candidates, link_existing_hub=link_existing_hub)
 
     return {"candidates": candidates, "stats": stats, "sft_pairs": sft_pairs}
 
@@ -471,6 +627,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--attach-threshold", type=float, default=0.80)
     parser.add_argument("--judge", action="store_true",
                         help="LLM-judge each new node (accept/reject/merge_into); implies --link-graph")
+    parser.add_argument("--no-stitch", action="store_true",
+                        help="disable cross-chunk/doc stitching (leaves per-chunk islands)")
     parser.add_argument("--collect-sft", action="store_true",
                         help="append (chunk -> conformed extraction) chat pairs for Qwen-0.5B distillation")
     parser.add_argument("--sft-out", default="data/external_kb/extractor_sft.jsonl",
@@ -492,7 +650,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     result = extract_documents(
         docs, controller=controller, dedupe_index=dedupe_index,
         dup_threshold=args.dup_threshold, attach_threshold=args.attach_threshold,
-        judge_fn=judge_fn, collect_sft=args.collect_sft,
+        judge_fn=judge_fn, collect_sft=args.collect_sft, stitch=not args.no_stitch,
     )
     out = write_candidate_queue(result["candidates"], args.out)
 
@@ -513,6 +671,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"  linking: deduped {s['deduped_existing']}, attached {s['attached_existing']}, "
           f"merged {s['merged_existing']}, judged_out {s['judged_out']}"
           + ("" if (dedupe_index is not None) else "  (linking OFF - pass --link-graph)"))
+    print(f"  stitch bridges: {s['stitch_bridges']}"
+          + ("  (stitch OFF)" if args.no_stitch else ""))
     if args.collect_sft:
         print(f"  sft pairs: {s['sft_pairs']}" + (f" -> appended {sft_out}" if sft_out else " (none)"))
     print(f"  queue: {out}")

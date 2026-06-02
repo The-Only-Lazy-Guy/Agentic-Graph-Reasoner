@@ -159,7 +159,8 @@ def test_extract_then_apply_grows_graph(tmp_path):
                 edges=[]).save_json(str(graph_path))
 
     docs = [Document(id="sv", text="p", domain="physics", mode="fact")]
-    result = extract_documents(docs, extract_fn=_stub)
+    # focus on content growth: stitch/hub-layer have their own tests below
+    result = extract_documents(docs, extract_fn=_stub, stitch=False, wire_hub_layer=False)
     applied = apply_candidates(result["candidates"], graph_path=graph_path, out_path=out_path)
 
     assert applied["persisted"] is True
@@ -167,3 +168,47 @@ def test_extract_then_apply_grows_graph(tmp_path):
     assert len(grown.nodes) == 3        # seed + 2 atomic facts (dedup by stable id across chunks)
     kb = [n for n in grown.nodes.values() if n.id.startswith("kb_fact_")]
     assert kb and all(n.metadata.get("auto_grown") for n in kb)
+
+
+def _stub_distinct(chunk: str, mode: str) -> str:
+    """Each chunk yields its own pair of nodes (no cross-chunk edges) -> islands."""
+    tag = chunk.strip()[:6]
+    return json.dumps({
+        "nodes": [
+            {"id": "a", "node_type": "reasoning_atom", "text": f"atom {tag} first detail line"},
+            {"id": "b", "node_type": "reasoning_atom", "text": f"atom {tag} second detail line"},
+        ],
+        "edges": [{"src": "a", "dst": "b", "relation": "chain_step"}],
+    })
+
+
+def test_stitch_connects_fragmented_chunks():
+    # 3 distinct chunks -> 3 disconnected components without stitching
+    docs = [Document(id="d", text="s1\n\ns2\n\ns3", domain="math", mode="cot")]
+    frag = extract_documents(docs, extract_fn=_stub_distinct, stitch=False, wire_hub_layer=False)
+    assert frag["stats"]["chunks"] == 3 and frag["stats"]["stitch_bridges"] == 0
+
+    stitched = extract_documents(docs, extract_fn=_stub_distinct, stitch=True, wire_hub_layer=False)
+    # 3 components -> 2 bridges unify them; bridges within one cot doc are chain_step
+    assert stitched["stats"]["stitch_bridges"] == 2
+    bridges = [c for c in stitched["candidates"]
+               if c["raw_edit"].get("metadata", {}).get("kb_stitch")]
+    assert len(bridges) == 2 and all(b["raw_edit"]["relation"] == "chain_step" for b in bridges)
+
+
+def test_wire_hubs_adds_hub_layer_per_doc():
+    docs = [Document(id="d", text="s1\n\ns2", domain="math", mode="cot")]
+    result = extract_documents(docs, extract_fn=_stub_distinct, stitch=True, wire_hub_layer=True)
+    assert result["stats"]["hub_nodes"] == 1                     # one source doc -> one doc hub
+    hub_nodes = [c for c in result["candidates"]
+                 if c["raw_edit"]["op"] == "add_node" and c["raw_edit"]["node_type"] == "hub"]
+    # parent root hub + one per-doc hub
+    ids = {c["raw_edit"]["node_id"] for c in hub_nodes}
+    assert "kb_hub_external_root" in ids and "kb_hub_d" in ids
+    # every content node is 1 hop from the doc hub (reachability fix)
+    content = {c["raw_edit"]["node_id"] for c in result["candidates"]
+               if c["raw_edit"]["op"] == "add_node" and c["raw_edit"]["node_type"] != "hub"}
+    hub_targets = {c["raw_edit"]["dst"] for c in result["candidates"]
+                   if c["raw_edit"].get("metadata", {}).get("kb_hub_edge")
+                   and c["raw_edit"]["src"] == "kb_hub_d"}
+    assert content <= hub_targets

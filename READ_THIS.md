@@ -8,6 +8,41 @@
 
 ---
 
+## Session update (2026-06-02h) — batch-1 grow: stitch + hub-wiring (gate PASS, health UP)
+
+- Ran the full batch-1 extraction (`extract --link-graph --collect-sft`, opencode):
+  12 OpenThoughts math docs → 235 chunks → **2411 candidates (1262 nodes / 1149
+  edges)**, **225 SFT pairs** banked to `data/external_kb/extractor_sft.jsonl`.
+- **Apply FAILED hard first: health 0.6948 → 0.4145 (−0.2803).** Diagnosed via
+  `graph_growth_apply.json`: +242 new components + 40 orphans. Root cause = the
+  extractor only links nodes WITHIN a chunk (`n0..nk`), never across chunks/docs,
+  so each of the 235 chunks became its own island.
+- **Fix 1 — `stitch_candidates()` (extract.py):** union-find over the batch, add a
+  minimal bridge between consecutive disconnected nodes (chain_step within a cot
+  doc, related across docs). 244 bridges → components 250→8, orphans 40→0,
+  connectivity 0.33→0.92. Delta −0.28 → **−0.11** (still FAIL).
+- **Residual cause:** `graph_health.hub_reachability_3hop` only counts nodes within
+  3 hops of a `node_type=="hub"` node, and all 40 existing hubs are old-domain →
+  bulk-added math scored ~0 reachability. No hub-wiring/rewire pass existed.
+- **Fix 2 — `wire_hubs()` (extract.py):** per source doc, add one topical `hub`
+  node linked to every node of that doc (1 hop → reachable), thread per-doc hubs
+  through a parent `kb_hub_external_root` into the existing mesh (optional
+  `link_existing_hub`, used `algo_design_hub`). 12 hubs + parent.
+- **Result — gate PASS, health IMPROVES: 0.6948 → 0.8497 (+0.1549).**
+  components 8→7, connectivity 0.79→0.94, clustering 0.39→**0.57**, reachability
+  0.60→**0.84**, orphans 0, hubs 40→53. `graphs/merged_graph.json` (831n/1454e)
+  → `graphs/grown_graph.json` **2092n / 4108e** (+1261 nodes).
+- Both passes default ON in `extract_documents` (`stitch`, `wire_hub_layer`);
+  `--no-stitch` to disable. 12 extract tests pass (added stitch + hub-wire tests).
+- **Takeaway:** graph growth is a 3-stage pipeline now — extract → **stitch (no
+  islands) → hub-wire (reachable)** → gated apply. A bulk new-domain dump must be
+  hub-wired or it tanks reachability even when fully connected.
+- **Next:** more batches (physics/chem/bio/logic via fetch_cot) to balance the
+  math-heavy graph; grow SFT corpus toward enough pairs to train the Qwen-0.5B
+  extractor; then point V5 at `grown_graph.json` and re-check label coverage.
+
+---
+
 ## Session update (2026-06-02g) — extractor --link-graph + --judge (no more islands)
 
 - Answered: at apply, the model only saw graph state for exact-id skip + edge-
