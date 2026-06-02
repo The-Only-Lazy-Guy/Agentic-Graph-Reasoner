@@ -8,6 +8,32 @@
 
 ---
 
+## Session update (2026-06-02) — answer_support_ids wired into projection
+
+- V4 now emits `outputs.answer_support_ids` (commit 92ff383): nodes the FINAL
+  answer rests on. Finalize → `shortcut_anchor_ids`; loop-finalized → cited
+  `read_node` ids; non-finalized → empty.
+- **Wired `v5/training/projection.py` to consume it** as the dominant
+  support/evidence signal: `_add_many(support, answer_support_ids, 5.0)`,
+  `_add_many(evidence, ..., 4.0)`, `_add_many(outer, ..., 1.5)`. Outweighs
+  trajectory-derived weights so V5 support/epistemic targets match what the
+  answer actually cited. Also exposed standalone `answer_support_ids` field +
+  `diagnostics.answer_support_count`.
+- End-to-end path verified on probes (re-projection):
+  - probe1 (finalized): 3 answer_support_ids dominate `support_target`
+    (24.2 / 23.3 / 21.3) and top evidence — answer-grounded nodes on top.
+  - probe2 (non-finalized, empty): graceful fallback to trajectory-derived
+    support, no contamination.
+- Path: `outputs.answer_support_ids` → projection `support_target`/
+  `evidence_target` → `dataset.support_target_map`/`evidence_target_map` →
+  bridge. Single source of truth (`project_corpus_file`); root
+  `project_corpus_to_v5_targets.py` delegates to it.
+- **Next:** regenerate corpus + scale question bank 288 → ~1000, then re-run
+  `fallback_write_diag` to confirm gold_all / applicable-fallback hold or
+  improve with answer-grounded labels at scale.
+
+---
+
 ## Session update (2026-06-01)
 
 - Corpus scale is now 288 unique traces after merging the local + vast.ai

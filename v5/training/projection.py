@@ -206,6 +206,7 @@ def project_corpus_row(row: Mapping[str, Any]) -> Dict[str, Any]:
     inp = row.get("input", {}) or {}
     trace = row.get("trace", {}) or {}
     metrics = row.get("metrics", {}) or {}
+    outputs = row.get("outputs", {}) or {}
     v5_traj = row.get("v5_trajectory", {}) or {}
 
     anchors = inp.get("anchors") or []
@@ -231,6 +232,15 @@ def project_corpus_row(row: Mapping[str, Any]) -> Dict[str, Any]:
     _add_many(outer, shortcut_anchor_ids, 1.0)
     _add_many(evidence, shortcut_anchor_ids, 2.0)
     _add_many(support, shortcut_anchor_ids, 3.0)
+
+    # Answer-grounded support: nodes the FINAL answer rests on (V4-side label,
+    # outputs.answer_support_ids). Highest-priority support/evidence signal —
+    # dominates trajectory-derived weights so V5 support/epistemic targets match
+    # what the answer actually cited.
+    answer_support_ids = _ordered_unique(outputs.get("answer_support_ids") or [])
+    _add_many(outer, answer_support_ids, 1.5)
+    _add_many(evidence, answer_support_ids, 4.0)
+    _add_many(support, answer_support_ids, 5.0)
 
     explicit_read_nodes: List[str] = []
     for tool_call in tool_calls:
@@ -401,12 +411,14 @@ def project_corpus_row(row: Mapping[str, Any]) -> Dict[str, Any]:
         "planning_target": planning_map,
         "evidence_target": evidence_map,
         "support_target": support_map,
+        "answer_support_ids": answer_support_ids,
         "distractor_target": distractor_map,
         "planning_loop_targets": planning_loops,
         "evidence_loop_targets": evidence_loop_targets,
         "diagnostics": {
             "anchor_count": len(anchor_ids),
             "shortcut_anchor_count": len(shortcut_anchor_ids),
+            "answer_support_count": len(answer_support_ids),
             "explicit_read_count": len(explicit_read_nodes),
             "micro_step_count": len(micro_steps),
             "safe_patch_count": sum(1 for patch in patches if _safe_patch_status(patch)),
