@@ -63,14 +63,17 @@ def train(
     batch_size: int = 1,
     grad_accum: int = 16,
     lr: float = 2e-4,
-    max_seq_len: int = 4096,
+    max_seq_len: int = 1536,   # p90 of the SFT pairs ~826 tok; 4096 wastes VRAM
     lora_r: int = 16,
     lora_alpha: int = 32,
     lora_dropout: float = 0.05,
 ) -> str:
     """LoRA-SFT Qwen-0.5B on the collected pairs. Returns the output dir."""
-    import torch
+    # NOTE: import datasets (pyarrow) BEFORE torch -- on Windows the reverse order
+    # segfaults from a native OpenMP/pyarrow clash. Launch with PYTHONUTF8=1 too
+    # (trl 1.5 reads a UTF-8 file with the platform codec -> cp1252 charmap error).
     from datasets import Dataset
+    import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from peft import LoraConfig
     from trl import SFTConfig, SFTTrainer
@@ -101,9 +104,11 @@ def train(
     sft_cfg = SFTConfig(
         output_dir=str(out_dir), num_train_epochs=epochs,
         per_device_train_batch_size=batch_size, gradient_accumulation_steps=grad_accum,
-        learning_rate=lr, max_seq_length=max_seq_len, logging_steps=5,
+        learning_rate=lr, max_length=max_seq_len, logging_steps=5,   # trl>=1.x: max_seq_length -> max_length
         save_strategy="epoch", bf16=torch.cuda.is_available(), report_to=[],
         dataset_text_field="text",
+        gradient_checkpointing=True,                       # trade compute for activation memory
+        gradient_checkpointing_kwargs={"use_reentrant": False},
     )
     trainer = SFTTrainer(model=model, args=sft_cfg, train_dataset=ds, peft_config=peft_cfg)
     trainer.train()
@@ -113,7 +118,8 @@ def train(
     return str(out_dir)
 
 
-def load_extractor_fn(model_dir: str | Path, *, max_new_tokens: int = 1024) -> Callable[[str, str], str]:
+def load_extractor_fn(model_dir: str | Path, *, max_new_tokens: int = 1024,
+                      max_input_tokens: int = 1536) -> Callable[[str, str], str]:
     """Return extract_fn(chunk, mode) -> raw JSON string, backed by the trained
     student. Drops into extract.extract_documents(extract_fn=...)."""
     import torch
@@ -129,11 +135,16 @@ def load_extractor_fn(model_dir: str | Path, *, max_new_tokens: int = 1024) -> C
     def extract_fn(chunk: str, mode: str) -> str:
         msgs = [{"role": "system", "content": _system_prompt(mode)},
                 {"role": "user", "content": chunk}]
-        ids = tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt").to(device)
+        # return_dict for cross-version safety (transformers 5.x returns a dict here)
+        enc = tok.apply_chat_template(msgs, add_generation_prompt=True,
+                                      return_tensors="pt", return_dict=True,
+                                      truncation=True, max_length=max_input_tokens)
+        enc = {k: v.to(device) for k, v in enc.items()}
+        prompt_len = enc["input_ids"].shape[1]
         with torch.no_grad():
-            out = model.generate(ids, max_new_tokens=max_new_tokens, do_sample=False,
+            out = model.generate(**enc, max_new_tokens=max_new_tokens, do_sample=False,
                                  pad_token_id=tok.pad_token_id or tok.eos_token_id)
-        return tok.decode(out[0, ids.shape[1]:], skip_special_tokens=True)
+        return tok.decode(out[0, prompt_len:], skip_special_tokens=True)
 
     return extract_fn
 
@@ -147,6 +158,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--grad-accum", type=int, default=16)
     parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--max-len", type=int, default=1536, help="max sequence length (lower = less VRAM)")
     parser.add_argument("--stats-only", action="store_true", help="print dataset stats and exit (no training)")
     args = parser.parse_args(argv)
 
@@ -154,7 +166,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(json.dumps(dataset_stats(load_sft(args.data)), indent=2))
         return 0
     train(data_path=args.data, model_name=args.model, out_dir=args.out,
-          epochs=args.epochs, batch_size=args.batch_size, grad_accum=args.grad_accum, lr=args.lr)
+          epochs=args.epochs, batch_size=args.batch_size, grad_accum=args.grad_accum,
+          lr=args.lr, max_seq_len=args.max_len)
     return 0
 
 

@@ -8,6 +8,37 @@
 
 ---
 
+## Session update (2026-06-02i) — Qwen-0.5B extractor SMOKE-TRAINED + verified (opencode-retirement path live)
+
+- LoRA-SFT'd Qwen2.5-0.5B on the 225 collected pairs (all cot/math). **bf16 LoRA,
+  NOT QLoRA** — 0.5B fits ~1 GB so 4-bit quant is pointless/lossy here. RTX 4050
+  (6 GB). 87 steps / 12.5 min, **train_loss 0.527, token-acc 0.92**. Adapter saved
+  to `models/extractor-0.5b` (35 MB, gitignored).
+- **Verified end-to-end:** `load_extractor_fn(model_dir)` -> `extract_fn` ->
+  `parse_extraction` -> `conform_edits` on 5 held chunks: **4/5 parseable +
+  vocab-correct** (atomic reasoning_atoms, valid edges; 1 empty). The student
+  reproduces the teacher's extraction format and drops into
+  `extract_documents(extract_fn=...)`. Opencode-retirement loop is real.
+- Real bugs fixed in `train_extractor.py` to get training+inference working on this
+  Windows box (trl 1.5 / transformers 5.9):
+  - import `datasets` BEFORE `torch` (else native pyarrow/OpenMP **segfault**).
+  - launch with `PYTHONUTF8=1` (trl reads a UTF-8 file w/ cp1252 -> charmap error).
+  - `SFTConfig`: `max_seq_length` -> `max_length` (trl rename).
+  - `generate`: `apply_chat_template(..., return_dict=True)` + `**enc` (tf 5.x
+    returns a dict, not a tensor).
+  - inference truncates input (`max_input_tokens=1536`) — the cot chunk branch is
+    uncapped so a 12k-token chunk OOM'd attention.
+  - default `max_length` 4096 -> 1536 (+ gradient_checkpointing): p90 of pairs is
+    ~826 tok; 4096 spilled to shared VRAM (9.9 GB, 33 s/it). 1536 -> 8 s/it, fits.
+- **trl install bumped transformers 4.54 -> 5.9.** Verified safe: core modules
+  import; reasoning suite **461 passed / 1 failed** (the 1 is a missing data
+  fixture, not an API break).
+- **Next:** scale + diversify the SFT corpus (more fetch_cot batches across
+  physics/chem/bio/logic + fact-mode docs, all `--collect-sft`), retrain, eval the
+  student vs opencode, then swap it in for `extract_fn` to grow the graph locally.
+
+---
+
 ## Session update (2026-06-02h) — batch-1 grow: stitch + hub-wiring (gate PASS, health UP)
 
 - Ran the full batch-1 extraction (`extract --link-graph --collect-sft`, opencode):
