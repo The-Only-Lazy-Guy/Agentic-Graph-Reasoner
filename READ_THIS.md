@@ -8,6 +8,39 @@
 
 ---
 
+## Session update (2026-06-02b) — V4 1-sample verify + override-detection fix
+
+- Generated 1 V4 sample via opencode (free big default model, cost 0) to verify
+  the pipeline: `python run_gen_llama.py --backend opencode --opencode-config-dir
+  pure-opencode --out-dir artifacts/datagen_probe --run-id verify_v4_0602 --limit 1`.
+- Wiring confirmed RIGHT: row well-formed, `outputs.answer_support_ids` present,
+  flows through projection. cost 0.
+- **But the sample exposed a real label bug — FALSE GROUNDING.** Q="scalar vs
+  vector" has no matching node; V4 anchored on junk, read a category-mismatched
+  node (`bond_polarity_depends_on_electronegativity_difference`), the model
+  explicitly rejected it and answered from its own knowledge — yet finalize set
+  `shortcut_anchor_ids=[that node]` → `answer_support_ids=[that node]` →
+  `v5_label_status=positive`. V5 would learn a junk node "supports" the answer
+  (poisons epistemic/fallback).
+- **Fix (option 1): override-detection.** `reasoning/distillation_corpus.py`:
+  if a FINALIZED answer has lexical_overlap(answer, support-node-text) < 0.08,
+  set `answer_support_ids=[]`, `v5_label_status="unsupported"`,
+  `quality.answer_overrides_graph=True`. `v5/training/projection.py` honors the
+  flag: keeps candidate pool + planning, ZEROes support/evidence/evidence-loop →
+  trains as a clean NEGATIVE (epistemic ~0 on attended node → fallback fires).
+- Verified by regenerating the same sample: support_target {bond_polarity:24}→{},
+  evidence {bond_polarity:34}→{}, label positive→unsupported, planning + pool
+  preserved. Positive regression check (dijkstra probe): support intact, stays
+  positive (missing flag → not overridden, backward-compatible).
+- **Take on root cause:** graph too small is the *frequency* driver (expand graph
+  long-term, also needed for positive:negative class balance), but override-
+  detection is the *correctness* fix and is independent of graph size — these
+  override traces, correctly relabeled, are gold negatives that calibrate the
+  fallback gate. Skipped upstream question-filtering (option 2): it discards that
+  signal and misses partial overrides. Track positive:negative ratio when scaling.
+
+---
+
 ## Session update (2026-06-02) — answer_support_ids wired into projection
 
 - V4 now emits `outputs.answer_support_ids` (commit 92ff383): nodes the FINAL

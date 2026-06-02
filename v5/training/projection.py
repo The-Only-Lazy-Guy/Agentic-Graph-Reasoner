@@ -363,6 +363,15 @@ def project_corpus_row(row: Mapping[str, Any]) -> Dict[str, Any]:
             for node_id in node_ids:
                 _add(outer, node_id, 0.1)
 
+    # Override row: the answer ignored the graph (false grounding, flagged by
+    # distillation_corpus.answer_overrides_graph). Keep the candidate pool +
+    # planning attention, but ZERO support/evidence so this trains as a clean
+    # negative (epistemic ~0 on attended nodes -> fallback gate learns to fire).
+    overridden = bool((row.get("quality") or {}).get("answer_overrides_graph"))
+    if overridden:
+        evidence.clear()
+        support.clear()
+
     for node_id, weight in list(support.items()):
         _add(evidence, node_id, max(1.0, 0.5 * weight))
 
@@ -371,7 +380,7 @@ def project_corpus_row(row: Mapping[str, Any]) -> Dict[str, Any]:
         if node_id not in positively_used:
             _add(distractor, node_id, 0.75)
 
-    evidence_loop_targets = evidence_loops or _micro_step_loop_targets(micro_steps)
+    evidence_loop_targets = [] if overridden else (evidence_loops or _micro_step_loop_targets(micro_steps))
     if not planning_loops and planning:
         planning_loops = [{
             "loop": 0,

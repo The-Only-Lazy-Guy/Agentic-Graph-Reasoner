@@ -32,6 +32,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, TYPE_CHECKING
 
+from reasoning.lexical_matching import lexical_overlap
+
 if TYPE_CHECKING:
     from answerer_v4 import V4Packet
     from graph_core import MemoryGraph
@@ -201,6 +203,30 @@ def packet_to_corpus_row(
                 if nid and nid not in answer_support_ids:
                     answer_support_ids.append(nid)
 
+    # ── override detection: answer ignored the graph ────────────────────────
+    # If a FINALIZED answer reuses (almost) no content from its support nodes,
+    # the model answered from its own parametric knowledge and OVERRODE the
+    # graph (retrieval missed / the read node was a category mismatch). Recording
+    # those nodes as "support" is a FALSE grounding label that poisons the V5
+    # epistemic/support heads. Detect via lexical overlap of the polished answer
+    # vs the support-node content; on override drop the support label and mark
+    # the row UNSUPPORTED — still useful: it's a clean negative that calibrates
+    # the fallback gate (epistemic SHOULD fire, fallback SHOULD trigger).
+    _OVERRIDE_OVERLAP_THRESHOLD = 0.08
+    answer_overrides_graph = False
+    if answer_support_ids and getattr(pkt, "finalized", False) and hasattr(graph, "nodes"):
+        _support_text = " ".join(
+            graph.nodes[aid].text
+            for aid in answer_support_ids
+            if aid in graph.nodes and getattr(graph.nodes[aid], "text", "")
+        )
+        _final_answer_text = str(getattr(pkt, "answer", "") or getattr(pkt, "answer_raw", "") or "")
+        if _support_text and _final_answer_text:
+            _grounding_overlap = lexical_overlap(_final_answer_text, _support_text)
+            if _grounding_overlap < _OVERRIDE_OVERLAP_THRESHOLD:
+                answer_overrides_graph = True
+                answer_support_ids = []   # false grounding -> no support label
+
     row: Dict[str, Any] = {
         # ── envelope ──
         "schema_version": CORPUS_SCHEMA_VERSION,
@@ -292,7 +318,12 @@ def packet_to_corpus_row(
             "coverage_pct": pkt.coverage_addressed_pct,
             "had_polish": pkt.polish_applied,
             "training_eligible": training_eligible,
-            "v5_label_status": "positive" if training_eligible else "needs_review",
+            "v5_label_status": (
+                "unsupported" if answer_overrides_graph
+                else "positive" if training_eligible
+                else "needs_review"
+            ),
+            "answer_overrides_graph": answer_overrides_graph,
             "finalization_quality": finalization_quality,
             # Crude "interesting" heuristic: hard tasks tend to produce
             # objects/hypotheses/failures; easy tasks don't.
