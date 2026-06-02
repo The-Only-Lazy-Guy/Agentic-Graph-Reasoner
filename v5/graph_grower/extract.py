@@ -161,6 +161,40 @@ def _llm_extract(chunk: str, mode: str, controller: Any) -> str:
     return resp["choices"][0]["message"]["content"]
 
 
+def build_codex_extract_fn(model: Optional[str] = None, *, sandbox: str = "read-only",
+                           timeout: float = 180.0) -> Callable[[str, str], str]:
+    """A second teacher: drive the Codex CLI (`codex exec`) as an extract_fn so docs
+    can be split across opencode + codex for ~2x throughput. Single-shot, read-only
+    sandbox (no repo writes), prompt via stdin, final message via -o tempfile."""
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+    exe = shutil.which("codex") or "codex"
+
+    def fn(chunk: str, mode: str) -> str:
+        prompt = _system_prompt(mode) + "\n\nTEXT:\n" + chunk
+        fd, out_path = tempfile.mkstemp(suffix=".txt"); os.close(fd)
+        cmd = [exe, "exec", "-s", sandbox, "--skip-git-repo-check", "-o", out_path]
+        if model:
+            cmd += ["-m", model]
+        cmd += ["-"]   # read the prompt from stdin
+        try:
+            subprocess.run(cmd, input=prompt, capture_output=True, text=True,
+                           timeout=timeout, encoding="utf-8")
+            with open(out_path, encoding="utf-8") as h:
+                return h.read()
+        except Exception:
+            return ""
+        finally:
+            try:
+                os.unlink(out_path)
+            except OSError:
+                pass
+
+    return fn
+
+
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
@@ -446,6 +480,7 @@ def extract_documents(
     stitch: bool = True,
     wire_hub_layer: bool = True,
     link_existing_hub: Optional[str] = None,
+    teacher: str = "opencode",
 ) -> Dict[str, Any]:
     """Run the extractor over documents -> candidates + stats.
 
@@ -486,7 +521,7 @@ def extract_documents(
             # Distillation: capture (chunk -> conformed extraction) as an SFT pair
             # for training a local Qwen-0.5B extractor to replace the big teacher.
             if collect_sft:
-                pair = _sft_pair(chunk, doc, conformed)
+                pair = _sft_pair(chunk, doc, conformed, teacher=teacher)
                 if pair is not None:
                     sft_pairs.append(pair)
                     stats["sft_pairs"] += 1
@@ -541,7 +576,8 @@ def extract_documents(
     return {"candidates": candidates, "stats": stats, "sft_pairs": sft_pairs}
 
 
-def _sft_pair(chunk: str, doc: Document, conformed: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+def _sft_pair(chunk: str, doc: Document, conformed: Mapping[str, Any],
+              *, teacher: str = "opencode") -> Optional[Dict[str, Any]]:
     """Build one (chunk -> conformed extraction) chat SFT pair for distillation.
 
     The target is the CLEAN conformed extraction (atomic, vocab-correct), with
@@ -565,7 +601,7 @@ def _sft_pair(chunk: str, doc: Document, conformed: Mapping[str, Any]) -> Option
             {"role": "user", "content": chunk},
             {"role": "assistant", "content": target},
         ],
-        "meta": {"doc_id": doc.id, "mode": doc.mode, "teacher": "opencode",
+        "meta": {"doc_id": doc.id, "mode": doc.mode, "teacher": teacher,
                  "n_nodes": len(nodes), "n_edges": len(edges)},
     }
 
@@ -615,9 +651,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Extract external knowledge (facts/CoT) into graph-edit candidates.")
     parser.add_argument("--docs", required=True, help="input jsonl: {id, text, domain?, mode?}")
     parser.add_argument("--out", default="artifacts/graph_growth/external_candidates.jsonl")
-    parser.add_argument("--backend", choices=["opencode"], default="opencode")
+    parser.add_argument("--backend", choices=["opencode", "codex"], default="opencode",
+                        help="teacher LLM: opencode (default) or codex (codex exec CLI)")
     parser.add_argument("--opencode-config-dir", default="pure-opencode")
     parser.add_argument("--opencode-model", default=None)
+    parser.add_argument("--codex-model", default=None, help="codex -m model (default: codex's own)")
     parser.add_argument("--limit", type=int, default=0, help="cap number of documents (0 = all)")
     parser.add_argument("--graph", default="graphs/merged_graph.json",
                         help="target graph for linking (the graph apply will grow)")
@@ -638,19 +676,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     docs = load_documents(args.docs)
     if args.limit:
         docs = docs[: args.limit]
-    controller = _build_opencode_controller(args.opencode_model, args.opencode_config_dir)
+
+    controller = None
+    extract_fn = None
+    if args.backend == "codex":
+        extract_fn = build_codex_extract_fn(args.codex_model)
+    else:
+        controller = _build_opencode_controller(args.opencode_model, args.opencode_config_dir)
 
     dedupe_index = None
     judge_fn = None
     if args.link_graph or args.judge:
         graph, dedupe_index = _build_dedupe_index(args.graph)
-        if args.judge:
-            judge_fn = _make_judge_fn(graph, dedupe_index, controller)
+        if args.judge:   # judge needs a chat controller; use opencode even under --backend codex
+            jc = controller or _build_opencode_controller(args.opencode_model, args.opencode_config_dir)
+            judge_fn = _make_judge_fn(graph, dedupe_index, jc)
 
     result = extract_documents(
-        docs, controller=controller, dedupe_index=dedupe_index,
+        docs, controller=controller, extract_fn=extract_fn, dedupe_index=dedupe_index,
         dup_threshold=args.dup_threshold, attach_threshold=args.attach_threshold,
         judge_fn=judge_fn, collect_sft=args.collect_sft, stitch=not args.no_stitch,
+        teacher=args.backend,
     )
     out = write_candidate_queue(result["candidates"], args.out)
 
