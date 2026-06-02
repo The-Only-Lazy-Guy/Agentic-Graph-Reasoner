@@ -48,15 +48,30 @@ RELATION_ALIASES: Dict[str, str] = {
     "requires": "requires_slot", "depends_on": "requires_slot",
 }
 
-ALLOWED_NODE_TYPES = frozenset({
-    "fact", "concept", "claim",                                   # declarative (fact mode)
-    "reasoning_atom", "chain_step", "strategy", "solved_subgoal", # reasoning (cot mode)
-    "procedure", "failure_pattern", "control_rule", "epistemic_state",
-})
+# Node types MUST match the graph design: only types in v5.gnn_encoder.
+# NODE_TYPE_VOCAB get a real type embedding, and only types in a
+# v5.subgraph pool (PLANNING_NODE_TYPES / EVIDENCE_NODE_TYPES) are ever attended.
+# An off-vocab type (e.g. "concept") becomes "unknown" AND falls in no pool ->
+# the node is invisible to both cross-attention layers. So we emit ONLY pooled
+# design types and alias common LLM outputs onto them.
+#   fact mode -> EVIDENCE pool : fact, claim   (declarative atomic knowledge)
+#   cot  mode -> PLANNING pool : reasoning_atom, reasoning_chain, strategy
+#                EVIDENCE pool : solved_subgoal (the resolved conclusion)
 MODE_DEFAULT_NODE_TYPE = {"fact": "fact", "cot": "reasoning_atom"}
 MODE_NODE_TYPES = {
-    "fact": frozenset({"fact", "concept", "claim"}),
-    "cot": frozenset({"reasoning_atom", "chain_step", "strategy", "solved_subgoal"}),
+    "fact": frozenset({"fact", "claim"}),
+    "cot": frozenset({"reasoning_atom", "reasoning_chain", "strategy", "solved_subgoal"}),
+}
+ALLOWED_NODE_TYPES = frozenset().union(*MODE_NODE_TYPES.values())
+
+# Map common LLM node-type outputs onto the design vocab (applied before the
+# per-mode allow check; anything still off-vocab falls back to the mode default).
+NODE_TYPE_ALIASES: Dict[str, str] = {
+    "concept": "claim", "definition": "claim", "principle": "claim",
+    "theorem": "fact", "law": "fact", "equation": "fact", "rule": "fact",
+    "chain_step": "reasoning_chain", "step": "reasoning_chain",
+    "reasoning_step": "reasoning_chain", "inference": "reasoning_atom",
+    "subgoal": "solved_subgoal", "conclusion": "solved_subgoal", "plan": "strategy",
 }
 
 # atomicity bounds: a node should be one self-contained claim, not a blob
@@ -118,9 +133,9 @@ def chunk_document(doc: Document, *, max_chunk_chars: int = 1200) -> List[str]:
 # ── extraction prompt + parsing ──────────────────────────────────────────────
 def _system_prompt(mode: str) -> str:
     node_hint = (
-        "node_type one of: fact, concept (declarative, decomposed atomic claims)"
+        "node_type one of: fact, claim (declarative, decomposed atomic knowledge)"
         if mode == "fact" else
-        "node_type one of: reasoning_atom, chain_step, strategy, solved_subgoal"
+        "node_type one of: reasoning_atom, reasoning_chain, strategy, solved_subgoal"
     )
     rel_hint = (
         "relation one of: entails, supports, contradicts, related"
@@ -200,6 +215,7 @@ def conform_edits(parsed: Mapping[str, Any], doc: Document) -> Dict[str, Any]:
             dropped["non_atomic"] += 1
             continue
         ntype = str(n.get("node_type") or "").strip().lower()
+        ntype = NODE_TYPE_ALIASES.get(ntype, ntype)
         if ntype not in allowed_types:
             ntype = default_type
         stable = _slug(text, mode)

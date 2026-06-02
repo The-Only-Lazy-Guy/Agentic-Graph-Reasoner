@@ -36,6 +36,30 @@ def test_conform_drops_non_atomic_and_falls_back_vocab():
     assert out["edge_edits"][0]["relation"] == "related"     # unknown relation -> fallback
 
 
+def test_concept_alias_maps_to_design_type():
+    doc = Document(id="d", text="x", domain="physics", mode="fact")
+    parsed = {"nodes": [{"id": "a", "node_type": "concept",
+                         "text": "A scalar is described by magnitude alone."}], "edges": []}
+    out = conform_edits(parsed, doc)
+    assert out["node_edits"][0]["node_type"] == "claim"   # concept -> claim (a design type)
+
+
+def test_extractor_node_types_match_graph_design():
+    """Drift guard: every type the extractor can emit must (a) be in the GNN
+    node-type vocab and (b) fall in a cross-attention pool, else the grown node
+    is invisible to the model."""
+    from v5.gnn_encoder import NODE_TYPE_VOCAB
+    from v5.subgraph import PLANNING_NODE_TYPES, EVIDENCE_NODE_TYPES
+    from v5.graph_grower.extract import ALLOWED_NODE_TYPES, NODE_TYPE_ALIASES
+
+    pooled = set(PLANNING_NODE_TYPES) | set(EVIDENCE_NODE_TYPES)
+    for t in ALLOWED_NODE_TYPES:
+        assert t in NODE_TYPE_VOCAB, f"{t} not in GNN NODE_TYPE_VOCAB"
+        assert t in pooled, f"{t} is in no planning/evidence pool -> never attended"
+    for target in NODE_TYPE_ALIASES.values():
+        assert target in ALLOWED_NODE_TYPES, f"alias target {target} not emittable"
+
+
 def test_parse_extraction_tolerates_code_fence_and_prose():
     raw = 'Sure!\n```json\n{"nodes":[{"node_type":"fact","text":"Water boils at 100C at sea level."}],"edges":[]}\n```'
     parsed = parse_extraction(raw)

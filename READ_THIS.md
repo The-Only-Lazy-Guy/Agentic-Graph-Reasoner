@@ -8,6 +8,27 @@
 
 ---
 
+## Session update (2026-06-02f) — FIX: extractor node types must match GNN design
+
+- Verification caught a real bug: the extractor emitted `concept` (fact mode) and
+  `chain_step` (cot node type) — NEITHER is in `v5.gnn_encoder.NODE_TYPE_VOCAB`
+  NOR in any `v5.subgraph` pool. Such nodes become `unknown` AND fall in no
+  planning/evidence pool → **invisible to both cross-attention layers**. The
+  scalar/vector smoke nodes were `concept` → would never have been attended.
+- Fix (`extract.py`): emit only pooled design types + alias common LLM outputs:
+  - fact mode → `fact`, `claim` (EVIDENCE pool); aliases concept/definition/
+    principle→claim, theorem/law/equation→fact
+  - cot mode → `reasoning_atom`, `reasoning_chain`, `strategy` (PLANNING),
+    `solved_subgoal` (EVIDENCE); aliases chain_step/step→reasoning_chain, etc.
+- Added a **drift-guard test** that imports the real GNN vocab + pools and asserts
+  every emittable type is embedded AND attended (can't silently diverge again).
+- Re-ran live opencode extraction: types now fact/claim/reasoning_atom/
+  reasoning_chain/solved_subgoal, **all in a pool** (fact/claim/solved_subgoal→
+  EVIDENCE, reasoning_atom/chain→PLANNING). 6 extract tests pass.
+- Confirmed Q: extraction uses **opencode** (big default, no --model, cost 0).
+
+---
+
 ## Session update (2026-06-02e) — CoT dataset chosen + HF adapter
 
 - Question-bank domain mix (from ids): cs 42, physics 39, algo 39, math 36,
