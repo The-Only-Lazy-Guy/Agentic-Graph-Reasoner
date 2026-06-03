@@ -63,6 +63,26 @@ NOTE the R-GCN currently expects 768-d (mpnet) text feats; Qwen-embed is 1024 �
 `text_embed_dim=1024`. The SAME RGCNEncoder is also the injection KV path (Stage 1/2A/2B,
 heads still untrained) — ranker first (cheaper, isolates "does topology help retrieval").
 
+**GNN-ranker VERDICT (2026-06-04) — topology does NOT beat the bi-encoder; STOP grinding it.**
+v1 architecture bug (separate query/node projections destroyed the shared-embedding
+alignment) → ~random (Hit@5 0.026). Fixed: query = frozen Qwen (no projection); node =
+Qwen + delta(gnn), delta ZERO-INIT → starts at the raw base. Fixed run: `[init/base]`
+Hit@5 0.307 (== raw embed, harness sound) → climbs to BEST **epoch 5 Hit@5 0.360 / MRR
+0.293**, then OVERFITS hard (train loss 8.6→0.78, held-out collapses to 0.23 by ep29;
+584 train queries can't support a full GNN). GNN best vs bi-encoder #2 (same held-out):
+GNN edges MRR (0.293 vs 0.272) but **LOSES Hit@5 (0.360 vs 0.412)** and is unstable.
+**Not a clean win.** Topology carries *some* signal (lifts MRR over its own raw base
+0.186→0.293) but a strong bi-encoder suffices for RETRIEVAL. **DECISION: bank the trained
+bi-encoder as the ranker; stop the retrieval-GNN.** Topology's real home = the INJECTION
+path (stage 6 reasoning K/V), not retrieval ranking. Held my own "one clean attempt" line.
+
+**PIVOT — the generation half (the real unknown).** Retrieval is settled. Everything so
+far (#1 data, #2 ranker, #3 strategy, #4 GNN) answered "can we RETRIEVE grounding?" The
+v2 bet is the other half: does a weak 4B USE the brief to write better code than cold?
+Next: (5) stand up the **SWE verifier harness** (Docker, FAIL_TO_PASS) — deferred
+expensive rung; (6) the **§12 brief-vs-cold probe** — 4B+brief vs cold, measure
+test-pass lift = the GO/NO-GO for v2. New: `swe_verify.py`.
+
 ---
 
 ## Session update (2026-06-03b) — #2 ranker CLOSED (config locked) + hard-neg verdict + #3 deps
