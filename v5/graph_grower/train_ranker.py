@@ -42,36 +42,51 @@ def load_node_texts(paths: Sequence[str]) -> Dict[str, str]:
     return id2text
 
 
-def build_examples(gold_paths: Sequence[str], id2text: Dict[str, str]):
-    from sentence_transformers import InputExample
-    ex = []
-    n_q = n_pair = 0
+def load_gold_rows(gold_paths: Sequence[str]) -> List[dict]:
+    rows = []
     for gp in gold_paths:
         for line in Path(gp).read_text(encoding="utf-8").splitlines():
             line = line.strip()
-            if not line:
-                continue
-            r = json.loads(line)
-            q = str(r.get("question", "")).strip()
-            if not q:
-                continue
-            n_q += 1
-            for sid in r.get("support_ids", []) or []:
-                t = id2text.get(sid)
-                if t:
-                    ex.append(InputExample(texts=[q, t])); n_pair += 1
-    print(f"  {n_q} queries -> {n_pair} (query, support) training pairs")
+            if line and str(json.loads(line).get("question", "")).strip():
+                rows.append(json.loads(line))
+    return rows
+
+
+def build_examples(rows: Sequence[dict], id2text: Dict[str, str]):
+    from sentence_transformers import InputExample
+    ex, n_pair = [], 0
+    for r in rows:
+        q = str(r.get("question", "")).strip()
+        for sid in r.get("support_ids", []) or []:
+            t = id2text.get(sid)
+            if t:
+                ex.append(InputExample(texts=[q, t])); n_pair += 1
+    print(f"  {len(rows)} queries -> {n_pair} (query, support) training pairs")
     return ex
 
 
 def train(gold_paths, node_paths, base: str, out: str, *, epochs: int = 2,
-          batch_size: int = 32, lr: float = 2e-5, max_seq: int = 256) -> str:
+          batch_size: int = 32, lr: float = 2e-5, max_seq: int = 256,
+          eval_frac: float = 0.15, heldout_out: str = "data/swe/retrieval_gold_heldout.jsonl") -> str:
+    import random
     from torch.utils.data import DataLoader
     from sentence_transformers import SentenceTransformer, losses
 
     id2text = load_node_texts(node_paths)
     print(f"node texts: {len(id2text)}")
-    examples = build_examples(gold_paths, id2text)
+    rows = load_gold_rows(gold_paths)
+    # leakage-safe internal split: hold out a fraction of QUERIES for eval
+    random.seed(0); random.shuffle(rows)
+    n_hold = int(len(rows) * eval_frac) if eval_frac > 0 else 0
+    held, train_rows = rows[:n_hold], rows[n_hold:]
+    if held and heldout_out:
+        Path(heldout_out).parent.mkdir(parents=True, exist_ok=True)
+        with open(heldout_out, "w", encoding="utf-8") as h:
+            for r in held:
+                h.write(json.dumps(r, ensure_ascii=False) + "\n")
+        print(f"held out {len(held)} eval queries -> {heldout_out} "
+              f"(eval the trained ranker on this for a leakage-free number)")
+    examples = build_examples(train_rows, id2text)
     if not examples:
         raise ValueError("no training pairs (check gold support_ids vs node ids)")
 
@@ -99,9 +114,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--lr", type=float, default=2e-5)
+    ap.add_argument("--eval-frac", type=float, default=0.15, help="held-out query fraction (0=off)")
+    ap.add_argument("--heldout-out", default="data/swe/retrieval_gold_heldout.jsonl")
     args = ap.parse_args(argv)
     train(args.gold, args.nodes, args.base, args.out,
-          epochs=args.epochs, batch_size=args.batch_size, lr=args.lr)
+          epochs=args.epochs, batch_size=args.batch_size, lr=args.lr,
+          eval_frac=args.eval_frac, heldout_out=args.heldout_out)
     return 0
 
 

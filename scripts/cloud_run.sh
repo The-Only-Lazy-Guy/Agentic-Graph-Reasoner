@@ -68,20 +68,20 @@ if [ -f "$CODE_NODES" ] && [ -f "$CODE_GOLD" ]; then
                     --out "$RES/retrieval_code_qwen.json"
 fi
 
-# ---- 2. TRAIN the ranker (opt-in; trains on Lite, evals on held-out Verified) ----
-# leakage-safe: train gold != eval gold. Verified must be present for a clean eval.
-CODE_NODES_EVAL="${CODE_NODES_EVAL:-artifacts/graph_growth/swe_code_candidates_verified.jsonl}"
-CODE_GOLD_EVAL="${CODE_GOLD_EVAL:-data/swe/retrieval_gold_code_verified.jsonl}"
+# ---- 2. TRAIN the ranker (#2; opt-in). Self-contained: internal held-out split ----
+# train_ranker holds out a query fraction -> leakage-free before/after on the SAME
+# held-out queries (no Verified needed). Lift = code-ranker vs code-base-held.
+HELDOUT="${HELDOUT:-data/swe/retrieval_gold_heldout.jsonl}"
 if [ "${TRAIN_RANKER:-0}" = "1" ] && [ -f "$CODE_GOLD" ]; then
-  step train-ranker python -m v5.graph_grower.train_ranker \
-                    --gold "$CODE_GOLD" --nodes "$CODE_NODES" --base "$QWEN_EMB" \
-                    --out models/ranker-code --epochs 2
-  EVAL_N="$CODE_NODES"; EVAL_G="$CODE_GOLD"
-  [ -f "$CODE_GOLD_EVAL" ] && { EVAL_N="$CODE_NODES_EVAL"; EVAL_G="$CODE_GOLD_EVAL"; } || \
-    echo "WARN: no held-out Verified gold -> ranker eval on TRAIN gold (leaky; build it first)"
-  step code-ranker python -m v5.graph_grower.retrieval_eval --nodes-file "$EVAL_N" \
-                    --gold-file "$EVAL_G" --embedder st-embed --model models/ranker-code \
-                    --out "$RES/retrieval_code_ranker.json"
+  step train-ranker   python -m v5.graph_grower.train_ranker \
+                        --gold "$CODE_GOLD" --nodes "$CODE_NODES" --base "$QWEN_EMB" \
+                        --out models/ranker-code --epochs 2 --heldout-out "$HELDOUT"
+  step code-base-held python -m v5.graph_grower.retrieval_eval --nodes-file "$CODE_NODES" \
+                        --gold-file "$HELDOUT" --embedder st-embed --model "$QWEN_EMB" \
+                        --out "$RES/retrieval_code_heldout_base.json"
+  step code-ranker    python -m v5.graph_grower.retrieval_eval --nodes-file "$CODE_NODES" \
+                        --gold-file "$HELDOUT" --embedder st-embed --model models/ranker-code \
+                        --out "$RES/retrieval_code_heldout_ranker.json"
 fi
 
 # ---- 2. Qwen3.5 hybrid injection validation (frozen, 4-bit) ----
