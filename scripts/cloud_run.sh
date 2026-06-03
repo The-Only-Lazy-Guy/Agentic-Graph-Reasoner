@@ -122,6 +122,24 @@ if [ "${TOPO_RERANK:-0}" = "1" ] && [ -f "$STRAT_S0" ]; then
                       --alpha "${TOPO_ALPHA:-0.5}" --out "$RES/topo_rerank.json"
 fi
 
+# ---- 1d. GNN-AS-RANKER (stage 4.3) — does LEARNED topology (R-GCN) beat the #2
+# bi-encoder (Hit@5 0.386 / MRR 0.285)? Uses the SAME held-out as #2 (comparable),
+# so run with TRAIN_RANKER=1 (which writes $HELDOUT). REFINES the frozen Qwen feats.
+if [ "${GNN_RANKER:-0}" = "1" ] && [ -s "$TRACES_ALL" ] && [ -f "$HELDOUT" ]; then
+  [ -s "$STRAT_CLEAN" ] || python -m v5.graph_grower.filter_strategy_leaks \
+                             --in "$STRAT_S0" "$STRAT_S1" --out "$STRAT_CLEAN"
+  step gnn-ranker python -m v5.graph_grower.train_gnn_ranker \
+                    --graph "$GRAPH" \
+                    --nodes-file artifacts/graph_growth/swe_code_candidates.jsonl \
+                                 artifacts/graph_growth/swe_code_candidates_verified.jsonl \
+                                 "$STRAT_CLEAN" \
+                    --edges-file "$STRAT_CLEAN" \
+                    --traces "$TRACES_ALL" --heldout-file "$HELDOUT" --emb "$QWEN_EMB" \
+                    --epochs "${GNN_EPOCHS:-30}" --out "$RES/gnn_ranker.json"
+elif [ "${GNN_RANKER:-0}" = "1" ]; then
+  echo "[gnn-ranker] SKIP: needs HELDOUT+TRACES -> run: TRAIN_RANKER=1 GNN_RANKER=1 bash scripts/cloud_run.sh"
+fi
+
 # ---- 2. Qwen3.5 hybrid injection validation (frozen, 4-bit) ----
 echo; echo "=== [realstack] Qwen3.5 injection-into-hybrid (4-bit) ==="
 ( export V5_LM_QUANT=4bit

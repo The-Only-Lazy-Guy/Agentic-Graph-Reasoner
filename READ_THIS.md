@@ -41,12 +41,27 @@ neighbor → noise reshuffles the top. **Lesson: this architecture's value IS le
 gating; a fixed formula can't prove/disprove it. NO more heuristics — the cheapest VALID
 test is the smallest TRAINED model.** topo_rerank kept only for its base-pool byproduct.
 
-**Next (decided):** run the LOCKED #2 ranker (in-batch, 2ep, contrastive bi-encoder) on
-the MIXED pool — does training survive the distractors? `TRAIN_RANKER=1 bash
-scripts/cloud_run.sh` now evals base vs ranker on the mixed pool (`--mix-graph`). If the
-trained ranker holds up → that's the retrieval baseline; THEN decide if the real
-GNN-as-ranker (R-GCN, learned per-relation weights over the leveraged topology) is worth
-training to beat it.
+**RESULT — #2 ranker SURVIVES the mixed pool (2026-06-03c, Blackwell).** Trained locked
+ranker (in-batch, 2ep, 35s) eval'd base vs ranker on the MIXED 28,495-node pool, 114
+held-out: base Hit@1 0.105 / Hit@5 0.360 / Hit@20 0.526 / MRR 0.226 → **ranker Hit@1
+0.167 / Hit@5 0.386 / Hit@20 0.597 / MRR 0.285** (+58% Hit@1, +26% MRR, +13% Hit@20).
+**Money contrast — SAME mixed pool:** naive topo heuristic Hit@1 −45% / MRR −14%;
+**trained ranker +58% / +26%.** Learned gating works, heuristics don't — proven on
+identical data. **BANKED: trained bi-encoder ranker = the generalist retrieval baseline
+(~Hit@5 0.39 / MRR 0.28 mixed).** Ranker absorbs most of the ~5pt generalism penalty.
+Caveats: absolutes modest (code retrieval hard); ranker uses ZERO topology (2101
+`leveraged` edges untapped).
+
+**Next (decided): GNN-as-ranker** — must BEAT the 0.39 bi-encoder by using topology with
+LEARNED gating. Reuse `v5/gnn_encoder.RGCNEncoder` (2-layer R-GCN, 12 relations, node
+input = frozen text-embed + type/epistemic/confidence → [N,256]) + a query projector
+(issue Qwen-embed → GNN space), contrastive on (issue→support) like #2 but over GNN node
+embeddings (so a symbol's embedding absorbs its strategy/`leveraged` neighbors). Design
+rule: GNN must REFINE the strong Qwen features (concat/residual), not replace them through
+the 256 bottleneck (else it loses to the 0.6B bi-encoder). New: `train_gnn_ranker.py`.
+NOTE the R-GCN currently expects 768-d (mpnet) text feats; Qwen-embed is 1024 → init with
+`text_embed_dim=1024`. The SAME RGCNEncoder is also the injection KV path (Stage 1/2A/2B,
+heads still untrained) — ranker first (cheaper, isolates "does topology help retrieval").
 
 ---
 
