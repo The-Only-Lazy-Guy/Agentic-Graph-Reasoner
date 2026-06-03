@@ -55,15 +55,63 @@ knowledge* cost, not *execution* cost. Design around that line.
 | | v1 (QA) | v2 (coder) |
 |---|---|---|
 | graph contents | STEM facts | code artifacts (§4) |
-| GNN + cross-attn | inject K/V into LM hidden states **every token** | run **once per task** as a retrieval **ranker** that assembles a brief |
-| grounding delivery | soft hidden-state bias | **verbatim text in context** (code needs exact tokens) |
+| GNN + cross-attn | inject K/V every token (the *only* grounding path) | **kept** for REASONING-grounding + also a once-per-task **ranker** for the brief |
+| exact tokens (APIs) | — (blurred by soft attn) | **graph-gated constrained decoding** (§3.5) — hard guarantee, not prompt text |
 | who retrieves | the loop, implicitly per token | a cheap **controller/policy**, never the 4B |
 | reliability | epistemic fallback (abstain) | **verifier-retry loop** (act, check, fix) |
 
-**The mechanism shift is the crux:** for implementation, soft injection biases
-"vibes" but loses the exact arg names code needs. So the GNN becomes a *ranker*
-that selects nodes; the selected artifacts go into the prompt as text. The L8/L20
-injector is demoted to (optional) routing/epistemic signal.
+### 3.5 The grounding mechanism — two jobs, two mechanisms (the crux)
+
+Earlier drafts demoted the L8/L20 injector and shipped grounding as **verbatim text
+in the prompt**. That was wrong: text-in-prompt is just RAG / a tool call — the
+model can ignore it, lost-in-the-middle, no guarantee of use. It is *weak*
+grounding. The fix is to recognize that grounding has **two distinct jobs** that
+need **different mechanisms**:
+
+- **Reasoning-grounding** — condition the *thinking* on graph structure (which node,
+  how they relate, "use Dijkstra not Bellman"). This is exactly what soft K/V
+  injection at L8/L20 is good at. **Keep v1 here — promote it, it's the spine.**
+- **Emission-exactness** — get the *exact* tokens out (function names, args,
+  imports, paths). Soft attention blurs this; *but the answer is NOT "dump text in
+  the prompt"* (RAG). The answer is a mechanism that makes exact tokens
+  **structurally guaranteed at decode time.**
+
+So you do not choose injection vs text. Use **injection for reasoning AND a hard
+emission-grounding mechanism for exactness:**
+
+1. **Graph-gated constrained decoding (primary, frozen-LM-compatible).** Build a
+   trie/grammar from the retrieved cards' valid symbols. In a "call position," a
+   logits processor **masks the vocab to only valid API tokens from the graph** —
+   the model *cannot* emit a hallucinated name; it is not in the allowed set.
+   Grounding by construction, not by bias. Composes with injection (injection picks
+   *which* API; the constraint guarantees you *spell it right*). No retraining;
+   standard logits-masking (outlines/guidance-style). **This is the strong grounding
+   — the graph GATES, it does not suggest.**
+2. **Copy / pointer head over the graph K/V (deeper, trained).** Let the decoder
+   **copy a token verbatim from a graph node it is attending to** (pointer-generator
+   / CopyNet) instead of generating from vocab. Deep AND exact; the literal "use the
+   cross-attention for exact emission." Cost: a trained head.
+3. **kNN-LM / output-distribution interpolation (no training, latency cost).** At
+   each step, retrieve nearest graph-node tokens and interpolate the next-token
+   distribution toward them (RETRO / kNN-LM). Pushes exact API tokens up at the
+   output layer. Cost: a datastore + per-step NN lookup (watch tok/s on 6 GB).
+
+**The stack to run:**
+```
+v1 injection (L8/L20)          -> grounds the REASONING (relational/structural/plan)   [PROMOTED]
+graph-gated constrained decode -> guarantees EXACT emission (cannot hallucinate an API) [the strong grounding]
+verbatim card text (optional)  -> human-readable backup / the model's notes, NOT load-bearing
+```
+Why this beats both earlier options: v1-alone = deep but blurry (wrong API names);
+text-RAG = exact but ignorable (weak). **injection + constrained-decode = deep
+reasoning-grounding AND hard exactness.** Verbatim text stays only as a readable
+backup, never the load-bearing path. The GNN-as-ranker (§7) still assembles the
+brief; it is now *in addition to* the injector, not a replacement for it.
+
+Cost order: constrained decoding first (moderate engineering, no retrain, highest
+grounding/effort ratio) -> copy head (train, biggest deep+exact payoff) -> kNN-LM
+(no train, per-token latency). Backing: GMT/"Beyond Prefixes" (injection into a
+frozen LM); grammar/guided decoding for code; RETRO/kNN-LM (token-level retrieval).
 
 ---
 
@@ -242,7 +290,8 @@ grounding mechanism before re-pointing the grower at code.
 ## 10. Reused vs new
 
 **Reused from v1:**
-- GNN encoder (repurposed: ranker, not per-token injector)
+- GNN encoder + L8/L20 cross-attention injector — **kept as the reasoning-grounding
+  path** (§3.5), AND also used as a once-per-task ranker for the brief (§7)
 - micro-controller planning (`task_family`/slots/steps) → §8
 - `control_rule`/slot machinery → constraint ledger
 - `answer_support_ids` + override-detection → retro-grounding (§9)
@@ -250,6 +299,8 @@ grounding mechanism before re-pointing the grower at code.
 - quantized LM loader (`v5/lm_loader`), 4-bit 4B deploy
 
 **New to build:**
+- **graph-gated constrained decoding** (§3.5) — logits processor + symbol trie from
+  the brief; the strong emission-grounding. (Later: copy head, kNN-LM variants.)
 - code node schemas (§4) + a code extractor (API cards / symbols / exemplars /
   error-fix) for the grower
 - retrieval policy + task-type recipes (§7)
