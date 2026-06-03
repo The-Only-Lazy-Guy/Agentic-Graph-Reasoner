@@ -8,6 +8,48 @@
 
 ---
 
+## Session update (2026-06-03c) — #3 scaled (300) + generalism cost MEASURED + naive topo rerank FAILED
+
+**#3 strategy distiller scaled to 300/300 (SWE-bench Lite, opencode):** 998 content nodes
+(299 strategy / ~409 reasoning_atom / 308 solved_subgoal) + 302 hubs, 4535 edges incl
+**2101 `leveraged`** (strategy→symbol) + 232 `transfers_to` (cross-instance). Strategy
+bridge nodes ~94% general (sample-checked + lint-confirmed). Generality lint made
+**type-aware** (`swe_strategy._LINT_TYPES`): hard-drop leaky retrieval-entry nodes
+(strategy/atom), KEEP solved_subgoal (instance resolution, grounded by edge).
+Retroactive filter (`filter_strategy_leaks.py`) on the pre-lint 300-run: dropped 70
+nodes (18 strategy + 52 atom) + 341 edges, 0 orphans.
+
+**KEY DECISION — ONE general graph, not a code-only silo.** grown_graph4 is multi-domain
+(cs/algo/sysdesign/logic + physics/chem/bio/math); the product is generalist (same
+assistant tutors a student AND fixes code). Eval the code task on the **MIXED pool**
+(distractors present) — a sanitized code-only number hides the real deploy condition.
+`retrieval_eval --mix-graph` unions graph + code symbols.
+
+**Generalism cost MEASURED (Qwen-embed, code gold, Blackwell box):** code-only pool
+(21.6k) Hit@1 0.159 / Hit@5 0.377 / MRR 0.262 → **MIXED pool (29.8k, +STEM)** Hit@1
+0.112 / Hit@5 0.322 / MRR 0.209. STEM distractors cost **~5pt / ~20% relative**. Real,
+expected; the fallback/ranker must absorb it.
+
+**Naive topology rerank FAILED (and that's fine — it was a bad probe).** `topo_rerank_eval`
+= a hand-rolled, UNTRAINED 1-hop heuristic (`rerank=cos + α·max_neighbor_cos`, α=0.5,
+bidirectional, ungated). On the mixed pool it HURT: base Hit@1 0.112 → 0.062 (−45%),
+MRR 0.209 → 0.180 (−14%); Hit@5/10/20 flat. Damning: Hit@10/@20 didn't move even in a
+near-ORACLE setup (not held-out — the strategy minted from issue X is in the pool when
+querying X) → the bridge surfaced ZERO correct symbols base missed. **Diagnosis:** an
+untrained heuristic has no gate, so it boosts every node with a vaguely-matching
+neighbor → noise reshuffles the top. **Lesson: this architecture's value IS learned
+gating; a fixed formula can't prove/disprove it. NO more heuristics — the cheapest VALID
+test is the smallest TRAINED model.** topo_rerank kept only for its base-pool byproduct.
+
+**Next (decided):** run the LOCKED #2 ranker (in-batch, 2ep, contrastive bi-encoder) on
+the MIXED pool — does training survive the distractors? `TRAIN_RANKER=1 bash
+scripts/cloud_run.sh` now evals base vs ranker on the mixed pool (`--mix-graph`). If the
+trained ranker holds up → that's the retrieval baseline; THEN decide if the real
+GNN-as-ranker (R-GCN, learned per-relation weights over the leveraged topology) is worth
+training to beat it.
+
+---
+
 ## Session update (2026-06-03b) — #2 ranker CLOSED (config locked) + hard-neg verdict + #3 deps
 
 **#2 (trained retrieval ranker) is DONE — locked, stop tuning it.**

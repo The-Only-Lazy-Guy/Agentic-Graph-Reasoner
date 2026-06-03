@@ -39,6 +39,8 @@ improved substrate) — that is the "prove step 3 = the lift" experiment.
 | graph embedder | retrieval A/B | ✅ **Qwen3-Embedding-0.6B** (Hit@5 0.63 > mpnet 0.55 > raw-hidden 0.41) |
 | injection-into-hybrid works? | realstack on Qwen3.5 | ✅ **VALIDATED** on Qwen3.5-4B 4-bit — hooks fire, loops sane, pools route; fork dropped |
 | trained ranker beats raw on code? | held-out A/B (#2) | ✅ **VALIDATED + LOCKED** — contrastive bi-encoder lifts code retrieval over raw (held-out Hit@5 0.40 / MRR 0.28; +19% MRR, +32% Hit@1). Config locked in-batch/2ep; hard negs gave no clean win. Plateau = query↔symbol semantic gap → #3 |
+| graph TOPOLOGY helps retrieval? | mixed-pool A/B | ⚠️ **untrained heuristic FAILED** (hand-rolled 1-hop `cos+α·max_neighbor` HURT: Hit@1 −45%, MRR −14%, recall flat — even near-oracle). Lesson: topology needs **learned gating** (R-GCN), not a fixed formula. Open → decided by the trained GNN-as-ranker AFTER the trained bi-encoder is benchmarked on the mixed pool. NO more heuristics. |
+| generalism cost (mixed vs code-only) | retrieval A/B | 📏 **MEASURED** — STEM distractors cost ~5pt Hit@5 / ~20% rel (code-only 0.377 → mixed 0.322). Real; ranker/fallback must absorb it. ONE general graph, eval on the mixed pool. |
 | DeltaNet carries grounding? | realstack observation | open (bonus if true; nothing lost if not) |
 | extractor size | held-out (0.5B = 50% ceiling) | open → likely step to 1.5B |
 | visual nodes | cross-modal retrieval eval | open |

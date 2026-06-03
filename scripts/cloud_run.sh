@@ -90,10 +90,14 @@ if [ "${TRAIN_RANKER:-0}" = "1" ] && [ -s "$TRACES_ALL" ]; then
                         --traces "$TRACES_ALL" --nodes "$CODE_NODES" --base "$QWEN_EMB" \
                         --out models/ranker-code --epochs "${RANKER_EPOCHS:-2}" \
                         --num-hard "${NUM_HARD:-0}" --heldout-out "$HELDOUT"
+  # MIXED pool (grown_graph4 STEM/algo/cs + code symbols, distractors present = real
+  # deploy). The headline #2 number: does the trained ranker SURVIVE the distractors?
   step code-base-held python -m v5.graph_grower.retrieval_eval --nodes-file "$CODE_NODES" \
+                        --graph "$GRAPH" --mix-graph \
                         --gold-file "$HELDOUT" --embedder st-embed --model "$QWEN_EMB" \
                         --out "$RES/retrieval_code_heldout_base.json"
   step code-ranker    python -m v5.graph_grower.retrieval_eval --nodes-file "$CODE_NODES" \
+                        --graph "$GRAPH" --mix-graph \
                         --gold-file "$HELDOUT" --embedder st-embed --model models/ranker-code \
                         --out "$RES/retrieval_code_heldout_ranker.json"
 fi
