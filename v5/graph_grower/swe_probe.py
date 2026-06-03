@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
 from v5.graph_grower.swe_load import load_instances, patch_files
+from v5.graph_grower.swe_verify import write_predictions
 
 
 def load_node_texts(paths: Sequence[str]) -> Dict[str, str]:
@@ -81,6 +82,18 @@ def _user_prompt(issue: str, brief_sigs: List[str]) -> str:
     return s + "Output ONLY the unified diff patch."
 
 
+def _extract_patch(gen: str) -> str:
+    """Pull a clean unified diff out of the model's output (fenced block or first
+    diff marker) so swebench's `git apply` has a chance. Weak outputs -> empty/garbage
+    (counted unresolved, honest)."""
+    g = gen or ""
+    m = re.search(r"```(?:diff|patch)?\s*\n(.*?)```", g, re.S)
+    if m:
+        g = m.group(1)
+    m = re.search(r"^(?:diff --git .*|--- a/.*)$", g, re.M)
+    return (g[m.start():].rstrip() + "\n") if m else ""
+
+
 def _diff_lines(gen: str) -> str:
     return "\n".join(l for l in (gen or "").splitlines()
                      if l[:1] in "+-" and not l.startswith(("+++", "---")))
@@ -117,6 +130,9 @@ def main(argv=None) -> int:
     ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
     ap.add_argument("--max-new", type=int, default=400)
     ap.add_argument("--out", default="artifacts/graph_growth/cloud_results/swe_probe.json")
+    ap.add_argument("--emit-predictions", default="",
+                    help="dir to write cold_predictions.jsonl + brief_predictions.jsonl "
+                         "(swebench format) -> move to a Docker box for Tier-2 swe_verify")
     args = ap.parse_args(argv)
 
     traces = load_traces(args.traces)
@@ -143,6 +159,7 @@ def main(argv=None) -> int:
         return tok.decode(out[0][enc["input_ids"].shape[1]:], skip_special_tokens=True)
 
     cold_rows, brief_rows = [], []
+    cold_preds, brief_preds = {}, {}
     for k, iid in enumerate(ids):
         t = traces[iid]; inst = insts[iid]
         gold_files = patch_files(inst.get("patch", ""))
@@ -159,6 +176,7 @@ def main(argv=None) -> int:
 
         cold = gen(t["issue"], [])
         brief = gen(t["issue"], brief_sigs)
+        cold_preds[iid] = _extract_patch(cold); brief_preds[iid] = _extract_patch(brief)
         cr = _adherence(cold, gold_files, all_syms, held_syms)
         br = _adherence(brief, gold_files, all_syms, held_syms)
         cold_rows.append(cr); brief_rows.append(br)
@@ -175,6 +193,14 @@ def main(argv=None) -> int:
                    for m in metrics}
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     json.dump(res, open(args.out, "w"), indent=2)
+    if args.emit_predictions:
+        d = Path(args.emit_predictions); d.mkdir(parents=True, exist_ok=True)
+        nc = write_predictions(cold_preds, str(d / "cold_predictions.jsonl"), "v5_cold")
+        nb = write_predictions(brief_preds, str(d / "brief_predictions.jsonl"), "v5_brief")
+        print(f"\nemitted predictions -> {d}/  (cold {nc}, brief {nb}) — Tier-2: on a Docker box run\n"
+              f"  swe_verify --gold-sanity --dataset {args.dataset} --limit 5\n"
+              f"  swe_verify --predictions {d}/cold_predictions.jsonl --dataset {args.dataset} --run-id cold\n"
+              f"  swe_verify --predictions {d}/brief_predictions.jsonl --dataset {args.dataset} --run-id brief")
     print("\n=== ADHERENCE (cold -> brief) ===")
     for m in metrics:
         c, b, l = res["cold"][m], res["brief"][m], res["lift"][m]
