@@ -3099,17 +3099,33 @@ class V4CodexController:
         self.print_raw_output = print_raw_output
         self._exe = shutil.which("codex") or "codex"
         self._raw_trace: List[Dict[str, Any]] = []
+        # PURE GENERATION ISOLATION: run codex in an empty scratch dir (its cwd), so
+        # the agent has NO repo to read/write/touch. Combined with -s read-only this
+        # makes it a self-contained text generator -- it cannot create files in or
+        # interact with the project. The prompt is fully self-contained (graph content
+        # is pre-expanded), so codex never needs repo access.
+        import tempfile as _tf0
+        self._scratch = _tf0.mkdtemp(prefix="codex_gen_")
         # compatibility attrs read by trace/session-extraction code paths
         self._session_id: Optional[str] = None
         self._system_prompt: Optional[str] = None
         self._sent_count: int = 0
 
+    # Pure-generation guard: read-only sandbox already blocks all writes (verified),
+    # but codex can still READ the repo -> it must NOT peek at files (e.g. the
+    # question bank's expected answers) or the trace is contaminated. Forbid tools.
+    _GUARD = ("SYSTEM CONSTRAINT: You are a pure text generator with NO tools. Do NOT "
+              "read, open, or list any files; do NOT search; do NOT run any commands. "
+              "Use ONLY the text provided in this message and answer directly.\n\n")
+
     def _run_codex(self, prompt: str) -> str:
         import os as _o
         import subprocess as _sp
         import tempfile as _tf
-        fd, out_path = _tf.mkstemp(suffix=".txt"); _o.close(fd)
-        cmd = [self._exe, "exec", "-s", self.sandbox, "--skip-git-repo-check", "-o", out_path]
+        prompt = self._GUARD + prompt
+        fd, out_path = _tf.mkstemp(suffix=".txt", dir=self._scratch); _o.close(fd)
+        cmd = [self._exe, "exec", "-s", self.sandbox, "--skip-git-repo-check",
+               "-C", self._scratch, "-o", out_path]   # -C: isolated cwd (no repo access)
         if self.model:
             cmd += ["-m", self.model]
         cmd += ["-"]   # prompt on stdin
@@ -3118,7 +3134,8 @@ class V4CodexController:
         text = ""
         try:
             proc = _sp.run(cmd, input=prompt, capture_output=True, text=True,
-                           timeout=self.timeout, encoding="utf-8", errors="replace")
+                           timeout=self.timeout, encoding="utf-8", errors="replace",
+                           cwd=self._scratch)   # belt+suspenders: subprocess cwd = scratch too
             rc = proc.returncode
             with open(out_path, encoding="utf-8") as h:
                 text = h.read()

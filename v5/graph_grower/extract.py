@@ -164,24 +164,27 @@ def _llm_extract(chunk: str, mode: str, controller: Any) -> str:
 def build_codex_extract_fn(model: Optional[str] = None, *, sandbox: str = "read-only",
                            timeout: float = 180.0) -> Callable[[str, str], str]:
     """A second teacher: drive the Codex CLI (`codex exec`) as an extract_fn so docs
-    can be split across opencode + codex for ~2x throughput. Single-shot, read-only
-    sandbox (no repo writes), prompt via stdin, final message via -o tempfile."""
+    can be split across opencode + codex for ~2x throughput. PURE generation: an empty
+    scratch cwd (-C) + read-only sandbox -> codex can't read/write/touch the repo.
+    Single-shot, prompt via stdin, final message via -o tempfile (in the scratch)."""
     import os
     import shutil
     import subprocess
     import tempfile
     exe = shutil.which("codex") or "codex"
+    scratch = tempfile.mkdtemp(prefix="codex_extract_")   # isolated cwd, no repo access
 
     def fn(chunk: str, mode: str) -> str:
         prompt = _system_prompt(mode) + "\n\nTEXT:\n" + chunk
-        fd, out_path = tempfile.mkstemp(suffix=".txt"); os.close(fd)
-        cmd = [exe, "exec", "-s", sandbox, "--skip-git-repo-check", "-o", out_path]
+        fd, out_path = tempfile.mkstemp(suffix=".txt", dir=scratch); os.close(fd)
+        cmd = [exe, "exec", "-s", sandbox, "--skip-git-repo-check",
+               "-C", scratch, "-o", out_path]
         if model:
             cmd += ["-m", model]
         cmd += ["-"]   # read the prompt from stdin
         try:
             subprocess.run(cmd, input=prompt, capture_output=True, text=True,
-                           timeout=timeout, encoding="utf-8")
+                           timeout=timeout, encoding="utf-8", cwd=scratch)
             with open(out_path, encoding="utf-8") as h:
                 return h.read()
         except Exception:
