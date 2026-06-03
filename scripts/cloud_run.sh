@@ -68,6 +68,22 @@ if [ -f "$CODE_NODES" ] && [ -f "$CODE_GOLD" ]; then
                     --out "$RES/retrieval_code_qwen.json"
 fi
 
+# ---- 2. TRAIN the ranker (opt-in; trains on Lite, evals on held-out Verified) ----
+# leakage-safe: train gold != eval gold. Verified must be present for a clean eval.
+CODE_NODES_EVAL="${CODE_NODES_EVAL:-artifacts/graph_growth/swe_code_candidates_verified.jsonl}"
+CODE_GOLD_EVAL="${CODE_GOLD_EVAL:-data/swe/retrieval_gold_code_verified.jsonl}"
+if [ "${TRAIN_RANKER:-0}" = "1" ] && [ -f "$CODE_GOLD" ]; then
+  step train-ranker python -m v5.graph_grower.train_ranker \
+                    --gold "$CODE_GOLD" --nodes "$CODE_NODES" --base "$QWEN_EMB" \
+                    --out models/ranker-code --epochs 2
+  EVAL_N="$CODE_NODES"; EVAL_G="$CODE_GOLD"
+  [ -f "$CODE_GOLD_EVAL" ] && { EVAL_N="$CODE_NODES_EVAL"; EVAL_G="$CODE_GOLD_EVAL"; } || \
+    echo "WARN: no held-out Verified gold -> ranker eval on TRAIN gold (leaky; build it first)"
+  step code-ranker python -m v5.graph_grower.retrieval_eval --nodes-file "$EVAL_N" \
+                    --gold-file "$EVAL_G" --embedder st-embed --model models/ranker-code \
+                    --out "$RES/retrieval_code_ranker.json"
+fi
+
 # ---- 2. Qwen3.5 hybrid injection validation (frozen, 4-bit) ----
 echo; echo "=== [realstack] Qwen3.5 injection-into-hybrid (4-bit) ==="
 ( export V5_LM_QUANT=4bit
