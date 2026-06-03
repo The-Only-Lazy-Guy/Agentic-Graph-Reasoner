@@ -81,10 +81,13 @@ fi
 # train_ranker holds out a query fraction -> leakage-free before/after on the SAME
 # held-out queries (no Verified needed). Lift = code-ranker vs code-base-held.
 HELDOUT="${HELDOUT:-data/swe/retrieval_gold_heldout.jsonl}"
-if [ "${TRAIN_RANKER:-0}" = "1" ] && [ -f "$CODE_GOLD" ]; then
+TRACES_ALL="$RES/code_traces_all.jsonl"
+cat data/swe/grounded_traces.jsonl data/swe/grounded_traces_verified.jsonl 2>/dev/null > "$TRACES_ALL" || true
+if [ "${TRAIN_RANKER:-0}" = "1" ] && [ -s "$TRACES_ALL" ]; then
   step train-ranker   python -m v5.graph_grower.train_ranker \
-                        --gold "$CODE_GOLD" --nodes "$CODE_NODES" --base "$QWEN_EMB" \
-                        --out models/ranker-code --epochs 2 --heldout-out "$HELDOUT"
+                        --traces "$TRACES_ALL" --nodes "$CODE_NODES" --base "$QWEN_EMB" \
+                        --out models/ranker-code --epochs "${RANKER_EPOCHS:-4}" \
+                        --num-hard "${NUM_HARD:-2}" --heldout-out "$HELDOUT"
   step code-base-held python -m v5.graph_grower.retrieval_eval --nodes-file "$CODE_NODES" \
                         --gold-file "$HELDOUT" --embedder st-embed --model "$QWEN_EMB" \
                         --out "$RES/retrieval_code_heldout_base.json"

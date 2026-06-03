@@ -43,6 +43,7 @@ def load_node_texts(paths: Sequence[str]) -> Dict[str, str]:
 
 
 def load_gold_rows(gold_paths: Sequence[str]) -> List[dict]:
+    """Slim gold {question, support_ids} -> rows (no brief -> in-batch negatives only)."""
     rows = []
     for gp in gold_paths:
         for line in Path(gp).read_text(encoding="utf-8").splitlines():
@@ -52,21 +53,51 @@ def load_gold_rows(gold_paths: Sequence[str]) -> List[dict]:
     return rows
 
 
-def build_examples(rows: Sequence[dict], id2text: Dict[str, str]):
+def load_trace_rows(trace_paths: Sequence[str]) -> List[dict]:
+    """grounded_traces -> {question, support_ids, brief_ids}; brief enables HARD negatives."""
+    rows = []
+    for tp in trace_paths:
+        for line in Path(tp).read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            v = (json.loads(line).get("v2_grounding") or {})
+            q = str(v.get("task", "")).strip()
+            sup = v.get("support_ids") or []
+            if q and sup:
+                rows.append({"question": q, "support_ids": sup,
+                             "brief_ids": (v.get("brief") or {}).get("retrieved_ids") or []})
+    return rows
+
+
+def build_examples(rows: Sequence[dict], id2text: Dict[str, str], num_hard: int = 2):
+    """(query, support[, hard_neg]) examples. Hard negatives = non-support symbols from
+    the SAME touched files (brief - support) -> the ranker learns this file's OTHER
+    functions aren't the fix. MultipleNegativesRanking treats a 3rd text as a hard neg
+    (plus in-batch negatives). Falls back to (query, support) pairs when no brief."""
+    import random
     from sentence_transformers import InputExample
-    ex, n_pair = [], 0
+    rng = random.Random(0)
+    ex, n_hard_used = [], 0
     for r in rows:
         q = str(r.get("question", "")).strip()
+        sup = set(r.get("support_ids", []) or [])
+        hard_pool = [b for b in (r.get("brief_ids") or []) if b not in sup and b in id2text]
         for sid in r.get("support_ids", []) or []:
-            t = id2text.get(sid)
-            if t:
-                ex.append(InputExample(texts=[q, t])); n_pair += 1
-    print(f"  {len(rows)} queries -> {n_pair} (query, support) training pairs")
+            pt = id2text.get(sid)
+            if not pt:
+                continue
+            if num_hard > 0 and hard_pool:
+                for neg in rng.sample(hard_pool, min(num_hard, len(hard_pool))):
+                    ex.append(InputExample(texts=[q, pt, id2text[neg]])); n_hard_used += 1
+            else:
+                ex.append(InputExample(texts=[q, pt]))
+    print(f"  {len(rows)} queries -> {len(ex)} examples ({n_hard_used} with hard negatives)")
     return ex
 
 
-def train(gold_paths, node_paths, base: str, out: str, *, epochs: int = 2,
-          batch_size: int = 32, lr: float = 2e-5, max_seq: int = 256,
+def train(rows: List[dict], node_paths, base: str, out: str, *, epochs: int = 2,
+          batch_size: int = 32, lr: float = 2e-5, max_seq: int = 256, num_hard: int = 2,
           eval_frac: float = 0.15, heldout_out: str = "data/swe/retrieval_gold_heldout.jsonl") -> str:
     import random
     from torch.utils.data import DataLoader
@@ -74,7 +105,6 @@ def train(gold_paths, node_paths, base: str, out: str, *, epochs: int = 2,
 
     id2text = load_node_texts(node_paths)
     print(f"node texts: {len(id2text)}")
-    rows = load_gold_rows(gold_paths)
     # leakage-safe internal split: hold out a fraction of QUERIES for eval
     random.seed(0); random.shuffle(rows)
     n_hold = int(len(rows) * eval_frac) if eval_frac > 0 else 0
@@ -82,13 +112,14 @@ def train(gold_paths, node_paths, base: str, out: str, *, epochs: int = 2,
     if held and heldout_out:
         Path(heldout_out).parent.mkdir(parents=True, exist_ok=True)
         with open(heldout_out, "w", encoding="utf-8") as h:
-            for r in held:
-                h.write(json.dumps(r, ensure_ascii=False) + "\n")
+            for r in held:   # held-out gold = slim {question, support_ids}
+                h.write(json.dumps({"question": r["question"],
+                                    "support_ids": r["support_ids"]}, ensure_ascii=False) + "\n")
         print(f"held out {len(held)} eval queries -> {heldout_out} "
               f"(eval the trained ranker on this for a leakage-free number)")
-    examples = build_examples(train_rows, id2text)
+    examples = build_examples(train_rows, id2text, num_hard=num_hard)
     if not examples:
-        raise ValueError("no training pairs (check gold support_ids vs node ids)")
+        raise ValueError("no training examples (check support_ids vs node ids)")
 
     try:
         model = SentenceTransformer(base, trust_remote_code=True)
@@ -107,18 +138,25 @@ def train(gold_paths, node_paths, base: str, out: str, *, epochs: int = 2,
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Train a contrastive retrieval ranker on query->support pairs.")
-    ap.add_argument("--gold", nargs="+", required=True, help="gold jsonl(s): {question, support_ids}")
+    ap.add_argument("--traces", nargs="*", default=[],
+                    help="grounded_traces jsonl(s) -> enables HARD negatives from the brief (preferred)")
+    ap.add_argument("--gold", nargs="*", default=[],
+                    help="slim gold jsonl(s) {question, support_ids} -> in-batch negatives only")
     ap.add_argument("--nodes", nargs="+", required=True, help="add_node candidate jsonl(s) for node text")
     ap.add_argument("--base", default="Qwen/Qwen3-Embedding-0.6B")
     ap.add_argument("--out", default="models/ranker-code")
-    ap.add_argument("--epochs", type=int, default=2)
+    ap.add_argument("--epochs", type=int, default=4)
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--lr", type=float, default=2e-5)
+    ap.add_argument("--num-hard", type=int, default=2, help="hard negatives per positive (needs --traces)")
     ap.add_argument("--eval-frac", type=float, default=0.15, help="held-out query fraction (0=off)")
     ap.add_argument("--heldout-out", default="data/swe/retrieval_gold_heldout.jsonl")
     args = ap.parse_args(argv)
-    train(args.gold, args.nodes, args.base, args.out,
-          epochs=args.epochs, batch_size=args.batch_size, lr=args.lr,
+    rows = load_trace_rows(args.traces) if args.traces else load_gold_rows(args.gold)
+    if not rows:
+        raise SystemExit("no rows: pass --traces (with brief, for hard negs) or --gold")
+    train(rows, args.nodes, args.base, args.out, epochs=args.epochs,
+          batch_size=args.batch_size, lr=args.lr, num_hard=args.num_hard,
           eval_frac=args.eval_frac, heldout_out=args.heldout_out)
     return 0
 
