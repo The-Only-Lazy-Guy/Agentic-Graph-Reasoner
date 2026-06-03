@@ -39,6 +39,9 @@ python -c "import torch;print('cuda',torch.cuda.is_available(),'|',torch.cuda.ge
 echo "=== installing deps ==="
 pip install -q -U transformers accelerate bitsandbytes sentence-transformers datasets numpy 2>&1 | tail -2 || \
   echo "WARN: pip install had issues; continuing"
+# GNN dep for realstack (RGCNConv). torch_geometric base wheel has a pure-torch fallback.
+python -c "import torch_geometric" 2>/dev/null || pip install -q torch_geometric 2>&1 | tail -2 || \
+  echo "WARN: torch_geometric install failed; realstack will be skipped"
 
 step() {  # label, cmd...
   local label="$1"; shift
@@ -82,6 +85,8 @@ PY
 # ---- 4. optional: push results back ----
 if [ "${PUSH_RESULTS:-0}" = "1" ]; then
   echo; echo "=== pushing results ==="
+  git config user.email "${GIT_EMAIL:-cloud@vast.ai}"
+  git config user.name  "${GIT_NAME:-vast-cloud}"
   git add -f "$RES"/*.json "$RES"/*.log 2>/dev/null
   git commit -m "results(cloud): embedder A/B + Qwen3.5 realstack (vast.ai)" 2>&1 | tail -2 && \
     git push origin HEAD 2>&1 | tail -2 || echo "push skipped/failed (set git creds + branch)"

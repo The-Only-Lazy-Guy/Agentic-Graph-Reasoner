@@ -144,7 +144,15 @@ def embed_causal_hidden(texts: List[str], model_name: str, device) -> np.ndarray
             batch = texts[i:i + 8]
             enc = tok(batch, padding=True, truncation=True, max_length=512,
                       return_tensors="pt").to(device)
-            h = mdl(**enc).hidden_states[-1]            # [B, T, D]
+            # output_hidden_states in the CALL (custom/hybrid models ignore it at load)
+            res = mdl(**enc, output_hidden_states=True, return_dict=True)
+            hs = res.hidden_states
+            if hs is None:   # some custom archs expose it as last_hidden_state instead
+                hs = [getattr(res, "last_hidden_state", None)]
+            h = hs[-1]                                   # [B, T, D]
+            if h is None:
+                raise RuntimeError("model returned no hidden states; this arch needs a "
+                                   "custom extraction path for causal-hidden embedding")
             mask = enc["attention_mask"].unsqueeze(-1).float()
             emb = (h * mask).sum(1) / mask.sum(1).clamp(min=1e-9)
             out.append(emb.float().cpu().numpy())
