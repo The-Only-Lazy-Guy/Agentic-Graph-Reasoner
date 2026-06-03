@@ -34,14 +34,14 @@ improved substrate) — that is the "prove step 3 = the lift" experiment.
 
 **Decision gates (open until measured):**
 
-| open variable | decided by | fork if it fails |
+| open variable | decided by | status |
 |---|---|---|
-| graph embedder | retrieval A/B | keep mpnet (cheaper) |
-| injection-into-hybrid works? | realstack on Qwen3.5 | drop injection → constrained-decode + cheap-long-context RAG |
-| DeltaNet carries grounding? | realstack observation | bonus if true; nothing lost if not |
-| extractor size | held-out (0.5B = 50% ceiling) | step to 1.5B |
-| visual nodes | cross-modal retrieval eval | out |
-| domain shortcut | per-domain fallback after stage 2 | source cs/physics/sysdesign |
+| graph embedder | retrieval A/B | ✅ **Qwen3-Embedding-0.6B** (Hit@5 0.63 > mpnet 0.55 > raw-hidden 0.41) |
+| injection-into-hybrid works? | realstack on Qwen3.5 | ✅ **VALIDATED** on Qwen3.5-4B 4-bit — hooks fire, loops sane, pools route; fork dropped |
+| DeltaNet carries grounding? | realstack observation | open (bonus if true; nothing lost if not) |
+| extractor size | held-out (0.5B = 50% ceiling) | open → likely step to 1.5B |
+| visual nodes | cross-modal retrieval eval | open |
+| domain shortcut | per-domain fallback after stage 2 | open (Track A) |
 
 After these three land, the architecture goes from **designed** to **decided**.
 
