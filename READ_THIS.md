@@ -8,6 +8,77 @@
 
 ---
 
+## Session update (2026-06-03) — Qwen3.5-4B validated + embedder decided + SWE code-data pipeline (v2 pivot)
+
+Big arc. The project pivoted from "STEM grounded-QA proof" toward the real product:
+a **local agentic coder** (v2). See `V5_V2_DESIGN.md` + `SWE_DATA_PIPELINE.md`.
+
+**Model + architecture (Track-B gates CLOSED, on an L40):**
+- **Base LM = Qwen/Qwen3.5-4B** (hidden 2560 — same as the stale Qwen3-4B target so
+  no adapter-dim change; 32 layers; hybrid Gated-DeltaNet+attention; multimodal;
+  4-bit for 6GB). **Injection-into-hybrid VALIDATED**: realstack passed — hooks fire
+  at L8/L20, GNN encodes, pool routing correct, loops sane, generation intact,
+  fallback correct (untrained heads). The "drop injection" fork is OFF.
+- Needed 5 hybrid fixes (committed): config dims -> derive from model
+  (get_input_embeddings); 4-bit device_map None -> cuda:0; output_hidden_states in
+  the forward CALL; +torch_geometric dep; **dtype seam** bf16 LM <-> fp32 adapter
+  (cast at the hook boundary).
+- **Graph embedder = Qwen3-Embedding-0.6B** (retrieval A/B on grown_graph4, 78 gold):
+  **Hit@5 0.628 / MRR 0.489** > mpnet 0.551/0.470 > raw Qwen3.5-hidden 0.410. Adopt.
+  PENDING production swap (re-embed + recalibrate dedup/attach thresholds).
+
+**v2 design (graph-grounded coder) — key decisions:**
+- **Dual grounding**: keep L8/L20 injection for REASONING-grounding (promoted, NOT
+  demoted) + **graph-gated constrained decoding** for EXACT emission (the strong
+  grounding; logits-mask to valid API tokens -> can't hallucinate). Verbatim-text-in-
+  prompt is just RAG (weak) -> rejected as the load-bearing path.
+- **GNN = once-per-task RANKER** assembling a brief, AND the injector (both).
+- **3-layer memory**: Task Ledger (carried, never retrieved) + Task Brief (pinned
+  once, KV-cached) + Subtask Delta (cheap). Decompose via V4 micro-controller skeleton.
+- **Data = retro-grounding**: teacher solves -> link solution to artifacts used (reuse
+  answer_support_ids). V4 corpus now emits a `v2_grounding` block (additive).
+- Prior-art validated (GMT/Beyond-Prefixes = injection twin; ReVeal = verifier;
+  Voyager/Trainable-Graph-Memory = skill memory; small-agents-beat-big = the bet).
+- Procedure-nodes-that-EXECUTE dropped (too risky). Strategy nodes = DECLARATIVE only.
+
+**SWE code-data pipeline (the v2 data spine, FREE — git+ast+gold patch, no LLM):**
+- `swe_load.py` (load SWE-bench/gym + partial-clone checkout), `code_extract.py`
+  (Python ast -> symbol nodes: signature+docstring+line spans + symbol_at_line),
+  `swe_grounded.py` (gold patch -> AST-mapped support symbols -> v2_grounding trace +
+  retrieval gold + code graph).
+- **Cheap rung scaled (SWE-bench Lite 300/300):** 300 grounded traces, 300 gold,
+  **19,223 code nodes** (19,008 symbols). **Code retrieval mpnet: Hit@5 0.272 / MRR
+  0.200** — ~2x HARDER than STEM (issue-symptom vs def-signature, low lexical
+  overlap). Motivates a TRAINED ranker + constrained-decode. (Qwen3-Embedding code
+  number pending the L40; sentence-transformers segfaults on Windows.)
+
+**Current plan (in progress): 1+2+3, STEM Q&A dropped.**
+1. **Scale SWE -> Verified (500) + gym** (running). 2. **Trained GNN-ranker** (the
+   0.27 floor demands it; train on code+STEM gold, contrastive). 3. **Strategy nodes
+   via opencode session-graph** — repurpose opencode (was STEM Q&A) to distill
+   (issue+gold patch) -> strategy/reasoning subgraph via V4's audit/apply (the SESSION
+   lane). symbols ground tokens; strategies ground approach.
+- **STEM regen HUNG** at 108/274 (opencode unreliable on long unattended batches);
+  killed. 122 v2-shaped traces banked (baseline_oc 108 + baseline_cx 14) -- enough as
+  the grounding-trains proof; finish remainder on a cheap cloud opencode box if wanted.
+- **codex**: pure-gen isolated (read-only sandbox + scratch cwd + guard; writes
+  verified blocked) for the self-contained STEM regime; for AGENTIC code it explores
+  in an ISOLATED throwaway workspace (not the project repo). Save codex budget (~20%)
+  for the SWE agentic rung, not STEM.
+
+**Deploy/infra:** `v5/lm_loader` env-driven precision (V5_LM_QUANT=4bit,
+V5_LM_TRUST_REMOTE_CODE=1 for Qwen3.5). `scripts/cloud_run.sh` on an L40 runs the
+embedder A/B + realstack + (now) code retrieval. `grown_graph4.json` (6874 nodes,
+committed) is the current STEM graph; SWE code graph is separate.
+
+**Key commands:**
+- code data: `python -m v5.graph_grower.swe_grounded --dataset lite --limit 300`
+- code retrieval: `python -m v5.graph_grower.retrieval_eval --nodes-file <swe_code_candidates> --gold-file <retrieval_gold_code> --embedder mpnet`
+- cloud: `export HF_TOKEN=...; bash scripts/cloud_run.sh`
+- finish STEM (cloud box): `GRAPH=graphs/grown_graph4.json SKIP_EXISTING=1 RUN_ID=cloud_oc BACKEND=opencode bash gen_and_push.sh`
+
+---
+
 ## Session update (2026-06-02i) — Qwen-0.5B extractor SMOKE-TRAINED + verified (opencode-retirement path live)
 
 - LoRA-SFT'd Qwen2.5-0.5B on the 225 collected pairs (all cot/math). **bf16 LoRA,
