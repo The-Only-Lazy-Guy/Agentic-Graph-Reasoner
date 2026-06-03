@@ -16,7 +16,7 @@ import argparse, json, sys, time
 from pathlib import Path
 
 from answerer_v4 import (V4LlamaServerController, V4ControllerConfig,
-                         V4OpencodeController, answer_query_v4)
+                         V4OpencodeController, V4CodexController, answer_query_v4)
 from graph_core import MemoryGraph
 from reasoning.distillation_corpus import append_session_to_corpus
 
@@ -60,8 +60,11 @@ def main():
     ap.add_argument("--skip-existing", action="store_true",
                     help="skip questions already present in any data/corpus_shards/*.jsonl "
                          "(re-run safety: each run only generates NEW questions)")
-    ap.add_argument("--backend", choices=["llama", "opencode"], default="llama",
-                    help="llama=local GGUF server; opencode=big cloud model via opencode CLI")
+    ap.add_argument("--backend", choices=["llama", "opencode", "codex"], default="llama",
+                    help="llama=local GGUF server; opencode=big cloud model; codex=codex exec CLI")
+    ap.add_argument("--codex-model", default=None, help="codex -m model (default: codex's own)")
+    ap.add_argument("--difficulties", default="",
+                    help="comma-sep; only generate tasks of these difficulties (e.g. extreme)")
     ap.add_argument("--opencode-config-dir", default="pure-opencode")
     ap.add_argument("--opencode-model", default=None,
                     help="opencode model alias (e.g. opencode/big-pickle). Default = controller default; "
@@ -73,6 +76,10 @@ def main():
     all_tasks = json.load(open(a.dataset, encoding="utf-8"))["tasks"]
     # disjoint shard so machines generate UNIQUE data
     tasks = [t for i, t in enumerate(all_tasks) if i % a.num_shards == a.shard_index]
+    diffs = {d.strip() for d in a.difficulties.split(",") if d.strip()}
+    if diffs:
+        tasks = [t for t in tasks if t.get("difficulty") in diffs]
+        print(f"--difficulties {sorted(diffs)}: {len(tasks)} tasks kept")
     if a.skip_existing:
         done = _existing_questions(a.out_dir)
         before = len(tasks)
@@ -93,6 +100,8 @@ def main():
     print(f"backend={a.backend}  tasks={len(tasks)}  out={out_dir/a.corpus_file}")
 
     def make_controller():
+        if a.backend == "codex":
+            return V4CodexController(model=a.codex_model, print_raw_output=False)
         if a.backend == "opencode":
             # model=None -> omit --model -> use opencode's own configured default
             # (invocation: `opencode run --format json <msg>`). Pass --opencode-model

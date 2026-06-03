@@ -3080,6 +3080,94 @@ class V4OpencodeController:
 
 
 # ---------------------------------------------------------------------------
+# Codex CLI controller -- drives `codex exec` as a V4 LLM controller.
+# STATELESS: flattens the full message history into one `codex exec` call per
+# turn (no session state), which is robust on Windows and matches V4 passing the
+# full message list each step. Used for the hardest-tier regen data where codex
+# quality is worth the limited weekly budget; opencode handles the rest.
+# ---------------------------------------------------------------------------
+
+class V4CodexController:
+    """Codex CLI controller exposing the V4 LLM-controller interface."""
+
+    def __init__(self, model: Optional[str] = None, *, sandbox: str = "read-only",
+                 timeout: float = 600.0, print_raw_output: bool = True, **_ignored):
+        import shutil
+        self.model = model
+        self.sandbox = sandbox
+        self.timeout = timeout
+        self.print_raw_output = print_raw_output
+        self._exe = shutil.which("codex") or "codex"
+        self._raw_trace: List[Dict[str, Any]] = []
+        # compatibility attrs read by trace/session-extraction code paths
+        self._session_id: Optional[str] = None
+        self._system_prompt: Optional[str] = None
+        self._sent_count: int = 0
+
+    def _run_codex(self, prompt: str) -> str:
+        import os as _o
+        import subprocess as _sp
+        import tempfile as _tf
+        fd, out_path = _tf.mkstemp(suffix=".txt"); _o.close(fd)
+        cmd = [self._exe, "exec", "-s", self.sandbox, "--skip-git-repo-check", "-o", out_path]
+        if self.model:
+            cmd += ["-m", self.model]
+        cmd += ["-"]   # prompt on stdin
+        started = time.time()
+        rc = None
+        text = ""
+        try:
+            proc = _sp.run(cmd, input=prompt, capture_output=True, text=True,
+                           timeout=self.timeout, encoding="utf-8", errors="replace")
+            rc = proc.returncode
+            with open(out_path, encoding="utf-8") as h:
+                text = h.read()
+        except Exception as exc:   # noqa: BLE001 -- record + return empty on any failure
+            text = ""
+            rc = f"error:{type(exc).__name__}"
+        finally:
+            try:
+                _o.unlink(out_path)
+            except OSError:
+                pass
+        elapsed = round(time.time() - started, 3)
+        self._raw_trace.append({"mode": "codex_exec", "assistant_text": text,
+                                "elapsed_sec": elapsed, "returncode": rc})
+        if self.print_raw_output:
+            print(f"\n===== CODEX EXEC (exit {rc}, {elapsed}s) =====")
+            print(text[:600])
+            print("===== CODEX EXEC END =====", flush=True)
+        return text
+
+    @staticmethod
+    def _flatten(messages: List[Dict[str, str]]) -> str:
+        parts: List[str] = []
+        for m in messages:
+            role, content = m.get("role"), m.get("content", "")
+            if role == "system":
+                parts.append(content)
+            elif role == "user":
+                parts.append(f"\n---\n{content}")
+            elif role == "assistant":
+                parts.append(f"\n[assistant previously responded]:\n{content}")
+        return "\n".join(parts)
+
+    def chat(self, messages: List[Dict[str, str]]) -> Dict[str, Any]:
+        text = self._run_codex(self._flatten(messages))
+        return {"choices": [{"message": {"content": text}}]}
+
+    def chat_oneshot(self, messages: List[Dict[str, str]]) -> Dict[str, Any]:
+        sub = V4CodexController(model=self.model, sandbox=self.sandbox,
+                                timeout=self.timeout, print_raw_output=self.print_raw_output)
+        result = sub.chat(messages)
+        self._raw_trace.extend(sub.get_raw_trace())
+        return result
+
+    def get_raw_trace(self) -> List[Dict[str, Any]]:
+        return list(self._raw_trace)
+
+
+# ---------------------------------------------------------------------------
 # Gemini direct controller -- calls Google's generativelanguage API natively.
 # Reads the API key from opencode's auth.json so no separate setup is needed.
 # Supports proper system messages and full conversation history.
