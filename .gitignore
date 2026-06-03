@@ -86,3 +86,6 @@ artifacts/graph_growth/
 # like corpus_shards) -- re-include despite the global *.jsonl ignore.
 !data/external_kb/
 !data/external_kb/*.jsonl
+
+# SWE-bench cloned repos (regenerable)
+data/swe_repos/
