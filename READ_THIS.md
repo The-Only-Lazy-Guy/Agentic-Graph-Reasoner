@@ -52,6 +52,17 @@ a **local agentic coder** (v2). See `V5_V2_DESIGN.md` + `SWE_DATA_PIPELINE.md`.
   overlap). Motivates a TRAINED ranker + constrained-decode. (Qwen3-Embedding code
   number pending the L40; sentence-transformers segfaults on Windows.)
 
+**#1+#2 RESULTS (A40 cloud, 2026-06-03):**
+- #1 scale DONE: SWE Lite(300)+Verified(499) = 799 grounded traces, 799 gold, 21,621
+  unique code symbols.
+- code retrieval (698 q, 21.6k symbols): mpnet Hit@5 0.281 / MRR 0.196; **Qwen3-Embedding
+  Hit@5 0.374 / MRR 0.264** (Qwen > mpnet on code too).
+- **#2 ranker VALIDATED** (contrastive bi-encoder, 680 q / 1727 pairs, 2 ep, 73s):
+  leakage-free held-out (116 q) raw Qwen 0.353/0.236/Hit@1 0.112 -> **trained ranker
+  Hit@5 0.414 / MRR 0.300 / Hit@1 0.190** (+6pts Hit@5, +27% MRR, +70% Hit@1).
+  Training lifts code retrieval -> the "train a ranker" thesis is PROVEN. Big headroom
+  (no hard negs, no graph topology, 2 ep). Run: `TRAIN_RANKER=1 bash scripts/cloud_run.sh`.
+
 **Current plan (in progress): 1+2+3, STEM Q&A dropped.**
 1. **Scale SWE -> Verified (500) + gym** (running). 2. **Trained GNN-ranker** (the
    0.27 floor demands it; train on code+STEM gold, contrastive). 3. **Strategy nodes
