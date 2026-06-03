@@ -58,8 +58,15 @@ step qwen-embed   python -m v5.graph_grower.retrieval_eval --graph "$GRAPH" --go
                     --embedder st-embed      --model "$QWEN_EMB" --out "$RES/retrieval_qwenembed.json"
 
 # ---- 1b. CODE retrieval (SWE symbols) — st-embed segfaults on Windows, runs here ----
-CODE_NODES="${CODE_NODES:-artifacts/graph_growth/swe_code_candidates.jsonl}"
-CODE_GOLD="${CODE_GOLD:-data/swe/retrieval_gold_code.jsonl}"
+# Combine Lite + Verified into the full code pool (799 queries / ~21.6k symbols).
+CODE_NODES="${CODE_NODES:-$RES/code_nodes_all.jsonl}"
+CODE_GOLD="${CODE_GOLD:-$RES/code_gold_all.jsonl}"
+cat artifacts/graph_growth/swe_code_candidates.jsonl \
+    artifacts/graph_growth/swe_code_candidates_verified.jsonl 2>/dev/null > "$CODE_NODES" || true
+cat data/swe/retrieval_gold_code.jsonl \
+    data/swe/retrieval_gold_code_verified.jsonl 2>/dev/null > "$CODE_GOLD" || true
+[ -s "$CODE_NODES" ] || CODE_NODES="artifacts/graph_growth/swe_code_candidates.jsonl"
+[ -s "$CODE_GOLD" ]  || CODE_GOLD="data/swe/retrieval_gold_code.jsonl"
 if [ -f "$CODE_NODES" ] && [ -f "$CODE_GOLD" ]; then
   step code-mpnet python -m v5.graph_grower.retrieval_eval --nodes-file "$CODE_NODES" \
                     --gold-file "$CODE_GOLD" --embedder mpnet    --out "$RES/retrieval_code_mpnet.json"
