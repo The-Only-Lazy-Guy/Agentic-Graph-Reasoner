@@ -61,6 +61,10 @@ def load_frozen_lm(model_name: str, *, device: Optional[torch.device] = None,
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
     q = resolve_quant(quant)
     dtype = resolve_dtype(device)
+    # new custom architectures (e.g. Qwen3.5 hybrid) ship a remote modeling file;
+    # enable via env until transformers integrates them natively.
+    trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
+    extra = {"trust_remote_code": True} if trust else {}
 
     if q in ("4bit", "8bit"):
         from transformers import BitsAndBytesConfig   # lazy: only when quantizing
@@ -73,13 +77,13 @@ def load_frozen_lm(model_name: str, *, device: Optional[torch.device] = None,
         # bitsandbytes places the weights itself via device_map; do NOT call .to()
         device_map = {"": device.index if device.type == "cuda" else device.type}
         model = AutoModelForCausalLM.from_pretrained(
-            model_name, quantization_config=qcfg, device_map=device_map)
+            model_name, quantization_config=qcfg, device_map=device_map, **extra)
     else:
         # transformers>=5 renamed torch_dtype -> dtype
         try:
-            model = AutoModelForCausalLM.from_pretrained(model_name, dtype=dtype)
+            model = AutoModelForCausalLM.from_pretrained(model_name, dtype=dtype, **extra)
         except TypeError:
-            model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=dtype)
+            model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=dtype, **extra)
         model = model.to(device)
 
     model.eval()

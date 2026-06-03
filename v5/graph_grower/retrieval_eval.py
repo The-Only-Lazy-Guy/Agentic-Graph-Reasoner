@@ -24,10 +24,15 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import os
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
+
+# custom archs (Qwen3.5 hybrid) ship remote modeling code; enable via env
+_TRUST = {"trust_remote_code": True} if os.environ.get(
+    "V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes") else {}
 
 DEFAULT_CORPUS_GLOBS = [
     "data/corpus_shards/*.jsonl",
@@ -69,6 +74,32 @@ def load_gold(globs: Sequence[str], node_ids: set) -> Dict[str, List[str]]:
     return {q: sorted(s) for q, s in gold.items()}
 
 
+def load_gold_file(path: str, node_ids: set) -> Dict[str, List[str]]:
+    """Read a pre-extracted slim gold jsonl: {"question":..., "support_ids":[...]}.
+    Lets the cloud box score without shipping the full (large) corpus."""
+    gold: Dict[str, set] = {}
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        row = json.loads(line)
+        q = str(row.get("question", "")).strip()
+        sup = [s for s in (row.get("support_ids") or []) if s in node_ids]
+        if q and sup:
+            gold.setdefault(q, set()).update(sup)
+    return {q: sorted(s) for q, s in gold.items()}
+
+
+def write_gold_file(globs: Sequence[str], node_ids: set, out: str) -> int:
+    """Extract the slim gold (question -> support_ids) from the corpus -> jsonl."""
+    gold = load_gold(globs, node_ids)
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w", encoding="utf-8") as h:
+        for q, sup in gold.items():
+            h.write(json.dumps({"question": q, "support_ids": sup}, ensure_ascii=False) + "\n")
+    return len(gold)
+
+
 # ── embedders (inference only) ───────────────────────────────────────────────
 def _l2(m: np.ndarray) -> np.ndarray:
     n = np.linalg.norm(m, axis=1, keepdims=True)
@@ -99,12 +130,13 @@ def embed_causal_hidden(texts: List[str], model_name: str, device) -> np.ndarray
     LM but NOT trained for cosine retrieval -- the honest 'option 2' to measure."""
     from transformers import AutoTokenizer, AutoModelForCausalLM
     import torch
-    tok = AutoTokenizer.from_pretrained(model_name)
+    tok = AutoTokenizer.from_pretrained(model_name, **_TRUST)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     mdl = AutoModelForCausalLM.from_pretrained(
         model_name, output_hidden_states=True,
         torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+        **_TRUST,
     ).to(device).eval()
     out = []
     with torch.no_grad():
@@ -170,6 +202,9 @@ def main(argv=None) -> int:
     ap.add_argument("--embedder", choices=list(EMBEDDERS), default="mpnet")
     ap.add_argument("--model", default="", help="HF repo for the embedder (blank = mpnet default)")
     ap.add_argument("--corpus-globs", nargs="*", default=DEFAULT_CORPUS_GLOBS)
+    ap.add_argument("--gold-file", default="data/retrieval_gold.jsonl",
+                    help="slim gold jsonl ({question,support_ids}); falls back to --corpus-globs")
+    ap.add_argument("--write-gold", default="", help="extract gold from corpus -> this path, then exit")
     ap.add_argument("--out", default="artifacts/graph_growth/retrieval_eval.json")
     args = ap.parse_args(argv)
 
@@ -177,7 +212,14 @@ def main(argv=None) -> int:
     g = MemoryGraph.load_json(args.graph)
     node_ids = list(g.nodes.keys())
     node_texts = [getattr(g.nodes[n], "text", "") or "" for n in node_ids]
-    gold = load_gold(args.corpus_globs, set(node_ids))
+    if args.write_gold:
+        n = write_gold_file(args.corpus_globs, set(node_ids), args.write_gold)
+        print(f"wrote {n} gold (question->support) pairs -> {args.write_gold}")
+        return 0
+    if args.gold_file and Path(args.gold_file).exists():
+        gold = load_gold_file(args.gold_file, set(node_ids))
+    else:
+        gold = load_gold(args.corpus_globs, set(node_ids))
     queries = sorted(gold)
     print(f"graph={args.graph} nodes={len(node_ids)} | gold queries={len(queries)} "
           f"| embedder={args.embedder} model={args.model or '(default)'}", flush=True)

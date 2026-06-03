@@ -9,6 +9,44 @@ and several pieces are reused (see §10).
 
 ---
 
+## 0. Roadmap & decision gates
+
+The **spine is settled** (this doc); the **branches are decided by experiments**, not
+opinion. Three experiments collapse most open variables — until they land, the
+branches stay open.
+
+**Track A — corpus/training (local, when the route-2 regen lands):**
+1. merge `baseline_oc` + `baseline_cx` → project to V5 targets (`projection.py`)
+2. Stage 1 (heads) → 2A (look) → 2B (write) on the fresh corpus vs `grown_graph4`
+3. measure the guardrail: **per-domain fallback rate** (cs/physics/sysdesign spike =
+   domain shortcut), plan P@1, support accuracy
+4. rerun the retrieval baseline with the bigger gold set
+
+**Track B — rented GPU (inference only, no training) — `scripts/cloud_run.sh`:**
+1. **embedder A/B** — `causal-hidden` (Qwen3.5-4B) + `st-embed` (Qwen3-Embedding) vs
+   the mpnet anchor (Hit@5 0.55 / MRR 0.47)
+2. **`realstack_test` on Qwen3.5-4B** — validate injection-into-hybrid (hooks fire at
+   L8/L20, hidden states extract, generation stable)
+3. re-embed `grown_graph4` with the winner + re-calibrate dedup/attach thresholds
+
+**Convergence:** B's wins (embedder/model) feed back into A (re-run training on the
+improved substrate) — that is the "prove step 3 = the lift" experiment.
+
+**Decision gates (open until measured):**
+
+| open variable | decided by | fork if it fails |
+|---|---|---|
+| graph embedder | retrieval A/B | keep mpnet (cheaper) |
+| injection-into-hybrid works? | realstack on Qwen3.5 | drop injection → constrained-decode + cheap-long-context RAG |
+| DeltaNet carries grounding? | realstack observation | bonus if true; nothing lost if not |
+| extractor size | held-out (0.5B = 50% ceiling) | step to 1.5B |
+| visual nodes | cross-modal retrieval eval | out |
+| domain shortcut | per-domain fallback after stage 2 | source cs/physics/sysdesign |
+
+After these three land, the architecture goes from **designed** to **decided**.
+
+---
+
 ## 1. Goal & scope
 
 A **local** assistant that does implementation / side-task / debugging work on a
