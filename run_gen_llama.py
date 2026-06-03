@@ -65,6 +65,8 @@ def main():
     ap.add_argument("--codex-model", default=None, help="codex -m model (default: codex's own)")
     ap.add_argument("--difficulties", default="",
                     help="comma-sep; only generate tasks of these difficulties (e.g. extreme)")
+    ap.add_argument("--domains", default="",
+                    help="comma-sep; only these domains from the id suffix (e.g. cs,algo for codex)")
     ap.add_argument("--opencode-config-dir", default="pure-opencode")
     ap.add_argument("--opencode-model", default=None,
                     help="opencode model alias (e.g. opencode/big-pickle). Default = controller default; "
@@ -80,6 +82,10 @@ def main():
     if diffs:
         tasks = [t for t in tasks if t.get("difficulty") in diffs]
         print(f"--difficulties {sorted(diffs)}: {len(tasks)} tasks kept")
+    doms = {d.strip() for d in a.domains.split(",") if d.strip()}
+    if doms:   # domain = last token of the id (e.g. q_03_easy_cs -> cs)
+        tasks = [t for t in tasks if t.get("id", "").split("_")[-1] in doms]
+        print(f"--domains {sorted(doms)}: {len(tasks)} tasks kept")
     if a.skip_existing:
         done = _existing_questions(a.out_dir)
         before = len(tasks)
