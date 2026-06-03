@@ -140,15 +140,26 @@ def run(graph_path: str = "graphs/algo3_binary_search.json",
 
     # 3. real frozen LM
     print(f"\nloading frozen LM {model_name}...")
-    from transformers import AutoConfig, AutoTokenizer
+    from transformers import AutoTokenizer
     from v5.lm_loader import load_frozen_lm
-    cfg = AutoConfig.from_pretrained(model_name)
-    lm_dim = cfg.hidden_size
-    n_layers = cfg.num_hidden_layers
-    assert n_layers > max(PLANNING_LAYER, EVIDENCE_LAYER), \
-        f"model has {n_layers} layers; need >{max(PLANNING_LAYER, EVIDENCE_LAYER)}"
     tok = AutoTokenizer.from_pretrained(model_name)
     model = load_frozen_lm(model_name, device=device)   # V5_LM_QUANT=4bit for the 6GB 4B target
+
+    # Derive dims from the LOADED MODEL, not the config: hybrid/multimodal configs
+    # (e.g. Qwen3_5Config) don't expose hidden_size/num_hidden_layers the standard way.
+    lm_dim = model.get_input_embeddings().weight.shape[1]
+    cfg = model.config
+    n_layers = next((getattr(c, a) for c in (cfg, getattr(cfg, "text_config", None))
+                     if c is not None for a in ("num_hidden_layers", "num_layers")
+                     if getattr(c, a, None)), None)
+    if n_layers is None:   # last resort: count the decoder block list
+        from v5.adapter import _get_transformer_layers
+        try:
+            n_layers = len(_get_transformer_layers(model))
+        except Exception:
+            n_layers = max(PLANNING_LAYER, EVIDENCE_LAYER) + 1
+    assert n_layers > max(PLANNING_LAYER, EVIDENCE_LAYER), \
+        f"model has {n_layers} layers; need >{max(PLANNING_LAYER, EVIDENCE_LAYER)}"
     print(f"  loaded: hidden={lm_dim}, layers={n_layers} (hooks at L{PLANNING_LAYER}/L{EVIDENCE_LAYER})")
 
     # 4. V5 adapter sized to the LM
