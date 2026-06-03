@@ -41,6 +41,8 @@ cd "$(dirname "$0")"
 BACKEND="${BACKEND:-llama}"
 SHARD_INDEX="${SHARD_INDEX:-0}"
 NUM_SHARDS="${NUM_SHARDS:-1}"
+GRAPH="${GRAPH:-graphs/grown_graph4.json}"   # route-2 baseline graph (committed)
+DIFFICULTIES="${DIFFICULTIES:-}"             # optional: only these tiers (e.g. hard,extreme)
 HOST_TAG="$(hostname 2>/dev/null | tr -cd 'a-z0-9' | cut -c1-12)"; HOST_TAG="${HOST_TAG:-box}"
 RUN_ID="${RUN_ID:-vast-${HOST_TAG}-${SHARD_INDEX}}"
 GGUF_REPO="${GGUF_REPO:-unsloth/Qwen3-4B-Instruct-2507-GGUF}"
@@ -168,12 +170,14 @@ log "generating shard ($BACKEND) -> $SHARD_PATH"
 if [ "$BACKEND" = "opencode" ]; then
   python run_gen_llama.py --backend opencode --opencode-config-dir "${OPENCODE_CONFIG_DIR:-pure-opencode}" \
     ${OPENCODE_MODEL:+--opencode-model "$OPENCODE_MODEL"} $SKIP_FLAG \
-    --dataset data/question_bank.json --graph graphs/merged_graph.json \
+    --dataset data/question_bank.json --graph "$GRAPH" \
+    ${DIFFICULTIES:+--difficulties "$DIFFICULTIES"} \
     --out-dir data/corpus_shards --run-id "$RUN_ID" \
     --shard-index "$SHARD_INDEX" --num-shards "$NUM_SHARDS" ${LIMIT:+--limit "$LIMIT"}
 else
   python run_gen_llama.py --backend llama $SKIP_FLAG \
-    --dataset data/question_bank.json --graph graphs/merged_graph.json \
+    --dataset data/question_bank.json --graph "$GRAPH" \
+    ${DIFFICULTIES:+--difficulties "$DIFFICULTIES"} \
     --out-dir data/corpus_shards --run-id "$RUN_ID" \
     --shard-index "$SHARD_INDEX" --num-shards "$NUM_SHARDS" \
     --base-url "http://127.0.0.1:${PORT}" --openai-mode ${LIMIT:+--limit "$LIMIT"}
