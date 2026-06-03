@@ -74,10 +74,15 @@ def load_frozen_lm(model_name: str, *, device: Optional[torch.device] = None,
                 bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=dtype)
         else:
             qcfg = BitsAndBytesConfig(load_in_8bit=True)
-        # bitsandbytes places the weights itself via device_map; do NOT call .to()
-        device_map = {"": device.index if device.type == "cuda" else device.type}
+        # bitsandbytes places the weights itself via device_map; do NOT call .to().
+        # NOTE: torch.device("cuda") has index None -> {"": None} crashes the loader;
+        # resolve to a concrete cuda:N (or cpu).
+        if device.type == "cuda":
+            dev = f"cuda:{device.index if device.index is not None else 0}"
+        else:
+            dev = "cpu"
         model = AutoModelForCausalLM.from_pretrained(
-            model_name, quantization_config=qcfg, device_map=device_map, **extra)
+            model_name, quantization_config=qcfg, device_map={"": dev}, **extra)
     else:
         # transformers>=5 renamed torch_dtype -> dtype
         try:
