@@ -57,6 +57,17 @@ step qwen-hidden  python -m v5.graph_grower.retrieval_eval --graph "$GRAPH" --go
 step qwen-embed   python -m v5.graph_grower.retrieval_eval --graph "$GRAPH" --gold-file "$GOLD" \
                     --embedder st-embed      --model "$QWEN_EMB" --out "$RES/retrieval_qwenembed.json"
 
+# ---- 1b. CODE retrieval (SWE symbols) — st-embed segfaults on Windows, runs here ----
+CODE_NODES="${CODE_NODES:-artifacts/graph_growth/swe_code_candidates.jsonl}"
+CODE_GOLD="${CODE_GOLD:-data/swe/retrieval_gold_code.jsonl}"
+if [ -f "$CODE_NODES" ] && [ -f "$CODE_GOLD" ]; then
+  step code-mpnet python -m v5.graph_grower.retrieval_eval --nodes-file "$CODE_NODES" \
+                    --gold-file "$CODE_GOLD" --embedder mpnet    --out "$RES/retrieval_code_mpnet.json"
+  step code-qwen  python -m v5.graph_grower.retrieval_eval --nodes-file "$CODE_NODES" \
+                    --gold-file "$CODE_GOLD" --embedder st-embed --model "$QWEN_EMB" \
+                    --out "$RES/retrieval_code_qwen.json"
+fi
+
 # ---- 2. Qwen3.5 hybrid injection validation (frozen, 4-bit) ----
 echo; echo "=== [realstack] Qwen3.5 injection-into-hybrid (4-bit) ==="
 ( export V5_LM_QUANT=4bit

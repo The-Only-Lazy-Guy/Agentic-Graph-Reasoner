@@ -207,6 +207,8 @@ def main(argv=None) -> int:
     from graph_core import MemoryGraph
     ap = argparse.ArgumentParser(description="Node-retrieval quality eval (inference only).")
     ap.add_argument("--graph", default="graphs/grown_graph4.json")
+    ap.add_argument("--nodes-file", default="",
+                    help="read nodes from an add_node candidates jsonl (id,text) instead of --graph")
     ap.add_argument("--embedder", choices=list(EMBEDDERS), default="mpnet")
     ap.add_argument("--model", default="", help="HF repo for the embedder (blank = mpnet default)")
     ap.add_argument("--corpus-globs", nargs="*", default=DEFAULT_CORPUS_GLOBS)
@@ -217,9 +219,22 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    g = MemoryGraph.load_json(args.graph)
-    node_ids = list(g.nodes.keys())
-    node_texts = [getattr(g.nodes[n], "text", "") or "" for n in node_ids]
+    if args.nodes_file:
+        # code-graph path: read symbol nodes straight from add_node candidates
+        node_ids, node_texts, seen = [], [], set()
+        for line in Path(args.nodes_file).read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            r = json.loads(line)
+            e = r.get("raw_edit", r)
+            if e.get("op") == "add_node" and e.get("node_id") not in seen:
+                seen.add(e["node_id"])
+                node_ids.append(e["node_id"]); node_texts.append(e.get("text", "") or "")
+    else:
+        g = MemoryGraph.load_json(args.graph)
+        node_ids = list(g.nodes.keys())
+        node_texts = [getattr(g.nodes[n], "text", "") or "" for n in node_ids]
     if args.write_gold:
         n = write_gold_file(args.corpus_globs, set(node_ids), args.write_gold)
         print(f"wrote {n} gold (question->support) pairs -> {args.write_gold}")
