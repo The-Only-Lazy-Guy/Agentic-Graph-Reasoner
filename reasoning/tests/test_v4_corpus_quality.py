@@ -139,3 +139,63 @@ def test_corpus_row_keeps_turn_summaries_raw_trace_and_training_quality():
     assert row["trace"]["controller_raw_trace_summary"][0]["assistant_chars"] == 5
     assert row["quality"]["training_eligible"] is False
     assert row["quality"]["v5_label_status"] == "needs_review"
+
+
+def _grounded_pkt(**over):
+    base = dict(
+        anchors=["n1"], question="Can Dijkstra handle a negative edge?",
+        task_frame_items=0, task_type="direct_judgment",
+        controller_task_family="algorithm_applicability", plan=[], plan_tree_summary=None,
+        tool_log=[], cot_log=[], hypotheses={}, failures=[], objects={},
+        procedure_invocations=[],
+        micro_steps=[{"index": 1, "subgoal": "answer_question",
+                      "subgoal_signature": "sig", "action": "REUSE",
+                      "sufficient": True, "filled_slots": ["answer"]}],
+        scoped_patches=[],
+        answer_raw="Dijkstra requires non-negative edge weights.",
+        answer="Dijkstra requires non-negative edge weights.",
+        explanation="", reflection=None, steps=1, max_steps=4, tool_call_count=0,
+        elapsed_sec=0.1, finalized=True, execution_mode="finalize",
+        shortcut_anchor_ids=["n1"], citation_warnings=0, search_repeats=0,
+        activation_signals=0, coverage_addressed_pct=1.0, coverage_rounds=0,
+        subgoal_reuse_count=0, slot_fill_stats={}, controller_action_counts={},
+        controller_fallback_used=False, polish_applied=False, budget_summary=None,
+        meta_signals=[], graph_edits=[], graph_edits_applied=False,
+        scoped_patch_summary={}, reflection_edits=[], reflection_applied=False,
+        nodes_accessed_log=[{"node_id": "n1", "node_type": "fact", "step": 1,
+                             "reason": "anchor_retrieval"}],
+        session_dir="session", controller_raw_trace=[], controller_call_count=1,
+        controller_total_elapsed_sec=0.2, controller_nonempty_turns=1,
+        finalization_quality={"training_eligible": True},
+    )
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+def test_v2_grounding_normalizes_brief_support_and_subtasks():
+    g = MemoryGraph({"n1": Node(id="n1", node_type="fact",
+                                text="Dijkstra requires non-negative edge weights.",
+                                confidence=0.9)}, [])
+    row = packet_to_corpus_row(_grounded_pkt(), g)
+    v2 = row["v2_grounding"]
+    assert v2["task"] == "Can Dijkstra handle a negative edge?"
+    assert v2["artifact_kind"] == "graph_node"
+    assert v2["brief"]["retrieved_ids"] == ["n1"]
+    assert v2["brief"]["anchor_ids"] == ["n1"]
+    assert v2["brief"]["retrieved_by_reason"]["anchor_retrieval"] == ["n1"]
+    assert v2["support_ids"] == ["n1"]            # answer overlaps node -> support kept
+    assert v2["overrides_graph"] is False
+    assert len(v2["subtasks"]) == 1 and v2["subtasks"][0]["goal"] == "answer_question"
+    assert v2["verifier"]["finalized"] is True and v2["verifier"]["label_status"] == "positive"
+
+
+def test_v2_grounding_drops_support_on_override():
+    # answer shares ~no content with the support node -> false grounding
+    g = MemoryGraph({"n1": Node(id="n1", node_type="fact",
+                                text="Photosynthesis converts light into chemical energy.",
+                                confidence=0.9)}, [])
+    row = packet_to_corpus_row(_grounded_pkt(), g)
+    v2 = row["v2_grounding"]
+    assert v2["overrides_graph"] is True
+    assert v2["support_ids"] == []                # override -> no support
+    assert v2["verifier"]["label_status"] == "unsupported"

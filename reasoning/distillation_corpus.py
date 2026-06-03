@@ -147,6 +147,65 @@ def _controller_raw_trace_summary(raw_trace: list[Dict[str, Any]]) -> list[Dict[
 
 
 
+def _build_v2_grounding(
+    pkt: "V4Packet",
+    anchor_records: list,
+    answer_support_ids: list,
+    answer_overrides_graph: bool,
+    label_status: str,
+) -> Dict[str, Any]:
+    """Normalize the trace into the V5 v2 ``(task + brief -> solution + support)`` shape.
+
+    Additive view (does not touch existing fields). Re-projects the already-computed
+    micro_steps + nodes_accessed_log + answer_support_ids into the form v2 training
+    consumes: a per-subtask ledger, the assembled BRIEF (everything retrieved), and
+    the SUPPORT subset the solution actually used (override-aware). During the STEM
+    grounding phase a graph NODE is the artifact stand-in (``artifact_kind``); when the
+    grower re-points at code these become api_card/symbol ids with the same shape.
+    See V5_V2_DESIGN.md §6/§9.
+    """
+    nlog = list(getattr(pkt, "nodes_accessed_log", []) or [])
+    retrieved_ids = list(dict.fromkeys(
+        e.get("node_id") for e in nlog if isinstance(e, dict) and e.get("node_id")))
+    by_reason: Dict[str, list] = {}
+    for e in nlog:
+        if isinstance(e, dict) and e.get("node_id"):
+            by_reason.setdefault(str(e.get("reason", "?")), []).append(e["node_id"])
+
+    subtasks = []
+    for ms in (getattr(pkt, "micro_steps", []) or []):
+        m = ms if isinstance(ms, dict) else _serialize_obj(ms)
+        subtasks.append({
+            "index": m.get("index"),
+            "goal": m.get("subgoal"),
+            "signature": m.get("subgoal_signature"),
+            "action": m.get("action"),
+            "sufficient": m.get("sufficient"),
+            "filled_slots": m.get("filled_slots", []),
+        })
+
+    return {
+        "task": getattr(pkt, "question", ""),
+        # STEM phase: a graph node stands in for a code artifact. Re-pointing the
+        # grower at code swaps this to api_card/symbol/exemplar, same schema.
+        "artifact_kind": "graph_node",
+        "brief": {
+            "anchor_ids": [a["id"] for a in anchor_records],
+            "retrieved_ids": retrieved_ids,
+            "retrieved_by_reason": by_reason,
+        },
+        "support_ids": list(answer_support_ids),
+        "overrides_graph": bool(answer_overrides_graph),
+        "subtasks": subtasks,
+        "solution": getattr(pkt, "answer", "") or getattr(pkt, "answer_raw", ""),
+        "verifier": {
+            "finalized": bool(getattr(pkt, "finalized", False)),
+            "coverage_pct": getattr(pkt, "coverage_addressed_pct", None),
+            "label_status": label_status,
+        },
+    }
+
+
 def packet_to_corpus_row(
     pkt: "V4Packet",
     graph: "MemoryGraph",
@@ -226,6 +285,12 @@ def packet_to_corpus_row(
             if _grounding_overlap < _OVERRIDE_OVERLAP_THRESHOLD:
                 answer_overrides_graph = True
                 answer_support_ids = []   # false grounding -> no support label
+
+    v5_label_status = (
+        "unsupported" if answer_overrides_graph
+        else "positive" if training_eligible
+        else "needs_review"
+    )
 
     row: Dict[str, Any] = {
         # ── envelope ──
@@ -318,11 +383,7 @@ def packet_to_corpus_row(
             "coverage_pct": pkt.coverage_addressed_pct,
             "had_polish": pkt.polish_applied,
             "training_eligible": training_eligible,
-            "v5_label_status": (
-                "unsupported" if answer_overrides_graph
-                else "positive" if training_eligible
-                else "needs_review"
-            ),
+            "v5_label_status": v5_label_status,
             "answer_overrides_graph": answer_overrides_graph,
             "finalization_quality": finalization_quality,
             # Crude "interesting" heuristic: hard tasks tend to produce
@@ -362,6 +423,14 @@ def packet_to_corpus_row(
             # Schema version so Phase 16 pipeline can detect V1 vs V2 rows.
             "corpus_schema_version": CORPUS_SCHEMA_VERSION,
         },
+
+        # ── V5 v2: normalized (task + brief -> solution + support) grounding view ──
+        # Additive re-projection of the trace into the shape v2 training consumes
+        # (per-subtask ledger + assembled brief + override-aware support). Graph
+        # node = code-artifact stand-in for now. See V5_V2_DESIGN.md.
+        "v2_grounding": _build_v2_grounding(
+            pkt, anchor_records, answer_support_ids, answer_overrides_graph, v5_label_status
+        ),
     }
     if extra_metadata:
         row["extra"] = dict(extra_metadata)
