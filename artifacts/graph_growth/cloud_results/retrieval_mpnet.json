@@ -1,0 +1,19 @@
+{
+  "queries_scored": 78,
+  "MRR": 0.4695,
+  "Recall@k": {
+    "1": 0.0921,
+    "5": 0.2808,
+    "10": 0.3445,
+    "20": 0.4383
+  },
+  "Hit@k": {
+    "1": 0.3846,
+    "5": 0.5513,
+    "10": 0.6154,
+    "20": 0.6795
+  },
+  "embedder": "mpnet",
+  "model": "default",
+  "graph": "graphs/grown_graph4.json"
+}

@@ -1,0 +1,31 @@
+device=cuda  embedder=all-mpnet-base-v2  lm=Qwen/Qwen3.5-4B
+
+subgraph nodes (10):
+  bsearch_strategy                   strategy         status=uncertain
+  unsorted_array_failure             failure_pattern  status=uncertain
+  bsearch_applicability_epi          epistemic_state  status=uncertain
+  sorted_precondition_verified       epistemic_state  status=verified
+  max_subarray_problem_definition    fact             status=-
+  subarray_must_be_contiguous        fact             status=-
+  subarray_must_be_nonempty          fact             status=-
+  brute_force_baseline_n_squared     fact             status=-
+  brute_force_triple_loop_false      claim            status=-
+  kadane_local_decision              fact             status=-
+
+embedding nodes with mpnet...
+Loading weights:   0%|                                                                                                                        | 0/199 [00:00<?, ?it/s]Loading weights: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████| 199/199 [00:00<00:00, 7657.14it/s]
+  embedded 10 nodes, dim=768
+
+loading frozen LM Qwen/Qwen3.5-4B...
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/workspace/Agentic-Graph-Reasoner/v5/realstack_test.py", line 224, in <module>
+    run(args.graph, args.model, args.device)
+  File "/workspace/Agentic-Graph-Reasoner/v5/realstack_test.py", line 146, in run
+    lm_dim = cfg.hidden_size
+             ^^^^^^^^^^^^^^^
+  File "/venv/main/lib/python3.12/site-packages/transformers/configuration_utils.py", line 434, in __getattribute__
+    return super().__getattribute__(key)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'Qwen3_5Config' object has no attribute 'hidden_size'

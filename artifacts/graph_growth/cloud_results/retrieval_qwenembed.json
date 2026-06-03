@@ -1,0 +1,19 @@
+{
+  "queries_scored": 78,
+  "MRR": 0.4886,
+  "Recall@k": {
+    "1": 0.0924,
+    "5": 0.2963,
+    "10": 0.3858,
+    "20": 0.4918
+  },
+  "Hit@k": {
+    "1": 0.3974,
+    "5": 0.6282,
+    "10": 0.6667,
+    "20": 0.7179
+  },
+  "embedder": "st-embed",
+  "model": "Qwen/Qwen3-Embedding-0.6B",
+  "graph": "graphs/grown_graph4.json"
+}
