@@ -154,7 +154,10 @@ class GraphAttentionInjector:
             return output
 
         self._plan_hook_calls += 1
-        h_anchor = h[:, -1, :]   # [B, d_lm] — last token, not first
+        # dtype seam: a 4-bit/bf16 frozen LM emits bf16 hidden states; the adapter is
+        # fp32 (trainable-stability). Cast in -> run fp32 adapter -> cast out.
+        adapter_dtype = next(self.adapter.parameters()).dtype
+        h_anchor = h[:, -1, :].to(adapter_dtype)   # [B, d_lm]
 
         h_updated, state, logs = self.adapter.run_planning(
             h=h_anchor,
@@ -168,7 +171,7 @@ class GraphAttentionInjector:
         self._loop_logs.extend(logs)
 
         h_new = h.clone()
-        h_new[:, -1, :] = h_updated   # write back to last position
+        h_new[:, -1, :] = h_updated.to(h.dtype)   # write back to last position (LM dtype)
         if isinstance(output, tuple):
             return (h_new,) + output[1:]
         return h_new
@@ -194,7 +197,8 @@ class GraphAttentionInjector:
             return output
 
         self._evid_hook_calls += 1
-        h_anchor = h[:, -1, :]   # [B, d_lm]
+        adapter_dtype = next(self.adapter.parameters()).dtype
+        h_anchor = h[:, -1, :].to(adapter_dtype)   # [B, d_lm] (cast bf16 LM -> adapter dtype)
 
         h_updated, state, logs = self.adapter.run_evidence(
             h=h_anchor,
@@ -208,7 +212,7 @@ class GraphAttentionInjector:
         self._loop_logs.extend(logs)
 
         h_new = h.clone()
-        h_new[:, -1, :] = h_updated
+        h_new[:, -1, :] = h_updated.to(h.dtype)   # write back in LM dtype
         if isinstance(output, tuple):
             return (h_new,) + output[1:]
         return h_new
