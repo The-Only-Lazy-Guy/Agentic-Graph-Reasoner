@@ -97,7 +97,7 @@ def build_examples(rows: Sequence[dict], id2text: Dict[str, str], num_hard: int 
 
 
 def train(rows: List[dict], node_paths, base: str, out: str, *, epochs: int = 2,
-          batch_size: int = 32, lr: float = 2e-5, max_seq: int = 256, num_hard: int = 2,
+          batch_size: int = 32, lr: float = 2e-5, max_seq: int = 256, num_hard: int = 0,
           eval_frac: float = 0.15, heldout_out: str = "data/swe/retrieval_gold_heldout.jsonl") -> str:
     import random
     from torch.utils.data import DataLoader
@@ -145,10 +145,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--nodes", nargs="+", required=True, help="add_node candidate jsonl(s) for node text")
     ap.add_argument("--base", default="Qwen/Qwen3-Embedding-0.6B")
     ap.add_argument("--out", default="models/ranker-code")
-    ap.add_argument("--epochs", type=int, default=4)
+    ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--lr", type=float, default=2e-5)
-    ap.add_argument("--num-hard", type=int, default=2, help="hard negatives per positive (needs --traces)")
+    ap.add_argument("--num-hard", type=int, default=0,
+                    help="hard negatives per positive (needs --traces). LOCKED default 0: the A40 A/B "
+                         "(2026-06-03) showed hard negs gave NO clean win over in-batch (bottleneck = "
+                         "query<->symbol semantic gap, not negative quality). Set >0 to re-enable.")
     ap.add_argument("--eval-frac", type=float, default=0.15, help="held-out query fraction (0=off)")
     ap.add_argument("--heldout-out", default="data/swe/retrieval_gold_heldout.jsonl")
     args = ap.parse_args(argv)

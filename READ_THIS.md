@@ -3,8 +3,51 @@
 > At-a-glance dump of the latest runs (raw outputs, numbers, repro commands) so
 > you don't have to dig through commits/logs. Updated each working session.
 
-**Last updated:** 2026-06-02
+**Last updated:** 2026-06-03
 **HEAD:** latest pushed commit on branch `main`
+
+---
+
+## Session update (2026-06-03b) — #2 ranker CLOSED (config locked) + hard-neg verdict + #3 deps
+
+**#2 (trained retrieval ranker) is DONE — locked, stop tuning it.**
+
+- **Confirmed (2nd A40 run):** the ranker beats raw retrieval again. Leakage-free
+  held-out (114 q, SAME held-out set within the run — the only valid comparison):
+  raw Qwen-embed Hit@1 0.132 / Hit@5 0.377 / Hit@10 0.474 / Hit@20 0.526 / MRR 0.238
+  → **ranker Hit@1 0.175 / Hit@5 0.404 / Hit@10 0.500 / Hit@20 0.640 / MRR 0.284.**
+  Lift biggest on Hit@1 (+32% rel), MRR (+19%), Hit@20 (+11 pts). Thesis re-proven.
+- **Hard-negatives VERDICT = no clean win.** This run (hard-neg, 4ep) scored ranker
+  0.404 / MRR 0.284 / Hit@1 0.175; the prior run (in-batch, 2ep) scored 0.414 / 0.300 /
+  0.190. **Do NOT read 0.404-vs-0.414 as a regression** — the two runs use DIFFERENT
+  held-out splits (114 vs 116 q; rows changed → different shuffle), so cross-run
+  absolute deltas at ~115 q are split noise, not signal. Within each run the ranker
+  beats raw; that's the robust claim. Hard negs neither clearly helped nor hurt.
+- **Root cause of the plateau (the real signal):** the bottleneck is the
+  **query↔symbol semantic gap** — query = bug-symptom issue, target = bare `def`
+  signature, low overlap. Negative-sampling tricks don't close that gap → diminishing
+  returns. The gap is closed by **#3 strategy nodes** (behavior-level text matches the
+  issue) + **graph-topology rerank** (strategy `leveraged`→symbol edges), NOT by more
+  ranker tuning.
+- **Config LOCKED** (`train_ranker.py` + `scripts/cloud_run.sh`): in-batch negatives,
+  2 epochs (`--num-hard 0 --epochs 2`, now the defaults). Hard-neg code path stays,
+  re-enable via `NUM_HARD>0`/`--num-hard`. Ship ranker as the v2 retrieval baseline
+  (~Hit@5 0.40 / MRR 0.28 held-out).
+
+**#3 (strategy-node distiller) deps — for the cheap CPU box (no GPU):**
+- python libs: **`datasets`** (swe_load.load_dataset — was MISSING from
+  `requirements-datagen.txt`), `huggingface_hub`, + `sentence-transformers`/`numpy`/
+  `requests` (pulled at import of answerer_v4 controller). NO torch-cuda / transformers /
+  bitsandbytes / torch_geometric — #3 is pure data-gen.
+- non-pip: **git CLI** (swe_grounded shells git to checkout repo@base_commit) +
+  **opencode CLI** (`npm i -g opencode-ai`, Node 18+, model API key) — or `--backend codex`.
+- output: `swe_strategy_candidates.jsonl` (strategy nodes + `leveraged` edges → support
+  symbols). Candidates only — apply onto a `code_graph.json` next.
+
+**Next after #3 lands:** build `code_graph.json` (apply symbol candidates → grown) →
+apply strategy candidates → **graph-topology rerank eval** (issue → strategy match →
+1-hop to symbols, vs raw bi-encoder Hit@5 0.40). That's the test of whether the
+semantic gap actually closes.
 
 ---
 

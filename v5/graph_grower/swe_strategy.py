@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -31,13 +32,51 @@ STRATEGY_SYS = (
     "  - the fix STRATEGY as a `strategy` node: a GENERALIZABLE lesson of the form "
     "'to fix <bug-class>, <approach>' -- reusable on OTHER code, not specific to this repo;\n"
     "  - the resolved approach as a `solved_subgoal` node.\n"
-    "Each node: one atomic, self-contained idea. Prefer general lessons over instance "
-    "details (no file paths / variable names unless essential).\n"
+    "Each node: one atomic, self-contained idea.\n"
+    "HARD RULE -- node text must TRANSFER to other codebases. The node TEXT must NOT "
+    "contain: file paths or '.py', function/class/variable names from this repo, "
+    "'self.', copied 'def ...(' signatures, or import lines. State the lesson in terms "
+    "of the BUG-CLASS and the APPROACH, not this repo's identifiers. The repo-specific "
+    "link is carried by the `leveraged` EDGE to the touched symbols, NOT by the text.\n"
+    "  GOOD strategy: 'to fix a name-collision when a key contains a separator char, "
+    "escape or reject the separator before using the key as a lookup path'.\n"
+    "  BAD strategy: 'fix register_blueprint in flask/app.py so self.blueprints handles "
+    "dotted names' (repo identifiers -> rejected).\n"
     "node_type one of: reasoning_atom, reasoning_chain, strategy, solved_subgoal.\n"
     "relation one of: chain_step, leveraged, supports, transfers_to.\n"
     'Output ONLY JSON: {"nodes":[{"id":"slug","node_type":"...","text":"..."}],'
     '"edges":[{"src":"slug","dst":"slug","relation":"..."}]}'
 )
+
+
+# High-precision leak markers: a strategy node TEXT containing any of these is
+# repo-specific (won't transfer) -> drop the node, keep the leveraged edge to the
+# real symbol (the edge is allowed to be specific; the text must be general).
+_LEAK_PAT = re.compile(
+    r"\.py\b"                                  # file extension
+    r"|\bself\."                               # attribute access
+    r"|\bdef\s+\w+\s*\("                       # copied signature
+    r"|\bimport\s+[\w.]+|\bfrom\s+[\w.]+\s+import\b"   # import lines
+    r"|/[\w./-]+\.\w+"                         # path-with-extension
+    r"|\b[a-zA-Z_]\w*\.[a-zA-Z_]\w*\.[a-zA-Z_]\w*",    # dotted module path a.b.c (alpha)
+    re.IGNORECASE,
+)
+
+
+# Node types that are RETRIEVAL ENTRIES (must transfer across repos) -> linted.
+# solved_subgoal is deliberately excluded: it's the instance resolution, grounded by edge.
+_LINT_TYPES = {"strategy", "reasoning_atom", "reasoning_chain"}
+
+
+def _is_leaky(text: str, repo: str = "") -> bool:
+    """True if node text carries repo-specific identifiers (path/self./signature/import/
+    dotted-module) or the repo's own org/project name verbatim -> not transferable."""
+    if not text:
+        return False
+    if _LEAK_PAT.search(text):
+        return True
+    low = text.lower()
+    return any(t in low for t in (p for p in re.split(r"[/_-]", repo.lower()) if len(p) > 3))
 
 
 def _build_user(inst: Dict[str, Any], support_sigs: List[str]) -> str:
@@ -72,15 +111,31 @@ def extract_strategy(inst: Dict[str, Any], controller, repo_root: str) -> List[D
     doc = Document(id=inst["instance_id"], text="", domain=inst["repo"], mode="cot")
     conformed = conform_edits(parse_extraction(raw), doc)
 
+    # GENERALITY GATE (type-aware): retrieval-entry nodes (strategy / reasoning_atom /
+    # chain) MUST transfer -> drop if repo-specific. solved_subgoal is the instance
+    # RESOLUTION (specificity is correct, grounded by its leveraged edge) -> not linted.
+    # Dropping a node drops its edges with it. See V5_V2_DESIGN.md / READ_THIS.
+    repo = inst.get("repo", "")
+    leaky_ids = {ne["node_id"] for ne in conformed["node_edits"]
+                 if ne.get("node_type") in _LINT_TYPES and _is_leaky(ne.get("text", ""), repo)}
+    kept_nodes = [ne for ne in conformed["node_edits"] if ne["node_id"] not in leaky_ids]
+    if leaky_ids:
+        print(f"    [leak] dropped {len(leaky_ids)}/{len(conformed['node_edits'])} "
+              f"repo-specific nodes ({inst['instance_id']})")
+    if not kept_nodes:
+        return []   # whole extraction leaked -> nothing transferable
+
     cands: List[Dict[str, Any]] = []
-    for idx, ne in enumerate(conformed["node_edits"]):
+    for idx, ne in enumerate(kept_nodes):
         ne["metadata"] = {**ne.get("metadata", {}), "swe_strategy": True,
                           "instance_id": inst["instance_id"]}
         cands.append(_to_candidate(ne, doc, idx))
     for idx, ee in enumerate(conformed["edge_edits"]):
-        cands.append(_to_candidate(ee, doc, idx + len(conformed["node_edits"])))
-    # link each new strategy/atom -> the support symbols (approach grounds onto code)
-    new_ids = [ne["node_id"] for ne in conformed["node_edits"]]
+        if ee.get("src") in leaky_ids or ee.get("dst") in leaky_ids:
+            continue   # edge touching a dropped node
+        cands.append(_to_candidate(ee, doc, idx + len(kept_nodes)))
+    # link each SURVIVING strategy/atom -> the support symbols (approach grounds onto code)
+    new_ids = [ne["node_id"] for ne in kept_nodes]
     for i, nid in enumerate(new_ids):
         for sid in support_ids:
             link = {"op": "add_edge", "src": nid, "dst": sid, "relation": "leveraged",

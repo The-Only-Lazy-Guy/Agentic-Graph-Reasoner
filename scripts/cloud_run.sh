@@ -84,16 +84,38 @@ HELDOUT="${HELDOUT:-data/swe/retrieval_gold_heldout.jsonl}"
 TRACES_ALL="$RES/code_traces_all.jsonl"
 cat data/swe/grounded_traces.jsonl data/swe/grounded_traces_verified.jsonl 2>/dev/null > "$TRACES_ALL" || true
 if [ "${TRAIN_RANKER:-0}" = "1" ] && [ -s "$TRACES_ALL" ]; then
+  # LOCKED config (2026-06-03 A40 A/B): in-batch negatives, 2 epochs. Hard negs + 4ep gave NO
+  # clean win (bottleneck = query<->symbol semantic gap, not negatives). Override to re-experiment.
   step train-ranker   python -m v5.graph_grower.train_ranker \
                         --traces "$TRACES_ALL" --nodes "$CODE_NODES" --base "$QWEN_EMB" \
-                        --out models/ranker-code --epochs "${RANKER_EPOCHS:-4}" \
-                        --num-hard "${NUM_HARD:-2}" --heldout-out "$HELDOUT"
+                        --out models/ranker-code --epochs "${RANKER_EPOCHS:-2}" \
+                        --num-hard "${NUM_HARD:-0}" --heldout-out "$HELDOUT"
   step code-base-held python -m v5.graph_grower.retrieval_eval --nodes-file "$CODE_NODES" \
                         --gold-file "$HELDOUT" --embedder st-embed --model "$QWEN_EMB" \
                         --out "$RES/retrieval_code_heldout_base.json"
   step code-ranker    python -m v5.graph_grower.retrieval_eval --nodes-file "$CODE_NODES" \
                         --gold-file "$HELDOUT" --embedder st-embed --model models/ranker-code \
                         --out "$RES/retrieval_code_heldout_ranker.json"
+fi
+
+# ---- 1c. TOPOLOGY RERANK (#3 payoff) — does the strategy->symbol bridge beat flat
+# retrieval on the MIXED/general pool (grown_graph4 STEM/algo/cs + code symbols +
+# strategy nodes, distractors present = real deploy condition)? Regenerates the
+# generality-filtered strategy set from the pushed shards first (deterministic).
+STRAT_S0="artifacts/graph_growth/swe_strategy_candidates_s0.jsonl"
+STRAT_S1="artifacts/graph_growth/swe_strategy_candidates_s1.jsonl"
+STRAT_CLEAN="$RES/swe_strategy_candidates_clean.jsonl"
+if [ "${TOPO_RERANK:-0}" = "1" ] && [ -f "$STRAT_S0" ]; then
+  step filter-strat python -m v5.graph_grower.filter_strategy_leaks \
+                      --in "$STRAT_S0" "$STRAT_S1" --out "$STRAT_CLEAN"
+  step topo-rerank  python -m v5.graph_grower.topo_rerank_eval \
+                      --graph "$GRAPH" \
+                      --nodes-file artifacts/graph_growth/swe_code_candidates.jsonl \
+                                   artifacts/graph_growth/swe_code_candidates_verified.jsonl \
+                                   "$STRAT_CLEAN" \
+                      --edges-file "$STRAT_CLEAN" \
+                      --gold-file "$CODE_GOLD" --embedder st-embed --model "$QWEN_EMB" \
+                      --alpha "${TOPO_ALPHA:-0.5}" --out "$RES/topo_rerank.json"
 fi
 
 # ---- 2. Qwen3.5 hybrid injection validation (frozen, 4-bit) ----
