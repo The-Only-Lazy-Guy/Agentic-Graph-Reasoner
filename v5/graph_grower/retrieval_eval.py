@@ -162,9 +162,17 @@ def embed_causal_hidden(texts: List[str], model_name: str, device) -> np.ndarray
 def embed_st(texts: List[str], model_name: str, device) -> np.ndarray:
     """A sentence-transformers embedding model (retrieval-trained), e.g.
     Qwen3-Embedding -- 'option 3': family-aligned AND trained for retrieval."""
+    import os
     from sentence_transformers import SentenceTransformer
-    mdl = SentenceTransformer(model_name, device=str(device))
-    emb = mdl.encode(texts, batch_size=32, normalize_embeddings=True,
+    try:
+        mdl = SentenceTransformer(model_name, device=str(device), trust_remote_code=True)
+    except TypeError:
+        mdl = SentenceTransformer(model_name, device=str(device))
+    # SWE-issue queries are long paragraphs; Qwen3-Embedding defaults to a huge
+    # max_seq -> O(seq^2) OOM. Cap it + a modest batch.
+    mdl.max_seq_length = int(os.environ.get("ST_MAX_SEQ", "512"))
+    bs = int(os.environ.get("ST_BATCH", "16"))
+    emb = mdl.encode(texts, batch_size=bs, normalize_embeddings=True,
                      show_progress_bar=False)
     return np.asarray(emb, dtype=np.float32)
 

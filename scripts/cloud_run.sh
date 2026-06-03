@@ -37,11 +37,13 @@ echo "=== GPU ==="
 python -c "import torch;print('cuda',torch.cuda.is_available(),'|',torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')" || true
 
 echo "=== installing deps ==="
-pip install -q -U transformers accelerate bitsandbytes sentence-transformers datasets numpy 2>&1 | tail -2 || \
-  echo "WARN: pip install had issues; continuing"
-# GNN dep for realstack (RGCNConv). torch_geometric base wheel has a pure-torch fallback.
-python -c "import torch_geometric" 2>/dev/null || pip install -q torch_geometric 2>&1 | tail -2 || \
-  echo "WARN: torch_geometric install failed; realstack will be skipped"
+DEPS="transformers accelerate bitsandbytes sentence-transformers datasets numpy torch_geometric"
+for i in 1 2 3; do
+  pip install -q --no-cache-dir -U $DEPS 2>&1 | tail -2 && break || { echo "pip attempt $i failed (network?); retrying"; sleep 5; }
+done
+# hard check: a broken install would just fail every step below -> abort loudly instead.
+python -c "import transformers, sentence_transformers, torch" 2>/dev/null || {
+  echo "FATAL: core deps missing after install. Run: pip install -U $DEPS  then re-run."; exit 1; }
 
 step() {  # label, cmd...
   local label="$1"; shift
