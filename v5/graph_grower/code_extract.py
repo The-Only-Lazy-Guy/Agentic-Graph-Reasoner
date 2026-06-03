@@ -51,7 +51,10 @@ def _summary(node: ast.AST) -> str:
         doc = ast.get_docstring(node)
     except Exception:
         doc = None
-    return (doc.strip().splitlines()[0] if doc else "")[:160]
+    if not doc:
+        return ""
+    lines = doc.strip().splitlines()   # whitespace-only docstring -> empty list
+    return (lines[0] if lines else "")[:160]
 
 
 def extract_file(abs_path: str | Path, repo: str = "", rel: Optional[str] = None

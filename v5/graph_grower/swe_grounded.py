@@ -103,7 +103,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     seen_node = set()
     ok = 0
     for inst in insts:
-        r = build_instance(inst, args.repo_root)
+        try:
+            r = build_instance(inst, args.repo_root)
+        except Exception as e:   # noqa: BLE001 -- one bad file must not kill the whole run
+            print(f"  ERR  {inst['instance_id']}: {repr(e)[:80]}"); continue
         if r is None:
             print(f"  SKIP {inst['instance_id']} (no py files / checkout / parse)"); continue
         ok += 1
