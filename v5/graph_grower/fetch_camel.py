@@ -81,25 +81,34 @@ def stream_camel(
     round-robin <= ``per_subtopic`` docs per sub_topic so the batch spans many
     topics. Stops scanning early once enough distinct sub_topics are collected.
     """
-    from datasets import load_dataset  # lazy: only needed when actually fetching
+    import io
+    import zipfile
+    from huggingface_hub import hf_hub_download  # lazy: only when actually fetching
 
     dataset = DATASET_MAP.get(domain.lower())
     if dataset is None:
         raise ValueError(f"unknown camel domain {domain!r}; choose from {sorted(DATASET_MAP)}")
-    # NON-streaming: camel-ai is ordered by topic (one giant block per sub_topic),
-    # so streaming first-N / scan gives a single cluster. Load the (cached) table
-    # once and bucket all rows in memory -> true round-robin diversity, fast.
-    ds = load_dataset(dataset, split="train")
+    # camel-ai science sets are legacy SCRIPT datasets (a <name>.zip of 20k per-row
+    # JSONs + a loader .py). datasets.load_dataset runs that script and hangs; instead
+    # pull the single zip directly and read it. The zip is NOT topic-ordered across
+    # files, so bucketing by sub_topic + round-robin gives true diversity.
+    zip_name = dataset.split("/")[-1] + ".zip"
+    zip_path = hf_hub_download(repo_id=dataset, filename=zip_name, repo_type="dataset")
 
     buckets: "OrderedDict[str, List[Dict[str, Any]]]" = OrderedDict()
-    for idx, row in enumerate(ds):
-        doc = row_to_doc(row, idx, domain=_canon(domain), keywords=keywords,
-                         min_solution_chars=min_solution_chars)
-        if doc is None:
-            continue
-        b = buckets.setdefault(doc["meta"].get("sub_topic") or "?", [])
-        if len(b) < per_subtopic:
-            b.append(doc)
+    with zipfile.ZipFile(zip_path) as z:
+        for idx, name in enumerate(n for n in z.namelist() if n.endswith(".json")):
+            try:
+                row = json.load(io.BytesIO(z.read(name)))
+            except (json.JSONDecodeError, KeyError):
+                continue
+            doc = row_to_doc(row, idx, domain=_canon(domain), keywords=keywords,
+                             min_solution_chars=min_solution_chars)
+            if doc is None:
+                continue
+            b = buckets.setdefault(doc["meta"].get("sub_topic") or "?", [])
+            if len(b) < per_subtopic:
+                b.append(doc)
 
     # round-robin: one per sub_topic per tier, so diversity comes first
     emitted = 0
