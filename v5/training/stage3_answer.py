@@ -69,7 +69,8 @@ def answer_nll(model, tok, injector, s, device, inject: bool):
 
 
 def run(model_name, corpus, graph_path=None, e1=100, e2a=80, e2b=80, e3=2,
-        lr3=1e-4, n_train=150, n_eval=60, device_str=None):
+        lr3=1e-4, n_train=150, n_eval=60, device_str=None,
+        adapter_ckpt="artifacts/stage_cache/adapter_code.pt", retrain=False):
     device = torch.device(device_str or ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"device={device}  lm={model_name}  corpus={corpus}")
 
@@ -82,17 +83,26 @@ def run(model_name, corpus, graph_path=None, e1=100, e2a=80, e2b=80, e3=2,
         p.requires_grad_(False)
     goal_enc = GoalEncoder().to(device).eval()
 
+    import os
     gpath = graph_path or _graph_path()
     graph = load_persisted_graph(gpath)
-    pos = corpus_to_stage1_examples(corpus, gnn=gnn, embedder=embedder, h_init_provider=provider,
-                                    device=device, lm_dim=lm_dim, graph_path=gpath, hops=1)
     adapter = V5AttentionAdapter(r_plan=3, r_evidence=4, lm_hidden_dim=lm_dim, gate_init=GATE_INIT).to(device)
 
-    print("\n--- Stages 1/2: routing-correct adapter ---")
-    Stage1Trainer(adapter, Stage1Config(epochs=e1, lr=1e-3)).train(pos)
-    Stage2Trainer(adapter, Stage2Config(sub_stage="2A", epochs=e2a, lr=2e-4)).train(pos)
-    Stage2Trainer(adapter, Stage2Config(sub_stage="2B", epochs=e2b, lr=1e-4,
-                                        lambda_delta=1.0, qkv_lr_scale=0.3)).train(pos)
+    if adapter_ckpt and os.path.exists(adapter_ckpt) and not retrain:
+        adapter.load_state_dict(torch.load(adapter_ckpt, map_location=device))
+        print(f"loaded adapter checkpoint {adapter_ckpt}  ->  SKIP stages 1/2 + h_init build")
+    else:
+        print("\n--- building examples (LM h_init, slow) + Stages 1/2 ---")
+        pos = corpus_to_stage1_examples(corpus, gnn=gnn, embedder=embedder, h_init_provider=provider,
+                                        device=device, lm_dim=lm_dim, graph_path=gpath, hops=1)
+        Stage1Trainer(adapter, Stage1Config(epochs=e1, lr=1e-3)).train(pos)
+        Stage2Trainer(adapter, Stage2Config(sub_stage="2A", epochs=e2a, lr=2e-4)).train(pos)
+        Stage2Trainer(adapter, Stage2Config(sub_stage="2B", epochs=e2b, lr=1e-4,
+                                            lambda_delta=1.0, qkv_lr_scale=0.3)).train(pos)
+        if adapter_ckpt:
+            os.makedirs(os.path.dirname(adapter_ckpt) or ".", exist_ok=True)
+            torch.save(adapter.state_dict(), adapter_ckpt)
+            print(f"saved adapter -> {adapter_ckpt}  (reuse with --adapter-ckpt; --retrain to refresh)")
 
     injector = GraphAttentionInjector(adapter, gnn, goal_enc, device=device)
     samples = Phase15Dataset(corpus).samples
@@ -148,8 +158,12 @@ def main(argv=None):
     ap.add_argument("--n-train", type=int, default=150)
     ap.add_argument("--n-eval", type=int, default=60)
     ap.add_argument("--device", default=None)
+    ap.add_argument("--adapter-ckpt", default="artifacts/stage_cache/adapter_code.pt",
+                    help="save/load the stages-1/2 adapter here -> skip retraining on reruns")
+    ap.add_argument("--retrain", action="store_true", help="force re-run stages 1/2 (refresh checkpoint)")
     a = ap.parse_args(argv)
-    run(a.model, a.corpus, a.graph, a.e1, a.e2a, a.e2b, a.e3, a.lr3, a.n_train, a.n_eval, a.device)
+    run(a.model, a.corpus, a.graph, a.e1, a.e2a, a.e2b, a.e3, a.lr3, a.n_train, a.n_eval, a.device,
+        adapter_ckpt=a.adapter_ckpt, retrain=a.retrain)
 
 
 if __name__ == "__main__":
