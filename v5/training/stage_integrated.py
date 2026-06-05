@@ -39,9 +39,10 @@ CORPUS = "artifacts/phase15/phase15_corpus.jsonl"
 DEFAULT_LM = "Qwen/Qwen2.5-1.5B"
 
 
-def run(model_name=DEFAULT_LM, device_str=None, e1=200, e2a=120, e2b=120, n_perturb=20):
+def run(model_name=DEFAULT_LM, device_str=None, e1=200, e2a=120, e2b=120, n_perturb=20,
+        corpus=CORPUS, graph_path=None):
     device = torch.device(device_str or ("cuda" if torch.cuda.is_available() else "cpu"))
-    print(f"device={device}  lm={model_name}")
+    print(f"device={device}  lm={model_name}  corpus={corpus}")
 
     provider = FrozenQwenHInitProvider(model_name, device=device)
     model, tok = provider.model, provider.tok
@@ -52,9 +53,9 @@ def run(model_name=DEFAULT_LM, device_str=None, e1=200, e2a=120, e2b=120, n_pert
         p.requires_grad_(False)
     goal_enc = GoalEncoder().to(device).eval()
 
-    gpath = _graph_path()
+    gpath = graph_path or _graph_path()
     graph = load_persisted_graph(gpath)
-    pos = corpus_to_stage1_examples(CORPUS, gnn=gnn, embedder=embedder,
+    pos = corpus_to_stage1_examples(corpus, gnn=gnn, embedder=embedder,
                                     h_init_provider=provider, device=device,
                                     lm_dim=lm_dim, graph_path=gpath, hops=1)
     negs = make_real_negatives(provider, embedder, gnn, graph, device, lm_dim, pos[0])
@@ -101,7 +102,7 @@ def run(model_name=DEFAULT_LM, device_str=None, e1=200, e2a=120, e2b=120, n_pert
     print("\n" + "=" * 60)
     print(f"PERTURBATION (integrated adapter, {n_perturb} q):")
     injector = GraphAttentionInjector(adapter.eval(), gnn, goal_enc, device=device)
-    samples = Phase15Dataset(CORPUS).samples[:n_perturb]
+    samples = Phase15Dataset(corpus).samples[:n_perturb]
     pa = evaluate_injection(model, tok, embedder, injector, graph, samples, device, max_new_tokens=60)
     print("AGGREGATE:", {k: (round(v, 3) if isinstance(v, float) else v) for k, v in pa.items()})
 
@@ -137,5 +138,7 @@ if __name__ == "__main__":
     ap.add_argument("--e2a", type=int, default=120)
     ap.add_argument("--e2b", type=int, default=120)
     ap.add_argument("--n-perturb", type=int, default=20)
+    ap.add_argument("--corpus", default=CORPUS, help="phase15 corpus (code: data/swe/code_phase15_corpus.jsonl)")
+    ap.add_argument("--graph", default=None, help="persisted graph for negatives (code: graphs/grown_graph4.json)")
     a = ap.parse_args()
-    run(a.model, a.device, a.e1, a.e2a, a.e2b, a.n_perturb)
+    run(a.model, a.device, a.e1, a.e2a, a.e2b, a.n_perturb, corpus=a.corpus, graph_path=a.graph)
