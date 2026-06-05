@@ -66,29 +66,27 @@ def _trie_processor_cls():
     return TrieConstraint
 
 
-def constrained_select(model, tok, prompt: str, candidates: List[str],
-                       max_new: int = 24) -> str:
-    """Greedy-generate constrained to the candidate-symbol trie -> returns one candidate."""
+def _cand_logprob(model, tok, prompt_ids, cand: str) -> float:
+    """Length-normalized log P(cand | prompt) under the LM."""
     import torch
-    from transformers import LogitsProcessorList
-    enc = tok(prompt, return_tensors="pt").to(model.device)
-    plen = enc["input_ids"].shape[1]
-    # candidate -> token ids (no special tokens); leading space variants help BPE
-    seqs, by_first = [], {}
-    for c in candidates:
-        ids = tok.encode(c, add_special_tokens=False)
-        if ids:
-            seqs.append(ids); by_first.setdefault(tuple(ids), c)
-    trie = build_trie(seqs)
-    Proc = _trie_processor_cls()
-    proc = LogitsProcessorList([Proc(trie, plen, tok.eos_token_id)])
+    c_ids = tok(" " + cand, add_special_tokens=False, return_tensors="pt").input_ids.to(model.device)
+    full = torch.cat([prompt_ids, c_ids], dim=1)
     with torch.no_grad():
-        out = model.generate(**enc, max_new_tokens=max_new, do_sample=False,
-                             logits_processor=proc, pad_token_id=tok.pad_token_id or tok.eos_token_id)
-    gen_ids = out[0][plen:].tolist()
-    gen_ids = [t for t in gen_ids if t != tok.eos_token_id]
-    text = tok.decode(gen_ids, skip_special_tokens=True).strip()
-    return text
+        logits = model(full).logits                              # [1, L, V]
+    plen = prompt_ids.shape[1]
+    lp = torch.log_softmax(logits[0, plen - 1:-1, :], dim=-1)     # preds for cand positions
+    tok_lp = lp[torch.arange(c_ids.shape[1], device=lp.device), c_ids[0]]
+    return float(tok_lp.mean())
+
+
+def constrained_select(model, tok, prompt: str, candidates: List[str]) -> str:
+    """Output RESTRICTED to the candidate set by construction: rank candidates by LM
+    likelihood, return the best. valid-in-set is 1.0 trivially (we never leave the set).
+    This is the selection form of graph-gating; the trie/LogitsProcessor above is for the
+    harder IN-PATCH free-generation case (force exact symbol tokens mid-diff)."""
+    import torch
+    prompt_ids = tok(prompt, return_tensors="pt").input_ids.to(model.device)
+    return max(candidates, key=lambda c: _cand_logprob(model, tok, prompt_ids, c))
 
 
 PROMPT = ("A bug is reported below. From the candidate functions, output the single "
