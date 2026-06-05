@@ -63,6 +63,23 @@ def _gen(model, tok, q, device, max_new_tokens):
     return tok.decode(out[0][enc["input_ids"].shape[1]:], skip_special_tokens=True).strip()
 
 
+class _StubNode:
+    __slots__ = ("text", "node_type", "metadata", "confidence")
+    def __init__(self, text, ntype):
+        self.text = text; self.node_type = ntype; self.metadata = {}; self.confidence = 0.5
+
+
+def _stub_graph(sample):
+    """Minimal node-only graph from a Phase15Sample whose nodes aren't in the persisted
+    graph (CODE symbols vs the STEM graph) -> lets build_active_subgraph pool them by their
+    sample-provided type. No edges."""
+    class _G:
+        nodes = {nid: _StubNode(sample.node_texts.get(nid, ""), sample.node_types.get(nid, "fact"))
+                 for nid in sample.node_ids}
+        edges = []
+    return _G()
+
+
 def evaluate_injection(model, tok, embedder, injector, graph, samples, device, max_new_tokens=60):
     """Baseline vs injected generation over `samples`, using a (possibly trained)
     injector/adapter. Returns the aggregate dict. Shared by the random-init
@@ -70,11 +87,18 @@ def evaluate_injection(model, tok, embedder, injector, graph, samples, device, m
     catastrophic = hooks_ok = 0
     sims, rows = [], []
     for i, s in enumerate(samples):
-        node_ids = _neighborhood(graph, s.node_ids, hops=1, max_nodes=24)
-        node_ids = node_ids + [nid for nid in s.substrate_nodes
-                               if nid in graph.nodes and nid not in set(node_ids)]
-        text_emb = embedder.embed_nodes({nid: (getattr(graph.nodes[nid], "text", "") or "") for nid in node_ids})
-        injector.prepare_session(graph, node_ids, text_emb, s.task_frame, r_plan=3, r_evidence=4)
+        if sum(1 for nid in s.node_ids if nid in graph.nodes) >= 2:
+            g = graph
+            node_ids = _neighborhood(graph, s.node_ids, hops=1, max_nodes=24)
+            node_ids = node_ids + [nid for nid in s.substrate_nodes
+                                   if nid in graph.nodes and nid not in set(node_ids)]
+            text_emb = embedder.embed_nodes({nid: (getattr(graph.nodes[nid], "text", "") or "") for nid in node_ids})
+        else:
+            # CODE sample: nodes live in the sample (text+type), not the STEM graph -> stub
+            g = _stub_graph(s)
+            node_ids = list(s.node_ids)[:24]
+            text_emb = embedder.embed_nodes({nid: s.node_texts.get(nid, "") for nid in node_ids})
+        injector.prepare_session(g, node_ids, text_emb, s.task_frame, r_plan=3, r_evidence=4)
         base = _gen(model, tok, s.question, device, max_new_tokens)
         with injector.inject(model):
             inj = _gen(model, tok, s.question, device, max_new_tokens)
