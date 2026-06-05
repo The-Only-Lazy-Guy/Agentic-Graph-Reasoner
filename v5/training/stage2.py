@@ -232,7 +232,8 @@ class Stage2Trainer:
         loss = es.slot_state_r.sum() * 0.0
         if ex.slot_target is not None:
             req = _required_slot_idx(ex.task_frame)
-            loss = loss + F.binary_cross_entropy(es.slot_state_r[0, req], ex.slot_target[0, req])
+            if len(req) > 0:    # code tasks have no required slots -> empty BCE = nan value
+                loss = loss + F.binary_cross_entropy(es.slot_state_r[0, req], ex.slot_target[0, req])
         if ex.epi_target is not None:
             loss = loss + F.binary_cross_entropy(es.epistemic_confidence_r, ex.epi_target)
         if ex.shortcut_target is not None:
@@ -251,6 +252,8 @@ class Stage2Trainer:
                 loss, wr = self._step(ex)
                 mwr += wr
                 if loss.grad_fn is None:      # no supervised/penalty term this example
+                    continue
+                if not torch.isfinite(loss):  # safety: skip a degenerate row, keep mean clean
                     continue
                 self.opt.zero_grad(); loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.params, self.cfg.grad_clip)
