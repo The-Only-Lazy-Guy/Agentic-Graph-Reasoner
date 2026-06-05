@@ -83,6 +83,8 @@ class FrozenQwenHInitProvider:
         out = self.model(**enc, output_hidden_states=True)
         # output of transformer layer `anchor_layer` == hidden_states[anchor_layer + 1]
         h = out.hidden_states[self.anchor_layer + 1][:, -1, :]   # [1, hidden]
-        h = h.detach().to(self.device)
+        # LM is bf16 (Qwen3.5); the fp32 adapter consumes h_init in training -> cast here
+        # (the injection-eval path casts at the hook boundary instead, see adapter.py).
+        h = h.detach().to(self.device).float()
         self._cache[question] = h
         return h
