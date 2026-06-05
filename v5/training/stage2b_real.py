@@ -65,6 +65,12 @@ def make_real_negatives(provider, embedder, gnn, graph, device, lm_dim, sample):
     """Real negatives: no-graph questions with real h_init over an irrelevant
     subgraph. Correct behavior: diffuse attention, small write, fallback."""
     node_ids = _neighborhood(graph, sample.node_ids, hops=1, max_nodes=18)
+    if len(node_ids) < 2:
+        # the sample's nodes aren't in this graph (e.g. CODE symbols vs the STEM graph) ->
+        # the negative is an IRRELEVANT subgraph anyway: sample arbitrary graph nodes.
+        import random
+        all_ids = list(graph.nodes.keys())
+        node_ids = random.Random(0).sample(all_ids, min(18, len(all_ids))) if all_ids else []
     negative_task_frame = dict(sample.task_frame or {})
     negative_task_frame.update({
         "graph_context": "no_graph",
