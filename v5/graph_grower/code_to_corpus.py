@@ -29,13 +29,34 @@ from typing import Dict, List, Optional, Sequence
 from v5.graph_grower.swe_probe import load_node_texts
 
 
-def _node_type_of(nid: str, strat_ids: set) -> str:
-    # strategy/atom nodes -> PLANNING pool; code symbols -> EVIDENCE pool (typed `fact`)
-    return "strategy" if nid in strat_ids else "fact"
+PLANNING_TYPES = {"strategy", "reasoning_atom", "reasoning_chain"}   # -> PLANNING pool (L8)
+
+
+def load_strategy_by_instance(paths: Sequence[str]):
+    """strategy candidates -> ({instance_id: [(nid, node_type)]}, {nid: text}). Lets each
+    code row attach its OWN distilled strategy/reasoning nodes as PLANNING anchors so the
+    planning head (L8) trains (was 0 — code rows had no planning targets)."""
+    by_inst: Dict[str, List] = {}
+    id2text: Dict[str, str] = {}
+    for p in paths:
+        for line in Path(p).read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            e = json.loads(line).get("raw_edit", {})
+            if e.get("op") != "add_node":
+                continue
+            meta = e.get("metadata", {}) or {}
+            iid = meta.get("instance_id")
+            nid, nt = e.get("node_id"), e.get("node_type", "")
+            if iid and nid:
+                by_inst.setdefault(iid, []).append((nid, nt))
+                id2text[nid] = e.get("text", "") or ""
+    return by_inst, id2text
 
 
 def build_rows(trace_paths: Sequence[str], id2text: Dict[str, str],
-               strat_ids: set, max_answer: int = 4000) -> List[dict]:
+               strat_by_inst: Dict[str, List], max_answer: int = 4000) -> List[dict]:
     rows: List[dict] = []
     for tp in trace_paths:
         for line in Path(tp).read_text(encoding="utf-8").splitlines():
@@ -50,11 +71,15 @@ def build_rows(trace_paths: Sequence[str], id2text: Dict[str, str],
             retrieved = [s for s in ((v.get("brief") or {}).get("retrieved_ids") or []) if s in id2text]
             if not (issue and support):
                 continue
-            # subgraph node pool = support + retrieved brief (deduped, in-pool)
-            cand = list(dict.fromkeys(support + retrieved))
-            anchors = [{"id": nid, "text": id2text[nid], "node_type": _node_type_of(nid, strat_ids)}
-                       for nid in cand]
+            # this instance's distilled strategy/reasoning nodes -> PLANNING anchors (L8)
+            strat_nodes = [(nid, nt) for nid, nt in strat_by_inst.get(iid, []) if nid in id2text]
+            strat_type = {nid: nt for nid, nt in strat_nodes}
+            planning_ids = [nid for nid, nt in strat_nodes if nt in PLANNING_TYPES]
             sup_set = set(support)
+            # subgraph node pool = support + retrieved brief + this instance's strategy nodes
+            cand = list(dict.fromkeys(support + retrieved + [nid for nid, _ in strat_nodes]))
+            anchors = [{"id": nid, "text": id2text.get(nid, ""),
+                        "node_type": strat_type.get(nid, "fact")} for nid in cand]
             solution = v.get("solution")
             answer = (solution if isinstance(solution, str) else json.dumps(solution))[:max_answer]
             rows.append({
@@ -68,10 +93,11 @@ def build_rows(trace_paths: Sequence[str], id2text: Dict[str, str],
                     "candidate_node_ids": cand,
                     "support_target": {s: 1.0 for s in support},
                     "evidence_target": {s: 1.0 for s in support},
-                    "distractor_target": {c: 1.0 for c in cand if c not in sup_set},
-                    "planning_target": {s: 1.0 for s in support if s in strat_ids},
+                    "distractor_target": {c: 1.0 for c in retrieved if c not in sup_set and c not in strat_type},
+                    "planning_target": {nid: 1.0 for nid in planning_ids},
                     "diagnostics": {"source": "swe_code", "instance_id": iid,
-                                    "n_support": len(support), "n_cand": len(cand)},
+                                    "n_support": len(support), "n_cand": len(cand),
+                                    "n_planning": len(planning_ids)},
                 },
             })
     return rows
@@ -86,11 +112,10 @@ def main(argv=None) -> int:
     ap.add_argument("--out", default="data/swe/code_phase15_corpus.jsonl")
     args = ap.parse_args(argv)
 
-    id2text = load_node_texts(args.nodes)
-    strat_text = load_node_texts(args.strategy) if args.strategy else {}
-    id2text = {**strat_text, **id2text}          # strategy texts available for anchors too
-    strat_ids = set(strat_text)
-    rows = build_rows(args.traces, id2text, strat_ids)
+    sym_text = load_node_texts(args.nodes)
+    strat_by_inst, strat_text = load_strategy_by_instance(args.strategy) if args.strategy else ({}, {})
+    id2text = {**strat_text, **sym_text}          # both symbol + strategy texts for anchors
+    rows = build_rows(args.traces, id2text, strat_by_inst)
     if args.limit:
         rows = rows[: args.limit]
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
@@ -99,8 +124,11 @@ def main(argv=None) -> int:
             w.write(json.dumps(r, ensure_ascii=False) + "\n")
     n_sup = sum(len(r["v5_projection"]["support_target"]) for r in rows)
     n_dis = sum(len(r["v5_projection"]["distractor_target"]) for r in rows)
-    print(f"wrote {len(rows)} code rows -> {args.out}  "
-          f"(avg support {n_sup/max(1,len(rows)):.1f}, avg distractors {n_dis/max(1,len(rows)):.1f})")
+    n_pl = sum(len(r["v5_projection"]["planning_target"]) for r in rows)
+    n_with_pl = sum(1 for r in rows if r["v5_projection"]["planning_target"])
+    print(f"wrote {len(rows)} code rows -> {args.out}  (avg support {n_sup/max(1,len(rows)):.1f}, "
+          f"avg distractors {n_dis/max(1,len(rows)):.1f}, avg planning {n_pl/max(1,len(rows)):.1f}, "
+          f"rows-with-planning {n_with_pl}/{len(rows)})")
     return 0
 
 
