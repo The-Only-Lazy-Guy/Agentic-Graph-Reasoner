@@ -24,7 +24,27 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
 from v5.graph_grower.swe_load import load_instances
-from v5.graph_grower.swe_probe import load_traces, load_node_texts, _symbol_name
+from v5.graph_grower.swe_probe import load_node_texts, _symbol_name
+
+
+def load_traces_rich(paths: Sequence[str]) -> Dict[str, dict]:
+    """instance_id -> {issue, support_ids, retrieved_ids}. retrieved_ids (the brief's
+    top-k, which mixes support + non-support) gives realistic DISTRACTORS for the
+    selection test -- without them every candidate is gold and top1 is trivially 1.0."""
+    out: Dict[str, dict] = {}
+    for tp in paths:
+        for line in Path(tp).read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            r = json.loads(line)
+            v = r.get("v2_grounding") or {}
+            iid = r.get("instance_id") or v.get("instance_id")
+            if iid and v.get("support_ids"):
+                out[iid] = {"issue": v.get("task", ""),
+                            "support_ids": v.get("support_ids") or [],
+                            "retrieved_ids": (v.get("brief") or {}).get("retrieved_ids") or []}
+    return out
 
 
 # ── token trie + constraint ──────────────────────────────────────────────────
@@ -108,11 +128,15 @@ def main(argv=None) -> int:
     ap.add_argument("--out", default="artifacts/graph_growth/cloud_results/constrained_select.json")
     args = ap.parse_args(argv)
 
-    traces = load_traces(args.traces)
+    import random
+    rng = random.Random(0)
+    traces = load_traces_rich(args.traces)
     id2text = load_node_texts(args.nodes)
     insts = {t["instance_id"] for t in load_instances(args.dataset, args.split, limit=0)}
     ids = [i for i in traces if i in insts][: args.limit]
-    print(f"instances={len(ids)} | model={args.model}", flush=True)
+    # global distractor pool of symbol names (fallback when the brief has no extras)
+    pool = sorted({n for txt in id2text.values() if (n := _symbol_name(txt))})
+    print(f"instances={len(ids)} | distractor pool={len(pool)} | model={args.model}", flush=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tok = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
@@ -121,11 +145,16 @@ def main(argv=None) -> int:
     hit = 0; scored = 0; valid = 0; rows = []
     for k, iid in enumerate(ids):
         t = traces[iid]
-        gold = {_symbol_name(id2text[s]) for s in t["support_ids"] if s in id2text}
-        gold.discard("")
-        cands = sorted({_symbol_name(id2text[s]) for s in t["support_ids"] if s in id2text} - {""})
-        if len(cands) < 2 or not gold:
-            continue   # need a real choice
+        gold = {_symbol_name(id2text[s]) for s in t["support_ids"] if s in id2text} - {""}
+        # candidates = retrieved brief (support + non-support) + sampled distractors
+        cands = {_symbol_name(id2text[s]) for s in t.get("retrieved_ids", []) if s in id2text} - {""}
+        cands |= gold
+        if len(cands - gold) == 0 and pool:                 # brief had no distractors -> sample
+            cands |= set(rng.sample(pool, min(8, len(pool))))
+        non_gold = sorted((cands - gold) - {""})[:15]       # cap distractors (1 fwd each)
+        cands = sorted(set(non_gold) | gold)
+        if not gold or len(cands) < 2 or not (set(cands) - gold):
+            continue   # need a real choice with at least one distractor
         cands_str = "\n".join(f"  - {c}" for c in cands)
         pick = constrained_select(model, tok, PROMPT.format(issue=t["issue"][:2000], cands=cands_str), cands)
         scored += 1
@@ -133,18 +162,20 @@ def main(argv=None) -> int:
         valid += 1 if in_set else 0           # constrained -> should ALWAYS be in set
         ok = pick in gold
         hit += 1 if ok else 0
-        rows.append({"id": iid, "pick": pick, "gold": sorted(gold), "in_set": in_set, "hit": ok})
-        print(f"  [{k+1}/{len(ids)}] {iid:28} pick={pick:24} {'HIT' if ok else 'miss'}"
-              f"{'' if in_set else '  <- OFF-SET(bug)'}", flush=True)
+        rows.append({"id": iid, "pick": pick, "gold": sorted(gold), "hit": ok,
+                     "n_cand": len(cands), "n_gold": len(gold)})
+        print(f"  [{k+1}/{len(ids)}] {iid:28} {len(cands):2}cand pick={pick:24} {'HIT' if ok else 'miss'}", flush=True)
 
+    rand = sum(r["n_gold"] / r["n_cand"] for r in rows) / max(1, len(rows))
     res = {"scored": scored, "valid_in_set": valid, "top1_hit": hit,
            "valid_rate": round(valid / max(1, scored), 4),
-           "top1_acc": round(hit / max(1, scored), 4), "rows": rows}
+           "top1_acc": round(hit / max(1, scored), 4),
+           "random_baseline": round(rand, 4), "rows": rows}
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     json.dump(res, open(args.out, "w"), indent=2)
-    print(f"\nconstrained select: {scored} scored | valid-in-set {res['valid_rate']} "
-          f"(must be 1.0 = grounding GATE works) | top1 {res['top1_acc']} "
-          f"(weak-4B picks the right gated symbol)")
+    print(f"\nconstrained select: {scored} scored | valid-in-set {res['valid_rate']} (=1.0 by construction) "
+          f"| top1 {res['top1_acc']} vs random {res['random_baseline']} "
+          f"-> {'LIFTS' if res['top1_acc'] > res['random_baseline'] else 'NO lift'} (gated weak-4B picks right symbol)")
     return 0
 
 
