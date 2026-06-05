@@ -171,7 +171,12 @@ class GraphAttentionInjector:
         self._loop_logs.extend(logs)
 
         h_new = h.clone()
-        h_new[:, -1, :] = h_updated.to(h.dtype)   # write back to last position (LM dtype)
+        if getattr(self, "inject_all_positions", False):
+            # teacher-forced answer-loss (Stage 3): broadcast the grounding delta to ALL
+            # positions so every answer token is conditioned (last-token-only -> no effect).
+            h_new = h_new + (h_updated.to(h.dtype) - h[:, -1, :]).unsqueeze(1)
+        else:
+            h_new[:, -1, :] = h_updated.to(h.dtype)   # generation anchor: last position (LM dtype)
         if isinstance(output, tuple):
             return (h_new,) + output[1:]
         return h_new
@@ -212,7 +217,10 @@ class GraphAttentionInjector:
         self._loop_logs.extend(logs)
 
         h_new = h.clone()
-        h_new[:, -1, :] = h_updated.to(h.dtype)   # write back in LM dtype
+        if getattr(self, "inject_all_positions", False):
+            h_new = h_new + (h_updated.to(h.dtype) - h[:, -1, :]).unsqueeze(1)   # Stage-3 all-pos
+        else:
+            h_new[:, -1, :] = h_updated.to(h.dtype)   # generation anchor: last position
         if isinstance(output, tuple):
             return (h_new,) + output[1:]
         return h_new

@@ -105,6 +105,7 @@ def run(model_name, corpus, graph_path=None, e1=100, e2a=80, e2b=80, e3=2,
             print(f"saved adapter -> {adapter_ckpt}  (reuse with --adapter-ckpt; --retrain to refresh)")
 
     injector = GraphAttentionInjector(adapter, gnn, goal_enc, device=device)
+    injector.inject_all_positions = True   # teacher-forced answer-loss: condition ALL answer tokens
     samples = Phase15Dataset(corpus).samples
     train_s = samples[:n_train]
     eval_s = samples[n_train:n_train + n_eval]
