@@ -63,17 +63,22 @@ def run(model_name, traces_p, nodes_p, exemplars_p, adapter_ckpt, dataset, split
     exemplars = [json.loads(l) for l in Path(exemplars_p).read_text(encoding="utf-8").splitlines() if l.strip()]
     ex_ids = [e["instance_id"] for e in exemplars]
     ex_diff = {e["instance_id"]: e["diff"] for e in exemplars}
+    ex_repo = {e["instance_id"]: e.get("repo", "") for e in exemplars}
     print(f"exemplars={len(exemplars)} — embedding issues for retrieval...", flush=True)
     ev = embedder.embed_nodes({e["instance_id"]: e["issue"] for e in exemplars})
     ex_mat = np.stack([_unit(ev[i]) for i in ex_ids])           # [E, d]
 
-    def nearest(q_iid, q_issue):
+    def nearest(q_iid, q_issue, q_repo=""):
         qv = _unit(embedder.embed_nodes({"q": q_issue})["q"])
         order = np.argsort(-(ex_mat @ qv))
-        for j in order:
-            if ex_ids[j] != q_iid:                              # exclude self -> no leakage
-                return ex_ids[j], ex_diff[ex_ids[j]]
-        return None, ""
+        # prefer SAME-REPO exemplars (same codebase/conventions) -> far better adaptation;
+        # fall back to global nearest. Always exclude self (no leakage).
+        same = [j for j in order if ex_ids[j] != q_iid and ex_repo[ex_ids[j]] == q_repo]
+        pool = same if same else [j for j in order if ex_ids[j] != q_iid]
+        if not pool:
+            return None, ""
+        j = pool[0]
+        return ex_ids[j], ex_diff[ex_ids[j]]
 
     traces = load_traces(traces_p)
     id2text = load_node_texts(nodes_p)
@@ -95,7 +100,7 @@ def run(model_name, traces_p, nodes_p, exemplars_p, adapter_ckpt, dataset, split
         text_emb = embedder.embed_nodes({s: id2text[s] for s in node_ids})
         injector.prepare_session(_stub_graph(node_ids, id2text, {s: "fact" for s in node_ids}),
                                  node_ids, text_emb, tf, r_plan=3, r_evidence=4)
-        ex_id, ex_d = nearest(iid, t["issue"])
+        ex_id, ex_d = nearest(iid, t["issue"], inst.get("repo", ""))
 
         cold = _gen(model, tok, [{"role": "system", "content": GEN_SYS},
                                  {"role": "user", "content": _user(t["issue"])}], device, injector, False, max_new)
@@ -139,7 +144,7 @@ def main(argv=None):
     ap.add_argument("--dataset", default="lite")
     ap.add_argument("--split", default="test")
     ap.add_argument("--n-eval", type=int, default=20)
-    ap.add_argument("--max-new", type=int, default=400)
+    ap.add_argument("--max-new", type=int, default=700)   # exemplar in prompt -> needs room to reason + emit
     ap.add_argument("--dump", default="")
     ap.add_argument("--device", default=None)
     a = ap.parse_args(argv)
