@@ -8,6 +8,31 @@
 
 ---
 
+## Session update (2026-06-05) — STAGES 3/4: grounding → better generation (the v2 thesis demonstrated)
+
+**The full v2 grounding stack is now proven end-to-end on code.** Progress map:
+
+PROVEN (mechanisms, all on code):
+- retrieval: trained bi-encoder ranker beats raw + survives mixed pool (GNN-ranker shelved)
+- emission: constrained-decode selection valid 1.0 / 2.1× random; in-patch constraint built
+- reasoning injection (stage 1/2): adapter routing plan/evid attn 1.0, write 0.13, non-destructive
+- **injection→generation (stage 3, `stage3_answer.py`):** held-out gold-patch NLL cold 1.30 →
+  injected 0.98–1.18 (87–98% better) — grounding makes the gold patch more likely
+- **grounded generation runtime (stage 4, `stage4_generate.py`):** injection → is_diff 0.40→0.73
+  (valid patches) + slight file-cov lift; exact-symbol emission (edit_cov) flat → motivates the
+  in-patch constrained decode (`--constrain`, just built) to force the exact symbols.
+
+Key fixes this session: planning targets wired into the code corpus (plan precision 0→1.0);
+nan loss = cosmetic empty-slot BCE (guarded); Stage-3 inject-at-ALL-positions (last-token-only
+had zero gradient); adapter checkpointing (`--adapter-ckpt`, skips slow 1/2 rebuild).
+
+REMAINING (product, not proof): verifier-retry loop + REAL test-pass (Tier-2, infra-blocked on
+Docker/sb-cli — the headline resolve-rate); 3-layer working memory; retrieval recipes; scale
+(strategy distill on Verified, SWE-gym) + polish. **Architecture risk ~retired; what's left is
+engineering + the verifier infra.**
+
+---
+
 ## Session update (2026-06-03c) — #3 scaled (300) + generalism cost MEASURED + naive topo rerank FAILED
 
 **#3 strategy distiller scaled to 300/300 (SWE-bench Lite, opencode):** 998 content nodes
