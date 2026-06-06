@@ -15,6 +15,7 @@ inference path (assemble subgraph -> inject -> generate) that the verifier-retry
 from __future__ import annotations
 
 import argparse
+import json
 import re
 from contextlib import nullcontext
 from pathlib import Path
@@ -68,7 +69,7 @@ def _adherence(gen: str, gold_files, gold_syms) -> dict:
 
 
 def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max_new,
-        constrain=False, device_str=None):
+        constrain=False, dump="", device_str=None):
     device = torch.device(device_str or ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"device={device}  lm={model_name}  adapter={adapter_ckpt}")
     provider = FrozenQwenHInitProvider(model_name, device=device)
@@ -88,7 +89,7 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
     ids = [i for i in traces if i in insts][:n_eval]
     print(f"eval instances={len(ids)}", flush=True)
 
-    cold_rows, inj_rows, con_rows = [], [], []
+    cold_rows, inj_rows, con_rows, records = [], [], [], []
     tf = {"task_family": "code_fix", "required_slots": []}
     for k, iid in enumerate(ids):
         t = traces[iid]; inst = insts[iid]
@@ -110,11 +111,22 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
         cold_rows.append(cr); inj_rows.append(ir)
         line = (f"  [{k+1}/{len(ids)}] {iid:26} edit {cr['edit_cov']:.2f}->{ir['edit_cov']:.2f}  "
                 f"file {cr['file_cov']:.2f}->{ir['file_cov']:.2f}  diff {cr['is_diff']:.0f}->{ir['is_diff']:.0f}")
+        rec = {"id": iid, "issue": t["issue"][:1200], "gold_symbols": gold_syms,
+               "gold_patch": inst.get("patch", ""), "cold": cold, "injected": inj}
         if constrain:
             con = _gen(model, tok, msgs, device, injector, True, max_new, constrain_symbols=gold_syms)
             xr = _adherence(con, gold_files, gold_syms); con_rows.append(xr)
             line += f"  |inj+con edit {xr['edit_cov']:.2f} diff {xr['is_diff']:.0f}"
+            rec["inj_constrain"] = con
+        records.append(rec)
         print(line, flush=True)
+
+    if dump:
+        Path(dump).parent.mkdir(parents=True, exist_ok=True)
+        with open(dump, "w", encoding="utf-8") as w:
+            for r in records:
+                w.write(json.dumps(r, ensure_ascii=False) + "\n")
+        print(f"\ndumped {len(records)} (issue/gold/cold/injected[/constrain]) -> {dump}", flush=True)
 
     def _m(rows, k):
         return round(sum(r[k] for r in rows) / max(1, len(rows)), 4)
@@ -141,10 +153,11 @@ def main(argv=None):
     ap.add_argument("--max-new", type=int, default=400)
     ap.add_argument("--constrain", action="store_true",
                     help="add a 3rd condition: injection + in-patch constrained decode (force exact symbols)")
+    ap.add_argument("--dump", default="", help="write issue/gold/cold/injected[/constrain] per instance -> jsonl for manual inspection")
     ap.add_argument("--device", default=None)
     a = ap.parse_args(argv)
     run(a.model, a.traces, a.nodes, a.adapter_ckpt, a.dataset, a.split, a.n_eval, a.max_new,
-        constrain=a.constrain, device_str=a.device)
+        constrain=a.constrain, dump=a.dump, device_str=a.device)
 
 
 if __name__ == "__main__":
