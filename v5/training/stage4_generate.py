@@ -42,13 +42,20 @@ def _stub_graph(node_ids, id2text, ntypes):
     return _G()
 
 
-def _gen(model, tok, msgs, device, injector, inject: bool, max_new: int) -> str:
+def _gen(model, tok, msgs, device, injector, inject: bool, max_new: int,
+         constrain_symbols=None) -> str:
     enc = tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt",
                                   return_dict=True).to(device)
+    procs = None
+    if constrain_symbols:
+        from transformers import LogitsProcessorList
+        from v5.graph_grower.constrained_decode import make_inpatch_processor
+        plen = enc["input_ids"].shape[1]
+        procs = LogitsProcessorList([make_inpatch_processor(tok, constrain_symbols, plen)])
     ctx = injector.inject(model) if inject else nullcontext()
     with ctx, torch.no_grad():
         out = model.generate(**enc, max_new_tokens=max_new, do_sample=False,
-                             pad_token_id=tok.pad_token_id or tok.eos_token_id)
+                             logits_processor=procs, pad_token_id=tok.pad_token_id or tok.eos_token_id)
     return tok.decode(out[0][enc["input_ids"].shape[1]:], skip_special_tokens=True)
 
 
@@ -60,7 +67,8 @@ def _adherence(gen: str, gold_files, gold_syms) -> dict:
             "is_diff": 1.0 if re.search(r"^@@ |^\+\+\+ ", g, re.M) else 0.0}
 
 
-def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max_new, device_str=None):
+def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max_new,
+        constrain=False, device_str=None):
     device = torch.device(device_str or ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"device={device}  lm={model_name}  adapter={adapter_ckpt}")
     provider = FrozenQwenHInitProvider(model_name, device=device)
@@ -80,7 +88,7 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
     ids = [i for i in traces if i in insts][:n_eval]
     print(f"eval instances={len(ids)}", flush=True)
 
-    cold_rows, inj_rows = [], []
+    cold_rows, inj_rows, con_rows = [], [], []
     tf = {"task_family": "code_fix", "required_slots": []}
     for k, iid in enumerate(ids):
         t = traces[iid]; inst = insts[iid]
@@ -100,16 +108,22 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
         inj = _gen(model, tok, msgs, device, injector, True, max_new)
         cr, ir = _adherence(cold, gold_files, gold_syms), _adherence(inj, gold_files, gold_syms)
         cold_rows.append(cr); inj_rows.append(ir)
-        print(f"  [{k+1}/{len(ids)}] {iid:26} edit {cr['edit_cov']:.2f}->{ir['edit_cov']:.2f}  "
-              f"file {cr['file_cov']:.2f}->{ir['file_cov']:.2f}  diff {cr['is_diff']:.0f}->{ir['is_diff']:.0f}",
-              flush=True)
+        line = (f"  [{k+1}/{len(ids)}] {iid:26} edit {cr['edit_cov']:.2f}->{ir['edit_cov']:.2f}  "
+                f"file {cr['file_cov']:.2f}->{ir['file_cov']:.2f}  diff {cr['is_diff']:.0f}->{ir['is_diff']:.0f}")
+        if constrain:
+            con = _gen(model, tok, msgs, device, injector, True, max_new, constrain_symbols=gold_syms)
+            xr = _adherence(con, gold_files, gold_syms); con_rows.append(xr)
+            line += f"  |inj+con edit {xr['edit_cov']:.2f} diff {xr['is_diff']:.0f}"
+        print(line, flush=True)
 
     def _m(rows, k):
         return round(sum(r[k] for r in rows) / max(1, len(rows)), 4)
-    print("\n=== STAGE 4 grounded GENERATION adherence (cold -> injected) ===")
+    hdr = "cold -> injected" + (" -> inj+constrain" if constrain else "")
+    print(f"\n=== STAGE 4 grounded GENERATION adherence ({hdr}) ===")
     for m in ("edit_cov", "file_cov", "is_diff"):
         c, i = _m(cold_rows, m), _m(inj_rows, m)
-        print(f"  {m:9} {c} -> {i}  (lift {i - c:+.4f})")
+        extra = f" -> {_m(con_rows, m)}" if constrain else ""
+        print(f"  {m:9} {c} -> {i}{extra}  (inj lift {i - c:+.4f})")
     print("\nedit_cov/file_cov lift = injection STEERS generation toward the gold symbols/files"
           "\n(echo-free: symbols enter via the graph, not the prompt). The generation-level"
           "\nconfirmation of the Stage-3 NLL win + the deployable runtime core.")
@@ -125,9 +139,12 @@ def main(argv=None):
     ap.add_argument("--split", default="test")
     ap.add_argument("--n-eval", type=int, default=30)
     ap.add_argument("--max-new", type=int, default=400)
+    ap.add_argument("--constrain", action="store_true",
+                    help="add a 3rd condition: injection + in-patch constrained decode (force exact symbols)")
     ap.add_argument("--device", default=None)
     a = ap.parse_args(argv)
-    run(a.model, a.traces, a.nodes, a.adapter_ckpt, a.dataset, a.split, a.n_eval, a.max_new, a.device)
+    run(a.model, a.traces, a.nodes, a.adapter_ckpt, a.dataset, a.split, a.n_eval, a.max_new,
+        constrain=a.constrain, device_str=a.device)
 
 
 if __name__ == "__main__":

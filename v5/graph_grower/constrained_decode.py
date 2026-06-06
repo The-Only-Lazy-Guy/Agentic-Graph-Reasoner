@@ -99,6 +99,52 @@ def _cand_logprob(model, tok, prompt_ids, cand: str) -> float:
     return float(tok_lp.mean())
 
 
+def make_inpatch_processor(tok, symbols: Sequence[str], prompt_len: int, bias: float = 4.0):
+    """In-patch constrained decoding: a LogitsProcessor that (a) BIASES the first token of
+    any brief symbol up (nudge the model to reach for a grounded symbol), and (b) once a
+    symbol is started, FORCES the trie completion so it emits a VALID brief symbol (never a
+    half-hallucinated one); on completion it exits -> free generation resumes. Combine with
+    injection: injection picks the region/form, this guarantees the exact symbol tokens (§3.5)."""
+    import torch
+    from transformers import LogitsProcessor
+
+    seqs = []
+    for s in symbols:
+        for variant in (" " + s, s):                       # BPE: leading-space + bare
+            ids = tuple(tok.encode(variant, add_special_tokens=False))
+            if ids:
+                seqs.append(ids)
+    trie = build_trie(seqs)
+    first_ids = sorted({s[0] for s in seqs})
+
+    class _InPatch(LogitsProcessor):
+        def __init__(self):
+            self.first = torch.tensor(first_ids, dtype=torch.long)
+
+        def __call__(self, input_ids, scores):
+            node = None                                     # re-derive symbol-walk from suffix
+            for t in input_ids[0, prompt_len:].tolist():
+                if node is None:
+                    node = trie.get(t)
+                    if node is not None and node.get("__end__") and len(node) == 1:
+                        node = None                         # single-token symbol -> done
+                else:
+                    node = node.get(t)
+                    if node is not None and node.get("__end__"):
+                        node = None                         # reached a valid end -> exit
+            if node is not None:                            # inside a symbol -> force valid child
+                children = [k for k in node if k != "__end__"]
+                m = torch.full_like(scores, float("-inf"))
+                if children:
+                    idx = torch.tensor(children, device=scores.device, dtype=torch.long)
+                    m[0, idx] = scores[0, idx]
+                return m
+            scores[0, self.first.to(scores.device)] += bias   # free -> nudge a symbol start
+            return scores
+
+    return _InPatch()
+
+
 def constrained_select(model, tok, prompt: str, candidates: List[str]) -> str:
     """Output RESTRICTED to the candidate set by construction: rank candidates by LM
     likelihood, return the best. valid-in-set is 1.0 trivially (we never leave the set).
