@@ -126,6 +126,11 @@ def run(model_name, corpus, graph_path=None, e1=100, e2a=80, e2b=80, e3=2,
             tot += float(nll.item()); n += 1
         print(f"  [S3] epoch {ep+1}  mean answer-NLL(inject) {tot/max(1,n):.4f}  ({n} rows)", flush=True)
 
+    if adapter_ckpt:                              # save the Stage-3-improved adapter for the runtime
+        s3_path = adapter_ckpt[:-3] + "_s3.pt" if adapter_ckpt.endswith(".pt") else adapter_ckpt + "_s3"
+        torch.save(adapter.state_dict(), s3_path)
+        print(f"saved Stage-3 adapter -> {s3_path}")
+
     # ── eval: cold vs injected NLL on HELD-OUT (does grounding lower gold NLL?) ──
     adapter.eval()
     cold, inj = [], []
