@@ -87,7 +87,7 @@ def _user(issue, src_ctx=""):
 
 
 def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max_new,
-        repo_root, max_syms=2, max_body_lines=45, dump="", device_str=None):
+        repo_root, max_syms=6, max_body_lines=70, dump="", device_str=None):
     device = torch.device(device_str or ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"device={device}  lm={model_name}", flush=True)
     provider = FrozenQwenHInitProvider(model_name, device=device)
@@ -174,10 +174,12 @@ def main(argv=None):
     ap.add_argument("--dataset", default="lite")
     ap.add_argument("--split", default="test")
     ap.add_argument("--n-eval", type=int, default=15)
-    ap.add_argument("--max-new", type=int, default=400)
+    ap.add_argument("--max-new", type=int, default=500)
     ap.add_argument("--repo-root", default="data/swe_repos")
-    ap.add_argument("--max-syms", type=int, default=2, help="source bodies for top-K support (speed)")
-    ap.add_argument("--max-body-lines", type=int, default=45)
+    ap.add_argument("--max-syms", type=int, default=6,
+                    help="source bodies for top-K support. Trimming to 2 HURT — all support "
+                         "symbols are patch-relevant (AST-mapped), don't drop the buggy function.")
+    ap.add_argument("--max-body-lines", type=int, default=70)
     ap.add_argument("--dump", default="")
     ap.add_argument("--device", default=None)
     a = ap.parse_args(argv)
