@@ -192,9 +192,10 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
             id2text[sid] = stext; ntypes[sid] = stype
         all_ids = list(id2text.keys())
         text_emb = embedder.embed_nodes(id2text)
-        r_plan = 6 if strat_pick else 3         # more planning slots when strategy injected
+        # r_plan = loop DEPTH (match training=3); the pooled strategy nodes are all attended in
+        # one pass, so more nodes cost ~nothing — don't raise r_plan (slower + train mismatch).
         injector.prepare_session(_stub_graph(all_ids, id2text, ntypes),
-                                 all_ids, text_emb, tf, r_plan=r_plan, r_evidence=4)
+                                 all_ids, text_emb, tf, r_plan=3, r_evidence=4)
 
         applyable, attempts, blocks, hist = solve(model, tok, injector, t["issue"], src_ctx,
                                                   str(dest), max_retries, max_new, inject_on=not no_graph)
