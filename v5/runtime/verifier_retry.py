@@ -119,7 +119,7 @@ def solve(model, tok, injector, issue, src_ctx, dest, max_retries, max_new, inje
 
 def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max_new,
         repo_root, max_retries, dump="", emit_predictions="", no_graph=False,
-        strategy="off", strategy_nodes=None, device_str=None):
+        strategy="off", strategy_nodes=None, strat_topk=3, device_str=None):
     device = torch.device(device_str or ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"device={device}  max_retries={max_retries}", flush=True)
     provider = FrozenQwenHInitProvider(model_name, device=device)
@@ -138,11 +138,13 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
     insts = {t["instance_id"]: t for t in load_instances(dataset, split, limit=0)}
     ids = [i for i in traces if i in insts][:n_eval]
     strat_meta = load_strategy_meta(strategy_nodes) if strategy != "off" else {}
-    strat_vecs = {}
+    strat_vecs, strat_syms = {}, {}
     if strategy == "retrieved":
         for siid in strat_meta:
             if siid in traces:
                 strat_vecs[siid] = _unit(embedder.embed_nodes({"q": traces[siid]["issue"]})["q"])
+                strat_syms[siid] = {n for s in (traces[siid].get("support_ids") or [])
+                                    if s in meta and (n := _symbol_name(meta[s]["text"]))}
     print(f"eval instances={len(ids)} | symbol meta={len(meta)} | strategy={strategy} "
           f"(instances={len(strat_meta)})", flush=True)
 
@@ -172,19 +174,27 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
         # strategy nodes -> L8 PLANNING (off / own=upper-bound leakage / retrieved=real, exclude self)
         strat_pick = []
         if strategy == "own":
-            strat_pick = strat_meta.get(iid, [])[:3]
+            strat_pick = strat_meta.get(iid, [])[:4]
         elif strategy == "retrieved" and strat_vecs:
             qv = _unit(embedder.embed_nodes({"q": t["issue"]})["q"])
-            cand = [s for s in strat_vecs if s != iid]
-            if cand:
-                best = max(cand, key=lambda s: float(np.dot(qv, strat_vecs[s])))
-                strat_pick = strat_meta[best][:3]
+            tsyms = {n for s in support if (n := _symbol_name(meta[s]["text"]))}
+
+            def _score(s):                       # issue similarity + symbol-overlap (same buggy fns -> shared HOW)
+                ov = len(tsyms & strat_syms.get(s, set())) / (len(tsyms | strat_syms.get(s, set())) + 1e-9)
+                return float(np.dot(qv, strat_vecs[s])) + 0.5 * ov
+
+            top = sorted((s for s in strat_vecs if s != iid), key=_score, reverse=True)[:strat_topk]
+            pool = []
+            for s in top:
+                pool.extend(strat_meta[s])
+            strat_pick = pool[:6]
         for sid, stext, stype in strat_pick:
             id2text[sid] = stext; ntypes[sid] = stype
         all_ids = list(id2text.keys())
         text_emb = embedder.embed_nodes(id2text)
+        r_plan = 6 if strat_pick else 3         # more planning slots when strategy injected
         injector.prepare_session(_stub_graph(all_ids, id2text, ntypes),
-                                 all_ids, text_emb, tf, r_plan=3, r_evidence=4)
+                                 all_ids, text_emb, tf, r_plan=r_plan, r_evidence=4)
 
         applyable, attempts, blocks, hist = solve(model, tok, injector, t["issue"], src_ctx,
                                                   str(dest), max_retries, max_new, inject_on=not no_graph)
@@ -244,11 +254,14 @@ def main(argv=None):
                          "retrieved=nearest other task's strategy (real, exclude self)")
     ap.add_argument("--strategy-nodes", nargs="+",
                     default=["artifacts/graph_growth/swe_strategy_candidates_clean.jsonl"])
+    ap.add_argument("--strat-topk", type=int, default=3,
+                    help="retrieved: pool strategies from top-K nearest tasks (issue+symbol-overlap)")
     ap.add_argument("--device", default=None)
     a = ap.parse_args(argv)
     run(a.model, a.traces, a.nodes, a.adapter_ckpt, a.dataset, a.split, a.n_eval, a.max_new,
         a.repo_root, a.max_retries, dump=a.dump, emit_predictions=a.emit_predictions,
-        no_graph=a.no_graph, strategy=a.strategy, strategy_nodes=a.strategy_nodes, device_str=a.device)
+        no_graph=a.no_graph, strategy=a.strategy, strategy_nodes=a.strategy_nodes,
+        strat_topk=a.strat_topk, device_str=a.device)
 
 
 if __name__ == "__main__":
