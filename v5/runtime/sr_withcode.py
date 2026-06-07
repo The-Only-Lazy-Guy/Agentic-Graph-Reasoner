@@ -40,7 +40,8 @@ def load_symbol_meta(paths):
             line = line.strip()
             if not line:
                 continue
-            e = json.loads(line).get("raw_edit", {})
+            r = json.loads(line)
+            e = r.get("raw_edit") or r          # candidates are flat (no raw_edit nesting)
             if e.get("op") == "add_node" and e.get("node_type") == "symbol":
                 m = e.get("metadata", {})
                 meta[e["node_id"]] = {"file": m.get("file"), "lineno": m.get("lineno"),
