@@ -113,28 +113,41 @@ DATASET_SBCLI = {"lite": "swe-bench_lite", "verified": "swe-bench_verified", "fu
 
 
 def run_sbcli(preds_path: str, dataset: str, run_id: str, split: str = "test",
-              out_dir: str = "artifacts/graph_growth/swe_verify") -> Dict[str, bool]:
-    """sb-cli backend (hosted, NO Docker): submit predictions to SWE-bench's servers, parse
-    the report -> {instance_id: resolved}. Needs `pip install sb-cli` + SWEBENCH_API_KEY."""
+              out_dir: str = "artifacts/graph_growth/swe_verify", submit: bool = True,
+              poll_secs: int = 20, max_wait: int = 1800) -> Dict[str, bool]:
+    """sb-cli backend (hosted, NO Docker): submit predictions, then poll `get-report` until the
+    remote eval finishes (pending=0) -> {instance_id: resolved}. Needs sb-cli + SWEBENCH_API_KEY.
+    submit=False just polls an existing run_id."""
     import glob
+    import time
     sub = DATASET_SBCLI.get(dataset, dataset)
-    cmd = ["sb-cli", "submit", sub, split, "--predictions_path", preds_path,
-           "--run_id", run_id, "--output_dir", out_dir]
-    print("  $ " + " ".join(cmd), flush=True)
-    proc = subprocess.run(cmd, text=True, capture_output=True, timeout=3600)
-    sys.stdout.write(proc.stdout[-4000:]); sys.stderr.write(proc.stderr[-2000:])
-    for p in sorted(glob.glob(os.path.join(out_dir, "**", "*.json"), recursive=True),
-                    key=os.path.getmtime, reverse=True):
-        try:
-            d = json.load(open(p, encoding="utf-8"))
-        except Exception:   # noqa: BLE001
-            continue
-        if isinstance(d, dict) and ("resolved_ids" in d or "resolved_instances" in d):
-            resolved = set(d.get("resolved_ids") or d.get("resolved_instances") or [])
-            ids = set(d.get("submitted_ids") or d.get("completed_ids") or []) or \
-                (resolved | set(d.get("unresolved_ids") or []))
-            return {i: (i in resolved) for i in ids}
-    print("  WARN: no sb-cli report json parsed; check the output above."); return {}
+    if submit:
+        cmd = ["sb-cli", "submit", sub, split, "--predictions_path", preds_path,
+               "--run_id", run_id, "--output_dir", out_dir]
+        print("  $ " + " ".join(cmd), flush=True)
+        subprocess.run(cmd, text=True, capture_output=True, timeout=600)
+    deadline = time.time() + max_wait
+    d: dict = {}
+    while True:
+        subprocess.run(["sb-cli", "get-report", sub, split, run_id, "-o", out_dir, "--overwrite", "1"],
+                       text=True, capture_output=True, timeout=300)
+        cands = [p for p in glob.glob(os.path.join(out_dir, "*.json")) if run_id in os.path.basename(p)]
+        if cands:
+            try:
+                d = json.load(open(max(cands, key=os.path.getmtime), encoding="utf-8"))
+            except Exception:   # noqa: BLE001
+                d = {}
+        pend, subm = d.get("pending_instances", 1), d.get("submitted_instances", 0)
+        print(f"  poll: submitted={subm} pending={pend} resolved={d.get('resolved_instances', 0)} "
+              f"failed={d.get('failed_instances', 0)}", flush=True)
+        if d and pend == 0 and subm > 0:
+            break
+        if time.time() > deadline:
+            print("  TIMEOUT waiting for the remote eval (results may still finish; re-poll later)."); break
+        time.sleep(poll_secs)
+    resolved = set(d.get("resolved_ids") or [])
+    ids = set(d.get("submitted_ids") or [])
+    return {i: (i in resolved) for i in ids}
 
 
 def _verify(preds_path, dataset, run_id, backend, instance_ids, max_workers, out_dir, split):
