@@ -33,6 +33,9 @@ from v5.graph_grower.swe_load import load_instances, patch_files, checkout_repo
 from v5.graph_grower.swe_probe import load_traces, _symbol_name
 from v5.runtime.search_replace import SR_SYS, parse_sr, apply_sr
 from v5.runtime.sr_withcode import load_symbol_meta, read_body, _file_text
+from v5.graph_grower.swe_verify import write_predictions
+
+import subprocess
 
 
 def _user(issue, src_ctx, feedback=""):
@@ -82,7 +85,7 @@ def solve(model, tok, injector, issue, src_ctx, dest, max_retries, max_new):
 
 
 def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max_new,
-        repo_root, max_retries, dump="", device_str=None):
+        repo_root, max_retries, dump="", emit_predictions="", device_str=None):
     device = torch.device(device_str or ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"device={device}  max_retries={max_retries}", flush=True)
     provider = FrozenQwenHInitProvider(model_name, device=device)
@@ -104,6 +107,7 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
 
     app1 = appk = scored = 0
     records = []
+    preds = {}                              # instance_id -> git diff (swebench prediction)
     tf = {"task_family": "code_fix", "required_slots": []}
     for k, iid in enumerate(ids):
         t = traces[iid]; inst = insts[iid]
@@ -131,6 +135,13 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
         scored += 1
         app1 += 1 if (hist and hist[0]["applyable"]) else 0
         appk += 1 if applyable else 0
+        # turn the applyable SR blocks into a real git diff (the swebench prediction), then
+        # restore the checkout so it's clean for the next instance.
+        model_patch = ""
+        if applyable:
+            _, model_patch = apply_sr(str(dest), blocks)
+            subprocess.run(["git", "-C", str(dest), "checkout", "--", "."], capture_output=True)
+        preds[iid] = model_patch
         records.append({"id": iid, "applyable": applyable, "attempts": attempts, "history": hist,
                         "gold_patch": inst.get("patch", ""), "final_blocks": blocks})
         print(f"  [{k+1}/{len(ids)}] {iid:24} applyable={applyable} in {attempts} "
@@ -142,6 +153,11 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
             for r in records:
                 w.write(json.dumps(r, ensure_ascii=False) + "\n")
         print(f"\ndumped {len(records)} -> {dump}", flush=True)
+
+    if emit_predictions:
+        n = write_predictions({i: p for i, p in preds.items() if p.strip()}, emit_predictions, "v5_retry")
+        print(f"emitted {n} applyable predictions -> {emit_predictions}  (TIER-2: verify with\n"
+              f"  python -m v5.graph_grower.swe_verify --predictions {emit_predictions} --dataset {dataset})", flush=True)
 
     print(f"\n=== RETRY LOOP (apply-feedback, no verifier) ===")
     print(f"  applyable@1   {app1}/{scored} ({100*app1/max(1,scored):.0f}%)")
@@ -163,10 +179,12 @@ def main(argv=None):
     ap.add_argument("--max-retries", type=int, default=3)
     ap.add_argument("--repo-root", default="data/swe_repos")
     ap.add_argument("--dump", default="")
+    ap.add_argument("--emit-predictions", default="",
+                    help="write the loop's applyable patches as a swebench predictions jsonl -> tier-2 verify")
     ap.add_argument("--device", default=None)
     a = ap.parse_args(argv)
     run(a.model, a.traces, a.nodes, a.adapter_ckpt, a.dataset, a.split, a.n_eval, a.max_new,
-        a.repo_root, a.max_retries, dump=a.dump, device_str=a.device)
+        a.repo_root, a.max_retries, dump=a.dump, emit_predictions=a.emit_predictions, device_str=a.device)
 
 
 if __name__ == "__main__":

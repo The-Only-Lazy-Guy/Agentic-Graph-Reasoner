@@ -88,7 +88,7 @@ def parse_report(model_name: str, run_id: str) -> Dict[str, bool]:
 
 
 def gold_sanity(dataset: str, split: str, limit: int, instance_ids: Optional[List[str]],
-                run_id: str, max_workers: int, out_dir: str) -> int:
+                run_id: str, max_workers: int, out_dir: str, backend: str = "docker") -> int:
     insts = load_instances(dataset, split, limit=0)
     by_id = {t["instance_id"]: t for t in insts}
     if instance_ids:
@@ -99,7 +99,7 @@ def gold_sanity(dataset: str, split: str, limit: int, instance_ids: Optional[Lis
     preds = os.path.join(out_dir, "gold_predictions.jsonl")
     n = write_predictions(id2patch, preds)
     print(f"gold-sanity: {n} instances -> {preds}  (gold patches MUST resolve)", flush=True)
-    res = run_swebench(preds, dataset, run_id, instance_ids=list(id2patch), max_workers=max_workers)
+    res = _verify(preds, dataset, run_id, backend, list(id2patch), max_workers, out_dir, split)
     if res:
         ok = sum(1 for v in res.values() if v)
         print(f"\nGOLD resolved {ok}/{len(res)}  "
@@ -109,8 +109,42 @@ def gold_sanity(dataset: str, split: str, limit: int, instance_ids: Optional[Lis
     return 0 if res else 1
 
 
+DATASET_SBCLI = {"lite": "swe-bench_lite", "verified": "swe-bench_verified", "full": "swe-bench"}
+
+
+def run_sbcli(preds_path: str, dataset: str, run_id: str, split: str = "test",
+              out_dir: str = "artifacts/graph_growth/swe_verify") -> Dict[str, bool]:
+    """sb-cli backend (hosted, NO Docker): submit predictions to SWE-bench's servers, parse
+    the report -> {instance_id: resolved}. Needs `pip install sb-cli` + SWEBENCH_API_KEY."""
+    import glob
+    sub = DATASET_SBCLI.get(dataset, dataset)
+    cmd = ["sb-cli", "submit", sub, split, "--predictions_path", preds_path,
+           "--run_id", run_id, "--output_dir", out_dir]
+    print("  $ " + " ".join(cmd), flush=True)
+    proc = subprocess.run(cmd, text=True, capture_output=True, timeout=3600)
+    sys.stdout.write(proc.stdout[-4000:]); sys.stderr.write(proc.stderr[-2000:])
+    for p in sorted(glob.glob(os.path.join(out_dir, "**", "*.json"), recursive=True),
+                    key=os.path.getmtime, reverse=True):
+        try:
+            d = json.load(open(p, encoding="utf-8"))
+        except Exception:   # noqa: BLE001
+            continue
+        if isinstance(d, dict) and ("resolved_ids" in d or "resolved_instances" in d):
+            resolved = set(d.get("resolved_ids") or d.get("resolved_instances") or [])
+            ids = set(d.get("submitted_ids") or d.get("completed_ids") or []) or \
+                (resolved | set(d.get("unresolved_ids") or []))
+            return {i: (i in resolved) for i in ids}
+    print("  WARN: no sb-cli report json parsed; check the output above."); return {}
+
+
+def _verify(preds_path, dataset, run_id, backend, instance_ids, max_workers, out_dir, split):
+    if backend == "sbcli":
+        return run_sbcli(preds_path, dataset, run_id, split=split, out_dir=out_dir)
+    return run_swebench(preds_path, dataset, run_id, instance_ids=instance_ids, max_workers=max_workers)
+
+
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="SWE verifier (wraps official swebench harness).")
+    ap = argparse.ArgumentParser(description="SWE verifier (Docker swebench harness OR hosted sb-cli).")
     ap.add_argument("--gold-sanity", action="store_true",
                     help="feed GOLD patches as predictions -> must resolve (proves the harness)")
     ap.add_argument("--predictions", default="", help="predictions jsonl {instance_id, model_patch}")
@@ -121,25 +155,34 @@ def main(argv=None) -> int:
     ap.add_argument("--run-id", default="v5verify")
     ap.add_argument("--max-workers", type=int, default=4)
     ap.add_argument("--out-dir", default="artifacts/graph_growth/swe_verify")
+    ap.add_argument("--backend", choices=["docker", "sbcli"], default="docker",
+                    help="docker = official swebench harness (needs Docker); sbcli = hosted (no Docker)")
     args = ap.parse_args(argv)
 
-    # preflight: swebench + docker present?
-    try:
-        import swebench  # noqa: F401
-    except ImportError:
-        print("FATAL: swebench not installed. Run: pip install swebench  (+ a running Docker daemon)")
-        return 2
-    if subprocess.run(["docker", "info"], capture_output=True, text=True).returncode != 0:
-        print("FATAL: Docker daemon not reachable (`docker info` failed). The harness needs Docker.")
-        return 2
+    # preflight per backend
+    if args.backend == "docker":
+        try:
+            import swebench  # noqa: F401
+        except ImportError:
+            print("FATAL: swebench not installed. Run: pip install swebench  (+ a running Docker daemon)")
+            return 2
+        if subprocess.run(["docker", "info"], capture_output=True, text=True).returncode != 0:
+            print("FATAL: Docker daemon not reachable (`docker info`). Use --backend sbcli (hosted, no Docker).")
+            return 2
+    else:  # sbcli
+        if subprocess.run(["sb-cli", "--help"], capture_output=True, text=True).returncode != 0:
+            print("FATAL: sb-cli not installed. Run: pip install sb-cli  (+ export SWEBENCH_API_KEY=...)")
+            return 2
+        if not os.environ.get("SWEBENCH_API_KEY"):
+            print("WARN: SWEBENCH_API_KEY unset -> sb-cli submit will fail. `sb-cli gen-api-key your@email`.")
 
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
     if args.gold_sanity:
         return gold_sanity(args.dataset, args.split, args.limit, args.instance_ids,
-                           args.run_id, args.max_workers, args.out_dir)
+                           args.run_id, args.max_workers, args.out_dir, backend=args.backend)
     if args.predictions:
-        res = run_swebench(args.predictions, args.dataset, args.run_id,
-                           instance_ids=args.instance_ids, max_workers=args.max_workers)
+        res = _verify(args.predictions, args.dataset, args.run_id, args.backend,
+                      args.instance_ids, args.max_workers, args.out_dir, args.split)
         ok = sum(1 for v in res.values() if v)
         report = os.path.join(args.out_dir, f"verify_{args.run_id}.json")
         json.dump({"resolved": ok, "total": len(res),
