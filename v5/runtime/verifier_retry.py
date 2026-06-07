@@ -38,8 +38,10 @@ from v5.graph_grower.swe_verify import write_predictions
 import subprocess
 
 
-def _user(issue, src_ctx, feedback=""):
+def _user(issue, src_ctx, feedback="", exemplar_diff=""):
     s = f"ISSUE:\n{issue[:1400]}\n\n"
+    if exemplar_diff:                        # a similar PAST fix to adapt (learning loop)
+        s += f"A SIMILAR resolved bug was fixed like this — ADAPT the pattern:\n{exemplar_diff[:1200]}\n\n"
     if src_ctx:                              # empty under --no-graph (cold baseline)
         s += f"RELEVANT SOURCE (the bug is in here):\n{src_ctx}\n\n"
     if feedback:
@@ -58,15 +60,17 @@ def _unmatched(blocks, dest):
     return out
 
 
-def solve(model, tok, injector, issue, src_ctx, dest, max_retries, max_new, inject_on=True):
+def solve(model, tok, injector, issue, src_ctx, dest, max_retries, max_new, inject_on=True,
+          exemplar_diff=""):
     """Iterate generate -> check SEARCH matches file -> feedback -> retry. Returns
-    (applyable, attempts_used, blocks, history). inject_on=False = cold baseline (--no-graph)."""
+    (applyable, attempts_used, blocks, history). inject_on=False = cold baseline (--no-graph).
+    exemplar_diff = a similar past fix to adapt (learning loop)."""
     feedback = ""
     history = []
     blocks = []
     for attempt in range(max_retries):
         gen = _gen(model, tok, [{"role": "system", "content": SR_SYS},
-                                {"role": "user", "content": _user(issue, src_ctx, feedback)}],
+                                {"role": "user", "content": _user(issue, src_ctx, feedback, exemplar_diff)}],
                    model.device if hasattr(model, "device") else next(model.parameters()).device,
                    injector, inject_on, max_new)
         blocks = parse_sr(gen)
