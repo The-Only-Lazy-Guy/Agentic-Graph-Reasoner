@@ -8,6 +8,40 @@
 
 ---
 
+## Session update (2026-06-07) — MILESTONE: first correct end-to-end fix (read-the-source unlocks edits)
+
+**The execution wall diagnosed + broken.** Exhaustive manual inspection of generated patches
+showed: grounding gets the 4B to the RIGHT FILE but the edits were garbage (no-op / wrong
+function / unmatchable). Root cause (proven, not "model ignores graph"): the brief gives symbol
+SIGNATURES (where), not the function BODY (what to edit) — so the 4B wrote SEARCH blocks for code
+it never saw -> blind edits. The frozen LM still USES grounding (stage-3 NLL dropped, localization
+works); it was just editing blind.
+
+**Fixes built this session (all infra-free):**
+- **SEARCH/REPLACE edit format** (`v5/runtime/search_replace.py`) — the 4B writes exact old->new
+  Python (its strength), no line-number/hunk math -> no `@@ -XXX` garbage; blocks apply
+  deterministically (verifiable). Same idea as Aider for weak models.
+- **Read-the-source step** (`v5/runtime/sr_withcode.py`) — checkout repo@base_commit, read each
+  support symbol's ACTUAL body (metadata.file+lineno), put it in context, then emit SR. NO
+  graph-search tool, no verifier.
+
+**RESULT (15 lite, adapter_code_s3): read-the-source CONFIRMS the diagnosis.**
+inject(signatures) -> withcode(real source): **search_in_file 0.067 -> 0.333 (5x)** (SEARCH now
+matches the real file = APPLYABLE), **edit_cov 0.067 -> 0.20 (3x)**. well_formed dropped
+0.73->0.40 (long source -> over-reasons -> emits fewer blocks; tunable). **astropy-14365 = a
+PERFECT fix**: SEARCH `re.compile(_type_re)` -> REPLACE `re.compile(_type_re, re.IGNORECASE)` =
+EXACTLY the gold patch. First correct surgical fix end-to-end — because the model saw the source.
+
+**Architecture VALIDATED (the V4 loop, for code):** localize (graph ranker) -> READ the source
+(repo, not graph) -> edit (SR, now matchable) -> verify. Single-shot failed only because it
+skipped the read step. Remaining gap = hit-rate (no-op edits + emission drop on long context) ->
+tune the read step (fewer/shorter bodies, tighter anti-echo prompt, keep it FAST) then the
+verifier-retry loop (no-op -> tests red -> retry). RL = expensive endgame, needs the verifier
+1000x + breaks frozen-LM; the retry loop is RL-lite (feedback, no training). Reuse V4's
+`reasoning_loop`/`micro_controller` (swap verify-step -> tests), don't reinvent.
+
+---
+
 ## Session update (2026-06-05) — STAGES 3/4: grounding → better generation (the v2 thesis demonstrated)
 
 **The full v2 grounding stack is now proven end-to-end on code.** Progress map:

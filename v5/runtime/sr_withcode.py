@@ -77,15 +77,17 @@ def _search_in_file(repo_dir, blocks) -> float:
 
 
 def _user(issue, src_ctx=""):
-    s = f"ISSUE:\n{issue[:1800]}\n\n"
+    s = f"ISSUE:\n{issue[:1400]}\n\n"
     if src_ctx:
-        s += ("RELEVANT SOURCE (the bug is in this code — your SEARCH blocks must match it "
-              f"EXACTLY, character for character):\n{src_ctx}\n\n")
+        return (s + f"RELEVANT SOURCE (the bug is in here):\n{src_ctx}\n\n"
+                "Find the exact line(s) causing the bug and fix them. Output ONLY search/replace "
+                "blocks: SEARCH must copy the source EXACTLY; REPLACE must DIFFER from SEARCH "
+                "(make the real change — do NOT echo unchanged code). Keep it minimal.")
     return s + "Output ONLY search/replace blocks (no prose)."
 
 
 def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max_new,
-        repo_root, dump="", device_str=None):
+        repo_root, max_syms=2, max_body_lines=45, dump="", device_str=None):
     device = torch.device(device_str or ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"device={device}  lm={model_name}", flush=True)
     provider = FrozenQwenHInitProvider(model_name, device=device)
@@ -119,8 +121,8 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
         if not ok:
             print(f"  [{k+1}] {iid} checkout FAILED: {msg[:60]}"); continue
         src_parts = []
-        for s in support[:6]:
-            body = read_body(str(dest), meta[s]["file"], meta[s]["lineno"])
+        for s in support[:max_syms]:        # top-K support only -> shorter prompt, faster, less over-reasoning
+            body = read_body(str(dest), meta[s]["file"], meta[s]["lineno"], max_lines=max_body_lines)
             if body:
                 src_parts.append(f"# {meta[s]['file']}\n{body}")
         src_ctx = "\n\n".join(src_parts)
@@ -172,13 +174,15 @@ def main(argv=None):
     ap.add_argument("--dataset", default="lite")
     ap.add_argument("--split", default="test")
     ap.add_argument("--n-eval", type=int, default=15)
-    ap.add_argument("--max-new", type=int, default=500)
+    ap.add_argument("--max-new", type=int, default=400)
     ap.add_argument("--repo-root", default="data/swe_repos")
+    ap.add_argument("--max-syms", type=int, default=2, help="source bodies for top-K support (speed)")
+    ap.add_argument("--max-body-lines", type=int, default=45)
     ap.add_argument("--dump", default="")
     ap.add_argument("--device", default=None)
     a = ap.parse_args(argv)
     run(a.model, a.traces, a.nodes, a.adapter_ckpt, a.dataset, a.split, a.n_eval, a.max_new,
-        a.repo_root, dump=a.dump, device_str=a.device)
+        a.repo_root, max_syms=a.max_syms, max_body_lines=a.max_body_lines, dump=a.dump, device_str=a.device)
 
 
 if __name__ == "__main__":
