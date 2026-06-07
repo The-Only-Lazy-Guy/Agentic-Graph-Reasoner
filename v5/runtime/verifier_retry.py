@@ -21,7 +21,34 @@ import argparse
 import json
 from pathlib import Path
 
+import numpy as np
 import torch
+
+# node types that route to the L8 PLANNING pool (subgraph.PLANNING_NODE_TYPES)
+_PLANNING_TYPES = {"strategy", "reasoning_atom", "reasoning_chain", "failure_pattern", "control_rule"}
+
+
+def _unit(v):
+    a = np.asarray(v, dtype=np.float32)
+    return a / (np.linalg.norm(a) + 1e-9)
+
+
+def load_strategy_meta(paths):
+    """{instance_id: [(node_id, text, node_type)]} for planning-pool strategy nodes."""
+    out = {}
+    for p in (paths or []):
+        for line in Path(p).read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            r = json.loads(line)
+            e = r.get("raw_edit") or r
+            if e.get("op") != "add_node" or e.get("node_type") not in _PLANNING_TYPES:
+                continue
+            iid = (e.get("metadata") or {}).get("instance_id")
+            if iid:
+                out.setdefault(iid, []).append((e["node_id"], e.get("text", "") or "", e["node_type"]))
+    return out
 
 from v5.adapter import GraphAttentionInjector
 from v5.cross_attention import V5AttentionAdapter
@@ -91,7 +118,8 @@ def solve(model, tok, injector, issue, src_ctx, dest, max_retries, max_new, inje
 
 
 def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max_new,
-        repo_root, max_retries, dump="", emit_predictions="", no_graph=False, device_str=None):
+        repo_root, max_retries, dump="", emit_predictions="", no_graph=False,
+        strategy="off", strategy_nodes=None, device_str=None):
     device = torch.device(device_str or ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"device={device}  max_retries={max_retries}", flush=True)
     provider = FrozenQwenHInitProvider(model_name, device=device)
@@ -109,7 +137,14 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
     meta = load_symbol_meta(nodes_p)
     insts = {t["instance_id"]: t for t in load_instances(dataset, split, limit=0)}
     ids = [i for i in traces if i in insts][:n_eval]
-    print(f"eval instances={len(ids)} | symbol meta={len(meta)}", flush=True)
+    strat_meta = load_strategy_meta(strategy_nodes) if strategy != "off" else {}
+    strat_vecs = {}
+    if strategy == "retrieved":
+        for siid in strat_meta:
+            if siid in traces:
+                strat_vecs[siid] = _unit(embedder.embed_nodes({"q": traces[siid]["issue"]})["q"])
+    print(f"eval instances={len(ids)} | symbol meta={len(meta)} | strategy={strategy} "
+          f"(instances={len(strat_meta)})", flush=True)
 
     app1 = appk = scored = 0
     records = []
@@ -131,11 +166,25 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
                 if body:
                     src_parts.append(f"# {meta[s]['file']}\n{body}")
         src_ctx = "\n\n".join(src_parts)
-        node_ids = support[:24]
-        text_emb = embedder.embed_nodes({s: meta[s]["text"] for s in node_ids})
-        injector.prepare_session(_stub_graph(node_ids, {s: meta[s]["text"] for s in node_ids},
-                                             {s: "fact" for s in node_ids}),
-                                 node_ids, text_emb, tf, r_plan=3, r_evidence=4)
+        sym_ids = support[:24]
+        id2text = {s: meta[s]["text"] for s in sym_ids}
+        ntypes = {s: "fact" for s in sym_ids}          # symbols -> L20 EVIDENCE
+        # strategy nodes -> L8 PLANNING (off / own=upper-bound leakage / retrieved=real, exclude self)
+        strat_pick = []
+        if strategy == "own":
+            strat_pick = strat_meta.get(iid, [])[:3]
+        elif strategy == "retrieved" and strat_vecs:
+            qv = _unit(embedder.embed_nodes({"q": t["issue"]})["q"])
+            cand = [s for s in strat_vecs if s != iid]
+            if cand:
+                best = max(cand, key=lambda s: float(np.dot(qv, strat_vecs[s])))
+                strat_pick = strat_meta[best][:3]
+        for sid, stext, stype in strat_pick:
+            id2text[sid] = stext; ntypes[sid] = stype
+        all_ids = list(id2text.keys())
+        text_emb = embedder.embed_nodes(id2text)
+        injector.prepare_session(_stub_graph(all_ids, id2text, ntypes),
+                                 all_ids, text_emb, tf, r_plan=3, r_evidence=4)
 
         applyable, attempts, blocks, hist = solve(model, tok, injector, t["issue"], src_ctx,
                                                   str(dest), max_retries, max_new, inject_on=not no_graph)
@@ -190,11 +239,16 @@ def main(argv=None):
                     help="write the loop's applyable patches as a swebench predictions jsonl -> tier-2 verify")
     ap.add_argument("--no-graph", action="store_true",
                     help="COLD baseline: no source-read, no injection -> ablation for the grounding lift")
+    ap.add_argument("--strategy", choices=["off", "own", "retrieved"], default="off",
+                    help="strategy@L8 planning injection: off=baseline, own=upper-bound (leakage), "
+                         "retrieved=nearest other task's strategy (real, exclude self)")
+    ap.add_argument("--strategy-nodes", nargs="+",
+                    default=["artifacts/graph_growth/swe_strategy_candidates_clean.jsonl"])
     ap.add_argument("--device", default=None)
     a = ap.parse_args(argv)
     run(a.model, a.traces, a.nodes, a.adapter_ckpt, a.dataset, a.split, a.n_eval, a.max_new,
         a.repo_root, a.max_retries, dump=a.dump, emit_predictions=a.emit_predictions,
-        no_graph=a.no_graph, device_str=a.device)
+        no_graph=a.no_graph, strategy=a.strategy, strategy_nodes=a.strategy_nodes, device_str=a.device)
 
 
 if __name__ == "__main__":
