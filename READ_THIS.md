@@ -8,6 +8,27 @@
 
 ---
 
+## Session update (2026-06-07) — VERIFIED RESOLVE NUMBERS + the grounding lift (official harness, local Docker)
+
+Stood up the **real verifier locally**: WSL2 Ubuntu (on E: for space) + docker.io + swebench.
+**gold-sanity 3/3 resolved -> HARNESS PROVEN** (sb-cli hosted-lite is broken: marks correct gold
+"failed"; use Docker). Ran the loop grounded vs `--no-graph` cold (n-eval 30), verified both:
+
+| condition | applyable | **resolved** |
+|---|---|---|
+| **grounded** | 19/30 (63%) | **4** (4/17 submitted, ~13% of attempted) |
+| **cold (--no-graph)** | 1/24 (4%) | **0** |
+
+**Grounding accounts for 100% of the resolves** — remove it (no read-source, no injection) and the
+4B solves NOTHING (0/24). Lift: **applyable ~15x (4%->63%), resolve 0->4.** Clean — no loop/SR-format
+confound. astropy-14365's gold (`re.IGNORECASE`) = exactly our read-source bullseye -> resolves for us.
+Modest absolute (4B reality), lift unambiguous = **the thesis, verified.** Scaling levers: retries
+4->6, full n-eval 300, graph coverage, and `grounded_coder --gate verify` (now UNBLOCKED — Docker
+works) = self-improving loop capturing only RESOLVED patches into memory. Verify is CPU-only
+(~2-7 min/instance). See `DOCKER_VERIFY_RUNBOOK.md`.
+
+---
+
 ## Session update (2026-06-07) — MILESTONE: first correct end-to-end fix (read-the-source unlocks edits)
 
 **The execution wall diagnosed + broken.** Exhaustive manual inspection of generated patches
