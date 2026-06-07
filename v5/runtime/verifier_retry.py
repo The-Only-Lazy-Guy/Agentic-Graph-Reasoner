@@ -39,7 +39,9 @@ import subprocess
 
 
 def _user(issue, src_ctx, feedback=""):
-    s = f"ISSUE:\n{issue[:1400]}\n\nRELEVANT SOURCE (the bug is in here):\n{src_ctx}\n\n"
+    s = f"ISSUE:\n{issue[:1400]}\n\n"
+    if src_ctx:                              # empty under --no-graph (cold baseline)
+        s += f"RELEVANT SOURCE (the bug is in here):\n{src_ctx}\n\n"
     if feedback:
         s += f"PREVIOUS ATTEMPT FAILED:\n{feedback}\n\n"
     return (s + "Find the exact line(s) causing the bug and fix them. Output ONLY search/replace "
@@ -56,9 +58,9 @@ def _unmatched(blocks, dest):
     return out
 
 
-def solve(model, tok, injector, issue, src_ctx, dest, max_retries, max_new):
+def solve(model, tok, injector, issue, src_ctx, dest, max_retries, max_new, inject_on=True):
     """Iterate generate -> check SEARCH matches file -> feedback -> retry. Returns
-    (applyable, attempts_used, blocks, history)."""
+    (applyable, attempts_used, blocks, history). inject_on=False = cold baseline (--no-graph)."""
     feedback = ""
     history = []
     blocks = []
@@ -66,7 +68,7 @@ def solve(model, tok, injector, issue, src_ctx, dest, max_retries, max_new):
         gen = _gen(model, tok, [{"role": "system", "content": SR_SYS},
                                 {"role": "user", "content": _user(issue, src_ctx, feedback)}],
                    model.device if hasattr(model, "device") else next(model.parameters()).device,
-                   injector, True, max_new)
+                   injector, inject_on, max_new)
         blocks = parse_sr(gen)
         um = _unmatched(blocks, dest)
         applyable = bool(blocks) and not um
@@ -85,7 +87,7 @@ def solve(model, tok, injector, issue, src_ctx, dest, max_retries, max_new):
 
 
 def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max_new,
-        repo_root, max_retries, dump="", emit_predictions="", device_str=None):
+        repo_root, max_retries, dump="", emit_predictions="", no_graph=False, device_str=None):
     device = torch.device(device_str or ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"device={device}  max_retries={max_retries}", flush=True)
     provider = FrozenQwenHInitProvider(model_name, device=device)
@@ -119,10 +121,11 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
         if not ok:
             print(f"  [{k+1}] {iid} checkout FAILED"); continue
         src_parts = []
-        for s in support[:6]:
-            body = read_body(str(dest), meta[s]["file"], meta[s]["lineno"], max_lines=70)
-            if body:
-                src_parts.append(f"# {meta[s]['file']}\n{body}")
+        if not no_graph:                     # cold baseline (--no-graph): no source, no injection
+            for s in support[:6]:
+                body = read_body(str(dest), meta[s]["file"], meta[s]["lineno"], max_lines=70)
+                if body:
+                    src_parts.append(f"# {meta[s]['file']}\n{body}")
         src_ctx = "\n\n".join(src_parts)
         node_ids = support[:24]
         text_emb = embedder.embed_nodes({s: meta[s]["text"] for s in node_ids})
@@ -131,7 +134,7 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
                                  node_ids, text_emb, tf, r_plan=3, r_evidence=4)
 
         applyable, attempts, blocks, hist = solve(model, tok, injector, t["issue"], src_ctx,
-                                                  str(dest), max_retries, max_new)
+                                                  str(dest), max_retries, max_new, inject_on=not no_graph)
         scored += 1
         app1 += 1 if (hist and hist[0]["applyable"]) else 0
         appk += 1 if applyable else 0
@@ -181,10 +184,13 @@ def main(argv=None):
     ap.add_argument("--dump", default="")
     ap.add_argument("--emit-predictions", default="",
                     help="write the loop's applyable patches as a swebench predictions jsonl -> tier-2 verify")
+    ap.add_argument("--no-graph", action="store_true",
+                    help="COLD baseline: no source-read, no injection -> ablation for the grounding lift")
     ap.add_argument("--device", default=None)
     a = ap.parse_args(argv)
     run(a.model, a.traces, a.nodes, a.adapter_ckpt, a.dataset, a.split, a.n_eval, a.max_new,
-        a.repo_root, a.max_retries, dump=a.dump, emit_predictions=a.emit_predictions, device_str=a.device)
+        a.repo_root, a.max_retries, dump=a.dump, emit_predictions=a.emit_predictions,
+        no_graph=a.no_graph, device_str=a.device)
 
 
 if __name__ == "__main__":
