@@ -81,7 +81,8 @@ def sr_nll(model, tok, injector, issue, src, sr_text, device, inject: bool, max_
     if not sr_text.strip():
         return None
     msgs = [{"role": "system", "content": SR_SYS}, {"role": "user", "content": _user(issue, src)}]
-    p_ids = tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt").to(device)
+    p_ids = tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt",
+                                    return_dict=True)["input_ids"].to(device)
     a_ids = tok(sr_text, add_special_tokens=False, return_tensors="pt",
                 truncation=True, max_length=max_new).input_ids.to(device)
     if a_ids.shape[1] == 0:
