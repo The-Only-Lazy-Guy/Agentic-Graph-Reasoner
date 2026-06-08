@@ -105,7 +105,9 @@ def _build_rows(ids, traces, insts, meta, repo_root):
         sr = patch_to_sr(inst.get("patch", "") or "")
         if not support or not sr.strip():
             continue
-        dest = Path(repo_root) / f"{inst['repo'].replace('/', '__')}__{inst['base_commit'][:8]}"
+        # per-REPO dest (reused across commits) -> ~1 clone/repo, not 1/instance. checkout_repo
+        # reuses the .git and just fetch+checkout each commit -> ~12 clones for lite, not 240.
+        dest = Path(repo_root) / inst["repo"].replace("/", "__")
         ok, _ = checkout_repo(inst["repo"], inst["base_commit"], dest)
         if not ok:
             continue
