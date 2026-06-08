@@ -212,6 +212,8 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, epochs, lr,
             del nll
             if n % 25 == 0 and device.type == "cuda":
                 torch.cuda.empty_cache()
+            if n % 100 == 0:
+                print(f"    ep{ep+1} {n}/{len(train_r)}  running SR-NLL {tot/max(1,n):.4f}", flush=True)
         print(f"  [SR-SFT] epoch {ep+1}  mean SR-NLL(inject) {tot/max(1,n):.4f}  ({n} rows)", flush=True)
 
     torch.save(adapter.state_dict(), out_ckpt)
