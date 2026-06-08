@@ -60,8 +60,10 @@ def read_body(repo_dir, file_rel, lineno, max_lines=70) -> str:
 
 
 def _file_text(repo_dir, rel):
-    fp = Path(repo_dir) / (rel or "")
-    return fp.read_text(encoding="utf-8", errors="ignore") if fp.exists() else ""
+    if not rel:                              # empty/missing file in an SR block -> no text (not the repo dir)
+        return ""
+    fp = Path(repo_dir) / rel
+    return fp.read_text(encoding="utf-8", errors="ignore") if fp.is_file() else ""
 
 
 def _search_in_file(repo_dir, blocks) -> float:
