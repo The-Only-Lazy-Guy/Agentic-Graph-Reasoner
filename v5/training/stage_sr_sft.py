@@ -97,8 +97,39 @@ def sr_nll(model, tok, injector, issue, src, sr_text, device, inject: bool, max_
     return -lp[idx, a_ids[0]].mean()
 
 
+import subprocess
+
+
+def _ensure_repo(repo, commit, dest):
+    """Blobless clone (once/repo) + fetch the commit object. NO working-tree checkout."""
+    dest = Path(dest)
+    if not (dest / ".git").exists():
+        dest.mkdir(parents=True, exist_ok=True)
+        r = subprocess.run(["git", "clone", "--filter=blob:none", "--no-checkout",
+                            f"https://github.com/{repo}.git", str(dest)],
+                           capture_output=True, text=True, timeout=900)
+        if r.returncode != 0:
+            return False
+    f = subprocess.run(["git", "fetch", "--depth", "1", "origin", commit],
+                       cwd=str(dest), capture_output=True, text=True, timeout=900)
+    return f.returncode == 0
+
+
+def _body_at(dest, commit, file, lineno, max_lines):
+    """Read ONE file at <commit> via `git show` (fetches just that blob) -> slice the symbol body.
+    No full checkout = ~10-50x faster than materializing the whole repo per instance."""
+    r = subprocess.run(["git", "-C", str(dest), "show", f"{commit}:{file}"],
+                       capture_output=True, text=True, timeout=120)
+    if r.returncode != 0 or not r.stdout:
+        return ""
+    lines = r.stdout.splitlines()
+    lo = lineno[0] if lineno else 1
+    hi = lineno[1] if (lineno and len(lineno) > 1) else lo
+    return "\n".join(lines[max(0, lo - 1):hi][:max_lines])
+
+
 def _build_rows(ids, traces, insts, meta, repo_root):
-    """For each instance: (issue, read-source, support node_ids/texts, gold SR). Checks out repos."""
+    """For each instance: (issue, read-source via git-show, support node_ids/texts, gold SR)."""
     rows = []
     for k, iid in enumerate(ids):
         if k % 25 == 0:
@@ -108,14 +139,18 @@ def _build_rows(ids, traces, insts, meta, repo_root):
         sr = patch_to_sr(inst.get("patch", "") or "")
         if not support or not sr.strip():
             continue
-        # per-REPO dest (reused across commits) -> ~1 clone/repo, not 1/instance. checkout_repo
-        # reuses the .git and just fetch+checkout each commit -> ~12 clones for lite, not 240.
+        # per-REPO blobless clone (once) + git-show each needed file at the commit. NO full
+        # checkout -> read 4 blobs, not materialize the whole repo. ~10-50x faster.
         dest = Path(repo_root) / inst["repo"].replace("/", "__")
-        ok, _ = checkout_repo(inst["repo"], inst["base_commit"], dest)
-        if not ok:
+        commit = inst["base_commit"]
+        if not _ensure_repo(inst["repo"], commit, dest):
             continue
-        src = "\n\n".join(f"# {meta[s]['file']}\n{read_body(str(dest), meta[s]['file'], meta[s]['lineno'], 55)}"
-                          for s in support[:4] if read_body(str(dest), meta[s]['file'], meta[s]['lineno'], 55))
+        parts = []
+        for s in support[:4]:
+            body = _body_at(dest, commit, meta[s]["file"], meta[s]["lineno"], 55)
+            if body:
+                parts.append(f"# {meta[s]['file']}\n{body}")
+        src = "\n\n".join(parts)
         if not src.strip():
             continue
         rows.append({"iid": iid, "issue": t["issue"], "src": src, "sr": sr,
