@@ -112,8 +112,8 @@ def _build_rows(ids, traces, insts, meta, repo_root):
         ok, _ = checkout_repo(inst["repo"], inst["base_commit"], dest)
         if not ok:
             continue
-        src = "\n\n".join(f"# {meta[s]['file']}\n{read_body(str(dest), meta[s]['file'], meta[s]['lineno'], 70)}"
-                          for s in support[:6] if read_body(str(dest), meta[s]['file'], meta[s]['lineno'], 70))
+        src = "\n\n".join(f"# {meta[s]['file']}\n{read_body(str(dest), meta[s]['file'], meta[s]['lineno'], 55)}"
+                          for s in support[:4] if read_body(str(dest), meta[s]['file'], meta[s]['lineno'], 55))
         if not src.strip():
             continue
         rows.append({"iid": iid, "issue": t["issue"], "src": src, "sr": sr,
@@ -127,6 +127,14 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, epochs, lr,
     print(f"device={device}  lm={model_name}  SR-SFT from {adapter_ckpt}", flush=True)
     provider = FrozenQwenHInitProvider(model_name, device=device)
     model, tok = provider.model, provider.tok
+    # gradient checkpointing: recompute activations in backward -> big VRAM cut (frozen base, but
+    # activations L8->output stay in the graph for the adapter's gradient). use_reentrant=False
+    # so the adapter delta (requires grad, injected at L8) is tracked.
+    model.config.use_cache = False
+    try:
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    except Exception as e:   # noqa: BLE001
+        print(f"  (gradient checkpointing unavailable: {e})", flush=True)
     lm_dim = provider.hidden_size
     embedder = RealEmbedder(device)
     gnn = RGCNEncoder().to(device).eval()
