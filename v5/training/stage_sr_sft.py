@@ -100,7 +100,9 @@ def sr_nll(model, tok, injector, issue, src, sr_text, device, inject: bool, max_
 def _build_rows(ids, traces, insts, meta, repo_root):
     """For each instance: (issue, read-source, support node_ids/texts, gold SR). Checks out repos."""
     rows = []
-    for iid in ids:
+    for k, iid in enumerate(ids):
+        if k % 25 == 0:
+            print(f"    build-rows {k}/{len(ids)} (kept {len(rows)})...", flush=True)
         t, inst = traces[iid], insts[iid]
         support = [s for s in t["support_ids"] if s in meta]
         sr = patch_to_sr(inst.get("patch", "") or "")
