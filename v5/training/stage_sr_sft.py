@@ -127,14 +127,9 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, epochs, lr,
     print(f"device={device}  lm={model_name}  SR-SFT from {adapter_ckpt}", flush=True)
     provider = FrozenQwenHInitProvider(model_name, device=device)
     model, tok = provider.model, provider.tok
-    # gradient checkpointing: recompute activations in backward -> big VRAM cut (frozen base, but
-    # activations L8->output stay in the graph for the adapter's gradient). use_reentrant=False
-    # so the adapter delta (requires grad, injected at L8) is tracked.
-    model.config.use_cache = False
-    try:
-        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
-    except Exception as e:   # noqa: BLE001
-        print(f"  (gradient checkpointing unavailable: {e})", flush=True)
+    # NO gradient checkpointing: it re-fires the injection hooks on every recompute segment ->
+    # re-runs the all-positions adapter many times -> memory EXPLODES (24->90GB). Cap the
+    # sequence instead (sr_nll truncates) so the retained activations stay bounded.
     lm_dim = provider.hidden_size
     embedder = RealEmbedder(device)
     gnn = RGCNEncoder().to(device).eval()
@@ -175,6 +170,9 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, epochs, lr,
             torch.nn.utils.clip_grad_norm_([p for p in adapter.parameters() if p.requires_grad], 1.0)
             opt.step()
             tot += float(nll.item()); n += 1
+            del nll
+            if n % 25 == 0 and device.type == "cuda":
+                torch.cuda.empty_cache()
         print(f"  [SR-SFT] epoch {ep+1}  mean SR-NLL(inject) {tot/max(1,n):.4f}  ({n} rows)", flush=True)
 
     torch.save(adapter.state_dict(), out_ckpt)
