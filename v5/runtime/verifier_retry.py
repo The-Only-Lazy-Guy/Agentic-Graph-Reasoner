@@ -119,7 +119,8 @@ def solve(model, tok, injector, issue, src_ctx, dest, max_retries, max_new, inje
 
 def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max_new,
         repo_root, max_retries, dump="", emit_predictions="", no_graph=False,
-        strategy="off", strategy_nodes=None, strat_topk=3, device_str=None):
+        strategy="off", strategy_nodes=None, strat_topk=3,
+        src_bodies=6, src_lines=70, device_str=None):
     device = torch.device(device_str or ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"device={device}  max_retries={max_retries}", flush=True)
     provider = FrozenQwenHInitProvider(model_name, device=device)
@@ -163,8 +164,8 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
             print(f"  [{k+1}] {iid} checkout FAILED"); continue
         src_parts = []
         if not no_graph:                     # cold baseline (--no-graph): no source, no injection
-            for s in support[:6]:
-                body = read_body(str(dest), meta[s]["file"], meta[s]["lineno"], max_lines=70)
+            for s in support[:src_bodies]:
+                body = read_body(str(dest), meta[s]["file"], meta[s]["lineno"], max_lines=src_lines)
                 if body:
                     src_parts.append(f"# {meta[s]['file']}\n{body}")
         src_ctx = "\n\n".join(src_parts)
@@ -257,12 +258,14 @@ def main(argv=None):
                     default=["artifacts/graph_growth/swe_strategy_candidates_clean.jsonl"])
     ap.add_argument("--strat-topk", type=int, default=3,
                     help="retrieved: pool strategies from top-K nearest tasks (issue+symbol-overlap)")
+    ap.add_argument("--src-bodies", type=int, default=6, help="read-source: top-K support bodies (MATCH training)")
+    ap.add_argument("--src-lines", type=int, default=70, help="read-source: max lines/body (MATCH training)")
     ap.add_argument("--device", default=None)
     a = ap.parse_args(argv)
     run(a.model, a.traces, a.nodes, a.adapter_ckpt, a.dataset, a.split, a.n_eval, a.max_new,
         a.repo_root, a.max_retries, dump=a.dump, emit_predictions=a.emit_predictions,
         no_graph=a.no_graph, strategy=a.strategy, strategy_nodes=a.strategy_nodes,
-        strat_topk=a.strat_topk, device_str=a.device)
+        strat_topk=a.strat_topk, src_bodies=a.src_bodies, src_lines=a.src_lines, device_str=a.device)
 
 
 if __name__ == "__main__":
