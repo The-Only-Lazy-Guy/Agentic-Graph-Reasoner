@@ -71,7 +71,7 @@ def patch_to_sr(patch: str) -> str:
 
 
 def _user(issue, src):
-    return (f"ISSUE:\n{issue[:1400]}\n\nRELEVANT SOURCE (the bug is in here):\n{src}\n\n"
+    return (f"ISSUE:\n{issue[:1000]}\n\nRELEVANT SOURCE (the bug is in here):\n{src}\n\n"
             "Find the exact line(s) causing the bug and fix them. Output ONLY search/replace "
             "blocks: SEARCH must copy the source EXACTLY; REPLACE must DIFFER from SEARCH.")
 
@@ -88,6 +88,8 @@ def sr_nll(model, tok, injector, issue, src, sr_text, device, inject: bool, max_
     if a_ids.shape[1] == 0:
         return None
     full = torch.cat([p_ids, a_ids], dim=1)
+    if full.shape[1] > 1600:                 # backstop: skip pathologically long rows -> no OOM
+        return None
     ctx = injector.inject(model) if inject else nullcontext()
     with ctx:
         logits = model(full).logits
@@ -146,8 +148,8 @@ def _build_rows(ids, traces, insts, meta, repo_root):
         if not _ensure_repo(inst["repo"], commit, dest):
             continue
         parts = []
-        for s in support[:4]:
-            body = _body_at(dest, commit, meta[s]["file"], meta[s]["lineno"], 55)
+        for s in support[:3]:                # 3x45 (was 4x55) -> shorter seq, fits 48GB on gym
+            body = _body_at(dest, commit, meta[s]["file"], meta[s]["lineno"], 45)
             if body:
                 parts.append(f"# {meta[s]['file']}\n{body}")
         src = "\n\n".join(parts)
