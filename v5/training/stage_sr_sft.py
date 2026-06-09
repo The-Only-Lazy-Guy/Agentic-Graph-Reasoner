@@ -130,7 +130,7 @@ def _body_at(dest, commit, file, lineno, max_lines):
     return "\n".join(lines[max(0, lo - 1):hi][:max_lines])
 
 
-def _build_rows(ids, traces, insts, meta, repo_root):
+def _build_rows(ids, traces, insts, meta, repo_root, src_bodies=4, src_lines=55):
     """For each instance: (issue, read-source via git-show, support node_ids/texts, gold SR)."""
     rows = []
     for k, iid in enumerate(ids):
@@ -148,8 +148,8 @@ def _build_rows(ids, traces, insts, meta, repo_root):
         if not _ensure_repo(inst["repo"], commit, dest):
             continue
         parts = []
-        for s in support[:3]:                # 3x45 (was 4x55) -> shorter seq, fits 48GB on gym
-            body = _body_at(dest, commit, meta[s]["file"], meta[s]["lineno"], 45)
+        for s in support[:src_bodies]:       # source config (MATCH the verifier_retry eval)
+            body = _body_at(dest, commit, meta[s]["file"], meta[s]["lineno"], src_lines)
             if body:
                 parts.append(f"# {meta[s]['file']}\n{body}")
         src = "\n\n".join(parts)
@@ -161,7 +161,7 @@ def _build_rows(ids, traces, insts, meta, repo_root):
 
 
 def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, epochs, lr,
-        n_train, n_eval, repo_root, out_ckpt, skip=30, device_str=None):
+        n_train, n_eval, repo_root, out_ckpt, skip=30, src_bodies=4, src_lines=55, device_str=None):
     device = torch.device(device_str or ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"device={device}  lm={model_name}  SR-SFT from {adapter_ckpt}", flush=True)
     provider = FrozenQwenHInitProvider(model_name, device=device)
@@ -187,7 +187,7 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, epochs, lr,
     # never trains on what we benchmark.
     ids = [i for i in traces if i in insts][skip: skip + n_train + n_eval]
     print(f"building rows (checkout + read-source) for {len(ids)} instances (skip first {skip})...", flush=True)
-    rows = _build_rows(ids, traces, insts, meta, repo_root)
+    rows = _build_rows(ids, traces, insts, meta, repo_root, src_bodies, src_lines)
     train_r, eval_r = rows[:n_train], rows[n_train:n_train + n_eval]
     print(f"rows: {len(train_r)} train / {len(eval_r)} eval", flush=True)
     tf = {"task_family": "code_fix", "required_slots": []}
@@ -253,10 +253,13 @@ def main(argv=None):
     ap.add_argument("--repo-root", default="data/swe_repos")
     ap.add_argument("--skip", type=int, default=30,
                     help="skip the first N instances (the verifier_retry resolve-eval set) -> no leakage")
+    ap.add_argument("--src-bodies", type=int, default=4, help="read-source bodies (MATCH eval)")
+    ap.add_argument("--src-lines", type=int, default=55, help="read-source max lines/body (MATCH eval)")
     ap.add_argument("--device", default=None)
     a = ap.parse_args(argv)
     run(a.model, a.traces, a.nodes, a.adapter_ckpt, a.dataset, a.split, a.epochs, a.lr,
-        a.n_train, a.n_eval, a.repo_root, a.out_ckpt, skip=a.skip, device_str=a.device)
+        a.n_train, a.n_eval, a.repo_root, a.out_ckpt, skip=a.skip,
+        src_bodies=a.src_bodies, src_lines=a.src_lines, device_str=a.device)
 
 
 if __name__ == "__main__":
