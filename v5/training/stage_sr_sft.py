@@ -161,7 +161,8 @@ def _build_rows(ids, traces, insts, meta, repo_root, src_bodies=4, src_lines=55)
 
 
 def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, epochs, lr,
-        n_train, n_eval, repo_root, out_ckpt, skip=30, src_bodies=4, src_lines=55, device_str=None):
+        n_train, n_eval, repo_root, out_ckpt, skip=30, src_bodies=4, src_lines=55,
+        exclude_lite=False, device_str=None):
     device = torch.device(device_str or ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"device={device}  lm={model_name}  SR-SFT from {adapter_ckpt}", flush=True)
     provider = FrozenQwenHInitProvider(model_name, device=device)
@@ -185,7 +186,13 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, epochs, lr,
     insts = {t["instance_id"]: t for t in load_instances(dataset, split, limit=0)}
     # NO LEAKAGE: skip the first `skip` instances (the verifier_retry resolve-eval set) so SR-SFT
     # never trains on what we benchmark.
-    ids = [i for i in traces if i in insts][skip: skip + n_train + n_eval]
+    pool = [i for i in traces if i in insts]
+    if exclude_lite:                          # drop lite-test instances -> domain-matched + eval-disjoint
+        lite_ids = {t["instance_id"] for t in load_instances("lite", "test", limit=0)}
+        before = len(pool)
+        pool = [i for i in pool if i not in lite_ids]
+        print(f"excluded {before - len(pool)} lite-test instances (no leakage)", flush=True)
+    ids = pool[skip: skip + n_train + n_eval]
     print(f"building rows (checkout + read-source) for {len(ids)} instances (skip first {skip})...", flush=True)
     rows = _build_rows(ids, traces, insts, meta, repo_root, src_bodies, src_lines)
     train_r, eval_r = rows[:n_train], rows[n_train:n_train + n_eval]
@@ -255,11 +262,13 @@ def main(argv=None):
                     help="skip the first N instances (the verifier_retry resolve-eval set) -> no leakage")
     ap.add_argument("--src-bodies", type=int, default=4, help="read-source bodies (MATCH eval)")
     ap.add_argument("--src-lines", type=int, default=55, help="read-source max lines/body (MATCH eval)")
+    ap.add_argument("--exclude-lite", action="store_true",
+                    help="drop lite-test instances from training (full --split test -> domain-matched + eval-disjoint)")
     ap.add_argument("--device", default=None)
     a = ap.parse_args(argv)
     run(a.model, a.traces, a.nodes, a.adapter_ckpt, a.dataset, a.split, a.epochs, a.lr,
         a.n_train, a.n_eval, a.repo_root, a.out_ckpt, skip=a.skip,
-        src_bodies=a.src_bodies, src_lines=a.src_lines, device_str=a.device)
+        src_bodies=a.src_bodies, src_lines=a.src_lines, exclude_lite=a.exclude_lite, device_str=a.device)
 
 
 if __name__ == "__main__":
