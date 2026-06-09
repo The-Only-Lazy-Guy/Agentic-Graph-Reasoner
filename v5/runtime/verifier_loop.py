@@ -62,7 +62,8 @@ def _gen_blocks(model, tok, injector, issue, src, dest, apply_fb, test_fb, max_n
 
 def run_one_test(instance_id, patch, dataset, run_id, out_dir):
     """Apply the patch in Docker + run the instance's tests -> (resolved, failing-output tail)."""
-    pred_path = write_predictions({instance_id: patch}, str(Path(out_dir) / "loop_pred.jsonl"), "v5_loop")
+    pred_path = str(Path(out_dir) / "loop_pred.jsonl")   # write_predictions returns the COUNT, not the path
+    write_predictions({instance_id: patch}, pred_path, "v5_loop")
     res = run_swebench(pred_path, dataset, run_id, instance_ids=[instance_id], max_workers=1)
     resolved = bool(res.get(instance_id, False))
     err = ""
