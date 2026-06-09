@@ -158,8 +158,11 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
         support = [s for s in t["support_ids"] if s in meta]
         if not support:
             continue
-        dest = Path(repo_root) / f"{inst['repo'].replace('/', '__')}__{inst['base_commit'][:8]}"
-        ok, msg = checkout_repo(inst["repo"], inst["base_commit"], dest)
+        # per-REPO dest (clone once, fetch+checkout each commit) -> NOT a fresh clone per commit
+        # (was re-cloning django 30x -> 900s timeout on a fresh box). apply_sr still works on the
+        # working tree checked out at this commit.
+        dest = Path(repo_root) / inst["repo"].replace("/", "__")
+        ok, msg = checkout_repo(inst["repo"], inst["base_commit"], dest, timeout=1800)
         if not ok:
             print(f"  [{k+1}] {iid} checkout FAILED"); continue
         src_parts = []
