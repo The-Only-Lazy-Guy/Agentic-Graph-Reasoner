@@ -44,7 +44,7 @@ def _stub_graph(node_ids, id2text, ntypes):
 
 
 def _gen(model, tok, msgs, device, injector, inject: bool, max_new: int,
-         constrain_symbols=None) -> str:
+         constrain_symbols=None, temperature: float = 0.0) -> str:
     enc = tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt",
                                   return_dict=True).to(device)
     procs = None
@@ -53,9 +53,11 @@ def _gen(model, tok, msgs, device, injector, inject: bool, max_new: int,
         from v5.graph_grower.constrained_decode import make_inpatch_processor
         plen = enc["input_ids"].shape[1]
         procs = LogitsProcessorList([make_inpatch_processor(tok, constrain_symbols, plen)])
+    sample = {"do_sample": True, "temperature": temperature, "top_p": 0.95} if temperature > 0 \
+        else {"do_sample": False}
     ctx = injector.inject(model) if inject else nullcontext()
     with ctx, torch.no_grad():
-        out = model.generate(**enc, max_new_tokens=max_new, do_sample=False,
+        out = model.generate(**enc, max_new_tokens=max_new, **sample,
                              logits_processor=procs, pad_token_id=tok.pad_token_id or tok.eos_token_id)
     return tok.decode(out[0][enc["input_ids"].shape[1]:], skip_special_tokens=True)
 

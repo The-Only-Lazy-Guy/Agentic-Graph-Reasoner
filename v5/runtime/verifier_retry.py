@@ -117,10 +117,37 @@ def solve(model, tok, injector, issue, src_ctx, dest, max_retries, max_new, inje
     return False, max_retries, blocks, history
 
 
+def solve_vote(model, tok, injector, issue, src_ctx, dest, k, temp, max_new):
+    """SELF-CONSISTENCY: sample K patches from the SAME prompt (no perturbation), keep the
+    applyable ones, VOTE on the canonical edit (file+search+replace block-set). Errors scatter,
+    the right minimal edit repeats -> the mode beats greedy. Returns (blocks|None, votes, n_app)."""
+    from collections import Counter
+    ballots = {}
+    counts = Counter()
+    n_app = 0
+    msgs_user = _user(issue, src_ctx)
+    for _ in range(k):
+        gen = _gen(model, tok, [{"role": "system", "content": SR_SYS},
+                                {"role": "user", "content": msgs_user}],
+                   next(model.parameters()).device, injector, True, max_new, temperature=temp)
+        blocks = parse_sr(gen)
+        if not blocks or _unmatched(blocks, dest):
+            continue
+        n_app += 1
+        key = tuple(sorted((b.get("file", ""), (b.get("search") or "").strip(),
+                            (b.get("replace") or "").strip()) for b in blocks))
+        ballots[key] = blocks
+        counts[key] += 1
+    if not counts:
+        return None, 0, 0
+    best, votes = counts.most_common(1)[0]
+    return ballots[best], votes, n_app
+
+
 def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max_new,
         repo_root, max_retries, dump="", emit_predictions="", no_graph=False,
         strategy="off", strategy_nodes=None, strat_topk=3,
-        src_bodies=6, src_lines=70, device_str=None):
+        src_bodies=6, src_lines=70, best_of_k=0, temp=0.7, device_str=None):
     device = torch.device(device_str or ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"device={device}  max_retries={max_retries}", flush=True)
     provider = FrozenQwenHInitProvider(model_name, device=device)
@@ -201,8 +228,16 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
         injector.prepare_session(_stub_graph(all_ids, id2text, ntypes),
                                  all_ids, text_emb, tf, r_plan=3, r_evidence=4)
 
-        applyable, attempts, blocks, hist = solve(model, tok, injector, t["issue"], src_ctx,
-                                                  str(dest), max_retries, max_new, inject_on=not no_graph)
+        if best_of_k > 1:
+            blocks, votes, n_app = solve_vote(model, tok, injector, t["issue"], src_ctx,
+                                              str(dest), best_of_k, temp, max_new)
+            applyable = blocks is not None
+            attempts = best_of_k
+            hist = [{"attempt": 1, "n_blocks": len(blocks or []), "applyable": applyable,
+                     "votes": votes, "applyable_samples": n_app}]
+        else:
+            applyable, attempts, blocks, hist = solve(model, tok, injector, t["issue"], src_ctx,
+                                                      str(dest), max_retries, max_new, inject_on=not no_graph)
         scored += 1
         app1 += 1 if (hist and hist[0]["applyable"]) else 0
         appk += 1 if applyable else 0
@@ -215,8 +250,12 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
         preds[iid] = model_patch
         records.append({"id": iid, "applyable": applyable, "attempts": attempts, "history": hist,
                         "gold_patch": inst.get("patch", ""), "final_blocks": blocks})
-        print(f"  [{k+1}/{len(ids)}] {iid:24} applyable={applyable} in {attempts} "
-              f"(attempt1={'Y' if hist and hist[0]['applyable'] else 'N'})", flush=True)
+        if best_of_k > 1:
+            print(f"  [{k+1}/{len(ids)}] {iid:24} applyable={applyable} "
+                  f"votes={hist[0].get('votes', 0)}/{hist[0].get('applyable_samples', 0)} of {best_of_k}", flush=True)
+        else:
+            print(f"  [{k+1}/{len(ids)}] {iid:24} applyable={applyable} in {attempts} "
+                  f"(attempt1={'Y' if hist and hist[0]['applyable'] else 'N'})", flush=True)
 
     if dump:
         Path(dump).parent.mkdir(parents=True, exist_ok=True)
@@ -263,12 +302,16 @@ def main(argv=None):
                     help="retrieved: pool strategies from top-K nearest tasks (issue+symbol-overlap)")
     ap.add_argument("--src-bodies", type=int, default=6, help="read-source: top-K support bodies (MATCH training)")
     ap.add_argument("--src-lines", type=int, default=70, help="read-source: max lines/body (MATCH training)")
+    ap.add_argument("--best-of-k", type=int, default=0,
+                    help=">1 = SELF-CONSISTENCY: sample K patches from the same prompt, vote on the modal edit")
+    ap.add_argument("--temp", type=float, default=0.7, help="sampling temperature for --best-of-k")
     ap.add_argument("--device", default=None)
     a = ap.parse_args(argv)
     run(a.model, a.traces, a.nodes, a.adapter_ckpt, a.dataset, a.split, a.n_eval, a.max_new,
         a.repo_root, a.max_retries, dump=a.dump, emit_predictions=a.emit_predictions,
         no_graph=a.no_graph, strategy=a.strategy, strategy_nodes=a.strategy_nodes,
-        strat_topk=a.strat_topk, src_bodies=a.src_bodies, src_lines=a.src_lines, device_str=a.device)
+        strat_topk=a.strat_topk, src_bodies=a.src_bodies, src_lines=a.src_lines,
+        best_of_k=a.best_of_k, temp=a.temp, device_str=a.device)
 
 
 if __name__ == "__main__":
