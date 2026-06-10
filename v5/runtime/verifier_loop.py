@@ -90,6 +90,8 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
     adapter.load_state_dict(torch.load(adapter_ckpt, map_location=device)); adapter.eval()
     injector = GraphAttentionInjector(adapter, gnn, goal_enc, device=device)
 
+    import uuid
+    sess = uuid.uuid4().hex[:6]               # unique per run -> swebench won't skip with a stale report
     traces = load_traces(traces_p)
     meta = load_symbol_meta(nodes_p)
     insts = {t["instance_id"]: t for t in load_instances(dataset, split, limit=0)}
@@ -127,7 +129,9 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
             subprocess.run(["git", "-C", str(dest), "checkout", "--", "."], capture_output=True)
             if not patch.strip():
                 apply_fb = "empty patch"; continue
-            resolved, err = run_one_test(iid, patch, dataset, f"loop_{iid[:20]}", out_dir)
+            # UNIQUE run_id per attempt -> swebench actually re-tests (else "already run, skipping")
+            rid = f"l{sess}_{iid.split('__')[-1][:14]}_{attempt+1}"
+            resolved, err = run_one_test(iid, patch, dataset, rid, out_dir)
             print(f"  [{k+1}/{len(ids)}] {iid:24} attempt{attempt+1} applyable=Y resolved={resolved}", flush=True)
             if resolved:
                 passed = True
