@@ -238,6 +238,12 @@ class GraphAttentionInjector:
         h_plan = layer_modules[PLANNING_LAYER].register_forward_hook(self._planning_hook)
         h_evid = layer_modules[EVIDENCE_LAYER].register_forward_hook(self._evidence_hook)
         self._hooks = [h_plan, h_evid]
+        # reset the run-once flags PER generation. run_once_per_session guards a double prefill
+        # WITHIN one generate(); without this reset it also blocked every generate AFTER the first
+        # in a session (prepare_session is called once, but voting/retry generate many times ->
+        # samples/attempts 2..K ran UNGROUNDED). Reset here = each generate is grounded.
+        self._plan_ran = False
+        self._evid_ran = False
         try:
             yield self
         finally:
