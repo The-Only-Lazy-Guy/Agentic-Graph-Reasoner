@@ -139,15 +139,16 @@ def solve_vote(model, tok, injector, issue, src_ctx, dest, k, temp, max_new):
         ballots[key] = blocks
         counts[key] += 1
     if not counts:
-        return None, 0, 0
+        return None, 0, 0, []
+    ranked = [ballots[key] for key, _ in counts.most_common()]   # distinct candidates, most-voted first
     best, votes = counts.most_common(1)[0]
-    return ballots[best], votes, n_app
+    return ballots[best], votes, n_app, ranked
 
 
 def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max_new,
         repo_root, max_retries, dump="", emit_predictions="", no_graph=False,
         strategy="off", strategy_nodes=None, strat_topk=3,
-        src_bodies=6, src_lines=70, best_of_k=0, temp=0.7, device_str=None):
+        src_bodies=6, src_lines=70, best_of_k=0, temp=0.7, emit_candidates=0, device_str=None):
     device = torch.device(device_str or ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"device={device}  max_retries={max_retries}", flush=True)
     provider = FrozenQwenHInitProvider(model_name, device=device)
@@ -179,6 +180,7 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
     app1 = appk = scored = 0
     records = []
     preds = {}                              # instance_id -> git diff (swebench prediction)
+    cand_preds = {}                         # rank -> {instance_id: patch} for --emit-candidates (oracle best-of-K)
     tf = {"task_family": "code_fix", "required_slots": []}
     for k, iid in enumerate(ids):
         t = traces[iid]; inst = insts[iid]
@@ -229,12 +231,18 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
                                  all_ids, text_emb, tf, r_plan=3, r_evidence=4)
 
         if best_of_k > 1:
-            blocks, votes, n_app = solve_vote(model, tok, injector, t["issue"], src_ctx,
-                                              str(dest), best_of_k, temp, max_new)
+            blocks, votes, n_app, ranked = solve_vote(model, tok, injector, t["issue"], src_ctx,
+                                                      str(dest), best_of_k, temp, max_new)
             applyable = blocks is not None
             attempts = best_of_k
             hist = [{"attempt": 1, "n_blocks": len(blocks or []), "applyable": applyable,
-                     "votes": votes, "applyable_samples": n_app}]
+                     "votes": votes, "applyable_samples": n_app, "n_distinct": len(ranked)}]
+            if emit_candidates:                  # ORACLE best-of-K: every distinct candidate -> its own file
+                for r, cb in enumerate(ranked[:emit_candidates]):
+                    _, cp = apply_sr(str(dest), cb)
+                    subprocess.run(["git", "-C", str(dest), "checkout", "--", "."], capture_output=True)
+                    if cp.strip():
+                        cand_preds.setdefault(r, {})[iid] = cp
         else:
             applyable, attempts, blocks, hist = solve(model, tok, injector, t["issue"], src_ctx,
                                                       str(dest), max_retries, max_new, inject_on=not no_graph)
@@ -268,6 +276,18 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
         n = write_predictions({i: p for i, p in preds.items() if p.strip()}, emit_predictions, "v5_retry")
         print(f"emitted {n} applyable predictions -> {emit_predictions}  (TIER-2: verify with\n"
               f"  python -m v5.graph_grower.swe_verify --predictions {emit_predictions} --dataset {dataset})", flush=True)
+
+    if emit_candidates and cand_preds:
+        base = Path(emit_predictions or "artifacts/cand").with_suffix("")
+        for r in range(emit_candidates):
+            cp = cand_preds.get(r, {})
+            if cp:
+                path = f"{base}_cand{r+1}.jsonl"
+                write_predictions(cp, path, "v5_cand")
+                print(f"  candidate-{r+1}: {len(cp)} patches -> {path}", flush=True)
+        print("\nORACLE best-of-K: verify EACH cand*.jsonl, UNION the resolved instance_ids. If the"
+              "\nunion >> the mode's resolves, the TRUTH is in the candidate set -> verifier-selection"
+              "\n(test candidates, keep any pass) is the lever. If ~equal, the model can't synthesize it.", flush=True)
 
     print(f"\n=== RETRY LOOP (apply-feedback, no verifier) ===")
     print(f"  applyable@1   {app1}/{scored} ({100*app1/max(1,scored):.0f}%)")
@@ -305,13 +325,15 @@ def main(argv=None):
     ap.add_argument("--best-of-k", type=int, default=0,
                     help=">1 = SELF-CONSISTENCY: sample K patches from the same prompt, vote on the modal edit")
     ap.add_argument("--temp", type=float, default=0.7, help="sampling temperature for --best-of-k")
+    ap.add_argument("--emit-candidates", type=int, default=0,
+                    help="with --best-of-k: write top-N distinct candidates to <preds>_candR.jsonl (ORACLE best-of-K)")
     ap.add_argument("--device", default=None)
     a = ap.parse_args(argv)
     run(a.model, a.traces, a.nodes, a.adapter_ckpt, a.dataset, a.split, a.n_eval, a.max_new,
         a.repo_root, a.max_retries, dump=a.dump, emit_predictions=a.emit_predictions,
         no_graph=a.no_graph, strategy=a.strategy, strategy_nodes=a.strategy_nodes,
         strat_topk=a.strat_topk, src_bodies=a.src_bodies, src_lines=a.src_lines,
-        best_of_k=a.best_of_k, temp=a.temp, device_str=a.device)
+        best_of_k=a.best_of_k, temp=a.temp, emit_candidates=a.emit_candidates, device_str=a.device)
 
 
 if __name__ == "__main__":
