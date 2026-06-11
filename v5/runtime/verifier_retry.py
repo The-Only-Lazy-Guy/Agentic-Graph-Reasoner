@@ -33,6 +33,19 @@ def _unit(v):
     return a / (np.linalg.norm(a) + 1e-9)
 
 
+def _recall(ret_meta, gold_meta):
+    """Fraction of gold-touched symbols a retrieved symbol overlaps (same file + lineno span)."""
+    if not gold_meta:
+        return 1.0
+    found = 0
+    for g in gold_meta.values():
+        gf, (glo, ghi) = g["file"], (g["lineno"][0], g["lineno"][-1])
+        hit = any(r["file"] == gf and not (r["lineno"][-1] < glo or r["lineno"][0] > ghi)
+                  for r in ret_meta.values())
+        found += 1 if hit else 0
+    return found / len(gold_meta)
+
+
 def load_strategy_meta(paths):
     """{instance_id: [(node_id, text, node_type)]} for planning-pool strategy nodes."""
     out = {}
@@ -148,7 +161,8 @@ def solve_vote(model, tok, injector, issue, src_ctx, dest, k, temp, max_new):
 def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max_new,
         repo_root, max_retries, dump="", emit_predictions="", no_graph=False,
         strategy="off", strategy_nodes=None, strat_topk=3,
-        src_bodies=6, src_lines=70, best_of_k=0, temp=0.7, emit_candidates=0, device_str=None):
+        src_bodies=6, src_lines=70, best_of_k=0, temp=0.7, emit_candidates=0,
+        retrieve=0, device_str=None):
     device = torch.device(device_str or ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"device={device}  max_retries={max_retries}", flush=True)
     provider = FrozenQwenHInitProvider(model_name, device=device)
@@ -179,30 +193,36 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
 
     app1 = appk = scored = 0
     records = []
+    recalls = []                            # retrieve mode: localization recall@K vs gold-touched symbols
     preds = {}                              # instance_id -> git diff (swebench prediction)
     cand_preds = {}                         # rank -> {instance_id: patch} for --emit-candidates (oracle best-of-K)
     tf = {"task_family": "code_fix", "required_slots": []}
     for k, iid in enumerate(ids):
         t = traces[iid]; inst = insts[iid]
-        support = [s for s in t["support_ids"] if s in meta]
-        if not support:
-            continue
-        # per-REPO dest (clone once, fetch+checkout each commit) -> NOT a fresh clone per commit
-        # (was re-cloning django 30x -> 900s timeout on a fresh box). apply_sr still works on the
-        # working tree checked out at this commit.
+        # per-REPO dest (clone once, fetch+checkout each commit) -> NOT a fresh clone per commit.
         dest = Path(repo_root) / inst["repo"].replace("/", "__")
         ok, msg = checkout_repo(inst["repo"], inst["base_commit"], dest, timeout=1800)
         if not ok:
             print(f"  [{k+1}] {iid} checkout FAILED"); continue
+        if retrieve > 0:                     # REAL localization: rank repo symbols by the ISSUE (no gold)
+            from v5.runtime.code_retrieve import retrieve_support, to_meta
+            inst_meta = to_meta(retrieve_support(str(dest), t["issue"], embedder, retrieve))
+            support = list(inst_meta)
+            recalls.append(_recall(inst_meta, {s: meta[s] for s in t["support_ids"] if s in meta}))
+        else:                                # ORACLE support (gold-AST-mapped) — the default
+            inst_meta = meta
+            support = [s for s in t["support_ids"] if s in meta]
+        if not support:
+            continue
         src_parts = []
         if not no_graph:                     # cold baseline (--no-graph): no source, no injection
             for s in support[:src_bodies]:
-                body = read_body(str(dest), meta[s]["file"], meta[s]["lineno"], max_lines=src_lines)
+                body = read_body(str(dest), inst_meta[s]["file"], inst_meta[s]["lineno"], max_lines=src_lines)
                 if body:
-                    src_parts.append(f"# {meta[s]['file']}\n{body}")
+                    src_parts.append(f"# {inst_meta[s]['file']}\n{body}")
         src_ctx = "\n\n".join(src_parts)
         sym_ids = support[:24]
-        id2text = {s: meta[s]["text"] for s in sym_ids}
+        id2text = {s: inst_meta[s]["text"] for s in sym_ids}
         ntypes = {s: "fact" for s in sym_ids}          # symbols -> L20 EVIDENCE
         # strategy nodes -> L8 PLANNING (off / own=upper-bound leakage / retrieved=real, exclude self)
         strat_pick = []
@@ -210,7 +230,7 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
             strat_pick = strat_meta.get(iid, [])[:4]
         elif strategy == "retrieved" and strat_vecs:
             qv = _unit(embedder.embed_nodes({"q": t["issue"]})["q"])
-            tsyms = {n for s in support if (n := _symbol_name(meta[s]["text"]))}
+            tsyms = {n for s in support if (n := _symbol_name(inst_meta[s]["text"]))}
 
             def _score(s):                       # issue similarity + symbol-overlap (same buggy fns -> shared HOW)
                 ov = len(tsyms & strat_syms.get(s, set())) / (len(tsyms | strat_syms.get(s, set())) + 1e-9)
@@ -292,6 +312,10 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
     print(f"\n=== RETRY LOOP (apply-feedback, no verifier) ===")
     print(f"  applyable@1   {app1}/{scored} ({100*app1/max(1,scored):.0f}%)")
     print(f"  applyable@{max_retries}   {appk}/{scored} ({100*appk/max(1,scored):.0f}%)")
+    if retrieve > 0 and recalls:
+        full = sum(1 for r in recalls if r >= 0.999)
+        print(f"  RETRIEVAL localization recall@{retrieve}: mean {sum(recalls)/len(recalls):.2f} | "
+              f"all-gold-found {full}/{len(recalls)}  (vs ORACLE support = the real graph test)")
     print("\napplyable@k > applyable@1 = iteration repairs unmatched SEARCH -> the loop lifts the"
           "\napplyable rate with zero infra. Tier-2 (run tests) plugs in when a verifier is available.")
 
@@ -327,13 +351,16 @@ def main(argv=None):
     ap.add_argument("--temp", type=float, default=0.7, help="sampling temperature for --best-of-k")
     ap.add_argument("--emit-candidates", type=int, default=0,
                     help="with --best-of-k: write top-N distinct candidates to <preds>_candR.jsonl (ORACLE best-of-K)")
+    ap.add_argument("--retrieve", type=int, default=0,
+                    help=">0 = REAL localization: rank repo symbols by the issue, top-K as support (NOT gold)")
     ap.add_argument("--device", default=None)
     a = ap.parse_args(argv)
     run(a.model, a.traces, a.nodes, a.adapter_ckpt, a.dataset, a.split, a.n_eval, a.max_new,
         a.repo_root, a.max_retries, dump=a.dump, emit_predictions=a.emit_predictions,
         no_graph=a.no_graph, strategy=a.strategy, strategy_nodes=a.strategy_nodes,
         strat_topk=a.strat_topk, src_bodies=a.src_bodies, src_lines=a.src_lines,
-        best_of_k=a.best_of_k, temp=a.temp, emit_candidates=a.emit_candidates, device_str=a.device)
+        best_of_k=a.best_of_k, temp=a.temp, emit_candidates=a.emit_candidates,
+        retrieve=a.retrieve, device_str=a.device)
 
 
 if __name__ == "__main__":
