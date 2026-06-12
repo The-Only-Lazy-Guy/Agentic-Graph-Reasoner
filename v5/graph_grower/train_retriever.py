@@ -33,6 +33,7 @@ from v5.training.providers import RealEmbedder
 from v5.graph_grower.swe_load import load_instances, checkout_repo
 from v5.runtime.code_retrieve import _pool_files, SymDelta
 from v5.graph_grower.code_extract import extract_paths
+from v5.graph_grower.swe_grounded import parse_patch_hunks
 
 
 def _unit(a):
@@ -40,29 +41,19 @@ def _unit(a):
     return a / (np.linalg.norm(a, axis=-1, keepdims=True) + 1e-9)
 
 
-def _load_traces_full(paths):
-    """{iid: {issue, support_meta:[(file,lo,hi)]}} — support from gold (for marking positives)."""
-    out = {}
-    for p in paths:
-        for line in Path(p).read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            r = json.loads(line); v = r.get("v2_grounding") or {}
-            iid = r.get("instance_id") or v.get("instance_id")
-            if iid and v.get("support_ids"):
-                out[iid] = {"issue": v.get("task", ""), "support_ids": v["support_ids"]}
-    return out
+def _gold_spans(patch):
+    """Gold patch -> {file: [(lo, hi)]} changed-line ranges (the positives, straight from the diff)."""
+    return {f: [(s, s + max(l, 1) - 1) for s, l in spans] for f, spans in parse_patch_hunks(patch).items()}
 
 
-def build_examples(ids, traces, insts, meta, repo_root, embedder, max_files, max_syms):
-    """Per instance: q_vec + pool symbol vecs + gold mask (whole-package pool = eval-hard negatives)."""
+def build_examples(insts_list, repo_root, embedder, max_files, max_syms):
+    """Per instance: q_vec + whole-package symbol vecs + gold mask. Gold = symbols overlapping the
+    patch's changed lines (derived from the diff, NOT a prebuilt candidate graph)."""
     examples = []
-    for k, iid in enumerate(ids):
+    for k, inst in enumerate(insts_list):
         if k % 20 == 0:
-            print(f"    build {k}/{len(ids)} (kept {len(examples)})", flush=True)
-        t, inst = traces[iid], insts[iid]
-        gold = {(meta[s]["file"], meta[s]["lineno"][0], meta[s]["lineno"][-1])
-                for s in t["support_ids"] if s in meta}
+            print(f"    build {k}/{len(insts_list)} (kept {len(examples)})", flush=True)
+        gold = _gold_spans(inst.get("patch", "") or "")
         if not gold:
             continue
         dest = Path(repo_root) / inst["repo"].replace("/", "__")
@@ -74,15 +65,15 @@ def build_examples(ids, traces, insts, meta, repo_root, embedder, max_files, max
                 and (n.get("text") or "").strip() and (n.get("metadata") or {}).get("lineno")][:max_syms]
         if len(syms) < 5:
             continue
-        # mark positives: pool symbol overlaps a gold span in the same file
         mask = []
         for n in syms:
             m = n["metadata"]; lo, hi = m["lineno"][0], m["lineno"][-1]
-            pos = any(m["file"] == gf and not (hi < glo or lo > ghi) for gf, glo, ghi in gold)
+            pos = any(m["file"] == gf and not (hi < glo or lo > ghi)
+                      for gf, spans in gold.items() for glo, ghi in spans)
             mask.append(pos)
         if not any(mask):                    # gold function not in the extracted pool -> unusable
             continue
-        qv = _unit(embedder.embed_nodes({"q": t["issue"][:1500]})["q"])
+        qv = _unit(embedder.embed_nodes({"q": (inst.get("problem_statement") or "")[:1500]})["q"])
         sv = embedder.embed_nodes({n["node_id"]: n["text"] for n in syms})
         pool = _unit(np.stack([sv[n["node_id"]] for n in syms]))
         examples.append({"q": qv, "pool": pool, "mask": np.array(mask, dtype=bool)})
@@ -103,29 +94,21 @@ def _recall(examples, model, k, device):
     return hits / len(examples)
 
 
-def run(traces_p, eval_traces_p, nodes_p, dataset, split, n_train, n_eval, exclude_lite,
+def run(dataset, split, n_train, n_eval, exclude_lite, repo_root,
         out, epochs, lr, max_files, max_syms, k_eval, device_str=None):
     device = torch.device(device_str or ("cuda" if torch.cuda.is_available() else "cpu"))
-    from v5.runtime.sr_withcode import load_symbol_meta
     embedder = RealEmbedder(device)
-    meta = load_symbol_meta(nodes_p)
-    insts = {t["instance_id"]: t for t in load_instances(dataset, split, limit=0)}
 
-    traces = _load_traces_full(traces_p)
-    pool = [i for i in traces if i in insts]
+    train_insts = load_instances(dataset, split, limit=0)
     if exclude_lite:
         lite_ids = {t["instance_id"] for t in load_instances("lite", "test", limit=0)}
-        pool = [i for i in pool if i not in lite_ids]
-    print(f"train pool {len(pool)} | building {min(n_train, len(pool))} examples...", flush=True)
-    train_ex = build_examples(pool[:n_train], traces, insts, meta, "data/swe_repos",
-                              embedder, max_files, max_syms)
+        train_insts = [t for t in train_insts if t["instance_id"] not in lite_ids]
+    print(f"train pool {len(train_insts)} | building <= {n_train} examples...", flush=True)
+    train_ex = build_examples(train_insts[:n_train], repo_root, embedder, max_files, max_syms)
 
-    ev_traces = _load_traces_full(eval_traces_p)
-    ev_insts = {t["instance_id"]: t for t in load_instances("lite", "test", limit=0)}
-    ev_ids = [i for i in ev_traces if i in ev_insts][:n_eval]
-    ev_meta = load_symbol_meta(["artifacts/graph_growth/swe_code_candidates.jsonl"])
-    eval_ex = build_examples(ev_ids, ev_traces, ev_insts, ev_meta, "data/swe_repos",
-                             embedder, max_files, max_syms)
+    eval_insts = load_instances("lite", "test", limit=0)[:n_eval]
+    print(f"building <= {n_eval} eval (lite) examples...", flush=True)
+    eval_ex = build_examples(eval_insts, repo_root, embedder, max_files, max_syms)
     print(f"examples: {len(train_ex)} train / {len(eval_ex)} eval", flush=True)
     if not train_ex:
         print("no training examples"); return
@@ -159,14 +142,12 @@ def run(traces_p, eval_traces_p, nodes_p, dataset, split, n_train, n_eval, exclu
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Train the localization retriever (zero-init symbol delta).")
-    ap.add_argument("--traces", nargs="+", default=["data/swe/fulltest_traces.jsonl"])
-    ap.add_argument("--eval-traces", nargs="+", default=["data/swe/grounded_traces.jsonl"])
-    ap.add_argument("--nodes", nargs="+", default=["artifacts/graph_growth/fulltest_code_candidates.jsonl"])
-    ap.add_argument("--dataset", default="full")
+    ap.add_argument("--dataset", default="full", help="train source (full --split test = lite repos)")
     ap.add_argument("--split", default="test")
-    ap.add_argument("--exclude-lite", action="store_true")
+    ap.add_argument("--exclude-lite", action="store_true", help="drop lite-test instances (leakage-free)")
     ap.add_argument("--n-train", type=int, default=300)
     ap.add_argument("--n-eval", type=int, default=50)
+    ap.add_argument("--repo-root", default="data/swe_repos")
     ap.add_argument("--out", default="artifacts/stage_cache/retriever_delta.pt")
     ap.add_argument("--epochs", type=int, default=8)
     ap.add_argument("--lr", type=float, default=1e-4)
@@ -175,7 +156,7 @@ def main(argv=None):
     ap.add_argument("--k-eval", type=int, default=8)
     ap.add_argument("--device", default=None)
     a = ap.parse_args(argv)
-    run(a.traces, a.eval_traces, a.nodes, a.dataset, a.split, a.n_train, a.n_eval, a.exclude_lite,
+    run(a.dataset, a.split, a.n_train, a.n_eval, a.exclude_lite, a.repo_root,
         a.out, a.epochs, a.lr, a.max_files, a.max_syms, a.k_eval, device_str=a.device)
 
 
