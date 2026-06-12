@@ -31,7 +31,7 @@ import torch.nn as nn
 
 from v5.training.providers import RealEmbedder
 from v5.graph_grower.swe_load import load_instances, checkout_repo
-from v5.runtime.code_retrieve import _pool_files, SymDelta
+from v5.runtime.code_retrieve import _rank_files, SymDelta
 from v5.graph_grower.code_extract import extract_paths
 from v5.graph_grower.swe_grounded import parse_patch_hunks
 
@@ -60,7 +60,7 @@ def build_examples(insts_list, repo_root, embedder, max_files, max_syms):
         ok, _ = checkout_repo(inst["repo"], inst["base_commit"], dest, timeout=1800)
         if not ok:
             continue
-        nodes, _ = extract_paths(str(dest), _pool_files(str(dest), max_files), repo="")
+        nodes, _ = extract_paths(str(dest), _rank_files(str(dest), inst.get("problem_statement", ""), max_files), repo="")
         syms = [n for n in nodes if n.get("node_type") == "symbol"
                 and (n.get("text") or "").strip() and (n.get("metadata") or {}).get("lineno")][:max_syms]
         if len(syms) < 5:
@@ -151,7 +151,7 @@ def main(argv=None):
     ap.add_argument("--out", default="artifacts/stage_cache/retriever_delta.pt")
     ap.add_argument("--epochs", type=int, default=8)
     ap.add_argument("--lr", type=float, default=1e-4)
-    ap.add_argument("--max-files", type=int, default=400)
+    ap.add_argument("--max-files", type=int, default=40, help="STAGE-1 file-filter: top-K files by issue keywords")
     ap.add_argument("--max-syms", type=int, default=1200)
     ap.add_argument("--k-eval", type=int, default=8)
     ap.add_argument("--device", default=None)

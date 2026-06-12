@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import glob
 import os
+import re
 from pathlib import Path
 from typing import Dict, List
 
@@ -23,6 +24,11 @@ import torch
 import torch.nn as nn
 
 from v5.graph_grower.code_extract import extract_paths
+
+_STOP = {"this", "that", "with", "from", "have", "when", "should", "which", "will", "python",
+         "code", "error", "issue", "test", "tests", "class", "function", "method", "value",
+         "return", "self", "none", "true", "false", "would", "could", "there", "their", "where",
+         "what", "into", "also", "only", "like", "used", "using", "example", "expected", "actual"}
 
 
 def _unit(v):
@@ -49,26 +55,57 @@ def load_delta(path, dim, device):
     return m
 
 
-def _pool_files(dest: str, max_files: int = 400) -> List[str]:
-    """Main-package .py files (the realistic retrieval pool) — exclude tests/docs/build."""
+def _all_py(dest: str) -> List[str]:
+    """All repo .py files (relative), excluding tests/docs/build."""
     dest = Path(dest)
     skip = ("/test", "/tests/", "/docs/", "/doc/", "/build/", "/.git/", "/examples/", "/benchmarks/")
     out = []
     for p in glob.glob(str(dest / "**" / "*.py"), recursive=True):
         rel = os.path.relpath(p, dest).replace("\\", "/")
-        low = "/" + rel.lower()
-        if any(s in low for s in skip):
+        if not any(s in "/" + rel.lower() for s in skip):
+            out.append(rel)
+    return out
+
+
+def _issue_keywords(issue: str) -> List[str]:
+    """Distinctive identifiers/words from the issue — the cheap file-filter signal."""
+    toks = re.findall(r"[A-Za-z_][A-Za-z0-9_]{3,}", issue or "")
+    return list({t for t in toks if t.lower() not in _STOP})[:60]
+
+
+def _rank_files(dest: str, issue: str, file_k: int = 40) -> List[str]:
+    """STAGE 1 (cheap, no embedding): rank repo files by issue-keyword occurrences -> top file_k.
+    The issue names the buggy area's identifiers, which appear in the gold file -> good coverage."""
+    kws = _issue_keywords(issue)
+    files = _all_py(dest)
+    if not kws or not files:
+        files.sort(key=lambda r: (r.count("/"), len(r)))
+        return files[:file_k]
+    scored = []
+    for rel in files:
+        try:
+            txt = (Path(dest) / rel).read_text(encoding="utf-8", errors="ignore")
+        except Exception:   # noqa: BLE001
             continue
-        out.append(rel)
-    out.sort(key=lambda r: (r.count("/"), len(r)))     # shallow/core files first
-    return out[:max_files]
+        s = sum(txt.count(k) for k in kws)
+        if s > 0:
+            scored.append((s, rel))
+    scored.sort(reverse=True)
+    return [rel for _, rel in scored[:file_k]] or files[:file_k]
+
+
+# back-compat: shallow pool (unused by the two-stage path)
+def _pool_files(dest: str, max_files: int = 400) -> List[str]:
+    files = _all_py(dest)
+    files.sort(key=lambda r: (r.count("/"), len(r)))
+    return files[:max_files]
 
 
 def retrieve_support(dest: str, issue: str, embedder, k: int = 8,
-                     max_files: int = 400, max_syms: int = 1500, delta=None) -> List[dict]:
-    """Issue -> top-K symbol nodes by cosine(issue, signature). delta = trained SymDelta (applied
-    to symbol embeddings) or None (naive cosine). Returns node dicts. NO gold knowledge."""
-    files = _pool_files(dest, max_files)
+                     max_files: int = 40, max_syms: int = 1500, delta=None) -> List[dict]:
+    """Two-stage: STAGE 1 cheap lexical file-filter (top max_files by issue keywords) -> STAGE 2
+    embed only those files' symbols, cosine-rank (+ trained delta). NO gold knowledge."""
+    files = _rank_files(dest, issue, max_files)
     nodes, _ = extract_paths(dest, files, repo="")
     syms = [n for n in nodes if n.get("node_type") == "symbol" and (n.get("text") or "").strip()]
     if not syms:

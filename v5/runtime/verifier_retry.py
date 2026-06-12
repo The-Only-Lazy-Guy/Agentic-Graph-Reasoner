@@ -162,7 +162,7 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
         repo_root, max_retries, dump="", emit_predictions="", no_graph=False,
         strategy="off", strategy_nodes=None, strat_topk=3,
         src_bodies=6, src_lines=70, best_of_k=0, temp=0.7, emit_candidates=0,
-        retrieve=0, retriever_ckpt="", retr_max_files=4000, retr_max_syms=12000, device_str=None):
+        retrieve=0, retriever_ckpt="", retr_max_files=40, retr_max_syms=1500, device_str=None):
     device = torch.device(device_str or ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"device={device}  max_retries={max_retries}", flush=True)
     provider = FrozenQwenHInitProvider(model_name, device=device)
@@ -364,8 +364,8 @@ def main(argv=None):
                     help=">0 = REAL localization: rank repo symbols by the issue, top-K as support (NOT gold)")
     ap.add_argument("--retriever-ckpt", default="",
                     help="trained SymDelta ckpt -> use the trained retriever instead of naive cosine")
-    ap.add_argument("--retr-max-files", type=int, default=4000, help="retrieval pool: max repo .py files (COVERAGE)")
-    ap.add_argument("--retr-max-syms", type=int, default=12000, help="retrieval pool: max symbols to rank")
+    ap.add_argument("--retr-max-files", type=int, default=40, help="STAGE-1 file-filter: top-K files by issue keywords")
+    ap.add_argument("--retr-max-syms", type=int, default=1500, help="STAGE-2: max symbols to embed+rank")
     ap.add_argument("--device", default=None)
     a = ap.parse_args(argv)
     run(a.model, a.traces, a.nodes, a.adapter_ckpt, a.dataset, a.split, a.n_eval, a.max_new,
