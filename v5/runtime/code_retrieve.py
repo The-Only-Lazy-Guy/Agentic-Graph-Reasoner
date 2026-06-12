@@ -19,13 +19,34 @@ from pathlib import Path
 from typing import Dict, List
 
 import numpy as np
+import torch
+import torch.nn as nn
 
 from v5.graph_grower.code_extract import extract_paths
 
 
 def _unit(v):
     a = np.asarray(v, dtype=np.float32)
-    return a / (np.linalg.norm(a) + 1e-9)
+    return a / (np.linalg.norm(a, axis=-1, keepdims=True) + 1e-9)
+
+
+class SymDelta(nn.Module):
+    """symbol_emb -> symbol_emb + zero-init MLP(symbol_emb). delta=0 at init == naive cosine.
+    Query side stays the frozen embedding (preserves the shared-embedding alignment)."""
+    def __init__(self, dim, hidden=512):
+        super().__init__()
+        self.f = nn.Sequential(nn.Linear(dim, hidden), nn.GELU(), nn.Linear(hidden, dim))
+        nn.init.zeros_(self.f[-1].weight); nn.init.zeros_(self.f[-1].bias)
+
+    def forward(self, s):
+        out = s + self.f(s)
+        return out / (out.norm(dim=-1, keepdim=True) + 1e-9)
+
+
+def load_delta(path, dim, device):
+    m = SymDelta(dim).to(device)
+    m.load_state_dict(torch.load(path, map_location=device)); m.eval()
+    return m
 
 
 def _pool_files(dest: str, max_files: int = 400) -> List[str]:
@@ -44,19 +65,25 @@ def _pool_files(dest: str, max_files: int = 400) -> List[str]:
 
 
 def retrieve_support(dest: str, issue: str, embedder, k: int = 8,
-                     max_files: int = 400, max_syms: int = 1500) -> List[dict]:
-    """Issue -> top-K symbol nodes by cosine(issue, signature). Returns node dicts
-    ({node_id, text, metadata:{file,lineno}}). NO gold knowledge."""
+                     max_files: int = 400, max_syms: int = 1500, delta=None) -> List[dict]:
+    """Issue -> top-K symbol nodes by cosine(issue, signature). delta = trained SymDelta (applied
+    to symbol embeddings) or None (naive cosine). Returns node dicts. NO gold knowledge."""
     files = _pool_files(dest, max_files)
     nodes, _ = extract_paths(dest, files, repo="")
     syms = [n for n in nodes if n.get("node_type") == "symbol" and (n.get("text") or "").strip()]
     if not syms:
         return []
     syms = syms[:max_syms]
-    qv = _unit(embedder.embed_nodes({"q": issue[:1500]})["q"])
+    qv = _unit(embedder.embed_nodes({"q": issue[:1500]})["q"]).reshape(-1)
     embs = embedder.embed_nodes({n["node_id"]: n["text"] for n in syms})
-    ranked = sorted(syms, key=lambda n: float(np.dot(qv, _unit(embs[n["node_id"]]))), reverse=True)
-    return ranked[:k]
+    pool = _unit(np.stack([embs[n["node_id"]] for n in syms]))         # [N, D]
+    if delta is not None:
+        dev = next(delta.parameters()).device
+        with torch.no_grad():
+            pool = delta(torch.tensor(pool, device=dev)).cpu().numpy()
+    scores = pool @ qv
+    order = np.argsort(-scores)[:k]
+    return [syms[i] for i in order]
 
 
 def to_meta(nodes: List[dict]) -> Dict[str, dict]:

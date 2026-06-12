@@ -162,7 +162,7 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
         repo_root, max_retries, dump="", emit_predictions="", no_graph=False,
         strategy="off", strategy_nodes=None, strat_topk=3,
         src_bodies=6, src_lines=70, best_of_k=0, temp=0.7, emit_candidates=0,
-        retrieve=0, device_str=None):
+        retrieve=0, retriever_ckpt="", device_str=None):
     device = torch.device(device_str or ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"device={device}  max_retries={max_retries}", flush=True)
     provider = FrozenQwenHInitProvider(model_name, device=device)
@@ -191,6 +191,13 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
     print(f"eval instances={len(ids)} | symbol meta={len(meta)} | strategy={strategy} "
           f"(instances={len(strat_meta)})", flush=True)
 
+    _retr_delta = None
+    if retrieve > 0 and retriever_ckpt:
+        from v5.runtime.code_retrieve import load_delta
+        dim = len(embedder.embed_nodes({"q": "x"})["q"])
+        _retr_delta = load_delta(retriever_ckpt, dim, device)
+        print(f"loaded TRAINED retriever {retriever_ckpt} (dim {dim})", flush=True)
+
     app1 = appk = scored = 0
     records = []
     recalls = []                            # retrieve mode: localization recall@K vs gold-touched symbols
@@ -206,7 +213,8 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
             print(f"  [{k+1}] {iid} checkout FAILED"); continue
         if retrieve > 0:                     # REAL localization: rank repo symbols by the ISSUE (no gold)
             from v5.runtime.code_retrieve import retrieve_support, to_meta
-            inst_meta = to_meta(retrieve_support(str(dest), t["issue"], embedder, retrieve))
+            inst_meta = to_meta(retrieve_support(str(dest), t["issue"], embedder, retrieve,
+                                                 delta=_retr_delta))
             support = list(inst_meta)
             recalls.append(_recall(inst_meta, {s: meta[s] for s in t["support_ids"] if s in meta}))
         else:                                # ORACLE support (gold-AST-mapped) — the default
@@ -353,6 +361,8 @@ def main(argv=None):
                     help="with --best-of-k: write top-N distinct candidates to <preds>_candR.jsonl (ORACLE best-of-K)")
     ap.add_argument("--retrieve", type=int, default=0,
                     help=">0 = REAL localization: rank repo symbols by the issue, top-K as support (NOT gold)")
+    ap.add_argument("--retriever-ckpt", default="",
+                    help="trained SymDelta ckpt -> use the trained retriever instead of naive cosine")
     ap.add_argument("--device", default=None)
     a = ap.parse_args(argv)
     run(a.model, a.traces, a.nodes, a.adapter_ckpt, a.dataset, a.split, a.n_eval, a.max_new,
@@ -360,7 +370,7 @@ def main(argv=None):
         no_graph=a.no_graph, strategy=a.strategy, strategy_nodes=a.strategy_nodes,
         strat_topk=a.strat_topk, src_bodies=a.src_bodies, src_lines=a.src_lines,
         best_of_k=a.best_of_k, temp=a.temp, emit_candidates=a.emit_candidates,
-        retrieve=a.retrieve, device_str=a.device)
+        retrieve=a.retrieve, retriever_ckpt=a.retriever_ckpt, device_str=a.device)
 
 
 if __name__ == "__main__":
