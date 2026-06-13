@@ -19,7 +19,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-MAX_TEXT = 300
+MAX_TEXT = 1000   # signature + summary + body (enriched) — body carries the bug-relevant code
 
 
 def _h(s: str) -> str:
@@ -82,7 +82,12 @@ def extract_file(abs_path: str | Path, repo: str = "", rel: Optional[str] = None
                 kind = ("class" if isinstance(child, ast.ClassDef)
                         else "method" if qual else "function")
                 sig, summ = _signature(child), _summary(child)
-                text = (sig + (" — " + summ if summ else ""))[:MAX_TEXT]
+                try:                          # enrich with the BODY -> the embedding matches the
+                    body = ast.get_source_segment(src, child) or ""   # bug-relevant code, not just the signature
+                except Exception:             # noqa: BLE001
+                    body = ""
+                head = sig + (" — " + summ if summ else "")
+                text = (head + ("\n" + body if body else ""))[:MAX_TEXT]
                 nodes.append({"op": "add_node", "node_id": sid, "node_type": "symbol",
                               "text": text, "tier": "add",
                               "metadata": {"repo": repo, "file": rel, "name": name,
