@@ -101,25 +101,36 @@ def _pool_files(dest: str, max_files: int = 400) -> List[str]:
     return files[:max_files]
 
 
+def load_st_ranker(path):
+    """Load the trained bi-encoder (sentence-transformers) — the DESIGN's locked ranker."""
+    from sentence_transformers import SentenceTransformer
+    return SentenceTransformer(path, trust_remote_code=True)
+
+
 def retrieve_support(dest: str, issue: str, embedder, k: int = 8,
-                     max_files: int = 40, max_syms: int = 1500, delta=None) -> List[dict]:
+                     max_files: int = 40, max_syms: int = 1500, delta=None, st_model=None) -> List[dict]:
     """Two-stage: STAGE 1 cheap lexical file-filter (top max_files by issue keywords) -> STAGE 2
-    embed only those files' symbols, cosine-rank (+ trained delta). NO gold knowledge."""
+    embed only those files' symbols, cosine-rank. NO gold. st_model = trained ST bi-encoder
+    (preferred, the design's ranker); else the frozen embedder (+ optional zero-init delta)."""
     files = _rank_files(dest, issue, max_files)
     nodes, _ = extract_paths(dest, files, repo="")
     syms = [n for n in nodes if n.get("node_type") == "symbol" and (n.get("text") or "").strip()]
     if not syms:
         return []
     syms = syms[:max_syms]
-    qv = _unit(embedder.embed_nodes({"q": issue[:1500]})["q"]).reshape(-1)
-    embs = embedder.embed_nodes({n["node_id"]: n["text"] for n in syms})
-    pool = _unit(np.stack([embs[n["node_id"]] for n in syms]))         # [N, D]
-    if delta is not None:
-        dev = next(delta.parameters()).device
-        with torch.no_grad():
-            pool = delta(torch.tensor(pool, device=dev)).cpu().numpy()
-    scores = pool @ qv
-    order = np.argsort(-scores)[:k]
+    texts = [n["text"] for n in syms]
+    if st_model is not None:                                           # trained bi-encoder path
+        pool = _unit(np.asarray(st_model.encode(texts, batch_size=64, show_progress_bar=False)))
+        qv = _unit(np.asarray(st_model.encode([issue[:1500]]))[0])
+    else:                                                              # frozen embedder (+ delta)
+        qv = _unit(embedder.embed_nodes({"q": issue[:1500]})["q"]).reshape(-1)
+        embs = embedder.embed_nodes({n["node_id"]: t for n, t in zip(syms, texts)})
+        pool = _unit(np.stack([embs[n["node_id"]] for n in syms]))
+        if delta is not None:
+            dev = next(delta.parameters()).device
+            with torch.no_grad():
+                pool = delta(torch.tensor(pool, device=dev)).cpu().numpy()
+    order = np.argsort(-(pool @ qv))[:k]
     return [syms[i] for i in order]
 
 

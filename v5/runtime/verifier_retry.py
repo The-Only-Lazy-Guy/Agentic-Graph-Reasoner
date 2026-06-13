@@ -162,7 +162,8 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
         repo_root, max_retries, dump="", emit_predictions="", no_graph=False,
         strategy="off", strategy_nodes=None, strat_topk=3,
         src_bodies=6, src_lines=70, best_of_k=0, temp=0.7, emit_candidates=0,
-        retrieve=0, retriever_ckpt="", retr_max_files=40, retr_max_syms=1500, device_str=None):
+        retrieve=0, retriever_ckpt="", retriever_st="", retr_max_files=40, retr_max_syms=1500,
+        device_str=None):
     device = torch.device(device_str or ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"device={device}  max_retries={max_retries}", flush=True)
     provider = FrozenQwenHInitProvider(model_name, device=device)
@@ -191,12 +192,16 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
     print(f"eval instances={len(ids)} | symbol meta={len(meta)} | strategy={strategy} "
           f"(instances={len(strat_meta)})", flush=True)
 
-    _retr_delta = None
-    if retrieve > 0 and retriever_ckpt:
+    _retr_delta = _retr_st = None
+    if retrieve > 0 and retriever_st:        # the DESIGN's trained bi-encoder (preferred)
+        from v5.runtime.code_retrieve import load_st_ranker
+        _retr_st = load_st_ranker(retriever_st)
+        print(f"loaded TRAINED bi-encoder ranker {retriever_st}", flush=True)
+    elif retrieve > 0 and retriever_ckpt:    # fallback: zero-init delta on the frozen embedder
         from v5.runtime.code_retrieve import load_delta
         dim = len(embedder.embed_nodes({"q": "x"})["q"])
         _retr_delta = load_delta(retriever_ckpt, dim, device)
-        print(f"loaded TRAINED retriever {retriever_ckpt} (dim {dim})", flush=True)
+        print(f"loaded delta retriever {retriever_ckpt} (dim {dim})", flush=True)
 
     app1 = appk = scored = 0
     records = []
@@ -215,7 +220,7 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
             from v5.runtime.code_retrieve import retrieve_support, to_meta
             inst_meta = to_meta(retrieve_support(str(dest), t["issue"], embedder, retrieve,
                                                  max_files=retr_max_files, max_syms=retr_max_syms,
-                                                 delta=_retr_delta))
+                                                 delta=_retr_delta, st_model=_retr_st))
             support = list(inst_meta)
             recalls.append(_recall(inst_meta, {s: meta[s] for s in t["support_ids"] if s in meta}))
         else:                                # ORACLE support (gold-AST-mapped) — the default
@@ -363,7 +368,9 @@ def main(argv=None):
     ap.add_argument("--retrieve", type=int, default=0,
                     help=">0 = REAL localization: rank repo symbols by the issue, top-K as support (NOT gold)")
     ap.add_argument("--retriever-ckpt", default="",
-                    help="trained SymDelta ckpt -> use the trained retriever instead of naive cosine")
+                    help="zero-init delta ckpt (fallback retriever on the frozen embedder)")
+    ap.add_argument("--retriever-st", default="",
+                    help="trained sentence-transformers bi-encoder (models/ranker-code) — the DESIGN ranker")
     ap.add_argument("--retr-max-files", type=int, default=40, help="STAGE-1 file-filter: top-K files by issue keywords")
     ap.add_argument("--retr-max-syms", type=int, default=1500, help="STAGE-2: max symbols to embed+rank")
     ap.add_argument("--device", default=None)
@@ -373,7 +380,7 @@ def main(argv=None):
         no_graph=a.no_graph, strategy=a.strategy, strategy_nodes=a.strategy_nodes,
         strat_topk=a.strat_topk, src_bodies=a.src_bodies, src_lines=a.src_lines,
         best_of_k=a.best_of_k, temp=a.temp, emit_candidates=a.emit_candidates,
-        retrieve=a.retrieve, retriever_ckpt=a.retriever_ckpt,
+        retrieve=a.retrieve, retriever_ckpt=a.retriever_ckpt, retriever_st=a.retriever_st,
         retr_max_files=a.retr_max_files, retr_max_syms=a.retr_max_syms, device_str=a.device)
 
 
