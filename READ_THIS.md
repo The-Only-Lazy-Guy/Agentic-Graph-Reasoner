@@ -3,8 +3,30 @@
 > At-a-glance dump of the latest runs (raw outputs, numbers, repro commands) so
 > you don't have to dig through commits/logs. Updated each working session.
 
-**Last updated:** 2026-06-03
+**Last updated:** 2026-06-12
 **HEAD:** latest pushed commit on branch `main`
+
+---
+
+## Session update (2026-06-12) — STATE OF THE PROJECT (re-grounded after drift; read this first)
+
+**What is BUILT + VALIDATED (don't rebuild):**
+- **Embedder**: Qwen3-Embedding-0.6B (graph A/B winner). **Trained bi-encoder ranker** = `train_ranker.py` -> `models/ranker-code` (held-out Hit@5 0.40, +19% MRR over raw). **DECIDED:** graph TOPOLOGY does NOT help retrieval — trained R-GCN GNN-ranker (`train_gnn_ranker.py`) LOSES Hit@5 to the bi-encoder; topology reserved for the INJECTION path, NOT ranking. (So: do not rebuild call-edge/GNN retrieval — already rejected.)
+- **Injection** L8/L20 (adapter.py) validated; **constrained-decode** (constrained_decode.py) valid_rate 1.0 (the emission-exactness mechanism — built but NOT yet wired into the SR runtime).
+- **Verifier**: local WSL2+Docker+swebench, gold-sanity 3/3 (sb-cli hosted is broken). DOCKER_VERIFY_RUNBOOK.md.
+
+**What THIS arc added (synthesis + honest eval):**
+- **Execution-gap fix**: SR format (`search_replace.py`) + read-the-source (`sr_withcode.py`) + **SR-SFT synthesis distillation** (`stage_sr_sft.py`) -> adapters `adapter_code_sr.pt` (bf16) / `adapter_code_sr4.pt` (4-bit deploy-aligned). **Resolve 4 -> 6 on held-out lite** (~2x hit-rate). Only TRAINING moved the number.
+- **Verified grounding lift**: grounded 4 resolved vs `--no-graph` cold 0 (grounding necessary+sufficient). ~6/30 (~20%) is the ceiling given location.
+- **Inference-time search EXHAUSTED**: voting / oracle best-of-K / test-feedback retry all <= greedy 6 (confirmed after fixing a bug). Greedy synthesis is the 4B ceiling; only training moves it.
+
+**Two BUGS found by code inspection (user prompted — both real):**
+1. **run-once injection** (`adapter.py`): `run_once_per_session` reset only in prepare_session -> multi-generation eval (voting/retries) ran UNGROUNDED for samples 2..K. FIXED (reset in inject()). The pre-fix voting/oracle negatives were invalid.
+2. **ORACLE localization**: `swe_grounded` support_ids = gold-patch-AST-mapped -> the eval HANDS the model the buggy function. So 6/30 = **synthesis given location, NOT end-to-end SWE**. The graph's localization was untested. See memory [[eval-oracle-localization]].
+
+**Honest localization status (the real open half):** built whole-repo two-stage retrieval (`code_retrieve.py`: lexical file-filter -> embed top-file symbols; `train_retriever.py` = a redundant reimpl of the existing bi-encoder — USE `train_ranker` instead). End-to-end recall@8: naive 0.10 -> trained two-stage **0.32** (3x), applyable 0->5. Localization is LEARNABLE but far from oracle (1.0). NOT topology (rejected) — it's coverage + the existing bi-encoder + richer node content.
+
+**Corrected next steps (long-term-correct, see [[work-long-term-correct]]):** (a) reuse `train_ranker` + the two-stage coverage for honest localization; (b) wire the validated stack into the runtime (constrained-decode for emission exactness; the proper ranker for the brief); (c) push synthesis via DPO/scale. Do NOT: rebuild rankers, re-test topology-for-retrieval, chase inference-time search.
 
 ---
 
