@@ -107,11 +107,31 @@ def load_st_ranker(path):
     return SentenceTransformer(path, trust_remote_code=True)
 
 
-def retrieve_support(dest: str, issue: str, embedder, k: int = 8,
-                     max_files: int = 40, max_syms: int = 1500, delta=None, st_model=None) -> List[dict]:
-    """Two-stage: STAGE 1 cheap lexical file-filter (top max_files by issue keywords) -> STAGE 2
-    embed only those files' symbols, cosine-rank. NO gold. st_model = trained ST bi-encoder
-    (preferred, the design's ranker); else the frozen embedder (+ optional zero-init delta)."""
+def _body_lex_scores(dest, syms, kws):
+    """Issue-keyword occurrences in each symbol's BODY (richer than the signature). Cheap."""
+    cache = {}
+    out = np.zeros(len(syms), dtype=np.float32)
+    for i, n in enumerate(syms):
+        m = n.get("metadata") or {}
+        f, ln = m.get("file"), m.get("lineno")
+        if not f or not ln:
+            continue
+        if f not in cache:
+            try:
+                cache[f] = (Path(dest) / f).read_text(encoding="utf-8", errors="ignore").splitlines()
+            except Exception:   # noqa: BLE001
+                cache[f] = []
+        lo, hi = ln[0], ln[-1]
+        body = "\n".join(cache[f][max(0, lo - 1):hi])
+        out[i] = sum(body.count(k) for k in kws)
+    return out
+
+
+def retrieve_support(dest: str, issue: str, embedder, k: int = 8, max_files: int = 40,
+                     max_syms: int = 1500, delta=None, st_model=None, hybrid_lex: float = 0.5) -> List[dict]:
+    """Two-stage: STAGE 1 lexical file-filter -> STAGE 2 rank top-file symbols by
+    EMBEDDING (signature, st_model/embedder) + hybrid_lex * BODY-keyword match (the body carries
+    the bug-relevant identifiers the signature omits). NO gold knowledge."""
     files = _rank_files(dest, issue, max_files)
     nodes, _ = extract_paths(dest, files, repo="")
     syms = [n for n in nodes if n.get("node_type") == "symbol" and (n.get("text") or "").strip()]
@@ -119,10 +139,10 @@ def retrieve_support(dest: str, issue: str, embedder, k: int = 8,
         return []
     syms = syms[:max_syms]
     texts = [n["text"] for n in syms]
-    if st_model is not None:                                           # trained bi-encoder path
+    if st_model is not None:
         pool = _unit(np.asarray(st_model.encode(texts, batch_size=64, show_progress_bar=False)))
         qv = _unit(np.asarray(st_model.encode([issue[:1500]]))[0])
-    else:                                                              # frozen embedder (+ delta)
+    else:
         qv = _unit(embedder.embed_nodes({"q": issue[:1500]})["q"]).reshape(-1)
         embs = embedder.embed_nodes({n["node_id"]: t for n, t in zip(syms, texts)})
         pool = _unit(np.stack([embs[n["node_id"]] for n in syms]))
@@ -130,7 +150,15 @@ def retrieve_support(dest: str, issue: str, embedder, k: int = 8,
             dev = next(delta.parameters()).device
             with torch.no_grad():
                 pool = delta(torch.tensor(pool, device=dev)).cpu().numpy()
-    order = np.argsort(-(pool @ qv))[:k]
+    emb = pool @ qv
+    score = emb
+    if hybrid_lex > 0:
+        lex = _body_lex_scores(dest, syms, _issue_keywords(issue))
+        if lex.max() > 0:                                   # min-max normalize both, then blend
+            lex = lex / lex.max()
+            emb = (emb - emb.min()) / (emb.max() - emb.min() + 1e-9)
+            score = emb + hybrid_lex * lex
+    order = np.argsort(-score)[:k]
     return [syms[i] for i in order]
 
 
