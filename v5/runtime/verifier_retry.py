@@ -205,7 +205,8 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
 
     app1 = appk = scored = 0
     records = []
-    recalls = []                            # retrieve mode: localization recall@K vs gold-touched symbols
+    recalls = []                            # retrieve mode: SYMBOL recall@K vs gold-touched symbols
+    file_recalls = []                       # STAGE-1: gold FILE in the lexical pool? (splits the wall)
     preds = {}                              # instance_id -> git diff (swebench prediction)
     cand_preds = {}                         # rank -> {instance_id: patch} for --emit-candidates (oracle best-of-K)
     tf = {"task_family": "code_fix", "required_slots": []}
@@ -217,12 +218,16 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
         if not ok:
             print(f"  [{k+1}] {iid} checkout FAILED"); continue
         if retrieve > 0:                     # REAL localization: rank repo symbols by the ISSUE (no gold)
-            from v5.runtime.code_retrieve import retrieve_support, to_meta
+            from v5.runtime.code_retrieve import retrieve_support, to_meta, _rank_files
+            gold_m = {s: meta[s] for s in t["support_ids"] if s in meta}
+            gold_files = {g["file"] for g in gold_m.values()}
+            s1 = set(_rank_files(str(dest), t["issue"], retr_max_files))   # STAGE-1 diagnostic
+            file_recalls.append(1.0 if (gold_files & s1) else 0.0)
             inst_meta = to_meta(retrieve_support(str(dest), t["issue"], embedder, retrieve,
                                                  max_files=retr_max_files, max_syms=retr_max_syms,
                                                  delta=_retr_delta, st_model=_retr_st))
             support = list(inst_meta)
-            recalls.append(_recall(inst_meta, {s: meta[s] for s in t["support_ids"] if s in meta}))
+            recalls.append(_recall(inst_meta, gold_m))
         else:                                # ORACLE support (gold-AST-mapped) — the default
             inst_meta = meta
             support = [s for s in t["support_ids"] if s in meta]
@@ -328,8 +333,11 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
     print(f"  applyable@{max_retries}   {appk}/{scored} ({100*appk/max(1,scored):.0f}%)")
     if retrieve > 0 and recalls:
         full = sum(1 for r in recalls if r >= 0.999)
-        print(f"  RETRIEVAL localization recall@{retrieve}: mean {sum(recalls)/len(recalls):.2f} | "
-              f"all-gold-found {full}/{len(recalls)}  (vs ORACLE support = the real graph test)")
+        fr = sum(file_recalls) / max(1, len(file_recalls))
+        print(f"  STAGE-1 FILE recall (gold file in lexical pool): {fr:.2f}  <- the ceiling")
+        print(f"  STAGE-2 SYMBOL recall@{retrieve}: mean {sum(recalls)/len(recalls):.2f} | all-gold {full}/{len(recalls)}")
+        print(f"  -> if file recall >> symbol recall: the RANKER/representation is the wall;"
+              f"\n     if file recall ~ symbol recall (~0.34): the lexical FILE-finder is the wall (parse tracebacks).")
     print("\napplyable@k > applyable@1 = iteration repairs unmatched SEARCH -> the loop lifts the"
           "\napplyable rate with zero infra. Tier-2 (run tests) plugs in when a verifier is available.")
 
