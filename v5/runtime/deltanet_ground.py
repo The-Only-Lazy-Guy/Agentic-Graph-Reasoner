@@ -93,6 +93,8 @@ def run(a):
         inj.projectors.load_state_dict(torch.load(a.proj, map_location=device))
         print(f"loaded projector <- {a.proj}", flush=True)
 
+    if a.specificity:
+        return _specificity(a, model, tok, embedder, inj, device)
     if a.killer:
         return _killer(a, model, tok, embedder, inj, device)
 
@@ -160,6 +162,49 @@ def run(a):
         print("  delta>0 = the frozen LM READS the DeltaNet-written nodes (the open question #1).")
 
 
+def _specificity(a, model, tok, embedder, inj, device):
+    """The honest node-specificity test (n>1, with a control): for each instance, is the gold edit
+    more likely under its OWN support nodes than under RANDOM unrelated nodes? own<<rand => the
+    grounding is node-bound; own~=rand => generic. Avoids the n=1, control-free killer."""
+    import random, statistics as st
+    rng = random.Random(0)
+    rows = _load_rows(a.traces, a.nodes, a.dataset, a.split, a.repo_root, a.skip, a.max_ids,
+                      a.src_bodies, a.src_lines)
+    src_of = (lambda r: "") if a.no_source else (lambda r: r["src"])
+    print(f"specificity test over {len(rows)} instances | "
+          f"{'GRAPH-ONLY' if a.no_source else 'WITH-SOURCE'}", flush=True)
+    cold_l, own_l, rand_l = [], [], []
+    own_beats_rand = own_beats_cold = 0
+    with torch.no_grad():
+        for r in rows:
+            inj.clear()
+            c = dn_nll(model, tok, r["issue"], src_of(r), r["sr"], device)
+            inj.set_nodes(_node_emb(embedder, r["texts"], r["node_ids"]).to(device))
+            o = dn_nll(model, tok, r["issue"], src_of(r), r["sr"], device)
+            rneg = rows[rng.randrange(len(rows))]
+            while rneg["iid"] == r["iid"] and len(rows) > 1:
+                rneg = rows[rng.randrange(len(rows))]
+            inj.set_nodes(_node_emb(embedder, rneg["texts"], rneg["node_ids"]).to(device))
+            rd = dn_nll(model, tok, r["issue"], src_of(r), r["sr"], device)
+            inj.clear()
+            if None in (c, o, rd) or not all(torch.isfinite(x) for x in (c, o, rd)):
+                continue
+            c, o, rd = float(c), float(o), float(rd)
+            cold_l.append(c); own_l.append(o); rand_l.append(rd)
+            own_beats_rand += int(o < rd); own_beats_cold += int(o < c)
+    n = len(own_l)
+    if not n:
+        print("no usable instances"); return
+    print(f"\n=== node-specificity (n={n}) ===")
+    print(f"  cold        {st.mean(cold_l):.4f}")
+    print(f"  own  nodes  {st.mean(own_l):.4f}   (lift vs cold {st.mean(cold_l)-st.mean(own_l):+.4f})")
+    print(f"  rand nodes  {st.mean(rand_l):.4f}   (lift vs cold {st.mean(cold_l)-st.mean(rand_l):+.4f})")
+    spec = st.mean(rand_l) - st.mean(own_l)
+    print(f"  SPECIFICITY own-vs-rand: {spec:+.4f}  | own<rand {own_beats_rand}/{n}  | own<cold {own_beats_cold}/{n}")
+    ok = spec > 0.02 and own_beats_rand > 0.6 * n
+    print(f"  -> {'NODE-SPECIFIC: own grounds better than random (killer was too blunt)' if ok else 'GENERIC: own ~= random (grounding is not node-bound)'}")
+
+
 def _killer(a, model, tok, embedder, inj, device):
     """Two disjoint skills A,B: cold / both / drop-A. PASS = A grounded+unlearned, B retained."""
     rows = _load_rows(a.traces, a.nodes, a.dataset, a.split, a.repo_root, 0, a.max_ids,
@@ -224,6 +269,8 @@ def main(argv=None):
     ap.add_argument("--out", default="artifacts/stage_cache/dn_proj.pt")
     ap.add_argument("--proj", default="", help="load a trained projector (killer mode / warm start)")
     ap.add_argument("--killer", action="store_true"); ap.add_argument("--max-ids", type=int, default=40)
+    ap.add_argument("--specificity", action="store_true",
+                    help="honest n>1 test: gold-NLL under OWN nodes vs RANDOM nodes (control)")
     ap.add_argument("--no-source", action="store_true", help="killer: graph as SOLE carrier (isolate confound)")
     ap.add_argument("--device", default=None)
     run(ap.parse_args(argv))
