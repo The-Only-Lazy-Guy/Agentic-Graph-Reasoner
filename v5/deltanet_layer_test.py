@@ -44,10 +44,8 @@ def _build_S(keys, values, betas):
     return torch.einsum("nh,nhk,nhv->hkv", betas, keys, values)
 
 
-def _install_graph_read(layer, S_graph_ref):
-    """Wrap the chunk kernel: out += read(S_graph, q); state passes through untouched (two-state)."""
-    orig = layer.chunk_gated_delta_rule
-
+def _wrap_kernel(orig, S_graph_ref):
+    """Wrap a delta-rule kernel: out += read(S_graph, q); state passes through (two-state)."""
     def wrapped(query, key, value, g=None, beta=None, initial_state=None,
                 output_final_state=False, use_qk_l2norm_in_kernel=False, **kw):
         out, state = orig(query, key, value, g=g, beta=beta, initial_state=initial_state,
@@ -62,7 +60,14 @@ def _install_graph_read(layer, S_graph_ref):
             gr = torch.einsum("bshk,hkv->bshv", q.float(), S.float()).to(out.dtype)
             out = out + gr
         return out, state                                    # state UNCHANGED -> two-state
-    layer.chunk_gated_delta_rule = wrapped
+    return wrapped
+
+
+def _install_graph_read(layer, S_graph_ref):
+    """Wrap BOTH kernels: chunk (prefill) AND recurrent (seq_len==1 decode) — so the graph read
+    survives generation, not just teacher-forced prefill."""
+    layer.chunk_gated_delta_rule = _wrap_kernel(layer.chunk_gated_delta_rule, S_graph_ref)
+    layer.recurrent_gated_delta_rule = _wrap_kernel(layer.recurrent_gated_delta_rule, S_graph_ref)
 
 
 def _ok(name, cond, extra=""):
@@ -130,7 +135,26 @@ def run():
     allp &= _ok("P5b graph read DID change the kernel output (sanity: o1 != o0)",
                 not torch.allclose(o0, o1, atol=1e-4))
 
-    print(f"\n{'ALL PASS — injection point + two-state plumbing hold on the REAL layer' if allp else 'SOME FAILED — integration assumption broken'}")
+    # P6: DECODE path — the recurrent kernel (seq_len==1) must also carry the graph read,
+    # state untouched. (Generation uses this kernel per-token; without the wrap the graph
+    # would only affect prefill, not the generated tokens.)
+    from transformers.models.qwen3_5.modeling_qwen3_5 import (
+        fused_recurrent_gated_delta_rule as _fr, torch_recurrent_gated_delta_rule)
+    raw_rec = _fr or torch_recurrent_gated_delta_rule
+    q1 = torch.randn(b, 1, H, dk); k1 = torch.randn(b, 1, H, dk); v1 = torch.randn(b, 1, H, dv)
+    g1 = torch.zeros(b, 1, H); beta1 = torch.rand(b, 1, H)
+    init = torch.randn(b, H, dk, dv)                          # a prior recurrent state (decode continues from cache)
+    ro0, rs0 = raw_rec(q1, k1, v1, g=g1, beta=beta1, initial_state=init.clone(),
+                       output_final_state=True, use_qk_l2norm_in_kernel=True)
+    ref[0] = S_all
+    ro1, rs1 = layer.recurrent_gated_delta_rule(q1, k1, v1, g=g1, beta=beta1, initial_state=init.clone(),
+                                                output_final_state=True, use_qk_l2norm_in_kernel=True)
+    allp &= _ok("P6 decode(recurrent) two-state: recurrent state identical w/ & w/o graph read",
+                torch.allclose(rs0, rs1, atol=1e-6))
+    allp &= _ok("P6b decode graph read changes the per-token output (o1 != o0)",
+                not torch.allclose(ro0, ro1, atol=1e-4))
+
+    print(f"\n{'ALL PASS — injection point + two-state plumbing hold on the REAL layer (prefill AND decode)' if allp else 'SOME FAILED — integration assumption broken'}")
     return allp
 
 
