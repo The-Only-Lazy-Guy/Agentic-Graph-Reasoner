@@ -47,7 +47,7 @@ def _pick_two(rows):
 
 
 def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, repo_root,
-        src_bodies, src_lines, dry, max_ids=40, device_str=None):
+        src_bodies, src_lines, dry, max_ids=40, no_source=False, device_str=None):
     traces = load_traces([traces_p])
     meta = load_symbol_meta([nodes_p])
     insts = {t["instance_id"]: t for t in load_instances(dataset, split, limit=0)}
@@ -91,17 +91,21 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, repo_root,
     union_ids = A["node_ids"] + [n for n in B["node_ids"] if n not in setA]
     union_texts = {**A["texts"], **B["texts"]}
 
+    src_of = (lambda r: "") if no_source else (lambda r: r["src"])
+
     @torch.no_grad()
     def nll(row, state):
         if state == "cold":
-            return float(sr_nll(model, tok, injector, row["issue"], row["src"], row["sr"],
+            return float(sr_nll(model, tok, injector, row["issue"], src_of(row), row["sr"],
                                 device, inject=False))
         if state == "both":
             prep(union_ids, union_texts)
         elif state == "delete-A":
             prep(B["node_ids"], B["texts"])            # A removed from the graph
-        return float(sr_nll(model, tok, injector, row["issue"], row["src"], row["sr"],
+        return float(sr_nll(model, tok, injector, row["issue"], src_of(row), row["sr"],
                             device, inject=True))
+
+    print(f"\nmode: {'GRAPH-ONLY (no source in prompt — graph is the sole carrier)' if no_source else 'WITH-SOURCE (gold source in prompt — graph is supplementary)'}")
 
     print("\n=== SR-NLL of each skill's gold edit (lower = LM knows the fix) ===")
     print(f"  {'skill':8s} {'cold':>8s} {'both':>8s} {'delete-A':>9s}")
@@ -112,14 +116,24 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, repo_root,
         print(f"  {name:8s} {c:8.4f} {bo:8.4f} {da:9.4f}")
 
     cA, boA, daA = res["A"]; cB, boB, daB = res["B"]
+    liftA = cA - boA                       # how much the graph grounded A
+    revertA = daA - boA                    # how much deleting A's node undid that
+    frac = revertA / liftA if abs(liftA) > 1e-6 else 0.0
+    driftB = abs(daB - boB)                # B should be unaffected by deleting A
     print("\n=== verdict ===")
-    print(f"  A grounded by graph:   both {boA:.3f} < cold {cA:.3f}   (lift {cA-boA:+.3f})")
-    print(f"  A UNLEARNED by delete: delete-A {daA:.3f} -> back toward cold {cA:.3f} "
-          f"(reverted {daA-boA:+.3f} of {cA-boA:+.3f})")
-    print(f"  B RETAINED (selective): both {boB:.3f} vs delete-A {daB:.3f} "
-          f"(drift {abs(daB-boB):.3f} — small = B unaffected by deleting A)")
-    print("\n  => editing the graph changed the frozen LM's behavior, and deleting A's nodes")
-    print("     removed A's competence ONLY. No retraining. That is selective unlearning.")
+    print(f"  A grounded by graph:   cold {cA:.3f} -> both {boA:.3f}  (lift {liftA:+.3f})")
+    print(f"  delete A's node:       both {boA:.3f} -> delete-A {daA:.3f}  "
+          f"(reverted {revertA:+.3f} = {frac*100:.0f}% of the lift)")
+    print(f"  B selectivity:         both {boB:.3f} -> delete-A {daB:.3f}  (drift {driftB:.3f})")
+    # honest PASS/FAIL — selective unlearn needs A to revert a LOT and B to barely move
+    ok = frac > 0.5 and driftB < 0.3 * abs(liftA)
+    print(f"\n  SELECTIVE UNLEARN: {'PASS' if ok else 'FAIL'} "
+          f"(need A revert >50% of lift AND B drift small)")
+    if not ok:
+        print("  -> deleting A's node did NOT remove A's skill. Likely the skill info is in the")
+        print("     prompt-source (graph supplementary) or the lift is generic, not node-specific.")
+        if not no_source:
+            print("     Try --no-source (graph as the SOLE carrier) for the real test.")
 
 
 def main(argv=None):
@@ -135,10 +149,12 @@ def main(argv=None):
     ap.add_argument("--src-lines", type=int, default=55)
     ap.add_argument("--dry", action="store_true", help="plumbing check only (no LM)")
     ap.add_argument("--max-ids", type=int, default=40, help="instances to scan for an A/B pair")
+    ap.add_argument("--no-source", action="store_true",
+                    help="drop gold source from the prompt -> graph is the SOLE carrier (real unlearn test)")
     ap.add_argument("--device", default=None)
     a = ap.parse_args(argv)
     run(a.model, a.traces, a.nodes, a.adapter_ckpt, a.dataset, a.split, a.repo_root,
-        a.src_bodies, a.src_lines, a.dry, max_ids=a.max_ids, device_str=a.device)
+        a.src_bodies, a.src_lines, a.dry, max_ids=a.max_ids, no_source=a.no_source, device_str=a.device)
 
 
 if __name__ == "__main__":
