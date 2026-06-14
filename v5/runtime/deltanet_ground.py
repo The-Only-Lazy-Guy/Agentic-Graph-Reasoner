@@ -157,16 +157,19 @@ def _killer(a, model, tok, embedder, inj, device):
     union_texts = {**A["texts"], **B["texts"]}
     print(f"A={A['iid']} ({len(A['node_ids'])}n)  B={B['iid']} ({len(B['node_ids'])}n)", flush=True)
 
+    src_of = (lambda r: "") if a.no_source else (lambda r: r["src"])
+    print(f"mode: {'GRAPH-ONLY (no source — graph is sole carrier)' if a.no_source else 'WITH-SOURCE'}")
+
     @torch.no_grad()
     def probe(row):
         out = {}
-        inj.clear(); out["cold"] = float(dn_nll(model, tok, row["issue"], row["src"], row["sr"], device))
+        inj.clear(); out["cold"] = float(dn_nll(model, tok, row["issue"], src_of(row), row["sr"], device))
         inj.set_nodes(_node_emb(embedder, union_texts, union_ids).to(device))
-        out["both"] = float(dn_nll(model, tok, row["issue"], row["src"], row["sr"], device))
+        out["both"] = float(dn_nll(model, tok, row["issue"], src_of(row), row["sr"], device))
         inj.set_nodes(_node_emb(embedder, union_texts, union_ids).to(device))
         for ai in range(len(A["node_ids"])):     # drop all of A's nodes (A is first in union)
             inj.drop_node(0)
-        out["drop-A"] = float(dn_nll(model, tok, row["issue"], row["src"], row["sr"], device))
+        out["drop-A"] = float(dn_nll(model, tok, row["issue"], src_of(row), row["sr"], device))
         inj.clear()
         return out
 
@@ -198,6 +201,7 @@ def main(argv=None):
     ap.add_argument("--out", default="artifacts/stage_cache/dn_proj.pt")
     ap.add_argument("--proj", default="", help="load a trained projector (killer mode / warm start)")
     ap.add_argument("--killer", action="store_true"); ap.add_argument("--max-ids", type=int, default=40)
+    ap.add_argument("--no-source", action="store_true", help="killer: graph as SOLE carrier (isolate confound)")
     ap.add_argument("--device", default=None)
     run(ap.parse_args(argv))
 
