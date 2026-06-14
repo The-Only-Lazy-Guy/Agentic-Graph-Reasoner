@@ -100,9 +100,13 @@ def run(a):
                       a.n_train + a.n_eval, a.src_bodies, a.src_lines)
     train_r, eval_r = rows[:a.n_train], rows[a.n_train:a.n_train + a.n_eval]
     print(f"rows: {len(train_r)} train / {len(eval_r)} eval", flush=True)
+    import random
+    rng = random.Random(0)
     opt = torch.optim.AdamW(inj.projectors.parameters(), lr=a.lr)
+    print(f"objective: {'CONTRASTIVE (right nodes must beat wrong by margin %.2f)' % a.margin if a.contrastive else 'grounding-only (positives)'}",
+          flush=True)
     for ep in range(a.epochs):
-        inj.projectors.train(); tot = n = 0
+        inj.projectors.train(); tot = tneg = n = 0
         for r in train_r:
             emb = _node_emb(embedder, r["texts"], r["node_ids"]).to(device)
             inj.set_nodes(emb)
@@ -111,13 +115,26 @@ def run(a):
                 inj.clear(); continue
             ortho = sum(key_orthogonality_loss(k) for k in inj.keys_for_ortho_loss(emb).values())
             loss = nll + a.ortho_weight * ortho
+            rank_val = 0.0
+            if a.contrastive:
+                # WRONG nodes (a different instance) must NOT lower THIS instance's NLL.
+                rneg = train_r[rng.randrange(len(train_r))]
+                while rneg["iid"] == r["iid"] and len(train_r) > 1:
+                    rneg = train_r[rng.randrange(len(train_r))]
+                emb_neg = _node_emb(embedder, rneg["texts"], rneg["node_ids"]).to(device)
+                inj.set_nodes(emb_neg)
+                nll_neg = dn_nll(model, tok, r["issue"], r["src"], r["sr"], device)  # r's gold, WRONG nodes
+                if nll_neg is not None and torch.isfinite(nll_neg):
+                    rank = torch.relu(nll - nll_neg + a.margin)   # want nll(true) < nll(wrong) - margin
+                    loss = loss + a.neg_weight * rank
+                    rank_val = float(rank.item())
             opt.zero_grad(); loss.backward()
             torch.nn.utils.clip_grad_norm_(inj.projectors.parameters(), 1.0)
             opt.step(); inj.clear()
-            tot += float(nll); n += 1
+            tot += float(nll.item()); tneg += rank_val; n += 1
             if n % 25 == 0:
-                print(f"    ep{ep+1} {n}/{len(train_r)} NLL {tot/max(1,n):.4f}", flush=True)
-        print(f"  [dn] epoch {ep+1} mean grounded-NLL {tot/max(1,n):.4f} ({n})", flush=True)
+                print(f"    ep{ep+1} {n}/{len(train_r)} NLL {tot/max(1,n):.4f} rank {tneg/max(1,n):.4f}", flush=True)
+        print(f"  [dn] epoch {ep+1} mean grounded-NLL {tot/max(1,n):.4f} rank {tneg/max(1,n):.4f} ({n})", flush=True)
 
     torch.save(inj.projectors.state_dict(), a.out)
     print(f"saved projector -> {a.out}", flush=True)
@@ -197,6 +214,10 @@ def main(argv=None):
     ap.add_argument("--n-train", type=int, default=120); ap.add_argument("--n-eval", type=int, default=40)
     ap.add_argument("--epochs", type=int, default=2); ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--ortho-weight", type=float, default=0.1)
+    ap.add_argument("--contrastive", action="store_true",
+                    help="add negatives: WRONG nodes must not lower NLL -> forces node-bound (not generic) grounding")
+    ap.add_argument("--neg-weight", type=float, default=1.0)
+    ap.add_argument("--margin", type=float, default=0.1)
     ap.add_argument("--src-bodies", type=int, default=4); ap.add_argument("--src-lines", type=int, default=55)
     ap.add_argument("--out", default="artifacts/stage_cache/dn_proj.pt")
     ap.add_argument("--proj", default="", help="load a trained projector (killer mode / warm start)")
