@@ -162,11 +162,22 @@ def _build_rows(ids, traces, insts, meta, repo_root, src_bodies=4, src_lines=55)
 
 def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, epochs, lr,
         n_train, n_eval, repo_root, out_ckpt, skip=30, src_bodies=4, src_lines=55,
-        exclude_lite=False, train_gnn=False, gnn_ckpt="", device_str=None):
+        exclude_lite=False, train_gnn=False, gnn_ckpt="",
+        lora_lm=False, lora_r=8, lora_alpha=16, no_adapter=False, device_str=None):
     device = torch.device(device_str or ("cuda" if torch.cuda.is_available() else "cpu"))
-    print(f"device={device}  lm={model_name}  SR-SFT from {adapter_ckpt}  train_gnn={train_gnn}", flush=True)
+    use_graph = not no_adapter
+    print(f"device={device}  lm={model_name}  SR-SFT from {adapter_ckpt}  "
+          f"train_gnn={train_gnn}  lora_lm={lora_lm}  use_graph={use_graph}", flush=True)
     provider = FrozenQwenHInitProvider(model_name, device=device)
     model, tok = provider.model, provider.tok
+    if lora_lm:                                # light-unfreeze: LoRA on the LM (attacks synthesis)
+        from peft import LoraConfig, get_peft_model
+        lcfg = LoraConfig(r=lora_r, lora_alpha=lora_alpha, lora_dropout=0.05,
+                          target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                                          "gate_proj", "up_proj", "down_proj"],
+                          task_type="CAUSAL_LM")
+        model = get_peft_model(model, lcfg)
+        model.print_trainable_parameters()
     # NO gradient checkpointing: it re-fires the injection hooks on every recompute segment ->
     # re-runs the all-positions adapter many times -> memory EXPLODES (24->90GB). Cap the
     # sequence instead (sr_nll truncates) so the retained activations stay bounded.
@@ -210,18 +221,26 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, epochs, lr,
         injector.prepare_session(_stub_graph(r["node_ids"], r["texts"], {s: "fact" for s in r["node_ids"]}),
                                  r["node_ids"], embedder.embed_nodes(r["texts"]), tf, r_plan=3, r_evidence=4)
 
-    trainable = [p for p in adapter.parameters() if p.requires_grad]
-    if train_gnn:
-        trainable = trainable + [p for p in gnn.parameters() if p.requires_grad]
+    trainable = []
+    if use_graph:
+        trainable += [p for p in adapter.parameters() if p.requires_grad]
+        if train_gnn:
+            trainable += [p for p in gnn.parameters() if p.requires_grad]
+    if lora_lm:
+        trainable += [p for p in model.parameters() if p.requires_grad]   # LoRA params only
     opt = torch.optim.AdamW(trainable, lr=lr)
     for ep in range(epochs):
-        adapter.train()
-        if train_gnn:
-            gnn.train()
+        if use_graph:
+            adapter.train()
+            if train_gnn:
+                gnn.train()
+        if lora_lm:
+            model.train()
         tot = n = 0
         for r in train_r:
-            prep(r)
-            nll = sr_nll(model, tok, injector, r["issue"], r["src"], r["sr"], device, inject=True)
+            if use_graph:
+                prep(r)
+            nll = sr_nll(model, tok, injector, r["issue"], r["src"], r["sr"], device, inject=use_graph)
             if nll is None or not torch.isfinite(nll):
                 continue
             opt.zero_grad(); nll.backward()
@@ -233,33 +252,44 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, epochs, lr,
                 torch.cuda.empty_cache()
             if n % 100 == 0:
                 print(f"    ep{ep+1} {n}/{len(train_r)}  running SR-NLL {tot/max(1,n):.4f}", flush=True)
-        print(f"  [SR-SFT] epoch {ep+1}  mean SR-NLL(inject) {tot/max(1,n):.4f}  ({n} rows)", flush=True)
+        print(f"  [SR-SFT] epoch {ep+1}  mean SR-NLL {tot/max(1,n):.4f}  ({n} rows)", flush=True)
 
-    torch.save(adapter.state_dict(), out_ckpt)
-    print(f"saved SR-SFT adapter -> {out_ckpt}", flush=True)
-    if train_gnn:
-        gnn_out = gnn_ckpt or out_ckpt.replace(".pt", "_gnn.pt")
-        torch.save(gnn.state_dict(), gnn_out)
-        print(f"saved trained GNN -> {gnn_out}  (eval must load this to realize the lift)", flush=True)
+    if use_graph:
+        torch.save(adapter.state_dict(), out_ckpt)
+        print(f"saved SR-SFT adapter -> {out_ckpt}", flush=True)
+        if train_gnn:
+            gnn_out = gnn_ckpt or out_ckpt.replace(".pt", "_gnn.pt")
+            torch.save(gnn.state_dict(), gnn_out)
+            print(f"saved trained GNN -> {gnn_out}  (eval must load this to realize the lift)", flush=True)
+    if lora_lm:
+        lora_dir = out_ckpt.replace(".pt", "_lora")
+        model.save_pretrained(lora_dir)
+        print(f"saved LM LoRA -> {lora_dir}  (verifier_retry must load it for resolve)", flush=True)
 
-    adapter.eval()
-    gnn.eval()
-    injector.train_gnn = False            # held-out eval: GNN under no_grad/eval
+    if use_graph:
+        adapter.eval(); gnn.eval(); injector.train_gnn = False
+    if lora_lm:
+        model.eval()
     cold, inj = [], []
     with torch.no_grad():
         for r in eval_r:
-            prep(r)
+            if use_graph:
+                prep(r)
             c = sr_nll(model, tok, injector, r["issue"], r["src"], r["sr"], device, inject=False)
-            i = sr_nll(model, tok, injector, r["issue"], r["src"], r["sr"], device, inject=True)
+            i = sr_nll(model, tok, injector, r["issue"], r["src"], r["sr"], device, inject=use_graph)
             if c is not None and i is not None and torch.isfinite(c) and torch.isfinite(i):
                 cold.append(float(c)); inj.append(float(i))
     if cold:
         mc, mi = st.mean(cold), st.mean(inj)
         win = sum(1 for c, i in zip(cold, inj) if i < c)
-        print(f"\n=== SR-SFT held-out SR-NLL (lower=better) ===")
-        print(f"  cold {mc:.4f} -> injected {mi:.4f}  (delta {mc-mi:+.4f}) | injection better {win}/{len(cold)}")
-        print("  lower injected SR-NLL = the trained adapter makes the gold EDIT more likely ->"
-              "\n  better single-shot synthesis -> fewer retries. Verify the real lift with verifier_retry.")
+        tag = ("LoRA-LM + graph" if (lora_lm and use_graph) else
+               "LoRA-LM alone (no graph)" if lora_lm else "frozen + graph")
+        print(f"\n=== held-out SR-NLL [{tag}] (lower=better) ===")
+        if use_graph:
+            print(f"  no-graph {mc:.4f} -> graph {mi:.4f}  (delta {mc-mi:+.4f}) | graph better {win}/{len(cold)}")
+        else:
+            print(f"  LM-only SR-NLL {mc:.4f}  (the synthesis CEILING of a tuned 4B; compare to frozen+graph)")
+        print("  -> compare across the 3 configs: frozen+graph, LoRA-alone, LoRA+graph.")
 
 
 def main(argv=None):
@@ -287,12 +317,20 @@ def main(argv=None):
                          "(probe showed random+frozen GNN contributes ~0 to grounding)")
     ap.add_argument("--gnn-ckpt", default="",
                     help="GNN warm-start in / save out path (default: <out-ckpt>_gnn.pt)")
+    ap.add_argument("--lora-lm", action="store_true",
+                    help="light-unfreeze: LoRA on the LM (attacks the synthesis bottleneck)")
+    ap.add_argument("--lora-r", type=int, default=8)
+    ap.add_argument("--lora-alpha", type=int, default=16)
+    ap.add_argument("--no-adapter", action="store_true",
+                    help="train LoRA WITHOUT the graph adapter (the FT-alone synthesis ceiling)")
     ap.add_argument("--device", default=None)
     a = ap.parse_args(argv)
     run(a.model, a.traces, a.nodes, a.adapter_ckpt, a.dataset, a.split, a.epochs, a.lr,
         a.n_train, a.n_eval, a.repo_root, a.out_ckpt, skip=a.skip,
         src_bodies=a.src_bodies, src_lines=a.src_lines, exclude_lite=a.exclude_lite,
-        train_gnn=a.train_gnn, gnn_ckpt=a.gnn_ckpt, device_str=a.device)
+        train_gnn=a.train_gnn, gnn_ckpt=a.gnn_ckpt,
+        lora_lm=a.lora_lm, lora_r=a.lora_r, lora_alpha=a.lora_alpha, no_adapter=a.no_adapter,
+        device_str=a.device)
 
 
 if __name__ == "__main__":

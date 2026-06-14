@@ -327,6 +327,14 @@ def _get_transformer_layers(model: nn.Module) -> List[nn.Module]:
     Tries common attribute paths used by Hugging Face Qwen3 and other
     decoder-only models. Raises ValueError if not found.
     """
+    # Unwrap a PEFT/LoRA wrapper so hooks land on the real decoder layers (LoRA adds adapters
+    # INSIDE the linear submodules; the decoder-layer module objects are unchanged).
+    if hasattr(model, "get_base_model"):
+        try:
+            model = model.get_base_model()
+        except Exception:   # noqa: BLE001
+            pass
+
     # Qwen3: model.model.layers
     for attr_path in [
         ("model", "layers"),
