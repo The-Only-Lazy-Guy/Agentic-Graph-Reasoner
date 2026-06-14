@@ -99,7 +99,9 @@ def run(a):
     rows = _load_rows(a.traces, a.nodes, a.dataset, a.split, a.repo_root, a.skip,
                       a.n_train + a.n_eval, a.src_bodies, a.src_lines)
     train_r, eval_r = rows[:a.n_train], rows[a.n_train:a.n_train + a.n_eval]
-    print(f"rows: {len(train_r)} train / {len(eval_r)} eval", flush=True)
+    src_of = (lambda r: "") if a.no_source else (lambda r: r["src"])
+    print(f"rows: {len(train_r)} train / {len(eval_r)} eval | "
+          f"{'GRAPH-ONLY (no source — nodes are the sole carrier)' if a.no_source else 'WITH-SOURCE'}", flush=True)
     import random
     rng = random.Random(0)
     opt = torch.optim.AdamW(inj.projectors.parameters(), lr=a.lr)
@@ -110,7 +112,7 @@ def run(a):
         for r in train_r:
             emb = _node_emb(embedder, r["texts"], r["node_ids"]).to(device)
             inj.set_nodes(emb)
-            nll = dn_nll(model, tok, r["issue"], r["src"], r["sr"], device)
+            nll = dn_nll(model, tok, r["issue"], src_of(r), r["sr"], device)
             if nll is None or not torch.isfinite(nll):
                 inj.clear(); continue
             ortho = sum(key_orthogonality_loss(k) for k in inj.keys_for_ortho_loss(emb).values())
@@ -123,7 +125,7 @@ def run(a):
                     rneg = train_r[rng.randrange(len(train_r))]
                 emb_neg = _node_emb(embedder, rneg["texts"], rneg["node_ids"]).to(device)
                 inj.set_nodes(emb_neg)
-                nll_neg = dn_nll(model, tok, r["issue"], r["src"], r["sr"], device)  # r's gold, WRONG nodes
+                nll_neg = dn_nll(model, tok, r["issue"], src_of(r), r["sr"], device)  # r's gold, WRONG nodes
                 if nll_neg is not None and torch.isfinite(nll_neg):
                     rank = torch.relu(nll - nll_neg + a.margin)   # want nll(true) < nll(wrong) - margin
                     loss = loss + a.neg_weight * rank
@@ -143,9 +145,9 @@ def run(a):
     with torch.no_grad():
         for r in eval_r:
             inj.clear()
-            c = dn_nll(model, tok, r["issue"], r["src"], r["sr"], device)
+            c = dn_nll(model, tok, r["issue"], src_of(r), r["sr"], device)
             inj.set_nodes(_node_emb(embedder, r["texts"], r["node_ids"]).to(device))
-            g = dn_nll(model, tok, r["issue"], r["src"], r["sr"], device)
+            g = dn_nll(model, tok, r["issue"], src_of(r), r["sr"], device)
             inj.clear()
             if c is not None and g is not None and torch.isfinite(c) and torch.isfinite(g):
                 cold.append(float(c)); grd.append(float(g))
