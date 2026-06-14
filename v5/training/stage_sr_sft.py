@@ -162,9 +162,9 @@ def _build_rows(ids, traces, insts, meta, repo_root, src_bodies=4, src_lines=55)
 
 def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, epochs, lr,
         n_train, n_eval, repo_root, out_ckpt, skip=30, src_bodies=4, src_lines=55,
-        exclude_lite=False, device_str=None):
+        exclude_lite=False, train_gnn=False, gnn_ckpt="", device_str=None):
     device = torch.device(device_str or ("cuda" if torch.cuda.is_available() else "cpu"))
-    print(f"device={device}  lm={model_name}  SR-SFT from {adapter_ckpt}", flush=True)
+    print(f"device={device}  lm={model_name}  SR-SFT from {adapter_ckpt}  train_gnn={train_gnn}", flush=True)
     provider = FrozenQwenHInitProvider(model_name, device=device)
     model, tok = provider.model, provider.tok
     # NO gradient checkpointing: it re-fires the injection hooks on every recompute segment ->
@@ -172,14 +172,21 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, epochs, lr,
     # sequence instead (sr_nll truncates) so the retained activations stay bounded.
     lm_dim = provider.hidden_size
     embedder = RealEmbedder(device)
-    gnn = RGCNEncoder().to(device).eval()
+    gnn = RGCNEncoder().to(device)
+    if gnn_ckpt:                               # warm-start from a prior trained GNN
+        gnn.load_state_dict(torch.load(gnn_ckpt, map_location=device))
+        print(f"loaded GNN warm-start <- {gnn_ckpt}", flush=True)
+    # train_gnn: unfreeze the GNN so topology can EARN signal (the probe showed random+frozen
+    # GNN contributes ~0 to grounding). Else: keep it frozen-random (the proven baseline).
+    gnn.train() if train_gnn else gnn.eval()
     for p in gnn.parameters():
-        p.requires_grad_(False)
+        p.requires_grad_(train_gnn)
     goal_enc = GoalEncoder().to(device).eval()
     adapter = V5AttentionAdapter(r_plan=3, r_evidence=4, lm_hidden_dim=lm_dim).to(device)
     adapter.load_state_dict(torch.load(adapter_ckpt, map_location=device))
     injector = GraphAttentionInjector(adapter, gnn, goal_enc, device=device)
     injector.inject_all_positions = True       # teacher-forced: condition ALL SR tokens
+    injector.train_gnn = train_gnn             # prepare_session keeps GNN grad when True
 
     traces = load_traces(traces_p)
     meta = load_symbol_meta(nodes_p)
@@ -203,9 +210,14 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, epochs, lr,
         injector.prepare_session(_stub_graph(r["node_ids"], r["texts"], {s: "fact" for s in r["node_ids"]}),
                                  r["node_ids"], embedder.embed_nodes(r["texts"]), tf, r_plan=3, r_evidence=4)
 
-    opt = torch.optim.AdamW([p for p in adapter.parameters() if p.requires_grad], lr=lr)
+    trainable = [p for p in adapter.parameters() if p.requires_grad]
+    if train_gnn:
+        trainable = trainable + [p for p in gnn.parameters() if p.requires_grad]
+    opt = torch.optim.AdamW(trainable, lr=lr)
     for ep in range(epochs):
         adapter.train()
+        if train_gnn:
+            gnn.train()
         tot = n = 0
         for r in train_r:
             prep(r)
@@ -213,7 +225,7 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, epochs, lr,
             if nll is None or not torch.isfinite(nll):
                 continue
             opt.zero_grad(); nll.backward()
-            torch.nn.utils.clip_grad_norm_([p for p in adapter.parameters() if p.requires_grad], 1.0)
+            torch.nn.utils.clip_grad_norm_(trainable, 1.0)
             opt.step()
             tot += float(nll.item()); n += 1
             del nll
@@ -225,8 +237,14 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, epochs, lr,
 
     torch.save(adapter.state_dict(), out_ckpt)
     print(f"saved SR-SFT adapter -> {out_ckpt}", flush=True)
+    if train_gnn:
+        gnn_out = gnn_ckpt or out_ckpt.replace(".pt", "_gnn.pt")
+        torch.save(gnn.state_dict(), gnn_out)
+        print(f"saved trained GNN -> {gnn_out}  (eval must load this to realize the lift)", flush=True)
 
     adapter.eval()
+    gnn.eval()
+    injector.train_gnn = False            # held-out eval: GNN under no_grad/eval
     cold, inj = [], []
     with torch.no_grad():
         for r in eval_r:
@@ -264,11 +282,17 @@ def main(argv=None):
     ap.add_argument("--src-lines", type=int, default=55, help="read-source max lines/body (MATCH eval)")
     ap.add_argument("--exclude-lite", action="store_true",
                     help="drop lite-test instances from training (full --split test -> domain-matched + eval-disjoint)")
+    ap.add_argument("--train-gnn", action="store_true",
+                    help="unfreeze + jointly train the GNN so graph topology earns signal "
+                         "(probe showed random+frozen GNN contributes ~0 to grounding)")
+    ap.add_argument("--gnn-ckpt", default="",
+                    help="GNN warm-start in / save out path (default: <out-ckpt>_gnn.pt)")
     ap.add_argument("--device", default=None)
     a = ap.parse_args(argv)
     run(a.model, a.traces, a.nodes, a.adapter_ckpt, a.dataset, a.split, a.epochs, a.lr,
         a.n_train, a.n_eval, a.repo_root, a.out_ckpt, skip=a.skip,
-        src_bodies=a.src_bodies, src_lines=a.src_lines, exclude_lite=a.exclude_lite, device_str=a.device)
+        src_bodies=a.src_bodies, src_lines=a.src_lines, exclude_lite=a.exclude_lite,
+        train_gnn=a.train_gnn, gnn_ckpt=a.gnn_ckpt, device_str=a.device)
 
 
 if __name__ == "__main__":

@@ -28,14 +28,18 @@ from v5.runtime.search_replace import SR_SYS, parse_sr, sr_metrics
 
 
 def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max_new,
-        dump="", device_str=None):
+        dump="", gnn_ckpt="", device_str=None):
     device = torch.device(device_str or ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"device={device}  lm={model_name}  adapter={adapter_ckpt}")
     provider = FrozenQwenHInitProvider(model_name, device=device)
     model, tok = provider.model, provider.tok
     lm_dim = provider.hidden_size
     embedder = RealEmbedder(device)
-    gnn = RGCNEncoder().to(device).eval()
+    gnn = RGCNEncoder().to(device)
+    if gnn_ckpt:
+        gnn.load_state_dict(torch.load(gnn_ckpt, map_location=device))
+        print(f"loaded trained GNN <- {gnn_ckpt}")
+    gnn.eval()
     goal_enc = GoalEncoder().to(device).eval()
     adapter = V5AttentionAdapter(r_plan=3, r_evidence=4, lm_hidden_dim=lm_dim).to(device)
     adapter.load_state_dict(torch.load(adapter_ckpt, map_location=device))
@@ -103,10 +107,11 @@ def main(argv=None):
     ap.add_argument("--n-eval", type=int, default=20)
     ap.add_argument("--max-new", type=int, default=500)
     ap.add_argument("--dump", default="")
+    ap.add_argument("--gnn-ckpt", default="", help="trained GNN (stage_sr_sft --train-gnn); else random-frozen")
     ap.add_argument("--device", default=None)
     a = ap.parse_args(argv)
     run(a.model, a.traces, a.nodes, a.adapter_ckpt, a.dataset, a.split, a.n_eval, a.max_new,
-        dump=a.dump, device_str=a.device)
+        dump=a.dump, gnn_ckpt=a.gnn_ckpt, device_str=a.device)
 
 
 if __name__ == "__main__":

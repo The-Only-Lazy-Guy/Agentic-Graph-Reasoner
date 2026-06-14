@@ -80,6 +80,10 @@ class GraphAttentionInjector:
         self._plan_hook_calls: int = 0
         self._evid_hook_calls: int = 0
         self.run_once_per_session: bool = True
+        # When True, prepare_session computes the GNN K/V WITH grad (so backprop from the LM
+        # loss reaches the GNN params) and leaves the GNN in train mode. Default False keeps
+        # the proven inference path (GNN under no_grad, eval) untouched.
+        self.train_gnn: bool = False
 
         self._hooks: List = []
 
@@ -118,13 +122,22 @@ class GraphAttentionInjector:
             graph, node_ids, text_embeddings, self.device, task_frame
         )
 
-        # GNN forward pass (once per session) — raw embeddings only
-        self.gnn.eval()
-        with torch.no_grad():
+        # GNN forward pass (once per session) — raw embeddings only.
+        # train_gnn=True: keep grad so the LM loss can backprop into the GNN params (joint
+        # adapter+GNN training, to let topology earn signal). Else: the proven no_grad path.
+        if self.train_gnn:
+            self.gnn.train()
             self._graph_kv = self.gnn.encode_to_kv(
                 self._active_subgraph.encoder_inputs,
                 self._active_subgraph,
             )
+        else:
+            self.gnn.eval()
+            with torch.no_grad():
+                self._graph_kv = self.gnn.encode_to_kv(
+                    self._active_subgraph.encoder_inputs,
+                    self._active_subgraph,
+                )
 
         self.goal_encoder.eval()
         with torch.no_grad():

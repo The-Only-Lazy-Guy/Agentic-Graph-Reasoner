@@ -163,14 +163,18 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, n_eval, max
         strategy="off", strategy_nodes=None, strat_topk=3,
         src_bodies=6, src_lines=70, best_of_k=0, temp=0.7, emit_candidates=0,
         retrieve=0, retriever_ckpt="", retriever_st="", retr_max_files=40, retr_max_syms=1500,
-        device_str=None):
+        gnn_ckpt="", device_str=None):
     device = torch.device(device_str or ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"device={device}  max_retries={max_retries}", flush=True)
     provider = FrozenQwenHInitProvider(model_name, device=device)
     model, tok = provider.model, provider.tok
     lm_dim = provider.hidden_size
     embedder = RealEmbedder(device)
-    gnn = RGCNEncoder().to(device).eval()
+    gnn = RGCNEncoder().to(device)
+    if gnn_ckpt:                              # trained GNN (from stage_sr_sft --train-gnn); else random-frozen
+        gnn.load_state_dict(torch.load(gnn_ckpt, map_location=device))
+        print(f"loaded trained GNN <- {gnn_ckpt}", flush=True)
+    gnn.eval()
     goal_enc = GoalEncoder().to(device).eval()
     adapter = V5AttentionAdapter(r_plan=3, r_evidence=4, lm_hidden_dim=lm_dim).to(device)
     adapter.load_state_dict(torch.load(adapter_ckpt, map_location=device))
@@ -381,6 +385,8 @@ def main(argv=None):
                     help="trained sentence-transformers bi-encoder (models/ranker-code) — the DESIGN ranker")
     ap.add_argument("--retr-max-files", type=int, default=40, help="STAGE-1 file-filter: top-K files by issue keywords")
     ap.add_argument("--retr-max-syms", type=int, default=1500, help="STAGE-2: max symbols to embed+rank")
+    ap.add_argument("--gnn-ckpt", default="",
+                    help="trained GNN (stage_sr_sft --train-gnn output); default = random-frozen GNN")
     ap.add_argument("--device", default=None)
     a = ap.parse_args(argv)
     run(a.model, a.traces, a.nodes, a.adapter_ckpt, a.dataset, a.split, a.n_eval, a.max_new,
@@ -389,7 +395,8 @@ def main(argv=None):
         strat_topk=a.strat_topk, src_bodies=a.src_bodies, src_lines=a.src_lines,
         best_of_k=a.best_of_k, temp=a.temp, emit_candidates=a.emit_candidates,
         retrieve=a.retrieve, retriever_ckpt=a.retriever_ckpt, retriever_st=a.retriever_st,
-        retr_max_files=a.retr_max_files, retr_max_syms=a.retr_max_syms, device_str=a.device)
+        retr_max_files=a.retr_max_files, retr_max_syms=a.retr_max_syms,
+        gnn_ckpt=a.gnn_ckpt, device_str=a.device)
 
 
 if __name__ == "__main__":
