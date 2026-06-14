@@ -123,7 +123,17 @@ def run(a):
     print(f"symbols {len(sym_ids)} | strategies {len(s_text)} | leveraged edges "
           f"{sum(len(v) for v in leveraged.values())}", flush=True)
 
-    # gold file already carries instance_id -> use it directly (NO fragile text matching)
+    # instance_id reference (the heldout gold omits it; the full gold has it) -> question->iid
+    inst_ref = {}
+    for refp in (a.inst_ref or []):
+        try:
+            for line in open(refp, encoding="utf-8"):
+                rr = json.loads(line)
+                if rr.get("question") and rr.get("instance_id"):
+                    inst_ref[rr["question"]] = rr["instance_id"]
+        except FileNotFoundError:
+            pass
+
     gold, q_inst = {}, {}
     for line in open(a.gold, encoding="utf-8"):
         r = json.loads(line)
@@ -131,7 +141,7 @@ def run(a):
         sup = [s for s in (r.get("support_ids") or []) if s in sym_set]
         if q and sup:
             gold[q] = sup
-            q_inst[q] = r.get("instance_id")
+            q_inst[q] = r.get("instance_id") or inst_ref.get(q)
     mapped = sum(1 for v in q_inst.values() if v)
     # how many strategies WILL be excluded by the gate (visibility — the bug last time was 0)?
     excl = sum(1 for q in gold for kb in s_inst
@@ -179,8 +189,10 @@ def main(argv=None):
     ap.add_argument("--nodes", default="artifacts/graph_growth/swe_code_candidates.jsonl")
     ap.add_argument("--strategies", default="artifacts/graph_growth/swe_strategy_candidates_clean.jsonl")
     ap.add_argument("--gold", default="data/swe/retrieval_gold_heldout.jsonl")
-    ap.add_argument("--traces", nargs="*", default=["data/swe/grounded_traces.jsonl"],
-                    help="for the leakage gate: question->instance map")
+    ap.add_argument("--inst-ref", nargs="*",
+                    default=["data/swe/retrieval_gold_code.jsonl",
+                             "data/swe/retrieval_gold_code_verified.jsonl"],
+                    help="gold(s) carrying instance_id -> question->instance map for the leakage gate")
     ap.add_argument("--model", default="models/ranker-code")
     ap.add_argument("--alpha", type=float, default=0.5, help="strategy-boost weight")
     ap.add_argument("--no-exclude", action="store_true", help="DISABLE leakage gate (debug; inflates)")
