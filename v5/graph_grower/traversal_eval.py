@@ -115,28 +115,29 @@ def _selftest():
 
 def run(a):
     from sentence_transformers import SentenceTransformer
-    from v5.graph_grower.retrieval_eval import load_gold_file
 
     syms = load_symbols(a.nodes)
     s_text, s_inst, leveraged = load_strategies(a.strategies)
     sym_ids = list(syms)
+    sym_set = set(sym_ids)
     print(f"symbols {len(sym_ids)} | strategies {len(s_text)} | leveraged edges "
           f"{sum(len(v) for v in leveraged.values())}", flush=True)
 
-    gold = load_gold_file(a.gold, set(sym_ids))      # {question: [gold sym_ids]}
-    # map question -> instance for the leakage gate (match issue text to a strategy session)
-    q_inst = {}
-    if a.traces:
-        tr = {}
-        for tp in a.traces:
-            for line in open(tp, encoding="utf-8"):
-                r = json.loads(line)
-                iid = r.get("instance_id") or (r.get("v2_grounding") or {}).get("instance_id")
-                iss = r.get("issue") or r.get("problem_statement") or ""
-                if iid and iss:
-                    tr[iss[:200]] = iid
-        for q in gold:
-            q_inst[q] = tr.get(q[:200])
+    # gold file already carries instance_id -> use it directly (NO fragile text matching)
+    gold, q_inst = {}, {}
+    for line in open(a.gold, encoding="utf-8"):
+        r = json.loads(line)
+        q = r.get("question")
+        sup = [s for s in (r.get("support_ids") or []) if s in sym_set]
+        if q and sup:
+            gold[q] = sup
+            q_inst[q] = r.get("instance_id")
+    mapped = sum(1 for v in q_inst.values() if v)
+    # how many strategies WILL be excluded by the gate (visibility — the bug last time was 0)?
+    excl = sum(1 for q in gold for kb in s_inst
+               if q_inst.get(q) and s_inst.get(kb) == q_inst[q])
+    print(f"queries {len(gold)} | with instance_id {mapped} | total same-instance strategy "
+          f"exclusions {excl} (gate {'FIRES' if excl else 'DEAD — check'})", flush=True)
 
     mdl = SentenceTransformer(a.model, trust_remote_code=True)
     enc = lambda xs: mdl.encode(xs, batch_size=64, normalize_embeddings=True, show_progress_bar=False)
