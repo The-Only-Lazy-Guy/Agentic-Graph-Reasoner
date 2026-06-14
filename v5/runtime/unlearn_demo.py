@@ -81,7 +81,8 @@ def run(model_name, traces_p, nodes_p, adapter_ckpt, dataset, split, repo_root,
     adapter = V5AttentionAdapter(r_plan=3, r_evidence=4, lm_hidden_dim=lm_dim).to(device)
     adapter.load_state_dict(torch.load(adapter_ckpt, map_location=device)); adapter.eval()
     injector = GraphAttentionInjector(adapter, gnn, goal_enc, device=device)
-    tf = {"task_family": "code_fix", "required_slots": []}
+    injector.inject_all_positions = True       # condition ALL teacher-forced tokens (else the
+    tf = {"task_family": "code_fix", "required_slots": []}   # hook only touches the last token -> no NLL effect
 
     def prep(node_ids, texts):
         injector.prepare_session(_stub_graph(node_ids, texts, {s: "fact" for s in node_ids}),
