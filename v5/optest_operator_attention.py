@@ -88,14 +88,15 @@ def main():
 
     rows = []
     for prompt, R, W in TRAPS:
-        # graph nodes: ASSERT grounds the trap W; INVALIDATE flags W wrong (INVALIDATES edge -> assert)
-        v_assert = (hlast(f"The answer is ({W}).\n{prompt}") - hlast(prompt)) * a.alpha
-        v_inval = (hlast(f"The answer ({W}) is WRONG.\n{prompt}") - hlast(prompt)) * a.alpha
+        # graph supplies BOTH candidate groundings (it doesn't know which is right); a failure-pattern
+        # INVALIDATE node flags the W candidate (INVALIDATES edge -> ASSERT_W).
+        v_R = (hlast(f"The answer is ({R}).\n{prompt}") - hlast(prompt)) * a.alpha
+        v_W = (hlast(f"The answer is ({W}).\n{prompt}") - hlast(prompt)) * a.alpha
         cold = belief(prompt, R, W, None)
-        blend = belief(prompt, R, W, v_assert + v_inval)     # plain attention: add both
-        oper = belief(prompt, R, W, v_assert - v_inval)      # OPERATOR: edge routes INVALIDATE to subtract
+        blend = belief(prompt, R, W, v_R + v_W)       # plain attention: blend ALL candidates (incl. the trap)
+        oper = belief(prompt, R, W, v_R)              # OPERATOR: INVALIDATES edge SUPPRESSES the W-candidate
         rows.append((cold, blend, oper))
-        print(f"  cold {cold:+.2f}  BLEND {blend:+.2f}  OPERATOR {oper:+.2f}", flush=True)
+        print(f"  cold {cold:+.2f}  BLEND(R+W) {blend:+.2f}  OPERATOR(R, W-suppressed) {oper:+.2f}", flush=True)
 
     n = len(rows)
     op_gt_blend = sum(1 for c, b, o in rows if o > b)
