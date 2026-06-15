@@ -89,6 +89,9 @@ def main():
     ap.add_argument("--scope", choices=["all", "problem"], default="problem",
                     help="all: retrieve correct node over every refuted node; problem: scope to the probe's source doc")
     ap.add_argument("--emb-layer", type=int, default=-1)
+    ap.add_argument("--embedder", choices=["lm", "real"], default="real",
+                    help="real = all-mpnet-base-v2 sentence embedder (project RealEmbedder, proper "
+                         "NL->text retrieval); lm = mean-pooled frozen-LM hidden (crude, the v1 stand-in)")
     a = ap.parse_args()
     trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
     from transformers import AutoTokenizer
@@ -100,9 +103,22 @@ def main():
 
     nodes, correct2fp = load_candidates(a.candidates)
     correct_ids = list(correct2fp.keys())
-    print(f"loaded | layer {a.layer} | scope {a.scope} | {len(correct_ids)} refuted correct nodes "
-          f"(each ->contradicts-> a trap) | emb_layer {emb_layer}", flush=True)
-    emb_cache = {cid: embed(model, tok, nodes[cid]["text"], dev, emb_layer) for cid in correct_ids}
+
+    # retrieval embedder: real (mpnet sentence embedder) or lm (crude mean-pooled hidden)
+    if a.embedder == "real":
+        from v5.training.providers import RealEmbedder
+        re_emb = RealEmbedder(dev)
+        emap = re_emb.embed_nodes({cid: nodes[cid]["text"] for cid in correct_ids})
+        emb_cache = {cid: torch.tensor(v, device=dev) for cid, v in emap.items()}
+        def embed_q(q):
+            return torch.tensor(re_emb.embed_nodes({"q": q})["q"], device=dev)
+    else:
+        emb_cache = {cid: embed(model, tok, nodes[cid]["text"], dev, emb_layer) for cid in correct_ids}
+        def embed_q(q):
+            return embed(model, tok, q, dev, emb_layer)
+
+    print(f"loaded | layer {a.layer} | scope {a.scope} | embedder {a.embedder} | "
+          f"{len(correct_ids)} refuted correct nodes (each ->contradicts-> a trap)", flush=True)
 
     def belief(q, R, W, v):
         lg = inj.answer_logits(q, v)
@@ -114,7 +130,7 @@ def main():
         pool = [c for c in correct_ids if nodes[c]["doc"] == doc] if a.scope == "problem" else correct_ids
         if not pool:
             print(f"  [skip] no refuted nodes for {doc}"); continue
-        qv = embed(model, tok, q, dev, emb_layer)
+        qv = embed_q(q)
         cid = max(pool, key=lambda c: float(emb_cache[c] @ qv))
         fid = correct2fp[cid]
         correct_t, trap_t = nodes[cid]["text"], nodes[fid]["text"]
