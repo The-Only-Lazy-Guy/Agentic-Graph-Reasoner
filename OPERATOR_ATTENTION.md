@@ -33,12 +33,17 @@ construction**, can't collapse. That is the whole idea.
 | `INVALIDATE` suppresses a reasoning trap → reasons better | `v5/optest_reasoning.py` | **8/8** (4B L26) |
 | op-signed **COMBINE** beats plain blend | `v5/operator_injector.py` | **6/6, +7.07** (4B L26) |
 | plain blend (RAG / array-of-text) with conflicting content | (same) | **−2.95 — net NEGATIVE** |
-| **REAL LOOP**: retrieval over 99 grown fps → op-signed inject | `v5/operator_loop.py` | **acc 4/7→7/7, beats blend 6/7, +2.85** (1.5B L14; 4B@L26 TODO) |
+| **EDGE-GATED end-to-end** (4B): grow→bare miscon→contradicts edge→retrieve correct→hop→signed inject | `v5/operator_loop_v2.py` | **acc 5/7→7/7, beats blend 6/7, cold +1.25→BLEND +0.57→OPERATOR +3.52** (4B L26, scope=all) |
 
-**Real-loop note:** the operator advantage SURVIVES real (noisy) retrieval at graph scale — the LM
-embeds the query, retrieves the matching `failure_pattern` from the grown graph, and the op-signed
-INVALIDATE injection lifts reasoning accuracy while RAG-blend of the same node stays flat/negative.
-Degree matters: summing k nodes overshoots, so per-node alpha = α/k (`operator_loop.py`).
+**End-to-end note (the headline):** validated the FULL chain on the deploy 4B. Two findings made it work:
+(1) **content shape** — the grower must emit `failure_pattern` as a BARE misconception (the wrong belief
+asserted as true), not a correction; a strong LM reads a correction as the right answer (`optest_shape`:
+bare → operator +2.76 / blend −2.64; correction → blend +2.07 / operator −0.34). (2) **edge-gated
+retrieval** — a bare misconception has no query cues, so retrieve the topical CORRECT node and follow its
+`contradicts` edge to the bare trap (real mpnet embedder). Then `ASSERT(correct) − INVALIDATE(trap)` beats
+`BLEND(both +)`: BLEND is a high-variance poison (craters to −11 on the relevant trap), OPERATOR is stable
++3.5–5.0. **An array can't follow the edge — that is "why a graph, not an array," end-to-end.**
+Degree: per-node α = α/k and residual-relative normalize (long grown nodes else over-steer).
 
 **The punchline:** typed operators make a frozen 4B reason dramatically better, and **naive
 content-retrieval (RAG) is worse than nothing** when evidence conflicts — only the operator structure
@@ -80,5 +85,5 @@ the runtime applies. Aliases: misconception/pitfall/mistake/trap/... → failure
 
 ## Next steps
 1. ~~Grow `failure_pattern` content~~ **DONE** (2026-06-15): codex teacher on `cot_batch1` (12 math docs) → `graphs/grown_graph6.json` carries **99 `failure_pattern` (INVALIDATE) nodes + 111 `contradicts` edges**, all op_kind-stamped, health gate PASS. Quality verified (concrete wrong-approaches w/ counterexamples). Optional: 2nd domain via `cs_batch` (12 algo docs).
-2. ~~Wire `OperatorInjector` into the real grounding loop on a **reasoning** task~~ **DONE** (`v5/operator_loop.py`): retrieval over the 99 grown INVALIDATE nodes + op-signed inject → acc 4/7→7/7, beats RAG-blend 6/7 (1.5B L14). **← NEXT: confirm on 4B @ L26 (A40; local box caps at 1.5B).**
-3. GATE test; the reasoning loop that writes SLOTs; a fast node→vector path (the projector is still generic).
+2. ~~Wire into the real grounding loop + confirm on the 4B~~ **DONE** (`operator_loop_v2.py`, 4B L26): edge-gated end-to-end PASS — acc 5/7→7/7, beats blend 6/7, cold +1.25→blend +0.57→**operator +3.52**. Needed two fixes: BARE-misconception content shape (grower) + edge-gated retrieval (mpnet) + per-node α/k normalize.
+3. **← NEXT:** GATE operator test (multiplicative precondition); the reasoning loop that writes SLOTs (the "idea layer" — emit a ProofPlan/PatchPlan into a SLOT node, then realize it; on-thesis alternative to a diffusion plan head); a fast node→vector path (the projector is still generic). Optional: 2nd domain (`cs_batch`); write up for INTFAIR.
