@@ -4,7 +4,101 @@
 > you don't have to dig through commits/logs. Updated each working session.
 
 **Last updated:** 2026-06-15
-**HEAD:** latest pushed commit on branch `main`
+**HEAD:** `7768680` (branch `main`)
+
+---
+
+## ⭐ CHECKPOINT (2026-06-15 LATE) — OPERATOR ATTENTION VALIDATED END-TO-END ON THE DEPLOY 4B
+
+> **One line:** the graph's typed operators now demonstrably make a **frozen Qwen3.5-4B reason better
+> than RAG** — proven through the WHOLE pipeline (grow → retrieve → inject), not a toy. This is the
+> measured answer to *"why a graph, not an array."*
+
+### 1. What "Operator Attention" is (read this first if cold)
+Every graph node carries an **operation KIND**, not just text:
+
+| op_kind | operation | node types | role |
+|---|---|---|---|
+| `ASSERT` | `+v` | fact, claim, symbol, … | evidence / grounding |
+| `INVALIDATE` | `−v` (subtract) | **failure_pattern**, contradicts | suppress a WRONG path |
+| `GATE` | `×g` | control_rule, epistemic_state | precondition (untested) |
+| `TRANSFORM` | `W·` | strategy, procedure, reasoning_chain | the "how" |
+| `SLOT` | writable register | (v2, not built) | intermediate result |
+
+These are **non-interchangeable**: a subtract can't be faked by a positive blend. So the structure is
+**load-bearing by construction** — it can't collapse to "generic grounding" the way every *trainable*
+injection did (the session-long wall). The runtime (`v5/operator_injector.py`) injects the **op-signed
+sum** of node grounding-vectors at a late layer (~L26 of 32 on the 4B). Vectors = in-context grounding
+shifts `h_L(node+query) − h_L(query)` (a trained text→vector projector collapses to generic, so we use
+the real shift; but the op KIND is hard-coded, so structure survives).
+
+### 2. The validated chain (end-to-end, on the deploy 4B)
+```
+grow content       →  BARE misconception   →  contradicts EDGE  →  retrieve correct node →  hop edge  →  ASSERT(correct) − INVALIDATE(trap)
+(codex teacher,        node (wrong belief       (wrong ↔ its         (mpnet embedder,         (follow the    (op-signed inject @ L26)
+ cot_batch1 math)      stated as if TRUE)       refutation)          topical NL→node)         typed edge)
+   ✅ 67 fps            ✅ optest_shape          ✅ 68/70 pairs       ✅ RealEmbedder          ✅            ✅ operator_loop_v2 (4B PASS)
+```
+
+### 3. Proof table (frozen LM; headline numbers = deploy Qwen3.5-4B @ L26)
+| what it proves | file | result |
+|---|---|---|
+| INVALIDATE flips a factual belief, edge-gated | `v5/optest_invalidate.py` | 5/5 (4B L18) |
+| INVALIDATE suppresses a reasoning trap → reasons better | `v5/optest_reasoning.py` | **8/8** (4B L26) |
+| op-signed COMBINE beats plain blend (curated nodes) | `v5/operator_injector.py` | **6/6, +7.07** (4B L26) |
+| plain blend of conflicting content (RAG / array) | (same) | **−2.95 — net NEGATIVE** |
+| **CONTENT SHAPE**: bare-misconception → operator; correction → blend | `v5/optest_shape.py` | bare **+2.76** vs blend **−2.64**; correction blend +2.07 / op −0.34 (4B) |
+| **END-TO-END edge-gated** (grow→edge→retrieve→hop→inject) | `v5/operator_loop_v2.py` | **acc 5/7→7/7, beats blend 6/7, cold +1.25 → blend +0.57 → OPERATOR +3.52** (4B L26, scope=all) |
+
+### 4. ⚠️ The TWO non-obvious fixes that made the 4B work (the session's real payoff)
+The first end-to-end 4B run **FAILED** (operator ≈ blend, both noisy). Chased to two root causes, both fixed:
+
+1. **CONTENT SHAPE — bare misconception, NOT correction.** The grower first emitted `failure_pattern`
+   as a *correction* ("Applying AM-GM gives an upper bound, the WRONG direction"). A strong model READS
+   that and grounds the *right* answer → wants ASSERT (RAG helps, subtract hurts). The fix: grower emits
+   the **bare wrong belief asserted as if valid** ("Since 1+b≥2√b, 1/(a(1+b))≥1/(2a√b)"). Then blending it
+   POISONS context and only **subtract (INVALIDATE)** steers away. `optest_shape.py` proved this cleanly
+   on the 4B (bare → op +2.76 / blend −2.64; correction → the opposite). Grower prompt changed
+   (`extract.py`), `cot_batch1` regrown → 67 bare fps (~88% clean shape).
+
+2. **EDGE-GATED RETRIEVAL — the text shape good for injection is bad for retrieval.** A bare misconception
+   has no NL query cues, so query→fp retrieval collapsed (probe asking about AM-GM retrieved a Euler's-
+   theorem node). Fix is STRUCTURAL: don't retrieve the trap — retrieve the **topical correct node** and
+   **follow its `contradicts` edge** to the bare trap (`operator_loop_v2.py`). Plus swap crude mean-pooled
+   LM-embedding for the project `RealEmbedder` (all-mpnet-base-v2). **An array can't follow the edge —
+   that is the load-bearing role of graph structure, end-to-end.**
+
+**The punchline figure (4B, end-to-end):** cold **+1.25** → RAG-blend **+0.57** (barely helps; a high-
+variance *poison*, craters to **−11** on the relevant trap) → operators **+3.52** (2.8× cold, accuracy
+5/7→7/7). Blending correct+trap is a coin-flip; the typed edge + signed subtract is stable and wins.
+
+### 5. Honest caveats (do not overclaim)
+- Not **7/7 per-probe** dominance — 2 algebraic-identity probes let blend luck a win (+7.62); **n=6–7, small**.
+- Probes are forced-choice (logit(correct)−logit(trap)); a clean, gradeable proxy, not open-ended proofs.
+- Per-node *content* specificity from text still collapses to generic (`optest_projector.py`); the value is
+  the op KIND + the edge, not learned per-node vectors.
+- GATE / SLOT operators **not yet tested**. `grown_graph6/7`, `grown_fps_bare.json` are local/regenerable.
+
+### 6. Files + repro
+- Schema (locked, torch-free): `v5/operator_schema.py`. Runtime: `v5/operator_injector.py`
+  (`combine(nodes, query, normalize=True)` = residual-relative, length-invariant; per-node α/k).
+- Tests: `optest_invalidate.py`, `optest_reasoning.py`, `optest_shape.py` (content-shape discriminator),
+  `operator_loop.py` (v1, single-node), `operator_loop_v2.py` (edge-gated, **the headline**).
+- Grower: `v5/graph_grower/extract.py` (cot prompt now emits bare misconceptions + contradicts edges).
+- Content: `artifacts/graph_growth/fp_bare_candidates.jsonl` (regrow output), `graphs/grown_fps_bare.json`
+  (67 bare fps, committed for the A40).
+- Repro the headline (A40, 4B): `git pull` then
+  `V5_LM_TRUST_REMOTE_CODE=1 python -m v5.operator_loop_v2 --layer 26 --alpha 0.5 --scope all --embedder real`
+  (run via a `subprocess.run(..., capture_output=True)` print — marimo swallows inherited stdout).
+- Full design writeup: `OPERATOR_ATTENTION.md`.
+
+### 7. Where we are / next
+**The Operator-Attention thesis is proven end-to-end on the deploy model.** Open directions:
+- **SLOT operator** (the writable "idea layer" — frozen LM emits a ProofPlan/PatchPlan into a SLOT node,
+  inject, then realize). The original "make DeltaNet/structure useful" goal + the on-thesis answer to the
+  diffusion "idea layer" idea (no retraining). ← recommended next build.
+- **GATE operator** test (multiplicative precondition, the one untested op_kind).
+- 2nd domain (`cs_batch`, 12 algo docs); or consolidate into the **INTFAIR demo + writeup** (the science is done).
 
 ---
 
