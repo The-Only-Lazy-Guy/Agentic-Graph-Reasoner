@@ -67,6 +67,8 @@ def main():
                     help="top-k fps to inject; >1 sums op vectors so divide alpha by k or it overshoots "
                          "(topk=1 is the clean single-INVALIDATE regime; topk=2 shows RAG-blend actively harms)")
     ap.add_argument("--emb-layer", type=int, default=-1, help="hidden-state index for retrieval (-1=auto mid)")
+    ap.add_argument("--normalize", action="store_true",
+                    help="length/model-invariant steering: unit shift * ||residual||; alpha = fraction of residual")
     a = ap.parse_args()
     trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
     from transformers import AutoTokenizer
@@ -97,8 +99,8 @@ def main():
         top = torch.topk(sims, a.topk).indices.tolist()
         retrieved = [fps[i]["text"] for i in top]
         inj.alpha = a.alpha / max(1, len(retrieved))    # per-node alpha: summing k nodes else overshoots
-        v_op = inj.combine([(t, "INVALIDATE") for t in retrieved], q)   # op_kind: subtract
-        v_bl = inj.combine([(t, "ASSERT") for t in retrieved], q)       # RAG blend: add
+        v_op = inj.combine([(t, "INVALIDATE") for t in retrieved], q, normalize=a.normalize)   # subtract
+        v_bl = inj.combine([(t, "ASSERT") for t in retrieved], q, normalize=a.normalize)       # RAG blend: add
         inj.alpha = a.alpha
         cold = belief(q, R, W, None)
         oper = belief(q, R, W, v_op)

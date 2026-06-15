@@ -71,14 +71,22 @@ class OperatorInjector:
         """the node's in-context grounding shift at the query's answer position."""
         return self._hlast(f"{node_text}\n{query}") - self._hlast(query)
 
-    def combine(self, nodes: List[Tuple[str, str]], query: str) -> torch.Tensor:
-        """nodes = [(text, op_kind)] -> op-signed steering vector at layer L."""
+    def combine(self, nodes: List[Tuple[str, str]], query: str, normalize: bool = False) -> torch.Tensor:
+        """nodes = [(text, op_kind)] -> op-signed steering vector at layer L.
+
+        normalize=True unit-scales each node's grounding shift before applying alpha, so the steering
+        DEGREE is length-invariant (long grown nodes else over-steer a big model — alpha 4 on 4B/L26
+        gave +-12 logit swings). With normalize, alpha is the steering magnitude in shift-norm units.
+        """
         base = self._hlast(query)
         v = torch.zeros_like(base)
         for text, op in nodes:
             s = SIGN.get(op, 0.0)
             if s != 0.0:
-                v = v + s * self.alpha * (self._hlast(f"{text}\n{query}") - base)
+                shift = self._hlast(f"{text}\n{query}") - base
+                if normalize:                       # length- AND model-invariant: unit shift * ||base||
+                    shift = shift / (shift.norm() + 1e-6) * base.norm()   # alpha now = fraction of residual
+                v = v + s * self.alpha * shift
         return v
 
     @contextlib.contextmanager
