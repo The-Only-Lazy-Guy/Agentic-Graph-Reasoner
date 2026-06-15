@@ -145,10 +145,15 @@ def _system_prompt(mode: str) -> str:
         "node_type one of: fact, claim (declarative, decomposed atomic knowledge)"
         if mode == "fact" else
         "node_type one of: reasoning_atom, reasoning_chain, strategy, solved_subgoal, "
-        "failure_pattern. failure_pattern = a COMMON WRONG approach, misconception, or pitfall "
-        "to AVOID for this kind of problem (e.g. 'naively applying X here gives the wrong answer "
-        "because Y'). Extract failure_patterns when the reasoning rejects/corrects a tempting "
-        "wrong path — they are as valuable as the correct steps."
+        "failure_pattern. failure_pattern = a tempting WRONG approach or misconception for this "
+        "kind of problem, written AS A CONFIDENT ASSERTION exactly as someone who believes it "
+        "would state it. CRITICAL: state the wrong idea as if it were VALID — do NOT say it is "
+        "wrong, do NOT append 'but this fails' / 'which is the wrong direction' / 'because Y'. "
+        "e.g. WRITE 'By AM-GM, 1+b >= 2 sqrt b, so each term 1/(a(1+b)) >= 1/(2a sqrt b) and the "
+        "lower bound follows'  — NOT 'applying AM-GM gives an upper bound, the wrong direction'. "
+        "Put the reason it is wrong ONLY in a 'contradicts' edge to the correct strategy/atom it "
+        "conflicts with (never inside the failure_pattern text). Extract these whenever the "
+        "reasoning rejects a tempting path — as valuable as the correct steps."
     )
     rel_hint = (
         "relation one of: entails, supports, contradicts, related"
