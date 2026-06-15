@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 from reasoning.graph_relations import RELATION_TYPE_ID
+from v5.operator_schema import op_kind_for, edge_op_for   # locked Operator-Attention schema (torch-free)
 
 # ── vocabulary ───────────────────────────────────────────────────────────────
 ALLOWED_RELATIONS = frozenset(RELATION_TYPE_ID)        # the 12 canonical relations
@@ -265,7 +266,8 @@ def conform_edits(parsed: Mapping[str, Any], doc: Document) -> Dict[str, Any]:
             "node_type": ntype,
             "text": text,
             "tier": "add",
-            "metadata": {"kb_source_doc": doc.id, "kb_domain": doc.domain, "kb_mode": mode},
+            "metadata": {"kb_source_doc": doc.id, "kb_domain": doc.domain, "kb_mode": mode,
+                         "op_kind": op_kind_for(ntype)},   # locked Operator-Attention schema
         })
 
     edge_edits: List[Dict[str, Any]] = []
@@ -285,7 +287,8 @@ def conform_edits(parsed: Mapping[str, Any], doc: Document) -> Dict[str, Any]:
             "dst": dst,
             "relation": rel,
             "tier": "add",
-            "metadata": {"kb_source_doc": doc.id, "kb_mode": mode},
+            "metadata": {"kb_source_doc": doc.id, "kb_mode": mode,
+                         "edge_op": edge_op_for(rel)},   # locked Operator-Attention schema
         })
     return {"node_edits": node_edits, "edge_edits": edge_edits, "id_map": id_map, "dropped": dropped}
 
