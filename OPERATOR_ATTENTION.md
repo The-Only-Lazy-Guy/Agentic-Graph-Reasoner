@@ -33,6 +33,12 @@ construction**, can't collapse. That is the whole idea.
 | `INVALIDATE` suppresses a reasoning trap → reasons better | `v5/optest_reasoning.py` | **8/8** (4B L26) |
 | op-signed **COMBINE** beats plain blend | `v5/operator_injector.py` | **6/6, +7.07** (4B L26) |
 | plain blend (RAG / array-of-text) with conflicting content | (same) | **−2.95 — net NEGATIVE** |
+| **REAL LOOP**: retrieval over 99 grown fps → op-signed inject | `v5/operator_loop.py` | **acc 4/7→7/7, beats blend 6/7, +2.85** (1.5B L14; 4B@L26 TODO) |
+
+**Real-loop note:** the operator advantage SURVIVES real (noisy) retrieval at graph scale — the LM
+embeds the query, retrieves the matching `failure_pattern` from the grown graph, and the op-signed
+INVALIDATE injection lifts reasoning accuracy while RAG-blend of the same node stays flat/negative.
+Degree matters: summing k nodes overshoots, so per-node alpha = α/k (`operator_loop.py`).
 
 **The punchline:** typed operators make a frozen 4B reason dramatically better, and **naive
 content-retrieval (RAG) is worse than nothing** when evidence conflicts — only the operator structure
@@ -73,6 +79,6 @@ the runtime applies. Aliases: misconception/pitfall/mistake/trap/... → failure
   and RAG-style blending actively hurts.** Clean figure: cold +1.2 → blend −3.0 → operators +7.1.
 
 ## Next steps
-1. Grow `failure_pattern` content (re-run the grower with the new prompt) → activates operators on real nodes.
-2. Wire `OperatorInjector` into the real grounding loop on a **reasoning** task (operators' home; SWE is execution-bound, ~20% cap).
+1. ~~Grow `failure_pattern` content~~ **DONE** (2026-06-15): codex teacher on `cot_batch1` (12 math docs) → `graphs/grown_graph6.json` carries **99 `failure_pattern` (INVALIDATE) nodes + 111 `contradicts` edges**, all op_kind-stamped, health gate PASS. Quality verified (concrete wrong-approaches w/ counterexamples). Optional: 2nd domain via `cs_batch` (12 algo docs).
+2. ~~Wire `OperatorInjector` into the real grounding loop on a **reasoning** task~~ **DONE** (`v5/operator_loop.py`): retrieval over the 99 grown INVALIDATE nodes + op-signed inject → acc 4/7→7/7, beats RAG-blend 6/7 (1.5B L14). **← NEXT: confirm on 4B @ L26 (A40; local box caps at 1.5B).**
 3. GATE test; the reasoning loop that writes SLOTs; a fast node→vector path (the projector is still generic).
