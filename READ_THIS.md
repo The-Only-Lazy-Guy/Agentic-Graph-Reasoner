@@ -92,13 +92,32 @@ variance *poison*, craters to **−11** on the relevant trap) → operators **+3
   (run via a `subprocess.run(..., capture_output=True)` print — marimo swallows inherited stdout).
 - Full design writeup: `OPERATOR_ATTENTION.md`.
 
-### 7. Where we are / next
-**The Operator-Attention thesis is proven end-to-end on the deploy model.** Open directions:
-- **SLOT operator** (the writable "idea layer" — frozen LM emits a ProofPlan/PatchPlan into a SLOT node,
-  inject, then realize). The original "make DeltaNet/structure useful" goal + the on-thesis answer to the
-  diffusion "idea layer" idea (no retraining). ← recommended next build.
-- **GATE operator** test (multiplicative precondition, the one untested op_kind).
-- 2nd domain (`cs_batch`, 12 algo docs); or consolidate into the **INTFAIR demo + writeup** (the science is done).
+### 7. SLOT register — DONE (4B): a frozen model carries its own intermediate as latent state
+`v5/optest_slot.py` + `v5/optest_slot_write.py`. A SLOT is a writable register (one operator, two
+accesses): READ = inject the slot vector, WRITE = set it. 2-step pure single-digit recall (cold can't
+know "the result"; text ceiling = literal copy):
+
+| | accuracy (4B L26) | mean |
+|---|---|---|
+| cold | 3/8 | −0.43 |
+| text (ceiling) | 8/8 | +3.49 |
+| **READ** (inject value's latent vector) | **8/8** | **+3.33** |
+| **WRITE** (model generates its own value → reads it back, no text) | **8/8** | **+6.14** |
+| pure-latent write (value never a token) | 6/8 | +1.58 |
+
+So a **frozen 4B writes its own computed intermediate to a latent register and reads it back** —
+token-free, inspectable, editable, no retraining (the "make DeltaNet useful" / idea-layer goal).
+**Scale note:** latent value-carry is scale-dependent — the 4B reads content from a real in-context
+shift, the 1.5B can't (revises "content always collapses": a *trained projector* collapses, a *real
+shift* carries content a strong model can read).
+
+### 8. Where we are / next
+Operator set: **ASSERT + INVALIDATE (end-to-end 4B) + SLOT (read/write 4B) PROVEN.** Open:
+- **GATE operator** test (×, multiplicative precondition — the LAST untested op_kind). ← next.
+- **SLOT multi-step loop** (write+read across several steps).
+- **"learn this" before/after expo demo** (tell the frozen model to learn X → add one node → behavior
+  flips, no weights touched — a thin harness over the proven operators). Build LAST.
+- Optional: `cs_batch` 2nd domain; native DeltaNet-state register; INTFAIR writeup.
 
 ---
 
