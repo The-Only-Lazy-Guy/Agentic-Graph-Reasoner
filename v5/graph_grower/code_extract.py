@@ -19,6 +19,8 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from v5.operator_schema import op_kind_for, edge_op_for   # locked Operator-Attention schema (torch-free)
+
 MAX_TEXT = 1000   # signature + summary + body (enriched) — body carries the bug-relevant code
 
 
@@ -72,7 +74,8 @@ def extract_file(abs_path: str | Path, repo: str = "", rel: Optional[str] = None
     file_id = f"file_{_h(repo + rel)}"
     nodes.append({"op": "add_node", "node_id": file_id, "node_type": "module",
                   "text": rel, "tier": "add",
-                  "metadata": {"repo": repo, "file": rel, "kind": "module"}})
+                  "metadata": {"repo": repo, "file": rel, "kind": "module",
+                               "op_kind": op_kind_for("module")}})
 
     def visit(parent: ast.AST, parent_id: str, qual: str) -> None:
         for child in ast.iter_child_nodes(parent):
@@ -91,11 +94,12 @@ def extract_file(abs_path: str | Path, repo: str = "", rel: Optional[str] = None
                 nodes.append({"op": "add_node", "node_id": sid, "node_type": "symbol",
                               "text": text, "tier": "add",
                               "metadata": {"repo": repo, "file": rel, "name": name,
-                                           "kind": kind,
+                                           "kind": kind, "op_kind": op_kind_for("symbol"),
                                            "lineno": [child.lineno,
                                                       getattr(child, "end_lineno", child.lineno)]}})
                 edges.append({"op": "add_edge", "src": parent_id, "dst": sid,
-                              "relation": "contains", "tier": "add", "metadata": {}})
+                              "relation": "contains", "tier": "add",
+                              "metadata": {"edge_op": edge_op_for("contains")}})
                 if isinstance(child, ast.ClassDef):   # recurse for methods
                     visit(child, sid, name)
     visit(tree, file_id, "")

@@ -3,8 +3,48 @@
 > At-a-glance dump of the latest runs (raw outputs, numbers, repro commands) so
 > you don't have to dig through commits/logs. Updated each working session.
 
-**Last updated:** 2026-06-12
+**Last updated:** 2026-06-15
 **HEAD:** latest pushed commit on branch `main`
+
+---
+
+## Session update (2026-06-15) — OPERATOR-ATTENTION schema LOCKED (structure-does-logic, PROVEN)
+
+**The question this answers:** "is the graph structure useful, or just inert text in an array?"
+We MEASURED (this session) that topology-as-GNN-embedding is decorative and per-node content
+grounding is GENERIC (own≈random) — so for a while "structure decorative" looked true. The fix + proof:
+
+**The invention — Operator Attention.** Every trainable injection mechanism collapsed to GENERIC
+because a softmax/weighted-sum can satisfy the loss while ignoring structure (gradient drops it).
+Fix: bake the operation KIND into node type as NON-INTERCHANGEABLE primitives (ASSERT=+v,
+INVALIDATE=−v/suppress, GATE=×gate, TRANSFORM=W·state, SLOT=writable register) — a subtract can't be
+reproduced by a positive blend, so structure is load-bearing BY CONSTRUCTION, can't collapse.
+
+**PROVEN (local, frozen Qwen2.5-1.5B; principle not model-size-specific):**
+- `v5/optest_invalidate.py` — INVALIDATE (subtract the belief direction, edge-gated) FLIPS a frozen
+  LM's factual belief; edge-ablation un-flips. Robust across layers at alpha≥4 (layer 18 = 5/5). FLOOR PASS.
+- `v5/optest_reasoning.py` — on 8 cognitive-reflection traps (bat-ball etc.), INVALIDATE suppresses the
+  wrong path → the frozen LM reasons BETTER: correctness 7/8, mean belief cold +0.34→+1.41,
+  CORRECT(belief>0) 5/8→7/8 (2 traps flipped wrong→right). REASONING PASS.
+- `v5/optest_projector.py` — projector node-TEXT→vector COLLAPSES to ~generic across 3 embeddings
+  (best +1.13 vs generic +1.05): per-node CONTENT specificity stays generic (same session wall).
+
+**SO — the honest "why a graph, not an array":** the typed OPERATORS do LOGIC (kill a wrong path, gate
+a precondition) that an array / RAG / plain-attention CANNOT — proven on real reasoning. Content stays
+generic (sufficient; system already works on coarse grounding, 0→4). **Structure's value = LOGIC
+(operators), not per-node content.** Vectors here are in-context-derived, not yet a trained projector
+(but the op KIND is hard-coded, so structure survives the content-collapse). Caveats: small N, 1.5B,
+degree-sensitive (one trap overshot); confirm on the 4B.
+
+**SCHEMA LOCKED — `v5/operator_schema.py` (single source of truth, torch-free):**
+`OP_OF` node_type→op_kind (failure_pattern→INVALIDATE, control_rule/epistemic_state→GATE,
+strategy/procedure/reasoning_chain→TRANSFORM, fact/claim/symbol/...→ASSERT) + `EDGEOP_OF`
+relation→edge_op (contradicts/invalidated_by→INVALIDATES, contains/leveraged/chain_step→DATAFLOW,
+gates/precondition→GATES, else REFINES). Coverage-checked (all 12 GNN node types mapped). op_kind is
+DERIVED from node_type (no graph regen needed); the grower also STAMPS metadata.op_kind/edge_op —
+wired into `code_extract.py` (torch-free import). **When scaling the graph, every node now carries a
+computational role, not inert text.** NEXT: confirm operators on the 4B; map the V4 strategy grower's
+node-types via OP_OF; build the GATE test + the reasoning loop that writes SLOTs.
 
 ---
 
