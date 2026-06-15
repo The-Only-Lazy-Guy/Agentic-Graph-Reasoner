@@ -1,0 +1,741 @@
+{
+"nodes": [
+{
+"id": "kb_cot_1a9be1d8c130",
+"text": "Since 1+b>=2sqrt(b), 1/(a(1+b))>=1/(2a sqrt(b)).",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_48dc413b40ed",
+"text": "The denominator a(1+b) is homogeneous of degree 2, so 1/(a(1+b)) has degree -2.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_4ba6a178ccd8",
+"text": "(1+abc)/(a(1+b))=(1+bc)/(a(1+b)).",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_d69e2825470c",
+"text": "The substitution a=x/y, b=y/z, c=z/x represents every positive triple (a,b,c).",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_4cbfe877ea31",
+"text": "Since y+z>=2sqrt(yz), yz/(x(y+z))>=sqrt(yz)/(2x).",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_26738d11d384",
+"text": "Scaling a,b,c to make abc=1 lets the abc=1 proof apply directly to the original inequality.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_59eeba8fb8d5",
+"text": "For all positive a,b,c, a+b+c+ab+bc+ca<=3(1+abc).",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_269ebf585a36",
+"text": "For k=xyz, (x+1)(y+1)(z+1)<=(k+1)^3/k for all positive x,y,z.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_676f327a33fe",
+"text": "Use AM-GM on each term yz/(x(y+z)) >= sqrt(yz)/(2x).",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_2daae68f1fc0",
+"text": "Since y+z >= 2sqrt(yz), yz/(x(y+z)) >= sqrt(yz)/(2x).",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_7c5060290700",
+"text": "Summing the termwise bounds gives sum yz/(x(y+z)) >= 1/2(sqrt(yz)/x+sqrt(zx)/y+sqrt(xy)/z).",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_590bd5319552",
+"text": "Because the auxiliary half-sum is at least 3/2, the original sum is at least 3/2.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_9187a40aa7e2",
+"text": "Using AM-GM, yz/(x(y+z)) >= sqrt(yz)/(2x).",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_d7635c1e42f8",
+"text": "By AM-GM, each term yz/(x(y+z)) is at least sqrt(yz)/(2x).",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_bb4dbebfe145",
+"text": "Summing the cyclic term bounds gives sum yz/(x(y+z)) >= 1/2(sqrt(yz)/x + sqrt(zx)/y + sqrt(xy)/z).",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_d7712c4ddf2f",
+"text": "Therefore sum yz/(x(y+z)) >= 3/2.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_fa08d167b73e",
+"text": "A triple can satisfy both requirements in one position by having an entry equal to 10.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000006",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_fbf1f63a69eb",
+"text": "The 5 and the even factor can come from the same entry of the triple.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000006",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_9a23591ec4a4",
+"text": "The required 5 and the required even number can occupy the same coordinate.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000006",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_2cb3f1a2f316",
+"text": "Triples with exactly three 5s contribute to the count because they have at least one 5.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000006",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_47739e5aa57a",
+"text": "A triple with exactly three 5s satisfies the condition because it has the required 5s.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000006",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_ead10814e04f",
+"text": "For triples from {1,2,3} requiring a 2 and a 3, choose a position for 2, a different position for 3, and any value in the third position, giving 3*2*3=18 valid triples.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000006",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_ea16968d4fd4",
+"text": "One must check every possible case before excluding p = 19.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000007",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_4c2abea02d4e",
+"text": "Since 23 is prime, it qualifies without checking remainders modulo smaller primes.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000007",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_d61de7cc0326",
+"text": "The candidate p = 29 is acceptable because the remainder 4 is allowed.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000007",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_5fb3de022fc2",
+"text": "11 satisfies the required remainder condition.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000007",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_6e24495db2b7",
+"text": "After 13, only 17 could create a problem for finding more working primes.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000007",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_c4c1774b5a99",
+"text": "A prime p satisfies the condition exactly when p - 1 is square-free.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000007",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_4c853df57d17",
+"text": "It is enough to forbid perfect-square remainders such as 4 and 9 modulo each smaller prime.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000007",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_b5e5d4b1376d",
+"text": "For every smaller prime q, the remainder p mod q must be 1, 2, or a prime.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000007",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_7a3f1d53c97e",
+"text": "Since p = 11 was already excluded, it does not need to be checked again.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000007",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_306422ac8fea",
+"text": "Since 17 is the next prime after 13 and 17 fails, 13 is the largest satisfying prime.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000007",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_72b2316a6426",
+"text": "As primes grow, they are increasingly likely to hit a non-square-free remainder, so all primes larger than 13 fail.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000007",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_51cf7da0bad2",
+"text": "Checking several primes greater than 13 establishes that every prime greater than 13 fails the condition.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000007",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_ecfccf55a65b",
+"text": "Each denominator is obtained by multiplying the two previous denominators and adding 1.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000016",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_432a80e3cdf5",
+"text": "The denominators grow very rapidly, so the partial sums are automatically less than 1.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000016",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_a13dceb349fb",
+"text": "Since gcd(10,n)=1, Euler's theorem gives 10^φ(n) ≡ 1 mod n, so n divides R_{φ(n)}=(10^φ(n)-1)/9.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000017",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_af3f86391ba7",
+"text": "Taking k to be the multiplicative order of 10 modulo n guarantees that R_k is divisible by n.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000017",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_627dd5343e8f",
+"text": "The antiderivative of 9x^-2 is 9x^-1.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000019",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_cb0dcefb0709",
+"text": "Since the given minimum is negative, the requested minimum should also be negative.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000021",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_d0c233d9acba",
+"text": "The requested minimum must depend on the slope a because both quadratics contain a.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000021",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_fce1a1ce99f1",
+"text": "The vertex of the equilateral triangle on BC should be connected to another new vertex associated with side BC.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000030",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_ba14701a7511",
+"text": "For a convex centrally symmetric hexagon, rotating every side vector 60 degrees counterclockwise places every equilateral triangle externally.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000030",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_3aa68312a2fa",
+"text": "M2 equals omega times M1, so the midpoint hexagon follows by repeated 60-degree rotation about the origin.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000030",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_723e0cfaa18c",
+"text": "For n=1, there is one way to place the letter because there is one letter and one envelope.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000031",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_5a09f9273fee",
+"text": "Placing A in envelope A and B in envelope B should be counted as a desired case.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000031",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_729019951bf8",
+"text": "If A→A, B→B, and C→C are all correct, then the combined submission is valid.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000031",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_0fade658dc8a",
+"text": "B maps to C.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000031",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_7e4ba4a79966",
+"text": "C maps to B.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000031",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_72daab9acf8b",
+"text": "A->C, B->B, C->A is a valid derangement because A and C are not fixed.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000031",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_9c5360ce01c4",
+"text": "There must be more than 2 derangements when n=3.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000031",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_4e44b1d11066",
+"text": "There are n! valid assignments because every permutation places the letters into envelopes.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000031",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_8813ea4b3204",
+"text": "The count is n!-n(n-1)! because subtracting permutations with one fixed element removes all invalid assignments exactly once.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000031",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_b86787fff633",
+"text": "The exact number of derangements is n!/e.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000031",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_5a505e22c7bb",
+"text": "The formula D(n)=floor(n!/e+1/2) is only an approximation and cannot give an exact derangement count.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000031",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_6f601424ef13",
+"text": "Since (19!)^2 is already a square, (20/k)(19!)^2 is a perfect square only when 20/k is an integer perfect square.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000033",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_31239b093d80",
+"text": "For option C, 20/3 is not an integer, so option C can be rejected without considering factors already inside 19!.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000033",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_876bb934e131",
+"text": "The exponents of primes in 19! are even because squaring doubles each exponent.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000033",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_5c891ec9a9fb",
+"text": "Dividing by 1 works because it leaves \\(20(19!)^2\\) as a perfect square.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000033",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_0b1f929ce0b5",
+"text": "Since the exponent of 2 becomes even after dividing by 4, option D is a perfect square.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000033",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_8a5abd7691e0",
+"text": "If the total product of the six integers is a perfect square, then the integers can be partitioned into two subsets with equal products.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000034",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_08ed82ed2e3c",
+"text": "The two equal-product subsets must each contain three numbers because the original set has six elements.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000034",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_97af5d2f3935",
+"text": "The six consecutive integers are pairwise coprime.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000034",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_5236f14ab47d",
+"text": "Since p squared is in the set, n is at least p squared minus 5, so p squared plus p is greater than n plus 5 for every positive prime p.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000034",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_e5d2611fea97",
+"text": "For any prime p greater than or equal to 2, if p squared is in the six-number set, then p squared plus p is outside the set.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000034",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_1df3c997c8ef",
+"text": "For any six consecutive numbers, a prime at least 7 divides at least one of the numbers.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000034",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+},
+{
+"id": "kb_cot_cfe2b324e326",
+"text": "Any prime at least 7 that divides one of six consecutive numbers contributes an odd exponent to the product.",
+"node_type": "failure_pattern",
+"metadata": {
+"kb_source_doc": "ot114k_000034",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE"
+}
+}
+]
+}
