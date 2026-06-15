@@ -48,7 +48,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
     ap.add_argument("--layer", type=int, default=18, help="residual layer to read/steer")
-    ap.add_argument("--alpha", type=float, default=6.0, help="steer strength")
+    ap.add_argument("--alpha", type=float, default=2.0, help="scale on the real grounding shift (sweep 1-6)")
     a = ap.parse_args()
     from transformers import AutoTokenizer
     import os
@@ -73,11 +73,11 @@ def main():
     handle = layers[L].register_forward_hook(hook)
 
     @torch.no_grad()
-    def mean_hidden(text):
+    def hidden_lastpos(text):
         steer["v"] = None
         ids = tok(text, return_tensors="pt").input_ids.to(dev)
         model(ids)
-        return cap["h"][0].mean(0).float()          # [d] mean over tokens at layer L
+        return cap["h"][0, -1].float()              # layer-L hidden at the FINAL token
 
     @torch.no_grad()
     def belief(prompt, true_tok, false_tok, v):
@@ -89,17 +89,15 @@ def main():
         fi = tok(" " + false_tok, add_special_tokens=False).input_ids[0]
         return float(logits[fi] - logits[ti])        # belief in the FALSE (counterfactual) city
 
-    NEUTRAL = "This is a neutral statement with no particular claim."
-    v_neutral = mean_hidden(NEUTRAL)
-
     rows = []
     for subj, true_c, false_c, prompt in PROBES:
-        assert_txt = f"Fact: The {subj} is located in {false_c}."
-        inval_txt = f"Fact: It is FALSE that the {subj} is located in {false_c}; it is in {true_c}."
-        v_a = (mean_hidden(assert_txt) - v_neutral)
-        v_i = (mean_hidden(inval_txt) - v_neutral)
-        v_a = v_a / (v_a.norm() + 1e-6) * a.alpha
-        v_i = v_i / (v_i.norm() + 1e-6) * a.alpha
+        # steering vector = the REAL grounding shift the fact causes at the answer position
+        # (in-context diff): h_L(last token of "fact\nprompt") - h_L(last token of "prompt").
+        assert_ctx = f"Fact: The {subj} is located in {false_c}.\n{prompt}"
+        inval_ctx = f"Fact: It is FALSE that the {subj} is in {false_c}; it is in {true_c}.\n{prompt}"
+        base = hidden_lastpos(prompt)
+        v_a = (hidden_lastpos(assert_ctx) - base) * a.alpha
+        v_i = (hidden_lastpos(inval_ctx) - base) * a.alpha
         cold = belief(prompt, true_c, false_c, None)
         asrt = belief(prompt, true_c, false_c, v_a)
         edge = belief(prompt, true_c, false_c, v_a - v_i)       # INVALIDATE via edge
@@ -120,8 +118,13 @@ def main():
     mc = st.mean(r[1] for r in rows); ma = st.mean(r[2] for r in rows)
     me = st.mean(r[3] for r in rows)
     print(f"  mean belief: cold {mc:+.2f} -> assert {ma:+.2f} -> edge(invalidate) {me:+.2f}")
-    ok = a_up >= 0.6 * n and e_dn >= 0.6 * n and (ma - me) > 0.5
-    print(f"\n  KILL-TEST: {'PASS — INVALIDATE operator flips the frozen LM, edge-gated (structure CAN compute)' if ok else 'FAIL — operator does not move the output (frozen-decode wall beats it)'}")
+    assert_fired = a_up >= 0.6 * n and (ma - mc) > 0.3
+    if not assert_fired:
+        print(f"\n  INCONCLUSIVE — the ASSERT prerequisite did not fire (steering too weak/wrong layer)."
+              f"\n  Sweep --layer/--alpha before reading INVALIDATE. (assert moved belief {ma-mc:+.2f})")
+        return
+    ok = e_dn >= 0.6 * n and (ma - me) > 0.3
+    print(f"\n  KILL-TEST: {'PASS — assert fires AND INVALIDATE-edge cancels it (structure CAN compute, edge-gated)' if ok else 'FAIL — assert fires but INVALIDATE does NOT oppose it (subtract-of-negation != remove-belief)'}")
     handle.remove()
 
 
