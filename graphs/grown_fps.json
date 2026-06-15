@@ -1,0 +1,1984 @@
+{
+"nodes": [
+{
+"id": "kb_cot_257399b7483e",
+"text": "Applying AM-GM to denominators 1+b≥2√b gives an upper bound 1/(a(1+b)) ≤ 1/(2a√b), which is the wrong direction for proving a lower bound.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T072104Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000000",
+"grow_patch_id": "ot114k_000000_add_node_0002"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_1699361287c1",
+"text": "Scaling by t=1/(abc)^(1/3) so that a' b' c' = 1 fails to directly connect to the original, because scaling changes 1+b to 1+bt, not preserving the inequality form.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T072104Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000000",
+"grow_patch_id": "ot114k_000000_add_node_0010"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_698bff2ce9b9",
+"text": "Using Cauchy-Schwarz (Σ1/(a(1+b)))(Σ a(1+b)) ≥ 9 and trying to prove Σ a(1+b) ≤ 3(1+abc) fails: a counterexample a=2,b=2,c=0.25 gives LHS=9.25, RHS=6, disproving the needed inequality.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T072104Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000000",
+"grow_patch_id": "ot114k_000000_add_node_0012"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_650b0d8c424e",
+"text": "AM-GM on the transformed form Σ xy/(y+1) leads to needing to prove (x+1)(y+1)(z+1) ≤ (k+1)³/k, which is a complicated inequality without an obvious proof.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T072104Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000000",
+"grow_patch_id": "ot114k_000000_add_node_0015"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_47be9e966b32",
+"text": "Claiming 'by scaling, it extends to the general case' without showing the actual transformation is insufficient — the scaling must preserve the inequality's structure, and this must be verified explicitly",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T072104Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000000",
+"grow_patch_id": "ot114k_000000_add_node_0006"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_fb2bdcf29233",
+"text": "Naively substituting a = 1/x, b = 1/y, c = 1/z does not help because it only rewrites abc = 1 as (1/xyz) = 1, introducing no simplification",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T072104Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000000",
+"grow_patch_id": "ot114k_000000_add_node_0003"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_30a08bc97c8e",
+"text": "Applying the standard Cauchy-Schwarz (∑ a_i b_i)² ≤ (∑ a_i²)(∑ b_i²) gives an upper bound, not helpful for proving a sum is ≥ something; the Engel form ∑ a_i²/b_i ≥ (∑ a_i)²/(∑ b_i) is needed for lower bounds",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T072104Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000000",
+"grow_patch_id": "ot114k_000000_add_node_0009"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_29310642c2ac",
+"text": "Naively applying Engel without first putting each term into the exact a_i²/b_i form (e.g., treating yz/(x(y+z)) as a_i²/b_i without squaring the numerator) misapplies the inequality and gives an incorrect bound",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T072104Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000000",
+"grow_patch_id": "ot114k_000000_add_node_0010"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_759f863e27ad",
+"text": "Applying AM-GM directly to an expression containing negative terms gives a wrong bound because the inequality reverses or is invalid",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T072104Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000000",
+"grow_patch_id": "ot114k_000000_add_node_0006"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_c37ed8919bc3",
+"text": "Using AM-GM to claim a minimum without verifying the equality condition is achievable leaves the bound unattained — the true minimum may be higher",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T072104Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000000",
+"grow_patch_id": "ot114k_000000_add_node_0007"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_4640a72a25af",
+"text": "Applying AM-GM to maximize a sum or minimize a product reverses the intended inequality direction",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T072104Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000000",
+"grow_patch_id": "ot114k_000000_add_node_0008"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_f1c04e9af04a",
+"text": "Naïvely applying y+z ≥ 2√(yz) gives yz/(x(y+z)) ≤ √(yz)/(2x), an upper bound — the opposite direction needed for a lower-bound proof.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T072104Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000000",
+"grow_patch_id": "ot114k_000000_add_node_0004"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_168964e27c4a",
+"text": "Trying to prove each individual term yz/(x(y+z)) ≥ something fails; the bound holds only for the cyclic sum as a whole.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T072104Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000000",
+"grow_patch_id": "ot114k_000000_add_node_0005"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_11a126838d08",
+"text": "Dividing each variable by k (power 1) instead of k^{1/3}, which would not cancel the triple product to 1",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T072104Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000000",
+"grow_patch_id": "ot114k_000000_add_node_0004"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_cc370ded9131",
+"text": "Applying k^{-1/3} scaling without requiring a,b,c > 0 — if any were zero, k = 0 and the scaling factor is undefined",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T072104Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000000",
+"grow_patch_id": "ot114k_000000_add_node_0005"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_80b2303f12c1",
+"text": "Assuming a'b'c' = 1 forces a' = b' = c' = 1, ignoring that infinitely many triples multiply to 1",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T072104Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000000",
+"grow_patch_id": "ot114k_000000_add_node_0006"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_f847b0615a0e",
+"text": "Trying to directly manipulate abc = 1 in an inequality without substitution often leads to messy expansions that obscure the underlying symmetry.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T072104Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000000",
+"grow_patch_id": "ot114k_000000_add_node_0004"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_5780c9253ee8",
+"text": "Claiming yz/(x(y+z)) ≥ √(yz)/(2x) from AM-GM reverses the inequality: a lower bound on a positive denominator produces an upper bound on the fraction, not a lower bound",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T072104Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000000",
+"grow_patch_id": "ot114k_000000_add_node_0002"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_fb370b785da6",
+"text": "Applying AM-GM directly to a single term yz/(x(y+z)) or to the sum without the ½(∑√(yz)/x) intermediate step does not yield the desired constant 3/2",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T072104Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000000",
+"grow_patch_id": "ot114k_000000_add_node_0004"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_87aa50ed11ed",
+"text": "Working directly with unnormalized variables (a,b,c) often leads to messy expressions without the product=1 simplification",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T072104Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000000",
+"grow_patch_id": "ot114k_000000_add_node_0007"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_648c24e47888",
+"text": "Using y+z >= 2sqrt(yz) to claim yz/(x(y+z)) >= sqrt(yz)/(2x) reverses the inequality.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000000",
+"grow_patch_id": "ot114k_000000_add_node_0011"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_2320d41de6f8",
+"text": "The attempted abc=1 proof based on the reversed denominator bound is invalid.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000000",
+"grow_patch_id": "ot114k_000000_add_node_0014"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_0bd4fd6ad4b2",
+"text": "Normalizing abc to 1 by common scaling does not directly prove the original non-homogeneous inequality.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000000",
+"grow_patch_id": "ot114k_000000_add_node_0017"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_2e5a4871427d",
+"text": "Applying Cauchy-Schwarz here fails if it relies on the false upper bound sum a(1+b) <= 3(1+abc).",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000000",
+"grow_patch_id": "ot114k_000000_add_node_0021"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_ddc7f51688fe",
+"text": "The general cyclic product parametrization creates a more complicated inequality without an immediate proof.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000000",
+"grow_patch_id": "ot114k_000000_add_node_0025"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_d74550b12626",
+"text": "The reciprocal AM-GM bound leaves an unproved condition on (x+1)(y+1)(z+1).",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000000",
+"grow_patch_id": "ot114k_000000_add_node_0028"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_b5346b133a61",
+"text": "The substitution a=x/y, b=y/z, c=z/x only covers triples with abc=1.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000000",
+"grow_patch_id": "ot114k_000000_add_node_0030"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_63a3755751e1",
+"text": "Treating a normalized proof plus an unstated scaling argument as a complete proof is insufficient when the general-case scaling step has not been articulated.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000000",
+"grow_patch_id": "ot114k_000000_add_node_0005"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_449e9425aad1",
+"text": "Using AM-GM to claim yz/(x(y + z)) >= sqrt(yz)/(2x) reverses the inequality direction.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000000",
+"grow_patch_id": "ot114k_000000_add_node_0003"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_3382ade16fd6",
+"text": "A common mistake is to use y + z >= 2 sqrt(yz) and then keep the same inequality direction after taking reciprocals.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000000",
+"grow_patch_id": "ot114k_000000_add_node_0003"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_c845e8538f54",
+"text": "It is a pitfall to infer sum yz/(x(y+z)) >= 1/2 sum of the radical-ratio terms; the natural AM-GM termwise comparison has the opposite direction.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000000",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000000",
+"grow_patch_id": "ot114k_000000_add_node_0005"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_124a0fdf5f0e",
+"text": "Assuming two triangles with the same incenter must have the same incircle is wrong because the inradius can differ.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000002",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000002",
+"grow_patch_id": "ot114k_000002_add_node_0010"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_4db8c15413bf",
+"text": "Forcing the distance from the shared incenter to EF to equal ABC's inradius incorrectly assumes the two triangles have the same inradius.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000002",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000002",
+"grow_patch_id": "ot114k_000002_add_node_0011"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_a8f8b3be36fd",
+"text": "Concluding EF must equal AB from the shared-incenter condition follows from the false same-incircle assumption.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000002",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000002",
+"grow_patch_id": "ot114k_000002_add_node_0012"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_1f11c639712a",
+"text": "Reducing the problem to EF = AB makes the proof trivial but does not address the intended nontrivial configuration.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000002",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000002",
+"grow_patch_id": "ot114k_000002_add_node_0013"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_24f18ea1769d",
+"text": "Assuming a different line through D can preserve the same incenter is a wrong approach.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000002",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000002",
+"grow_patch_id": "ot114k_000002_add_node_0001"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_87b31f115b6e",
+"text": "Do not treat one entry as satisfying both the factor 5 and factor 2 requirements in this range.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000006",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000006",
+"grow_patch_id": "ot114k_000006_add_node_0010"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_66d79c01e8f4",
+"text": "Counting triples with at least one 5 alone is insufficient because some of those triples have no even entry.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000006",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000006",
+"grow_patch_id": "ot114k_000006_add_node_0011"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_fe2ae5420e65",
+"text": "It is wrong to let the same entry satisfy both the 5 requirement and the even requirement because 5 is not even.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000006",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000006",
+"grow_patch_id": "ot114k_000006_add_node_0011"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_1e1900003d20",
+"text": "Including the exactly-three-5s case as valid is wrong because that case has no even entry.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000006",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000006",
+"grow_patch_id": "ot114k_000006_add_node_0013"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_9c15d2549681",
+"text": "Treating a triple of three 5s as satisfying the even-number condition is wrong because 5 is odd.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000006",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000006",
+"grow_patch_id": "ot114k_000006_add_node_0028"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_187105e026f1",
+"text": "Directly assigning positions for required values can overcount triples when extra positions may repeat required values.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000006",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000006",
+"grow_patch_id": "ot114k_000006_add_node_0029"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_49c1f1d83c37",
+"text": "After fixing one 5, counting all remaining non-5 pairs is wrong because the triple still needs an even entry.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000006",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000006",
+"grow_patch_id": "ot114k_000006_add_node_0030"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_e9c57e82c65e",
+"text": "Accepting 11 without checking its remainder modulo 7 is wrong because the remainder is 4, which is not square-free.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000007",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000007",
+"grow_patch_id": "ot114k_000007_add_node_0005"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_19c7ec169968",
+"text": "Requiring all remaining checks after a candidate has already failed one required condition is unnecessary.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000007",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000007",
+"grow_patch_id": "ot114k_000007_add_node_0003"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_729c8353d818",
+"text": "A common mistake is to accept p merely because p is prime without checking remainders modulo all smaller primes.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000007",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000007",
+"grow_patch_id": "ot114k_000007_add_node_0002"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_fcd9eab032b0",
+"text": "A common mistake is to keep p when most remainders are square-free even though one checked remainder is not square-free.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000007",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000007",
+"grow_patch_id": "ot114k_000007_add_node_0003"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_d5babd758e4a",
+"text": "Treating a candidate as valid after finding remainder 4 is wrong because 4 contains the square factor 2 squared.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000007",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000007",
+"grow_patch_id": "ot114k_000007_add_node_0006"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_63d4bd0e1fb8",
+"text": "Declaring p=13 valid after checking only its remainder modulo 11 is incomplete.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000007",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000007",
+"grow_patch_id": "ot114k_000007_add_node_0001"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_4f9c098f120d",
+"text": "Continuing to test a candidate after a disqualifying modulo-5 remainder wastes work because the candidate is already eliminated.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000007",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000007",
+"grow_patch_id": "ot114k_000007_add_node_0005"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_76f720f5cc4d",
+"text": "Do not infer from a few examples that all primes larger than 13 fail without a proof or exhaustive check.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000007",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000007",
+"grow_patch_id": "ot114k_000007_add_node_0005"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_eaaf2de29633",
+"text": "Checking only whether a remainder is a perfect square is insufficient because non-square numbers can still have square factors.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000007",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000007",
+"grow_patch_id": "ot114k_000007_add_node_0005"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_2ba791e4ecc8",
+"text": "Using p-1 being square-free as the criterion is wrong because other remainders p mod q can fail.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000007",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000007",
+"grow_patch_id": "ot114k_000007_add_node_0007"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_e3042293903c",
+"text": "Treating 4 as square-free is wrong because it contains the repeated prime factor 2.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000007",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000007",
+"grow_patch_id": "ot114k_000007_add_node_0002"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_dd60cdeb9d2b",
+"text": "A tempting mistake is to include 11 among satisfying primes without respecting its prior exclusion.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000007",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000007",
+"grow_patch_id": "ot114k_000007_add_node_0007"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_f07df47c190b",
+"text": "Checking several primes larger than 13 does not prove that every larger prime is excluded.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000007",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000007",
+"grow_patch_id": "ot114k_000007_add_node_0021"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_2b1047329b77",
+"text": "Showing that 17 is excluded does not by itself prove that 13 is the largest satisfying prime.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000007",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000007",
+"grow_patch_id": "ot114k_000007_add_node_0022"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_26b24e28710d",
+"text": "Arguing that large primes are likely to hit a nonsquare-free remainder is not a proof that all large primes fail.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000007",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000007",
+"grow_patch_id": "ot114k_000007_add_node_0023"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_71180a5e67cd",
+"text": "The claim that 101 mod 13 equals 9 is a modular arithmetic error; 101 mod 13 equals 10.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000007",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000007",
+"grow_patch_id": "ot114k_000007_add_node_0024"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_243d3fe9e7fb",
+"text": "Inferring that all primes greater than 13 fail from only several example failures is not a valid proof of the universal claim.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000007",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000007",
+"grow_patch_id": "ot114k_000007_add_node_0015"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_249e42a141e2",
+"text": "Relying only on the rapid growth of the denominators does not prove that every partial sum is less than 1.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000016",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000016",
+"grow_patch_id": "ot114k_000016_add_node_0016"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_621452cba9ac",
+"text": "Guessing a denominator pattern from the first few terms is not a proof unless the recurrence is derived.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000016",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000016",
+"grow_patch_id": "ot114k_000016_add_node_0017"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_83326f70a6bc",
+"text": "Showing that the terms decrease quickly does not by itself establish a sharp upper bound for all partial sums.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000016",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000016",
+"grow_patch_id": "ot114k_000016_add_node_0018"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_54353a655b5b",
+"text": "A common pitfall is treating the partial-fraction identity as a consequence of the recurrence rather than as an algebraic identity.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000016",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000016",
+"grow_patch_id": "ot114k_000016_add_node_0004"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_5b6bf5cd85a7",
+"text": "It is not enough to use 10^φ(n) ≡ 1 mod n and conclude that n divides (10^φ(n)-1)/9.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000017",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000017",
+"grow_patch_id": "ot114k_000017_add_node_0008"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_fcc180bcd142",
+"text": "Canceling a factor in modular arithmetic is invalid unless that factor is invertible modulo the modulus.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000017",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000017",
+"grow_patch_id": "ot114k_000017_add_node_0006"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_a2e94525fc03",
+"text": "Forgetting the constant of integration prevents using the given point to determine the specific function.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000019",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000019",
+"grow_patch_id": "ot114k_000019_add_node_0014"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_6a1e4ece3257",
+"text": "Integrating x^-2 as a positive x^-1 term gives the wrong sign because division by -1 is required.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000019",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000019",
+"grow_patch_id": "ot114k_000019_add_node_0015"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_73a92e5f0ba7",
+"text": "Do not reject a positive target minimum just because the given minimum is negative; the two minimized quadratics are different functions.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000021",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000021",
+"grow_patch_id": "ot114k_000021_add_node_0010"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_4de005727cb2",
+"text": "Multiplying or simplifying the minimum equation to -6b+6c-1=-19 is an algebra error and does not imply c=b-17/12.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000021",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000021",
+"grow_patch_id": "ot114k_000021_add_node_0008"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_58a835a6f38a",
+"text": "Treating the triangle vertices as points lying on the original sides is wrong because the relevant vertex is the new third vertex of each equilateral triangle.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000030",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000030",
+"grow_patch_id": "ot114k_000030_add_node_0011"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_f0d770ef464e",
+"text": "Leaving 'vertices of adjacent triangles' ambiguous makes it unclear which segments' midpoints are being studied.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000030",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000030",
+"grow_patch_id": "ot114k_000030_add_node_0012"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_68e4567bfec3",
+"text": "Choosing a 60-degree rotation direction without matching the external side can place an equilateral triangle on the wrong side of the hexagon.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000030",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000030",
+"grow_patch_id": "ot114k_000030_add_node_0022"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_316c09687d5a",
+"text": "Assuming consecutive midpoint position vectors are simple 60-degree rotations about the origin gives a false coefficient identity.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000030",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000030",
+"grow_patch_id": "ot114k_000030_add_node_0054"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_b0ad474d207a",
+"text": "Counting the single placement for n equals 1 as valid is wrong because that placement puts the letter in its designated envelope.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000031",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000031",
+"grow_patch_id": "ot114k_000031_add_node_0006"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_3fc1e87f2b1d",
+"text": "Accepting the correct placement is a pitfall when the goal is to avoid correct placements.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000031",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000031",
+"grow_patch_id": "ot114k_000031_add_node_0002"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_9b1b68c5f7e0",
+"text": "Assuming that correct individual mappings are sufficient to make the overall configuration valid is a pitfall.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000031",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000031",
+"grow_patch_id": "ot114k_000031_add_node_0005"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_4f2a852d55ad",
+"text": "Treating an implication as automatically reversible is a common invalid move.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000031",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000031",
+"grow_patch_id": "ot114k_000031_add_node_0003"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_f624b31ae9c7",
+"text": "Assuming a cycle of implications forces at least one proposition to be true is a wrong approach.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000031",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000031",
+"grow_patch_id": "ot114k_000031_add_node_0006"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_968a36e9b544",
+"text": "Counting A->C, B->B, C->A as a derangement is wrong because B is fixed.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000031",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000031",
+"grow_patch_id": "ot114k_000031_add_node_0001"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_762c88b3b017",
+"text": "Treating n!/e without rounding as an exact derangement count is wrong because n!/e is generally not an integer.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000031",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000031",
+"grow_patch_id": "ot114k_000031_add_node_0016"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_4d9992dca016",
+"text": "Rejecting choice C solely because 20/3 is not an integer ignores that the denominator may cancel with factors inside (19!)^2.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000033",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000033",
+"grow_patch_id": "ot114k_000033_add_node_0017"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_ec6b2781ba16",
+"text": "Testing only whether the visible multiplier 20/k is an integer square can obscure the needed prime-exponent parity check in the full expression.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000033",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000033",
+"grow_patch_id": "ot114k_000033_add_node_0018"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_3346568f038b",
+"text": "Checking only the exponent of 2 can falsely suggest an option is a square when another prime still has an odd exponent.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000033",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000033",
+"grow_patch_id": "ot114k_000033_add_node_0013"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_c3daa4ddb5c9",
+"text": "Ignoring the prime factor removed by k can miss that division changes an exponent from even to odd.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000033",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000033",
+"grow_patch_id": "ot114k_000033_add_node_0014"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_d355dcf6674c",
+"text": "It is wrong to conclude that every prime exponent in 19! is even because squaring doubles exponents; squaring affects (19!)^2, not 19! itself.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000033",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000033",
+"grow_patch_id": "ot114k_000033_add_node_0003"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_bf925e9c1f7f",
+"text": "Assuming division by 1 can make the value a perfect square is wrong when an odd prime exponent remains.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000033",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000033",
+"grow_patch_id": "ot114k_000033_add_node_0003"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_84a18e327c8d",
+"text": "Assuming division by 2 gives a perfect square is wrong when the resulting exponent of 2 is odd.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000033",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000033",
+"grow_patch_id": "ot114k_000033_add_node_0001"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_5935b7941b00",
+"text": "Treating a number as a perfect square despite an odd prime exponent is a misconception.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000033",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000033",
+"grow_patch_id": "ot114k_000033_add_node_0004"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_73b4a802a125",
+"text": "Checking only that the exponent of 2 becomes even is insufficient because another prime exponent may remain odd.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000033",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000033",
+"grow_patch_id": "ot114k_000033_add_node_0005"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_e445f5445073",
+"text": "Assuming the two equal-product subsets must each contain three numbers is unjustified because equal products do not imply equal subset sizes.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000034",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000034",
+"grow_patch_id": "ot114k_000034_add_node_0006"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_f0bdb552e1b7",
+"text": "Requiring one of the six numbers to equal p^2 is too narrow; the relevant condition is that the term divisible by p contain an even power of p.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000034",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000034",
+"grow_patch_id": "ot114k_000034_add_node_0026"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_0c6136ec070a",
+"text": "Treating the presence of p^2 in the block as enough for square parity is wrong when another multiple of p also lies in the block.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000034",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000034",
+"grow_patch_id": "ot114k_000034_add_node_0030"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_69a1abed089c",
+"text": "A tempting wrong approach is to assume that including one prime square such as 49 is enough to make the total product a square.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000034",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000034",
+"grow_patch_id": "ot114k_000034_add_node_0011"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_cac17fae5b0e",
+"text": "A tempting wrong approach is to assume that a block of six composite numbers avoids the square-product obstruction.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000034",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000034",
+"grow_patch_id": "ot114k_000034_add_node_0012"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_799792e42a45",
+"text": "A wrong approach is to search directly for equal subset products without first using the necessary square condition on the total product.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000034",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000034",
+"grow_patch_id": "ot114k_000034_add_node_0013"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_c80064be63b5",
+"text": "It is wrong to assume a prime at least 7 can have its exponent paired across two different numbers in a block of six consecutive integers.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000034",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000034",
+"grow_patch_id": "ot114k_000034_add_node_0003"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_1490e1ee68d6",
+"text": "Assuming that including p^2 for p >= 7 only fixes the exponent of p is wrong because neighboring numbers can introduce other primes with odd exponents.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000034",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000034",
+"grow_patch_id": "ot114k_000034_add_node_0006"
+},
+"access_count": 0,
+"context_guard": {}
+},
+{
+"id": "kb_cot_5f7a3f2365d4",
+"text": "Assuming prime exponents can be balanced across six consecutive numbers overlooks unavoidable odd prime exponents.",
+"node_type": "failure_pattern",
+"confidence": 0.5,
+"importance": 0.5,
+"metadata": {
+"kb_source_doc": "ot114k_000034",
+"kb_domain": "math",
+"kb_mode": "cot",
+"op_kind": "INVALIDATE",
+"auto_grown": true,
+"batch_id": "grow_20260615T092215Z",
+"grow_lane": "external",
+"grow_source_session": "ot114k_000034",
+"grow_patch_id": "ot114k_000034_add_node_0005"
+},
+"access_count": 0,
+"context_guard": {}
+}
+]
+}
