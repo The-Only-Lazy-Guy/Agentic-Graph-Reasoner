@@ -72,12 +72,17 @@ def main():
     ap.add_argument("--layer", type=int, default=26)
     ap.add_argument("--alpha", type=float, default=0.4)   # low: injected every gen step, compounds -> over-steers high
     ap.add_argument("--ntok", type=int, default=6)
+    ap.add_argument("--layers", default=None, help="comma list -> multi-layer injection (adapter fix)")
     a = ap.parse_args()
     trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
     from transformers import AutoTokenizer
     model = load_frozen_lm(a.model); model.eval()
     tok = AutoTokenizer.from_pretrained(a.model, trust_remote_code=trust)
-    inj = OperatorInjector(model, tok, a.layer, a.alpha)
+    if a.layers:
+        from v5.operator_injector_ml import OperatorInjectorML
+        inj = OperatorInjectorML(model, tok, [int(x) for x in a.layers.split(",")], a.alpha)
+    else:
+        inj = OperatorInjector(model, tok, a.layer, a.alpha)
     dev = next(model.parameters()).device
     print(f"loaded | layer {a.layer} | alpha {a.alpha} | {len(ITEMS)} items | gen {a.ntok} tok greedy\n", flush=True)
 

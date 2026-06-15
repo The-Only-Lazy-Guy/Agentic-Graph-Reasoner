@@ -59,14 +59,21 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
     ap.add_argument("--layer", type=int, default=26)
+    ap.add_argument("--layers", default=None, help="comma list e.g. 8,14,20,26 -> multi-layer injection (adapter fix)")
     ap.add_argument("--alpha", type=float, default=1.0)
     a = ap.parse_args()
     trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
     from transformers import AutoTokenizer
     model = load_frozen_lm(a.model); model.eval()
     tok = AutoTokenizer.from_pretrained(a.model, trust_remote_code=trust)
-    inj = OperatorInjector(model, tok, a.layer, a.alpha)
-    print(f"loaded | layer {a.layer} | alpha {a.alpha} | {len(ITEMS)} reasoning items\n", flush=True)
+    if a.layers:
+        from v5.operator_injector_ml import OperatorInjectorML
+        inj = OperatorInjectorML(model, tok, [int(x) for x in a.layers.split(",")], a.alpha)
+        where = f"layers {a.layers} (multi)"
+    else:
+        inj = OperatorInjector(model, tok, a.layer, a.alpha)
+        where = f"layer {a.layer}"
+    print(f"loaded | {where} | alpha {a.alpha} | {len(ITEMS)} reasoning items\n", flush=True)
 
     def tid(s): return tok(s, add_special_tokens=False).input_ids[-1]
     def belief(q, R, W, v=None):
