@@ -50,7 +50,7 @@ def _layers(model):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="Qwen/Qwen2.5-1.5B")
+    ap.add_argument("--model", default="Qwen/Qwen3.5-4B")   # match optest_invalidate default
     ap.add_argument("--layer", type=int, default=14)
     ap.add_argument("--alpha", type=float, default=4.0)
     a = ap.parse_args()
