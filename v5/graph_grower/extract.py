@@ -43,6 +43,7 @@ RELATION_ALIASES: Dict[str, str] = {
     "causes": "entails", "implies": "entails", "leads_to": "entails",
     "because": "supports", "evidence_for": "supports", "supported_by": "supports",
     "contradicted_by": "contradicts", "refutes": "contradicts",
+    "invalidates": "contradicts", "warns_against": "contradicts", "wrong_because": "contradicts",
     "derived_from": "leveraged", "uses": "leveraged", "applies": "leveraged",
     "next_step": "chain_step", "then": "chain_step", "step": "chain_step",
     "generalizes_to": "transfers_to", "transfers": "transfers_to",
@@ -61,7 +62,10 @@ RELATION_ALIASES: Dict[str, str] = {
 MODE_DEFAULT_NODE_TYPE = {"fact": "fact", "cot": "reasoning_atom"}
 MODE_NODE_TYPES = {
     "fact": frozenset({"fact", "claim"}),
-    "cot": frozenset({"reasoning_atom", "reasoning_chain", "strategy", "solved_subgoal"}),
+    # failure_pattern (-> INVALIDATE op, PLANNING pool): a common WRONG approach/misconception to
+    # AVOID. The Operator-Attention runtime SUBTRACTS these to suppress wrong paths (validated 4B 8/8).
+    "cot": frozenset({"reasoning_atom", "reasoning_chain", "strategy", "solved_subgoal",
+                      "failure_pattern"}),
 }
 ALLOWED_NODE_TYPES = frozenset().union(*MODE_NODE_TYPES.values())
 
@@ -73,6 +77,10 @@ NODE_TYPE_ALIASES: Dict[str, str] = {
     "chain_step": "reasoning_chain", "step": "reasoning_chain",
     "reasoning_step": "reasoning_chain", "inference": "reasoning_atom",
     "subgoal": "solved_subgoal", "conclusion": "solved_subgoal", "plan": "strategy",
+    # wrong-path nodes -> failure_pattern (INVALIDATE op)
+    "misconception": "failure_pattern", "pitfall": "failure_pattern", "mistake": "failure_pattern",
+    "common_error": "failure_pattern", "wrong_approach": "failure_pattern", "trap": "failure_pattern",
+    "anti_pattern": "failure_pattern", "gotcha": "failure_pattern",
 }
 
 # atomicity bounds: a node should be one self-contained claim, not a blob
@@ -136,12 +144,17 @@ def _system_prompt(mode: str) -> str:
     node_hint = (
         "node_type one of: fact, claim (declarative, decomposed atomic knowledge)"
         if mode == "fact" else
-        "node_type one of: reasoning_atom, reasoning_chain, strategy, solved_subgoal"
+        "node_type one of: reasoning_atom, reasoning_chain, strategy, solved_subgoal, "
+        "failure_pattern. failure_pattern = a COMMON WRONG approach, misconception, or pitfall "
+        "to AVOID for this kind of problem (e.g. 'naively applying X here gives the wrong answer "
+        "because Y'). Extract failure_patterns when the reasoning rejects/corrects a tempting "
+        "wrong path — they are as valuable as the correct steps."
     )
     rel_hint = (
         "relation one of: entails, supports, contradicts, related"
         if mode == "fact" else
-        "relation one of: chain_step, leveraged, transfers_to, supports"
+        "relation one of: chain_step, leveraged, transfers_to, supports, contradicts. "
+        "Use 'contradicts' from a failure_pattern to the correct strategy/atom it warns against."
     )
     return (
         "You convert text into ATOMIC knowledge-graph edits. Decompose into the "
