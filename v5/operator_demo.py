@@ -37,30 +37,32 @@ SPEC_TARGET = "paris"
 # each item: question (ends where the answer begins), target (correct, graded), node (the graph edit),
 # op (operator kind), wrong (the cold mistake, for display). target chosen to be checkable + short.
 ITEMS = [
-    # --- A: correction (INVALIDATE a tempting wrong answer) ---
-    dict(t="A-correction", q="A bat and a ball cost $1.10 in total. The bat costs $1.00 more than the "
-         "ball. Therefore the ball costs $", target="0.05", wrong="0.10",
-         node="The ball costs 10 cents.", op="INVALIDATE"),
-    dict(t="A-correction", q="5 machines take 5 minutes to make 5 widgets. So 100 machines take this "
-         "many minutes to make 100 widgets:", target="5", wrong="100",
-         node="It takes 100 minutes.", op="INVALIDATE"),
+    # --- A: correction (INVALIDATE a tempting wrong answer). Precheck filters the ones the 4B gets cold. ---
     dict(t="A-correction", q="A lily patch doubles in size every day and covers the whole lake in 48 "
-         "days. It covered exactly half the lake on day number", target="47", wrong="24",
+         "days. It covered exactly half the lake on day number", target="47",
          node="It is half covered on day 24.", op="INVALIDATE"),
+    dict(t="A-correction", q="A farmer has 15 sheep and all but 8 of them run away. The number of sheep "
+         "the farmer still has is", target="8",
+         node="The farmer has 7 sheep left.", op="INVALIDATE"),
+    dict(t="A-correction", q="In a foot race you just overtook the runner in second place. The place "
+         "you are now in is", target="second",
+         node="You are now in first place.", op="INVALIDATE"),
 
-    # --- B: value (ASSERT a value -> recall it) ---
-    dict(t="B-value", q="The secret access number is", target="7", wrong="(none)",
-         node="The secret access number is 7.", op="ASSERT"),
-    dict(t="B-value", q="The meeting is scheduled for room number", target="42", wrong="(none)",
+    # --- B: value (ASSERT a value -> recall it). Values chosen so the model can't guess them cold. ---
+    dict(t="B-value", q="The secret access number is", target="58",
+         node="The secret access number is 58.", op="ASSERT"),
+    dict(t="B-value", q="The meeting is scheduled for room number", target="42",
          node="The meeting is in room 42.", op="ASSERT"),
+    dict(t="B-value", q="The project codename is the word", target="falcon",
+         node="The project codename is Falcon.", op="ASSERT"),
 
     # --- C: new fact (ASSERT a fact the model cannot know) ---
-    dict(t="C-fact", q="The capital city of the country Zorbia is", target="quint", wrong="(unknown)",
+    dict(t="C-fact", q="The capital city of the country Zorbia is", target="quint",
          node="The capital of Zorbia is Quint.", op="ASSERT"),
-    dict(t="C-fact", q="The chemical element zentium has the symbol", target="zx", wrong="(unknown)",
+    dict(t="C-fact", q="The chemical element zentium has the symbol", target="zx",
          node="Zentium has the chemical symbol Zx.", op="ASSERT"),
-    dict(t="C-fact", q="The novel 'Whispering Tides' was written by an author named", target="voss",
-         wrong="(unknown)", node="Whispering Tides was written by Mara Voss.", op="ASSERT"),
+    dict(t="C-fact", q="The novel Whispering Tides was written by an author named", target="voss",
+         node="Whispering Tides was written by Mara Voss.", op="ASSERT"),
 ]
 
 
@@ -68,8 +70,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
     ap.add_argument("--layer", type=int, default=26)
-    ap.add_argument("--alpha", type=float, default=1.0)
-    ap.add_argument("--ntok", type=int, default=8)
+    ap.add_argument("--alpha", type=float, default=0.4)   # low: injected every gen step, compounds -> over-steers high
+    ap.add_argument("--ntok", type=int, default=6)
     a = ap.parse_args()
     trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
     from transformers import AutoTokenizer
