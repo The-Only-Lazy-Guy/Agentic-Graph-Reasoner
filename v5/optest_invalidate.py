@@ -59,24 +59,32 @@ def main():
     dev = next(model.parameters()).device
     layers = _layers(model)
     L = a.layer
+    print(f"loaded | device {dev} | {len(layers)} layers | steering layer {L} "
+          f"({type(layers[L]).__name__})", flush=True)
 
     cap = {"h": None}
     steer = {"v": None}
 
     def hook(mod, inp, out):
-        h = out[0] if isinstance(out, tuple) else out
+        is_tup = isinstance(out, tuple)
+        h = out[0] if is_tup else out
         cap["h"] = h.detach()
         if steer["v"] is not None:
             h = h + steer["v"].to(h.dtype)
-            return (h,) + out[1:] if isinstance(out, tuple) else h
+            if is_tup:
+                return (h,) + tuple(out[1:])
+            return h
         return out
     handle = layers[L].register_forward_hook(hook)
 
     @torch.no_grad()
     def hidden_lastpos(text):
         steer["v"] = None
+        cap["h"] = None
         ids = tok(text, return_tensors="pt").input_ids.to(dev)
         model(ids)
+        if cap["h"] is None:
+            raise RuntimeError(f"hook never fired at layer {L} — wrong layer module")
         return cap["h"][0, -1].float()              # layer-L hidden at the FINAL token
 
     @torch.no_grad()
@@ -90,19 +98,27 @@ def main():
         return float(logits[fi] - logits[ti])        # belief in the FALSE (counterfactual) city
 
     rows = []
-    for subj, true_c, false_c, prompt in PROBES:
-        # steering vector = the REAL grounding shift the fact causes at the answer position
-        # (in-context diff): h_L(last token of "fact\nprompt") - h_L(last token of "prompt").
-        assert_ctx = f"Fact: The {subj} is located in {false_c}.\n{prompt}"
-        inval_ctx = f"Fact: It is FALSE that the {subj} is in {false_c}; it is in {true_c}.\n{prompt}"
-        base = hidden_lastpos(prompt)
-        v_a = (hidden_lastpos(assert_ctx) - base) * a.alpha
-        v_i = (hidden_lastpos(inval_ctx) - base) * a.alpha
-        cold = belief(prompt, true_c, false_c, None)
-        asrt = belief(prompt, true_c, false_c, v_a)
-        edge = belief(prompt, true_c, false_c, v_a - v_i)       # INVALIDATE via edge
-        ablt = belief(prompt, true_c, false_c, v_a)             # edge removed == assert
-        rows.append((subj, cold, asrt, edge, ablt))
+    try:
+        for subj, true_c, false_c, prompt in PROBES:
+            # steering vector = the REAL grounding shift the fact causes at the answer position
+            # (in-context diff): h_L(last token of "fact\nprompt") - h_L(last token of "prompt").
+            assert_ctx = f"Fact: The {subj} is located in {false_c}.\n{prompt}"
+            inval_ctx = f"Fact: It is FALSE that the {subj} is in {false_c}; it is in {true_c}.\n{prompt}"
+            base = hidden_lastpos(prompt)
+            v_a = (hidden_lastpos(assert_ctx) - base) * a.alpha
+            v_i = (hidden_lastpos(inval_ctx) - base) * a.alpha
+            cold = belief(prompt, true_c, false_c, None)
+            asrt = belief(prompt, true_c, false_c, v_a)
+            edge = belief(prompt, true_c, false_c, v_a - v_i)       # INVALIDATE via edge
+            ablt = belief(prompt, true_c, false_c, v_a)             # edge removed == assert
+            rows.append((subj, cold, asrt, edge, ablt))
+            print(f"  done {subj}: cold {cold:.2f} assert {asrt:.2f} edge {edge:.2f}", flush=True)
+    except Exception as e:                                          # noqa: BLE001
+        import traceback
+        print("ERROR during probes:", repr(e), flush=True)
+        traceback.print_exc()
+        handle.remove()
+        return
 
     print(f"\n=== INVALIDATE operator kill-test (layer {L}, alpha {a.alpha}) ===")
     print(f"  belief = logit(false_city) - logit(true_city)  (higher = believes the counterfactual)")
