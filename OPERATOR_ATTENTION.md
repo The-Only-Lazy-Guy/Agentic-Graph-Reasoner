@@ -36,6 +36,7 @@ construction**, can't collapse. That is the whole idea.
 | **EDGE-GATED end-to-end** (4B): grow→bare miscon→contradicts edge→retrieve correct→hop→signed inject | `v5/operator_loop_v2.py` | **acc 5/7→7/7, beats blend 6/7, cold +1.25→BLEND +0.57→OPERATOR +3.52** (4B L26, scope=all) |
 | **SLOT register READ** (inject a value's latent vector → frozen LM recalls it) | `v5/optest_slot.py` | **8/8, +3.33 ≈ text** (4B L26; 1.5B fails — scale-dependent) |
 | **SLOT register WRITE** (model writes its OWN computed value → reads it back, no text) | `v5/optest_slot_write.py` | **write-gen 8/8, +6.14** (4B L26; pure-latent write-state 6/8) |
+| **SLOT MULTI-STEP** (compute s2 = s1+z from the LATENT slotted s1, across a hop) | `v5/optest_slot_chain.py` | **8/8, +7.79 ≥ text** (4B L26) — operates on the register, not just recall |
 | **GATE** mechanism: gate injection tracks precondition; ASSERT is precondition-blind | `v5/optest_gate.py` | 4B: gate +2.73(sat)/+1.16(vio) tracks g, assert +3.05/+4.78 blind; 1.5B accuracy 1/4→3/4 |
 
 **GATE caveat (honest):** GATE is the weak operator. The *mechanism* (multiplicative, gate-output tracks
