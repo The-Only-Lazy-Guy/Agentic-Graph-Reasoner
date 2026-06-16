@@ -243,8 +243,8 @@ def _v3_test():
 # Controlled 4-hop chain over FICTIONAL entities (the 4B has no prior -> must use the graph), with
 # VERBOSE per-slot dumps so the result is MANUALLY INSPECTED (no cheap pass): read the retrieved
 # evidence + the 4B's actual fill for every slot, verify right-for-the-right-reason.
-def _real_run(model_name, layer, alpha, ntok):
-    import contextlib, os, torch
+def _real_run(model_name, layer, alpha, ntok, distractors=0):
+    import contextlib, os, random, torch
     from v5.lm_loader import load_frozen_lm
     from v5.operator_injector import OperatorInjector
     from v5.training.providers import RealEmbedder
@@ -260,6 +260,29 @@ def _real_run(model_name, layer, alpha, ntok):
         {"id": "n3", "kind": "fact", "text": "Kesmir has a population of two million."},
         {"id": "n4", "kind": "fact", "text": "Talgrid borders the sea."},
     ]
+    if distractors:
+        # CONFUSER chain: the Zarnvolt Protocol's REVIEWER (not author) leads to a WRONG answer.
+        GRAPH += [
+            {"id": "c1", "kind": "fact", "text": "The Zarnvolt Protocol was reviewed by Tomas Reln."},
+            {"id": "c2", "kind": "fact", "text": "Tomas Reln founded the city of Dremont."},
+            {"id": "c3", "kind": "fact", "text": "The city of Dremont lies in the province of Veska."},
+            {"id": "c4", "kind": "fact", "text": "The province of Veska produces a metal called ironwood."},
+        ]
+        # VOLUME distractors: many same-structure facts about unrelated entities (overload the context).
+        rng = random.Random(0)
+        syl = ["Vor", "Kel", "Tarn", "Mire", "Dol", "Bre", "Quen", "Zad", "Lor", "Fyn", "Grim", "Vex", "Sel", "Oru"]
+        nm = lambda: rng.choice(syl) + rng.choice(syl).lower()
+        METALS = ["bronzine", "ferrolite", "steelix", "corandium", "palebrass", "ironclad", "greysteel",
+                  "duralume", "coppernite", "tinveil", "zincara", "leadolite", "nickelan", "cobalith"]
+        for i in range(distractors):
+            pr, pe, ci, pv, mt = f"{nm()} Pact", f"{nm()} {nm()}", nm(), nm(), rng.choice(METALS)
+            GRAPH += [
+                {"id": f"d{i}a", "kind": "fact", "text": f"The {pr} was authored by {pe}."},
+                {"id": f"d{i}b", "kind": "fact", "text": f"{pe} founded the city of {ci}."},
+                {"id": f"d{i}c", "kind": "fact", "text": f"The city of {ci} lies in the province of {pv}."},
+                {"id": f"d{i}d", "kind": "fact", "text": f"The province of {pv} produces a metal called {mt}."},
+            ]
+    print(f"GRAPH size = {len(GRAPH)} facts (distractors={distractors})\n")
     QUESTION = ("What metal is produced by the home province of the city founded by the author of the "
                 "Zarnvolt Protocol?")
     ANSWER = "quintsteel"
@@ -288,10 +311,10 @@ def _real_run(model_name, layer, alpha, ntok):
         lines = [ln.strip(" .*\"'`:") for ln in txt.splitlines() if ln.strip(" .*\"'`:")]
         return lines[0] if lines else ""                                       # the entity (first real line)
 
-    def retrieve(query, kind):
-        qv = torch.tensor(emb.embed_nodes({"q": query})["q"], device=dev)
+    def retrieve(query, kind, k=4):          # top-K (not top-1): give the slot a small focused set,
+        qv = torch.tensor(emb.embed_nodes({"q": query})["q"], device=dev)   # the LM disambiguates within it
         ranked = sorted(GRAPH, key=lambda n: -float(gtens[n["id"]] @ qv))
-        return ranked[:1]
+        return ranked[:k]
 
     specs = [
         SlotSpec("AUTHOR", [], "fact", "ASSERT",
@@ -312,11 +335,11 @@ def _real_run(model_name, layer, alpha, ntok):
     dump = []
 
     def op_filler(slot, evidence, pool):
-        # EXTRACTION slot = exact entity -> the fact goes IN CONTEXT (RAG), not an operator vector
-        # (vectors can't emit exact content -- proven). Operators are for REASONING slots (e.g. DIAGNOSE).
+        # EXTRACTION slot = exact entity -> the top-K facts go IN CONTEXT (RAG); the LM disambiguates
+        # the right relation within the slot's small set (top-1 retrieval propagates confuser errors).
         spec = specmap[slot.name]
-        fact = evidence[0]["text"] if evidence else ""
-        q = f"Fact: {fact}\n\n{spec.ask(pool.slots)}"
+        facts = "\n".join(f"- {e['text']}" for e in evidence)
+        q = f"Facts:\n{facts}\n\n{spec.ask(pool.slots)}"
         val = gen(q)
         dump.append((slot.name, spec.query(pool.slots), [e["text"] for e in evidence], spec.ask(pool.slots), val))
         return val
@@ -349,7 +372,22 @@ def _real_run(model_name, layer, alpha, ntok):
     cold_prompt = (f"Facts:\n" + "\n".join(f"- {n['text']}" for n in GRAPH) +
                    f"\n\n{QUESTION}\nAnswer with only the metal:")
     cold = gen(cold_prompt, None)
-    print(f"\nCOLD (all facts in context, one-shot RAG) = {cold!r}   correct={ANSWER in cold.lower()}")
+    print(f"\nCOLD-FULL (ALL {len(GRAPH)} facts in context — only possible on a SMALL graph) = {cold!r}   "
+          f"correct={ANSWER in cold.lower()}")
+    # COLD-CAPPED: the REALISTIC baseline at scale — a big graph can't fit, so ONE retrieval for the
+    # whole question (no decomposition). It gets the endpoints but misses the INTERMEDIATE hops.
+    cap_ev = retrieve(QUESTION, "fact", k=8)
+    cap_prompt = ("Facts:\n" + "\n".join(f"- {e['text']}" for e in cap_ev) +
+                  f"\n\n{QUESTION}\nAnswer with only the metal:")
+    capped = gen(cap_prompt)
+    print(f"\nCOLD-CAPPED (top-8 retrieval, the realistic big-graph baseline) = {capped!r}   "
+          f"correct={ANSWER in capped.lower()}")
+    print(f"   one-shot retrieved for the question (note the MISSING intermediate hops):")
+    for e in cap_ev:
+        print(f"      - {e['text']}")
+    print(f"\n  VALUE: slot-graph (per-hop retrieval) vs COLD-CAPPED (one-shot retrieval) — both are what")
+    print(f"  you can actually run on a graph too big to fit. If the chain holds and cold-capped misses a")
+    print(f"  hop -> the DECOMPOSITION earns it. cold-FULL is the unrealistic 'everything fits' ceiling.")
     print("\nINSPECT: did the 4B fill EACH slot from the retrieved fact correctly (right-for-right-reason),")
     print("and did the chain reach the gold? Compare to cold one-shot. Read the actual fills above.")
 
@@ -363,9 +401,12 @@ def main(argv=None):
     ap.add_argument("--layer", type=int, default=26)
     ap.add_argument("--alpha", type=float, default=0.5)
     ap.add_argument("--ntok", type=int, default=64)   # reasoning model thinks first; strip + take the answer line
+    ap.add_argument("--distractors", type=int, default=0,
+                    help=">0 = big-graph value-demo: add a confuser (reviewer) chain + N*4 volume facts; "
+                         "tests whether cold (all facts in context) fails while slot-graph retrieve-per-hop holds")
     a = ap.parse_args(argv)
     if a.real:
-        _real_run(a.model, a.layer, a.alpha, a.ntok)
+        _real_run(a.model, a.layer, a.alpha, a.ntok, a.distractors)
     elif a.v3:
         _v3_test()
     elif a.demo:
