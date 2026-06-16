@@ -273,11 +273,15 @@ def _real_run(model_name, layer, alpha, ntok):
     gvecs = emb.embed_nodes({n["id"]: n["text"] for n in GRAPH})
     gtens = {k: torch.tensor(v, device=dev) for k, v in gvecs.items()}
 
-    def gen(prompt, v):
+    import re
+    def gen(prompt, v=None):
         with (inj.inject(v) if v is not None else contextlib.nullcontext()):
             enc = tok(prompt, return_tensors="pt").to(dev)
             out = model.generate(**enc, max_new_tokens=ntok, do_sample=False, pad_token_id=tok.eos_token_id)
-        return tok.decode(out[0, enc.input_ids.shape[1]:], skip_special_tokens=True).strip()
+        txt = tok.decode(out[0, enc.input_ids.shape[1]:], skip_special_tokens=True)
+        txt = re.sub(r"<think>.*?</think>", "", txt, flags=re.DOTALL).strip()   # reasoning model: drop think block
+        lines = [ln.strip(" .*\"'`") for ln in txt.splitlines() if ln.strip(" .*\"'`")]
+        return lines[0] if lines else ""                                       # the entity (first real line)
 
     def retrieve(query, kind):
         qv = torch.tensor(emb.embed_nodes({"q": query})["q"], device=dev)
@@ -303,11 +307,13 @@ def _real_run(model_name, layer, alpha, ntok):
     dump = []
 
     def op_filler(slot, evidence, pool):
+        # EXTRACTION slot = exact entity -> the fact goes IN CONTEXT (RAG), not an operator vector
+        # (vectors can't emit exact content -- proven). Operators are for REASONING slots (e.g. DIAGNOSE).
         spec = specmap[slot.name]
-        q = spec.ask(pool.slots)
-        v = inj.combine([(e["text"], spec.op) for e in evidence], q, normalize=True) if evidence else None
-        val = gen(q, v)
-        dump.append((slot.name, spec.query(pool.slots), [e["text"] for e in evidence], q, val))
+        fact = evidence[0]["text"] if evidence else ""
+        q = f"Fact: {fact}\n\n{spec.ask(pool.slots)}"
+        val = gen(q)
+        dump.append((slot.name, spec.query(pool.slots), [e["text"] for e in evidence], spec.ask(pool.slots), val))
         return val
 
     pool = Pool(specs, context={"issue": QUESTION})
@@ -343,7 +349,7 @@ def main(argv=None):
     ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
     ap.add_argument("--layer", type=int, default=26)
     ap.add_argument("--alpha", type=float, default=0.5)
-    ap.add_argument("--ntok", type=int, default=8)
+    ap.add_argument("--ntok", type=int, default=64)   # reasoning model thinks first; strip + take the answer line
     a = ap.parse_args(argv)
     if a.real:
         _real_run(a.model, a.layer, a.alpha, a.ntok)
