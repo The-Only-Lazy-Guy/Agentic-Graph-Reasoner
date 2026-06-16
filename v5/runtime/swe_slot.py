@@ -25,6 +25,8 @@ from v5.graph_grower.swe_load import load_instances, checkout_repo
 from v5.graph_grower.swe_probe import load_traces
 from v5.runtime.sr_withcode import load_symbol_meta, read_body, _file_text
 from v5.runtime.search_replace import SR_SYS, parse_sr, apply_sr
+from v5.graph_grower.swe_verify import write_predictions
+import subprocess
 
 
 def _unmatched(blocks, dest):
@@ -78,6 +80,13 @@ def main():
 
     dump = open(a.dump, "w", encoding="utf-8")
     oneshot_app = slot_app = scored = 0
+    oneshot_preds, slot_preds = {}, {}
+    def _patch(blocks, dest):                # applyable -> git diff (the swebench prediction), then restore
+        if not (bool(blocks) and not _unmatched(blocks, dest)):
+            return ""
+        _, p = apply_sr(dest, blocks)
+        subprocess.run(["git", "-C", dest, "checkout", "--", "."], capture_output=True)
+        return p
     for k, iid in enumerate(ids):
         t = traces[iid]; inst = insts[iid]
         support = [s for s in t["support_ids"] if s in meta]
@@ -101,17 +110,24 @@ def main():
         g2 = gen(SR_SYS, fix_user(t["issue"], src, diag), a.max_new)
         b2 = parse_sr(g2); app2 = bool(b2) and not _unmatched(b2, str(dest))
         slot_app += app2
-        import subprocess
-        subprocess.run(["git", "-C", str(dest), "checkout", "--", "."], capture_output=True)
+        p1, p2 = _patch(b1, str(dest)), _patch(b2, str(dest))   # emit predictions for the verifier
+        if p1.strip(): oneshot_preds[iid] = p1
+        if p2.strip(): slot_preds[iid] = p2
         print(f"  [{k+1}/{len(ids)}] {iid:28} oneshot_app={app1} slot_app={app2}", flush=True)
         dump.write(f"\n===== {iid} =====\nISSUE: {t['issue'][:200]}\n\nDIAGNOSIS:\n{diag}\n\n"
                    f"ONESHOT blocks={len(b1)} applyable={app1}:\n{g1[:500]}\n\n"
                    f"SLOT blocks={len(b2)} applyable={app2}:\n{g2[:500]}\n")
     dump.close()
+    n1 = write_predictions(oneshot_preds, "artifacts/swe_oneshot_preds.jsonl", "v5_oneshot")
+    n2 = write_predictions(slot_preds, "artifacts/swe_slot_preds.jsonl", "v5_slot")
     print(f"\n=== #9 SYNTHESIS (DIAGNOSE->FIX vs one-shot, given support) ===")
     print(f"  applyable@1:  ONE-SHOT {oneshot_app}/{scored}  |  SLOT(diagnose->fix) {slot_app}/{scored}")
-    print(f"  dump (MANUALLY INSPECT the diagnoses + patches) -> {a.dump}")
-    print(f"  next: verifier (resolve) on the applyable patches; the honest synthesis lift is resolve, not applyable.")
+    print(f"  emitted predictions: oneshot {n1} -> artifacts/swe_oneshot_preds.jsonl | slot {n2} -> artifacts/swe_slot_preds.jsonl")
+    print(f"  dump (MANUALLY INSPECT) -> {a.dump}")
+    print(f"  VERIFY (Docker, CPU-only): gold-sanity FIRST, then both pred files -> the RESOLVE lift:")
+    print(f"    python -m v5.graph_grower.swe_verify --gold-sanity --dataset {a.dataset} --limit 5")
+    print(f"    python -m v5.graph_grower.swe_verify --predictions artifacts/swe_oneshot_preds.jsonl --dataset {a.dataset}")
+    print(f"    python -m v5.graph_grower.swe_verify --predictions artifacts/swe_slot_preds.jsonl --dataset {a.dataset}")
 
 
 if __name__ == "__main__":
