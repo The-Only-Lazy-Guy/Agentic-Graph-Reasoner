@@ -61,7 +61,11 @@ def main():
     ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
     ap.add_argument("--layer", type=int, default=26)
     ap.add_argument("--alpha", type=float, default=1.0)
+    ap.add_argument("--latent", action="store_true",
+                    help="build the op vector against a FIXED stub (query-independent -> cacheable/fast) "
+                         "instead of the actual query (grounded). Tests if a precomputed latent keeps content.")
     a = ap.parse_args()
+    LATENT_STUB = "Question:\nAnswer: ("   # fixed context: a node's vector here is query-independent, precomputable
     trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
     from transformers import AutoTokenizer
     model = load_frozen_lm(a.model); model.eval()
@@ -74,13 +78,16 @@ def main():
         lg = inj.answer_logits(q, v)
         return float(lg[tid(R)] - lg[tid(W)])
 
+    # grounded: vector built against the real query; latent: against a fixed stub (cacheable, fast).
+    ctx = (lambda q: LATENT_STUB) if a.latent else (lambda q: q)
+
     rows = []
     for tag, q, R, W, good, bad in ITEMS:
         cold = belief(q, R, W)
-        op_good = belief(q, R, W, inj.combine([(good, "ASSERT")], q, normalize=True))
-        op_bad = belief(q, R, W, inj.combine([(bad, "ASSERT")], q, normalize=True))   # WRONG insight control
+        op_good = belief(q, R, W, inj.combine([(good, "ASSERT")], ctx(q), normalize=True))
+        op_bad = belief(q, R, W, inj.combine([(bad, "ASSERT")], ctx(q), normalize=True))   # WRONG insight control
         rag = belief(f"{good}\n{q}", R, W)
-        v_spec = inj.combine([(good, "ASSERT")], SPEC_Q, normalize=True)
+        v_spec = inj.combine([(good, "ASSERT")], ctx(SPEC_Q), normalize=True)
         spec_cold = belief(SPEC_Q, SPEC_R, SPEC_W)
         spec = belief(SPEC_Q, SPEC_R, SPEC_W, v_spec)
         fooled = cold <= 0
