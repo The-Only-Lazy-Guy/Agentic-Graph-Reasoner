@@ -29,6 +29,7 @@ class SlotSpec:
     op: str                                # operator on the retrieved evidence (ASSERT/INVALIDATE/...)
     query: Callable[[Dict[str, "Slot"]], str]   # SLOT-AWARE: build the retrieval query from the pool
     ask: Callable[[Dict[str, "Slot"]], str] = None   # the LM sub-question to fill the slot (real run)
+    mode: str = "extract"                  # 'extract' = exact content -> RAG; 'reason' = decision -> OPERATORS
 
 
 @dataclass
@@ -392,6 +393,69 @@ def _real_run(model_name, layer, alpha, ntok, distractors=0):
     print("and did the chain reach the gold? Compare to cold one-shot. Read the actual fills above.")
 
 
+# ── #14: operators in REASONING slots — operator-fill (INVALIDATE pitfalls / ASSERT insight) vs RAG ──
+# Reuses op_kind_for (operator_schema) + OperatorInjector + the proven bare-misconception content.
+# A reasoning slot JUDGES an approach; the operator-fill subtracts the wrong path (INVALIDATE), where
+# RAG of the same misconception POISONS (optest_shape). This is operator_loop_v2's logic, as a slot-fill.
+def _reason_demo(model_name, layer, alpha, ntok):
+    import contextlib, os, re, torch
+    from v5.lm_loader import load_frozen_lm
+    from v5.operator_injector import OperatorInjector
+    from v5.operator_schema import op_kind_for
+    from transformers import AutoTokenizer
+
+    # (question -> yes/no validity judgement, correct, evidence node, node_type). bare misconception
+    # nodes -> op_kind_for=INVALIDATE; a correct-approach node -> ASSERT (the valid control).
+    ITEMS = [
+        ("A student proves  sum 1/(a(1+b)) >= 3/(1+abc)  by writing 1+b >= 2 sqrt(b), hence "
+         "1/(a(1+b)) <= 1/(2a sqrt(b)), then summing. Is this proof VALID? Answer yes or no:", "no",
+         "By AM-GM 1+b >= 2 sqrt(b), so 1/(a(1+b)) <= 1/(2a sqrt(b)), and summing proves the lower bound.",
+         "failure_pattern"),
+        ("A student argues there are infinitely many primes because N = (product of all primes so far) "
+         "+ 1 is ITSELF always prime. Is this argument VALID? Answer yes or no:", "no",
+         "N = (product of all primes up to p) + 1 is itself a prime not in the list.", "failure_pattern"),
+        ("To prove  sum 1/(a(1+b)) >= 3/(1+abc),  a student clears denominators and reduces it to a "
+         "polynomial inequality, then applies AM-GM to the polynomial form. Is this approach VALID? "
+         "Answer yes or no:", "yes",
+         "Clearing denominators to a polynomial inequality and bounding it with AM-GM is a standard, "
+         "valid route for this inequality.", "strategy"),
+    ]
+    trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
+    model = load_frozen_lm(model_name); model.eval()
+    tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=trust)
+    inj = OperatorInjector(model, tok, layer, alpha); dev = next(model.parameters()).device
+
+    def gen(prompt, v=None):
+        kw = dict(add_generation_prompt=True, return_tensors="pt", return_dict=True)
+        try:
+            enc = tok.apply_chat_template([{"role": "user", "content": prompt}], enable_thinking=False, **kw).to(dev)
+        except TypeError:
+            enc = tok.apply_chat_template([{"role": "user", "content": prompt}], **kw).to(dev)
+        with (inj.inject(v) if v is not None else contextlib.nullcontext()):
+            out = model.generate(**enc, max_new_tokens=ntok, do_sample=False, pad_token_id=tok.eos_token_id)
+        t = re.sub(r"<think>.*?</think>", "", tok.decode(out[0, enc["input_ids"].shape[1]:],
+                   skip_special_tokens=True), flags=re.DOTALL).strip().lower()
+        m = re.search(r"\b(yes|no)\b", t)     # first clear yes/no anywhere (model may explain then answer)
+        return m.group(1) if m else (t[:18] or "(empty)")
+
+    print("#14 REASONING SLOTS: operator-fill vs RAG (per-slot). MANUALLY INSPECT.\n")
+    op_ok = rag_ok = cold_ok = 0
+    for q, correct, node, ntype in ITEMS:
+        op = op_kind_for(ntype)
+        v = inj.combine([(node, op)], q, normalize=True)
+        cold, opr, rag = gen(q), gen(q, v), gen(f"Note: {node}\n\n{q}")
+        op_ok += (opr == correct); rag_ok += (rag == correct); cold_ok += (cold == correct)
+        print(f"[{op:10} expect={correct}]  cold={cold!r}  OPERATOR={opr!r}  RAG={rag!r}  "
+              f"{'OP✓' if opr==correct else 'OP✗'}{' RAGpoison' if rag!=correct and op=='INVALIDATE' else ''}")
+        print(f"   Q: {q[:70]}")
+        print(f"   node({ntype}->{op}): {node[:70]}\n")
+    n = len(ITEMS)
+    print(f"=== operator-fill {op_ok}/{n} | RAG-fill {rag_ok}/{n} | cold {cold_ok}/{n} ===")
+    print("  INSPECT: on the INVALIDATE (misconception) items, does OPERATOR judge 'no' while RAG of the")
+    print("  same misconception poisons toward 'yes'? On the ASSERT (valid) item, does OPERATOR keep 'yes'?")
+    print("  (operator-fill = operator_loop_v2's edge-gated combine, now as the reasoning-slot fill.)")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Slot-graph reasoning substrate.")
     ap.add_argument("--demo", action="store_true", help="run the toy loop-mechanics demo (no model)")
@@ -404,8 +468,11 @@ def main(argv=None):
     ap.add_argument("--distractors", type=int, default=0,
                     help=">0 = big-graph value-demo: add a confuser (reviewer) chain + N*4 volume facts; "
                          "tests whether cold (all facts in context) fails while slot-graph retrieve-per-hop holds")
+    ap.add_argument("--reason", action="store_true", help="#14: operators in REASONING slots (op-fill vs RAG)")
     a = ap.parse_args(argv)
-    if a.real:
+    if a.reason:
+        _reason_demo(a.model, a.layer, a.alpha, a.ntok)
+    elif a.real:
         _real_run(a.model, a.layer, a.alpha, a.ntok, a.distractors)
     elif a.v3:
         _v3_test()
