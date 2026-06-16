@@ -275,12 +275,17 @@ def _real_run(model_name, layer, alpha, ntok):
 
     import re
     def gen(prompt, v=None):
+        msgs = [{"role": "user", "content": prompt}]
+        try:                                  # Qwen3.5 reasoning model: disable <think> so it answers directly
+            ids = tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt",
+                                          enable_thinking=False).to(dev)
+        except TypeError:
+            ids = tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt").to(dev)
         with (inj.inject(v) if v is not None else contextlib.nullcontext()):
-            enc = tok(prompt, return_tensors="pt").to(dev)
-            out = model.generate(**enc, max_new_tokens=ntok, do_sample=False, pad_token_id=tok.eos_token_id)
-        txt = tok.decode(out[0, enc.input_ids.shape[1]:], skip_special_tokens=True)
-        txt = re.sub(r"<think>.*?</think>", "", txt, flags=re.DOTALL).strip()   # reasoning model: drop think block
-        lines = [ln.strip(" .*\"'`") for ln in txt.splitlines() if ln.strip(" .*\"'`")]
+            out = model.generate(ids, max_new_tokens=ntok, do_sample=False, pad_token_id=tok.eos_token_id)
+        txt = tok.decode(out[0, ids.shape[1]:], skip_special_tokens=True)
+        txt = re.sub(r"<think>.*?</think>", "", txt, flags=re.DOTALL).strip()   # backup strip
+        lines = [ln.strip(" .*\"'`:") for ln in txt.splitlines() if ln.strip(" .*\"'`:")]
         return lines[0] if lines else ""                                       # the entity (first real line)
 
     def retrieve(query, kind):
@@ -319,18 +324,26 @@ def _real_run(model_name, layer, alpha, ntok):
     pool = Pool(specs, context={"issue": QUESTION})
     ok, steps = sg.solve(pool, retrieve, op_filler, log=None)
 
+    EXPECT = {"AUTHOR": "voss", "CITY": "kesmir", "PROVINCE": "talgrid", "PRODUCT": "quintsteel"}
     print("="*78)
     print("REAL 4B slot-graph run — 4-hop fictional chain. MANUALLY INSPECT every slot below.\n")
     print(f"QUESTION: {QUESTION}\nGOLD: {ANSWER}\n")
+    per_slot_ok = {}
     for name, rq, ev, ask, val in dump:
-        print(f"[{name}]")
+        good = EXPECT[name] in val.lower()
+        per_slot_ok[name] = good
+        print(f"[{name}]  per-slot correct={good}  (expect '{EXPECT[name]}')")
         print(f"   retrieval query : {rq}")
         print(f"   retrieved fact  : {ev[0] if ev else '(none)'}")
         print(f"   LM sub-question : {ask}")
         print(f"   4B FILLED       : {val!r}")
         print()
     final = pool.slots["PRODUCT"].value
-    print(f"SLOT-CHAIN final (PRODUCT) = {final!r}   correct={ANSWER in final.lower()}  (fixpoint={ok} in {steps})")
+    chain_ok = all(per_slot_ok.values())
+    print(f"PER-SLOT chain: {per_slot_ok}")
+    print(f"CHAIN COMPLETE (every hop right) = {chain_ok}   <- the HONEST metric (not just the final slot,")
+    print(f"     which the last retrieved fact can fake)")
+    print(f"SLOT-CHAIN final (PRODUCT) = {final!r}   final-correct={ANSWER in final.lower()}  (fixpoint={ok} in {steps})")
 
     # COLD baseline: 4B given the question + ALL facts in context, one shot (RAG, no decomposition).
     cold_prompt = (f"Facts:\n" + "\n".join(f"- {n['text']}" for n in GRAPH) +
