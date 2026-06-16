@@ -456,6 +456,142 @@ def _reason_demo(model_name, layer, alpha, ntok):
     print("  (operator-fill = operator_loop_v2's edge-gated combine, now as the reasoning-slot fill.)")
 
 
+# ── #13: REAL self-improving memory — serializable templates, save -> retrieve-by-signature -> instantiate ──
+# V3 was a toy dict of lambda-factories. This serializes the SOLVED slot-graph STRUCTURE as string
+# templates (placeholders {SUBJECT}, {SLOT}, {SLOT.ent}), saves to a store, retrieves the nearest by
+# signature-embedding for a new task, and instantiates it -> the reasoning structure is REUSED.
+def _fmt(s, slots, subject):
+    out = s.replace("{SUBJECT}", subject)
+    for name, slot in slots.items():
+        val = getattr(slot, "value", "") or ""
+        out = out.replace("{" + name + ".ent}", _ent2(val)).replace("{" + name + "}", val)
+    return out
+
+
+def _ent2(text):
+    ws = [w.strip(".,") for w in text.split() if w[:1].isupper()]
+    return ws[-1] if ws else text
+
+
+def instantiate(template, subject):
+    """A serialized template + a task subject -> live SlotSpecs (query/ask format the placeholders)."""
+    specs = []
+    for s in template["slots"]:
+        specs.append(SlotSpec(
+            s["name"], s["needs"], "fact", s.get("op", "ASSERT"),
+            query=(lambda slots, t=s["query"]: _fmt(t, slots, subject)),
+            ask=(lambda slots, t=s["ask"]: _fmt(t, slots, subject)),
+            mode=s.get("mode", "extract")))
+    return specs
+
+
+def _selfimprove_demo(model_name, layer, alpha, ntok):
+    import contextlib, json, os, re, torch
+    from pathlib import Path
+    from v5.lm_loader import load_frozen_lm
+    from v5.operator_injector import OperatorInjector
+    from v5.training.providers import RealEmbedder
+    from transformers import AutoTokenizer
+
+    # the GENERALIZED reasoning structure (entity-agnostic; {SUBJECT} = the task's document).
+    TEMPLATE = {
+        "signature": "the metal produced by the home province of the city founded by the author of a document",
+        "slots": [
+            {"name": "AUTHOR", "needs": [], "query": "author of the {SUBJECT}",
+             "ask": "Who is the author of the {SUBJECT}? Answer with only the name:"},
+            {"name": "CITY", "needs": ["AUTHOR"], "query": "city founded by {AUTHOR}",
+             "ask": "Which city did {AUTHOR} found? Answer with only the city name:"},
+            {"name": "PROVINCE", "needs": ["CITY"], "query": "province that contains the city {CITY}",
+             "ask": "In which province does the city {CITY} lie? Answer with only the province:"},
+            {"name": "PRODUCT", "needs": ["PROVINCE"], "query": "metal produced by the province {PROVINCE}",
+             "ask": "What metal does the province {PROVINCE} produce? Answer with only the metal:"},
+        ],
+    }
+    GRAPH_A = [
+        {"id": "a1", "text": "The Zarnvolt Protocol was authored by Helena Voss."},
+        {"id": "a2", "text": "Helena Voss founded the city of Kesmir."},
+        {"id": "a3", "text": "The city of Kesmir lies in the province of Talgrid."},
+        {"id": "a4", "text": "The province of Talgrid produces a metal called quintsteel."},
+        {"id": "an", "text": "Helena Voss was born in winter."},
+    ]
+    GRAPH_B = [   # a DIFFERENT task: new document + entities, SAME structure
+        {"id": "b1", "text": "The Brunel Accord was authored by Sera Mond."},
+        {"id": "b2", "text": "Sera Mond founded the city of Othal."},
+        {"id": "b3", "text": "The city of Othal lies in the province of Wessen."},
+        {"id": "b4", "text": "The province of Wessen produces a metal called brightsteel."},
+        {"id": "bn", "text": "Othal is famous for its bridges."},
+    ]
+    STORE = Path("artifacts/slot_templates.jsonl")
+
+    trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
+    model = load_frozen_lm(model_name); model.eval()
+    tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=trust)
+    OperatorInjector(model, tok, layer, alpha)               # (hooks installed; extract slots use RAG)
+    dev = next(model.parameters()).device
+    emb = RealEmbedder(dev)
+
+    def gen(prompt):
+        kw = dict(add_generation_prompt=True, return_tensors="pt", return_dict=True)
+        try:
+            enc = tok.apply_chat_template([{"role": "user", "content": prompt}], enable_thinking=False, **kw).to(dev)
+        except TypeError:
+            enc = tok.apply_chat_template([{"role": "user", "content": prompt}], **kw).to(dev)
+        out = model.generate(**enc, max_new_tokens=ntok, do_sample=False, pad_token_id=tok.eos_token_id)
+        t = re.sub(r"<think>.*?</think>", "", tok.decode(out[0, enc["input_ids"].shape[1]:],
+                   skip_special_tokens=True), flags=re.DOTALL).strip()
+        ls = [x.strip(" .*\"'`:") for x in t.splitlines() if x.strip(" .*\"'`:")]
+        return ls[0] if ls else ""
+
+    def solve_over(graph, specs):
+        gv = {n["id"]: torch.tensor(emb.embed_nodes({n["id"]: n["text"]})[n["id"]], device=dev) for n in graph}
+        def retr(query, kind, k=4):
+            qv = torch.tensor(emb.embed_nodes({"q": query})["q"], device=dev)
+            return sorted(graph, key=lambda n: -float(gv[n["id"]] @ qv))[:k]
+        sm = {s.name: s for s in specs}
+        def fill(slot, ev, pool):
+            facts = "\n".join(f"- {e['text']}" for e in ev)
+            return gen(f"Facts:\n{facts}\n\n{sm[slot.name].ask(pool.slots)}")
+        sg = SlotGraph(specs); pool = Pool(specs, context={})
+        sg.solve(pool, retr, fill)
+        return pool.slots[sg.order[-1]].value
+
+    def save_template(t, sig_emb):
+        STORE.parent.mkdir(parents=True, exist_ok=True)
+        with STORE.open("a", encoding="utf-8") as h:
+            h.write(json.dumps({"template": t, "sig_emb": sig_emb}, ensure_ascii=False) + "\n")
+
+    def retrieve_template(task_text):
+        if not STORE.exists():
+            return None
+        qv = torch.tensor(emb.embed_nodes({"q": task_text})["q"], device=dev)
+        best, bd = None, -1e9
+        for line in STORE.read_text(encoding="utf-8").splitlines():
+            r = json.loads(line)
+            sc = float(qv @ torch.tensor(r["sig_emb"], device=dev))
+            if sc > bd:
+                bd, best = sc, r["template"]
+        return best
+
+    print("#13 SELF-IMPROVING MEMORY — save a solved slot-graph, reuse it on a NEW task. INSPECT.\n")
+    # TASK A: solve via the template, then SAVE it (with its signature embedding).
+    specs_a = instantiate(TEMPLATE, "Zarnvolt Protocol")
+    ans_a = solve_over(GRAPH_A, specs_a)
+    sig_emb = emb.embed_nodes({"s": TEMPLATE["signature"]})["s"]
+    save_template(TEMPLATE, sig_emb)
+    print(f"TASK A (Zarnvolt Protocol): solved -> {ans_a!r}  correct={'quintsteel' in ans_a.lower()}  -> template SAVED to {STORE}\n")
+
+    # TASK B (NEW): retrieve the template by the question's signature, instantiate for Brunel, solve.
+    QB = "What metal is produced by the home province of the city founded by the author of the Brunel Accord?"
+    tmpl = retrieve_template(QB)
+    print(f"TASK B retrieved a template: {tmpl is not None and tmpl['signature'][:50]!r}")
+    specs_b = instantiate(tmpl, "Brunel Accord")
+    ans_b = solve_over(GRAPH_B, specs_b)
+    print(f"TASK B (Brunel Accord): solved via the REUSED template -> {ans_b!r}  correct={'brightsteel' in ans_b.lower()}")
+    print(f"\n=== #13: a SOLVED reasoning structure was saved + retrieved + reused on a DIFFERENT task ===")
+    print(f"  INSPECT: did B reuse A's saved slot-graph (signature match) and solve a NEW document correctly?")
+    print(f"  This is grow-reasoning-not-params: the graph accumulates reasoning STRUCTURES.")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Slot-graph reasoning substrate.")
     ap.add_argument("--demo", action="store_true", help="run the toy loop-mechanics demo (no model)")
@@ -469,8 +605,11 @@ def main(argv=None):
                     help=">0 = big-graph value-demo: add a confuser (reviewer) chain + N*4 volume facts; "
                          "tests whether cold (all facts in context) fails while slot-graph retrieve-per-hop holds")
     ap.add_argument("--reason", action="store_true", help="#14: operators in REASONING slots (op-fill vs RAG)")
+    ap.add_argument("--selfimprove", action="store_true", help="#13: save a solved slot-graph, reuse on a new task")
     a = ap.parse_args(argv)
-    if a.reason:
+    if a.selfimprove:
+        _selfimprove_demo(a.model, a.layer, a.alpha, a.ntok)
+    elif a.reason:
         _reason_demo(a.model, a.layer, a.alpha, a.ntok)
     elif a.real:
         _real_run(a.model, a.layer, a.alpha, a.ntok, a.distractors)
