@@ -28,6 +28,7 @@ class SlotSpec:
     evidence_kind: str                     # which node type / pool to retrieve from the big graph
     op: str                                # operator on the retrieved evidence (ASSERT/INVALIDATE/...)
     query: Callable[[Dict[str, "Slot"]], str]   # SLOT-AWARE: build the retrieval query from the pool
+    ask: Callable[[Dict[str, "Slot"]], str] = None   # the LM sub-question to fill the slot (real run)
 
 
 @dataclass
@@ -238,17 +239,120 @@ def _v3_test():
     print("  (toy: structure-transfer mechanism; the real lift = a frozen 4B doing the multi-hop, next phase)")
 
 
+# ── #8: REAL run — frozen 4B fills each slot via OperatorInjector + real-embedder retrieval ──
+# Controlled 4-hop chain over FICTIONAL entities (the 4B has no prior -> must use the graph), with
+# VERBOSE per-slot dumps so the result is MANUALLY INSPECTED (no cheap pass): read the retrieved
+# evidence + the 4B's actual fill for every slot, verify right-for-the-right-reason.
+def _real_run(model_name, layer, alpha, ntok):
+    import contextlib, os, torch
+    from v5.lm_loader import load_frozen_lm
+    from v5.operator_injector import OperatorInjector
+    from v5.training.providers import RealEmbedder
+    from transformers import AutoTokenizer
+
+    GRAPH = [
+        {"id": "g1", "kind": "fact", "text": "The Zarnvolt Protocol was authored by Helena Voss."},
+        {"id": "g2", "kind": "fact", "text": "Helena Voss founded the city of Kesmir."},
+        {"id": "g3", "kind": "fact", "text": "The city of Kesmir lies in the province of Talgrid."},
+        {"id": "g4", "kind": "fact", "text": "The province of Talgrid produces a metal called quintsteel."},
+        {"id": "n1", "kind": "fact", "text": "The Zarnvolt Protocol has fourteen articles."},
+        {"id": "n2", "kind": "fact", "text": "Helena Voss was born in winter."},
+        {"id": "n3", "kind": "fact", "text": "Kesmir has a population of two million."},
+        {"id": "n4", "kind": "fact", "text": "Talgrid borders the sea."},
+    ]
+    QUESTION = ("What metal is produced by the home province of the city founded by the author of the "
+                "Zarnvolt Protocol?")
+    ANSWER = "quintsteel"
+
+    trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
+    model = load_frozen_lm(model_name); model.eval()
+    tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=trust)
+    inj = OperatorInjector(model, tok, layer, alpha)
+    dev = next(model.parameters()).device
+    emb = RealEmbedder(dev)
+    gvecs = emb.embed_nodes({n["id"]: n["text"] for n in GRAPH})
+    gtens = {k: torch.tensor(v, device=dev) for k, v in gvecs.items()}
+
+    def gen(prompt, v):
+        with (inj.inject(v) if v is not None else contextlib.nullcontext()):
+            enc = tok(prompt, return_tensors="pt").to(dev)
+            out = model.generate(**enc, max_new_tokens=ntok, do_sample=False, pad_token_id=tok.eos_token_id)
+        return tok.decode(out[0, enc.input_ids.shape[1]:], skip_special_tokens=True).strip()
+
+    def retrieve(query, kind):
+        qv = torch.tensor(emb.embed_nodes({"q": query})["q"], device=dev)
+        ranked = sorted(GRAPH, key=lambda n: -float(gtens[n["id"]] @ qv))
+        return ranked[:1]
+
+    specs = [
+        SlotSpec("AUTHOR", [], "fact", "ASSERT",
+                 query=lambda p: "author of the Zarnvolt Protocol",
+                 ask=lambda p: "Who is the author of the Zarnvolt Protocol? Answer with only the name:"),
+        SlotSpec("CITY", ["AUTHOR"], "fact", "ASSERT",
+                 query=lambda p: f"city founded by {p['AUTHOR'].value}",
+                 ask=lambda p: f"Which city did {p['AUTHOR'].value} found? Answer with only the city name:"),
+        SlotSpec("PROVINCE", ["CITY"], "fact", "ASSERT",
+                 query=lambda p: f"province that contains the city {p['CITY'].value}",
+                 ask=lambda p: f"In which province does the city {p['CITY'].value} lie? Answer with only the province:"),
+        SlotSpec("PRODUCT", ["PROVINCE"], "fact", "ASSERT",
+                 query=lambda p: f"metal produced by the province {p['PROVINCE'].value}",
+                 ask=lambda p: f"What metal does the province {p['PROVINCE'].value} produce? Answer with only the metal:"),
+    ]
+    sg = SlotGraph(specs)
+    specmap = {s.name: s for s in specs}
+    dump = []
+
+    def op_filler(slot, evidence, pool):
+        spec = specmap[slot.name]
+        q = spec.ask(pool.slots)
+        v = inj.combine([(e["text"], spec.op) for e in evidence], q, normalize=True) if evidence else None
+        val = gen(q, v)
+        dump.append((slot.name, spec.query(pool.slots), [e["text"] for e in evidence], q, val))
+        return val
+
+    pool = Pool(specs, context={"issue": QUESTION})
+    ok, steps = sg.solve(pool, retrieve, op_filler, log=None)
+
+    print("="*78)
+    print("REAL 4B slot-graph run — 4-hop fictional chain. MANUALLY INSPECT every slot below.\n")
+    print(f"QUESTION: {QUESTION}\nGOLD: {ANSWER}\n")
+    for name, rq, ev, ask, val in dump:
+        print(f"[{name}]")
+        print(f"   retrieval query : {rq}")
+        print(f"   retrieved fact  : {ev[0] if ev else '(none)'}")
+        print(f"   LM sub-question : {ask}")
+        print(f"   4B FILLED       : {val!r}")
+        print()
+    final = pool.slots["PRODUCT"].value
+    print(f"SLOT-CHAIN final (PRODUCT) = {final!r}   correct={ANSWER in final.lower()}  (fixpoint={ok} in {steps})")
+
+    # COLD baseline: 4B given the question + ALL facts in context, one shot (RAG, no decomposition).
+    cold_prompt = (f"Facts:\n" + "\n".join(f"- {n['text']}" for n in GRAPH) +
+                   f"\n\n{QUESTION}\nAnswer with only the metal:")
+    cold = gen(cold_prompt, None)
+    print(f"\nCOLD (all facts in context, one-shot RAG) = {cold!r}   correct={ANSWER in cold.lower()}")
+    print("\nINSPECT: did the 4B fill EACH slot from the retrieved fact correctly (right-for-right-reason),")
+    print("and did the chain reach the gold? Compare to cold one-shot. Read the actual fills above.")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Slot-graph reasoning substrate.")
     ap.add_argument("--demo", action="store_true", help="run the toy loop-mechanics demo (no model)")
     ap.add_argument("--v3", action="store_true", help="V3: save a template, reuse on a 2nd task (2nd-task-easier)")
+    ap.add_argument("--real", action="store_true", help="#8: REAL frozen-4B fill + embedder retrieval, verbose dumps")
+    ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
+    ap.add_argument("--layer", type=int, default=26)
+    ap.add_argument("--alpha", type=float, default=0.5)
+    ap.add_argument("--ntok", type=int, default=8)
     a = ap.parse_args(argv)
-    if a.v3:
+    if a.real:
+        _real_run(a.model, a.layer, a.alpha, a.ntok)
+    elif a.v3:
         _v3_test()
     elif a.demo:
         _toy_demo()
     else:
-        print("use --demo (loop mechanics) or --v3 (save/reuse template); model run + SWE = next phase")
+        print("use --demo (mechanics) / --v3 (template reuse) / --real (frozen-4B fill, A40)")
 
 
 if __name__ == "__main__":
