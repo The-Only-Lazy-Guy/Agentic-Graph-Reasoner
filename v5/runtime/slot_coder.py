@@ -148,14 +148,107 @@ def _toy_demo():
     print("  after editing f_len -> LENGTH state:", pool.slots["LENGTH"].state, "(stale = needs re-fill)")
 
 
+# ── V3: save a solved slot-graph as a GENERALIZED template, reuse it on a 2nd task -> easier? ──
+def _ent(text):
+    ws = [w.strip(".,") for w in text.split() if w[:1].isupper()]
+    return ws[-1] if ws else ""
+
+
+def _toks(s):                               # punctuation-fair tokens (strip 's and trailing marks)
+    out = set()
+    for w in s.lower().split():
+        w = w.split("'")[0].strip(".,?!;:()")
+        if len(w) > 3:
+            out.add(w)
+    return out
+
+
+def _mk_retriever(graph):
+    def retriever(query, kind):
+        qw = _toks(query)
+        scored = [(len(qw & _toks(n["text"])), n) for n in graph if n["kind"] == kind]
+        return [n for sc, n in sorted(scored, key=lambda x: -x[0]) if sc > 0][:1]
+    return retriever
+
+
+def _filler(slot, evidence, pool):
+    return evidence[0]["text"] if evidence else ""
+
+
+# the GENERALIZED template = entity-agnostic slot structure (parameterised by the task's subject).
+def _template_specs(country):
+    return [
+        SlotSpec("CAPITAL", [], "fact", "ASSERT", lambda p: f"capital of {country}"),
+        SlotSpec("RIVER", ["CAPITAL"], "fact", "ASSERT", lambda p: f"river {_ent(p['CAPITAL'].value)} sits on"),
+        # query intentionally avoids "long"/"river" (the question's words) -> the answer fact is only
+        # reachable by chaining through RIVER's entity, so a single undecomposed retrieval can't shortcut.
+        SlotSpec("LENGTH", ["RIVER"], "fact", "ASSERT", lambda p: f"{_ent(p['RIVER'].value)} stretches kilometers distance"),
+    ]
+
+
+def _cold_specs(country, question):                 # NO template: one undecomposed retrieval
+    return [SlotSpec("ANSWER", [], "fact", "ASSERT", lambda p: question)]
+
+
+def _v3_test():
+    GRAPH_A = [
+        {"id": "a1", "kind": "fact", "text": "The capital of Aterra is Vionne."},
+        {"id": "a2", "kind": "fact", "text": "Vionne sits on the river Sel."},
+        {"id": "a3", "kind": "fact", "text": "Sel stretches 900 kilometers."},
+        {"id": "an", "kind": "fact", "text": "Bananas contain potassium."},
+    ]
+    GRAPH_B = [   # a DIFFERENT task: new entities, SAME structure
+        {"id": "b1", "kind": "fact", "text": "The capital of Bravos is Mira."},
+        {"id": "b2", "kind": "fact", "text": "Mira sits on the river Tol."},
+        {"id": "b3", "kind": "fact", "text": "Tol stretches 500 kilometers."},
+        {"id": "bn", "kind": "fact", "text": "Helium is lighter than air."},
+    ]
+    TEMPLATE_STORE = {}
+
+    def solve(specs, graph, country, question):
+        sg = SlotGraph(specs)
+        pool = Pool(specs, context={"issue": question})
+        ok, steps = sg.solve(pool, _mk_retriever(graph), _filler, log=None)
+        answer = pool.slots[sg.order[-1]].value           # terminal slot
+        retrievals = sum(1 for s in pool.slots.values() if s.value)
+        return answer, steps, retrievals
+
+    def correct(answer, km):
+        return km in answer
+
+    # TASK 1 (Aterra): solve from the (hand-built) structure, then SAVE it generalized.
+    ans1, st1, _ = solve(_template_specs("Aterra"), GRAPH_A, "Aterra", "How long is Aterra's capital's river?")
+    TEMPLATE_STORE["capital-river-length"] = _template_specs   # save the GENERALIZED template (factory)
+    print(f"TASK 1 (Aterra): answer={ans1[:34]!r} correct={correct(ans1,'900')}  -> template SAVED\n")
+
+    Q2 = "How long is Bravos's capital's river?"
+    # TASK 2 COLD (no template): one undecomposed retrieval
+    a_cold, st_cold, r_cold = solve(_cold_specs("Bravos", Q2), GRAPH_B, "Bravos", Q2)
+    # TASK 2 TEMPLATE: retrieve the saved structure, instantiate for Bravos
+    factory = TEMPLATE_STORE.get("capital-river-length")
+    a_tmpl, st_tmpl, r_tmpl = solve(factory("Bravos"), GRAPH_B, "Bravos", Q2)
+
+    print(f"TASK 2 (Bravos):  '{Q2}'")
+    print(f"  COLD     (no template, 1 retrieval): answer={a_cold[:34]!r}  correct={correct(a_cold,'500')}  retrievals={r_cold}")
+    print(f"  TEMPLATE (reused slot-graph)       : answer={a_tmpl[:34]!r}  correct={correct(a_tmpl,'500')}  retrievals={r_tmpl} steps={st_tmpl}")
+    print(f"\n=== V3 (2nd-task-easier) ===")
+    won = correct(a_tmpl, "500") and not correct(a_cold, "500")
+    print(f"  template solves the 2nd task: {correct(a_tmpl,'500')} | cold solves it: {correct(a_cold,'500')}")
+    print(f"  RESULT: {'PASS — the SAVED reasoning structure makes the 2nd (different) task solvable where cold (no decomposition) fails' if won else 'see numbers'}")
+    print("  (toy: structure-transfer mechanism; the real lift = a frozen 4B doing the multi-hop, next phase)")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Slot-graph reasoning substrate.")
     ap.add_argument("--demo", action="store_true", help="run the toy loop-mechanics demo (no model)")
+    ap.add_argument("--v3", action="store_true", help="V3: save a template, reuse on a 2nd task (2nd-task-easier)")
     a = ap.parse_args(argv)
-    if a.demo:
+    if a.v3:
+        _v3_test()
+    elif a.demo:
         _toy_demo()
     else:
-        print("use --demo for the loop-mechanics test; model run + SWE port = next phase")
+        print("use --demo (loop mechanics) or --v3 (save/reuse template); model run + SWE = next phase")
 
 
 if __name__ == "__main__":
