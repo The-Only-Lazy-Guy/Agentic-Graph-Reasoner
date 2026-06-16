@@ -276,14 +276,14 @@ def _real_run(model_name, layer, alpha, ntok):
     import re
     def gen(prompt, v=None):
         msgs = [{"role": "user", "content": prompt}]
+        kw = dict(add_generation_prompt=True, return_tensors="pt", return_dict=True)
         try:                                  # Qwen3.5 reasoning model: disable <think> so it answers directly
-            ids = tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt",
-                                          enable_thinking=False).to(dev)
-        except TypeError:
-            ids = tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt").to(dev)
+            enc = tok.apply_chat_template(msgs, enable_thinking=False, **kw).to(dev)
+        except TypeError:                     # older template (e.g. Qwen2.5) has no enable_thinking
+            enc = tok.apply_chat_template(msgs, **kw).to(dev)
         with (inj.inject(v) if v is not None else contextlib.nullcontext()):
-            out = model.generate(ids, max_new_tokens=ntok, do_sample=False, pad_token_id=tok.eos_token_id)
-        txt = tok.decode(out[0, ids.shape[1]:], skip_special_tokens=True)
+            out = model.generate(**enc, max_new_tokens=ntok, do_sample=False, pad_token_id=tok.eos_token_id)
+        txt = tok.decode(out[0, enc["input_ids"].shape[1]:], skip_special_tokens=True)
         txt = re.sub(r"<think>.*?</think>", "", txt, flags=re.DOTALL).strip()   # backup strip
         lines = [ln.strip(" .*\"'`:") for ln in txt.splitlines() if ln.strip(" .*\"'`:")]
         return lines[0] if lines else ""                                       # the entity (first real line)
