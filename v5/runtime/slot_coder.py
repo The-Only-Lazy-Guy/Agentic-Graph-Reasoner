@@ -582,48 +582,64 @@ def _reason_demo(model_name, layer, alpha, ntok):
     tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=trust)
     inj = OperatorInjector(model, tok, layer, alpha); dev = next(model.parameters()).device
 
-    def gen_AB(prompt, v=None):
-        kw = dict(add_generation_prompt=True, return_tensors="pt", return_dict=True)
-        try:
-            enc = tok.apply_chat_template([{"role": "user", "content": prompt}], enable_thinking=False, **kw).to(dev)
-        except TypeError:
-            enc = tok.apply_chat_template([{"role": "user", "content": prompt}], **kw).to(dev)
-        with (inj.inject(v) if v is not None else contextlib.nullcontext()):
-            out = model.generate(**enc, max_new_tokens=8, do_sample=False, pad_token_id=tok.eos_token_id)
-        t = re.sub(r"<think>.*?</think>", "", tok.decode(out[0, enc["input_ids"].shape[1]:],
-                   skip_special_tokens=True), flags=re.DOTALL).strip().upper()
-        m = re.search(r"\b([AB])\b", t)
-        return m.group(1) if m else (t[:6] or "?")
+    def tid(s): return tok(s, add_special_tokens=False).input_ids[-1]
+    A_id, B_id = tid("A"), tid("B")
 
-    # the three JUDGE fills (each closes over the question's evidence nodes), all run INSIDE solve():
-    def op_judge(q, ev):                                   # OPERATOR: op-signed combine -> inject -> gen
-        nodes = [(e["text"], op_kind_for(e["node_type"])) for e in ev]
-        v = inj.combine(nodes, q, normalize=True)
-        return gen_AB(q, v)
-    def rag_judge(q, ev):                                  # RAG: the SAME node texts in context
-        notes = "\n".join(f"Note: {e['text']}" for e in ev)
-        return gen_AB(f"{notes}\n\n{q}")
-    def cold_judge(q, ev):                                 # COLD: no grounding
-        return gen_AB(q)
+    def score(prompt, R, W, v=None):
+        """answer-position logit MARGIN logit(R)-logit(W) + the discrete pick. The prompt ends
+        'Answer: (' so the next token is A/B (raw prompt, matches the proven code_reasoning_suite setup;
+        the margin is the SENSITIVE reasoning signal that a coarse A/B pick hides)."""
+        lg = inj.answer_logits(prompt, v)
+        mr = float(lg[tid(R)] - lg[tid(W)])
+        pick = "A" if lg[A_id] >= lg[B_id] else "B"
+        return pick, mr
 
-    print(f"#14 operators COMPOSED INTO solve() — reason-slot fill = operator inject. {len(ITEMS)} code items.\n")
+    margins = {"cold": [], "op": [], "rag": []}
+    cur = {}
+
+    def mk_judge(mode):
+        def judge(q, ev):                                  # runs INSIDE solve() as the JUDGE reason-slot fill
+            R, W = cur["R"], cur["W"]
+            if mode == "op":                               # OPERATOR: op-signed combine -> inject
+                nodes = [(e["text"], op_kind_for(e["node_type"])) for e in ev]
+                pick, mr = score(q, R, W, inj.combine(nodes, q, normalize=True))
+            elif mode == "rag":                            # RAG: the SAME node texts in context
+                notes = "\n".join(f"Note: {e['text']}" for e in ev)
+                pick, mr = score(f"{notes}\n\n{q}", R, W, None)
+            else:                                          # COLD: no grounding
+                pick, mr = score(q, R, W, None)
+            margins[mode].append(mr)
+            return pick
+        return judge
+    op_judge, rag_judge, cold_judge = mk_judge("op"), mk_judge("rag"), mk_judge("cold")
+
+    print(f"#14 operators COMPOSED INTO solve() — reason-slot fill = operator inject. {len(ITEMS)} code items.")
+    print("metric: discrete pick THROUGH solve() + belief MARGIN logit(correct)-logit(wrong) (the reasoning signal).\n")
     op_ok = rag_ok = cold_ok = 0
     for kind, q, R, W, good, bad in ITEMS:
-        ev = [{"id": "good", "text": good, "node_type": "strategy"},        # -> ASSERT
-              {"id": "bad", "text": bad, "node_type": "failure_pattern"}]   # -> INVALIDATE
-        op_v, log = _reason_build(q, ev, op_judge)         # operator fill, THROUGH the engine
-        rag_v, _ = _reason_build(q, ev, rag_judge)
-        cold_v, _ = _reason_build(q, ev, cold_judge)
+        cur["R"], cur["W"] = R, W
+        ev = [{"id": "good", "text": good, "node_type": "strategy"},        # -> ASSERT/+ (positive grounding)
+              {"id": "bad", "text": bad, "node_type": "failure_pattern"}]   # -> INVALIDATE/- (subtract)
+        op_v, log = _reason_build(q, ev, op_judge);   op_m = margins["op"][-1]
+        rag_v, _ = _reason_build(q, ev, rag_judge);   rag_m = margins["rag"][-1]
+        cold_v, _ = _reason_build(q, ev, cold_judge); cold_m = margins["cold"][-1]
         op_ok += (op_v == R); rag_ok += (rag_v == R); cold_ok += (cold_v == R)
-        print(f"[{kind:3} expect={R}]  cold={cold_v!r}  OPERATOR={op_v!r}  RAG={rag_v!r}  "
-              f"{'OP✓' if op_v == R else 'OP✗'}{'  RAG✗' if rag_v != R else ''}")
-        print(f"   Q: {q[:72]}")
-        print(f"   solve routed: {[r[0] for r in log]}\n")
+        print(f"[{kind:3} expect={R}]  pick cold={cold_v} OP={op_v} RAG={rag_v}   "
+              f"margin(corr-wrong) cold={cold_m:+.2f} OP={op_m:+.2f} RAG={rag_m:+.2f}  "
+              f"{'OP>RAG' if op_m > rag_m else 'op<=rag'}")
+        print(f"   Q: {q[:64]!r}   routed: {[r[0] for r in log]}")
     n = len(ITEMS)
-    print(f"=== THROUGH solve(): operator {op_ok}/{n} | RAG {rag_ok}/{n} | cold {cold_ok}/{n} ===")
-    print("  the JUDGE reason-slot fill = inj.combine+inject INSIDE the fixpoint loop (not decorative).")
-    print("  VALUE claim = operator > RAG here, on the code items where op>RAG is already proven; this")
-    print("  run CONFIRMS it survives being routed through the slot-graph engine. MANUALLY INSPECT the rows.")
+    import statistics as st
+    mm = lambda k: st.mean(margins[k])
+    opw = sum(1 for o, r in zip(margins['op'], margins['rag']) if o > r)
+    print(f"\n=== THROUGH solve() (N={n}) ===")
+    print(f"  discrete pick:  operator {op_ok}/{n} | RAG {rag_ok}/{n} | cold {cold_ok}/{n}")
+    print(f"  MEAN MARGIN  :  operator {mm('op'):+.2f} | RAG {mm('rag'):+.2f} | cold {mm('cold'):+.2f}   "
+          f"(higher = stronger pull to the CORRECT option)")
+    print(f"  operator margin > RAG margin on {opw}/{n} items")
+    print("  READING: discrete A/B is coarse + ties easily. The MARGIN answers 'does the operator help the")
+    print("  model PICK the better option?' — op_margin>rag_margin means the typed subtract (INVALIDATE the")
+    print("  misconception) pulls preference toward the correct fix MORE than dumping the same text via RAG.")
 
 
 # ── #13: REAL self-improving memory — serializable templates, save -> retrieve-by-signature -> instantiate ──
