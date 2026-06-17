@@ -105,9 +105,11 @@ def derive_reward(value, upstream_values: Sequence[str], gold=None, op: str = "+
     if solved:
         r = base + (uniq_bonus if uniq else 0.0)
         return r, {"grounded": True, "solved": True, "unique": uniq, "why": why,
-                   "verdict": "REWARD" + ("+unique" if uniq else " (copy, no bonus)")}
-    return 0.1, {"grounded": True, "solved": False, "unique": uniq, "why": why,
-                 "verdict": "small (grounded but unsolved)"}
+                   "verdict": "REWARD" + ("+unique" if uniq else " (no uniq bonus)")}
+    # grounded but does NOT solve = a COPY / partial (echoing an upstream number). Your spec rewards
+    # FILLS-AND-SOLVES, so this gets 0.0 (not positive) — else RL parks here (the +0.1 plateau it found).
+    return 0.0, {"grounded": True, "solved": False, "unique": uniq, "why": why,
+                 "verdict": "zero (grounded but does not solve = copy/partial)"}
 
 
 # ── validate the reward on KNOWN derive cases (no model). The reward MUST reward grounded+solves+
@@ -136,7 +138,7 @@ def _validate():
         print(f"  [{'PASS' if ok else 'FAIL'}] {name:44} reward={r:+.2f}  {b['verdict']}  ({b.get('why','')[:42]})")
     n = sum(results)
     print(f"\n=== DERIVE REWARD: {n}/{len(results)} PASS ===")
-    print("  grounded+solves+unique -> +1.5 | copy -> +1.0 | grounded-unsolved -> +0.1 | UNGROUNDED -> -1.0")
+    print("  solves+unique -> +1.5 | solves not-unique -> +1.0 | grounded-but-unsolved(copy) -> 0.0 | UNGROUNDED -> -1.0")
     print("  the LUCKY-hallucination row (value==gold but NOT derivable from upstream) is PUNISHED -> RL")
     print("  cannot win by inventing the right-looking number; it must actually compose from the graph.")
     return n == len(results)

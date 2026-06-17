@@ -86,7 +86,7 @@ def _selftest():
     return ok
 
 
-def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every):
+def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every, ent_coef, temperature):
     import torch
     import torch.nn as nn
     from transformers import AutoTokenizer
@@ -116,7 +116,7 @@ def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every):
 
     def gen_ids(prompt_ids, sample):
         with torch.no_grad():
-            return model.generate(prompt_ids, do_sample=sample, temperature=0.9 if sample else None,
+            return model.generate(prompt_ids, do_sample=sample, temperature=temperature if sample else None,
                                   top_p=0.95 if sample else None, max_new_tokens=12,
                                   pad_token_id=tok.eos_token_id)
 
@@ -134,8 +134,10 @@ def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every):
         logits = model(full).logits[:, :-1]
         logp = torch.log_softmax(logits.float(), dim=-1)
         start = prompt_ids.shape[1] - 1
-        sel = logp[:, start:start + comp_ids.shape[1]].gather(-1, comp_ids.unsqueeze(-1)).squeeze(-1)
-        return sel.sum(-1)                                   # total log-prob of the sampled completion
+        span = logp[:, start:start + comp_ids.shape[1]]      # [1, T, V] over the completion positions
+        sel = span.gather(-1, comp_ids.unsqueeze(-1)).squeeze(-1).sum(-1)   # total log-prob
+        ent = -(span.exp() * span).sum(-1).mean()            # mean token entropy (exploration bonus)
+        return sel, ent
 
     @torch.no_grad()
     def evaluate(tasks):
@@ -163,9 +165,11 @@ def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every):
         advs = advantages(rewards)
         mean_r = sum(rewards) / K
         r_std = (sum((r - mean_r) ** 2 for r in rewards) / K) ** 0.5    # within-group spread = the RL signal
-        loss = 0.0
+        loss = 0.0; ent_total = 0.0
         for comp, a in zip(comps, advs):
-            loss = loss - a * seq_logprob(pids, comp)
+            lp, ent = seq_logprob(pids, comp)
+            loss = loss - a * lp - ent_coef * ent                      # policy gradient + entropy bonus
+            ent_total += float(ent.detach())
         loss = loss / K
         loss.backward()
         gnorm = torch.nn.utils.clip_grad_norm_(trainable, 1.0)          # >0 => gradient is flowing to the LoRA
@@ -173,8 +177,8 @@ def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every):
         if r_std < 1e-9:
             zero_var += 1
         if steps <= 40 or step % 20 == 0:
-            print(f"[step {step:3}] task={t['name']:9} mean_r={mean_r:+.2f} r_std={r_std:.2f} "
-                  f"loss={float(loss):+.3f} gnorm={float(gnorm):.3f} rewards={[round(r,1) for r in rewards]}", flush=True)
+            print(f"[step {step:3}] task={t['name']:9} mean_r={mean_r:+.2f} r_std={r_std:.2f} ent={ent_total/K:.2f} "
+                  f"loss={float(loss.detach()):+.3f} gnorm={float(gnorm):.3f} rewards={[round(r,1) for r in rewards]}", flush=True)
         if step % eval_every == 0:
             m, h = evaluate(held)
             print(f"[eval @{step}] held-out mean reward={m:+.3f} hallucination={h:.0%}  (base {base_mean:+.3f}/{base_hall:.0%})", flush=True)
@@ -199,11 +203,13 @@ def main():
     ap.add_argument("--layers", type=int, nargs="+", default=[20, 22, 24, 26, 28],
                     help="layers to put LoRA on (the compose/inject band)")
     ap.add_argument("--eval-every", type=int, default=50)
+    ap.add_argument("--ent-coef", type=float, default=0.02, help="entropy bonus (exploration; prevents collapse to copies)")
+    ap.add_argument("--temperature", type=float, default=1.0, help="rollout sampling temperature")
     a = ap.parse_args()
     if a.selftest:
         import sys
         sys.exit(0 if _selftest() else 1)
-    train(a.model, a.steps, a.k, a.lr, a.r_lora, a.seed, a.layers, a.eval_every)
+    train(a.model, a.steps, a.k, a.lr, a.r_lora, a.seed, a.layers, a.eval_every, a.ent_coef, a.temperature)
 
 
 if __name__ == "__main__":
