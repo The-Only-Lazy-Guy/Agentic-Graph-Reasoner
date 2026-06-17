@@ -88,6 +88,7 @@ def _selftest():
 
 def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every):
     import torch
+    import torch.nn as nn
     from transformers import AutoTokenizer
     from peft import LoraConfig, get_peft_model
     from v5.lm_loader import load_frozen_lm
@@ -96,9 +97,16 @@ def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every):
     base = load_frozen_lm(model_name)
     tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=trust)
     dev = next(base.parameters()).device
+    # auto-detect the Linear leaf-module names inside the transformer layers (Qwen3.5 is a custom
+    # linear-attention arch -> NOT q/k/v/o_proj). Architecture-agnostic; print what we adapt.
+    leaf = sorted({n.split(".")[-1] for n, m in base.named_modules()
+                   if isinstance(m, nn.Linear) and ".layers." in n
+                   and not any(x in n.lower() for x in ("lm_head", "embed"))})
+    if not leaf:
+        raise RuntimeError("no Linear leaf modules found inside .layers.* — inspect base.named_modules()")
+    print(f"LoRA target leaf modules (auto-detected): {leaf}", flush=True)
     cfg = LoraConfig(r=r_lora, lora_alpha=2 * r_lora, lora_dropout=0.0, task_type="CAUSAL_LM",
-                     target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-                     layers_to_transform=layers)            # target the compose/inject layers (the gap)
+                     target_modules=leaf, layers_to_transform=layers)   # target the compose/inject band
     model = get_peft_model(base, cfg); model.train()
     trainable = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(trainable, lr=lr)
