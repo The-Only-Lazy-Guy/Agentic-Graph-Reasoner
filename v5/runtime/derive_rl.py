@@ -23,16 +23,16 @@ from v5.runtime.derive_reward import derive_reward, _nums
 
 # HARD = mixed-op (the gap = composing DIFFERENT ops). EASY = single-op the 4B can sometimes do (gives
 # GRPO a foothold). Curriculum ramps p_hard 0->1 so groups have within-group variance early (no cold-start).
-TEMPLATES = [
-    ("sum_disc", lambda a, b, c: a + b - c,        "the subtotal of the two items after the discount"),
-    ("prod_add", lambda a, b, c: a * b + c,        "the cost of the units plus the flat fee"),
-    ("sum_prod", lambda a, b, c: (a + b) * c,      "the total when the two parts are bought in that quantity"),
-    ("prod_sub", lambda a, b, c: a * b - c,        "the cost of the units after the rebate"),
+TEMPLATES = [   # mixed-op, UNAMBIGUOUS instruction (names the exact operation -> gap = COMPUTE, not interpret)
+    ("sum_disc", lambda a, b, c: a + b - c,        "A plus B, then minus C"),
+    ("prod_add", lambda a, b, c: a * b + c,        "A multiplied by B, then plus C"),
+    ("sum_prod", lambda a, b, c: (a + b) * c,      "the sum of A and B, then that result multiplied by C"),
+    ("prod_sub", lambda a, b, c: a * b - c,        "A multiplied by B, then minus C"),
 ]
 EASY_T = [
-    ("e_sum2", lambda a, b, c: a + b,              "the total of the two items"),
-    ("e_sum3", lambda a, b, c: a + b + c,          "the total of all three items"),
-    ("e_prod", lambda a, b, c: a * b,              "the cost for the given quantity"),
+    ("e_sum2", lambda a, b, c: a + b,              "A plus B"),
+    ("e_sum3", lambda a, b, c: a + b + c,          "A plus B plus C"),
+    ("e_prod", lambda a, b, c: a * b,              "A multiplied by B"),
 ]
 NOISE = ["The order id is 5567.", "It ships from aisle 12.", "Founded in 2019.",
          "There are 100 reviews.", "This is the tier 3 plan.", "Catalog page 88."]
@@ -203,9 +203,49 @@ def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every, ent_coef, 
     model.save_pretrained(out); print(f"  LoRA saved -> {out}")
 
 
+def run_baseline_eval(model_name, n):
+    """Evaluate the FROZEN model (no LoRA) on n hard tasks with the now-unambiguous instructions.
+    Per-task rows show WHICH compositions fail -> is the gap COMPUTE (still fails) or was it interpret
+    (now solves)? Greedy decode."""
+    import torch
+    from transformers import AutoTokenizer
+    from v5.lm_loader import load_frozen_lm
+    trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
+    model = load_frozen_lm(model_name); model.eval()
+    tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=trust)
+    dev = next(model.parameters()).device
+
+    def gen(prompt):
+        m = [{"role": "user", "content": prompt}]
+        kw = dict(add_generation_prompt=True, return_tensors="pt", return_dict=True)
+        try:
+            enc = tok.apply_chat_template(m, enable_thinking=False, **kw)
+        except TypeError:
+            enc = tok.apply_chat_template(m, **kw)
+        ids = enc["input_ids"].to(dev)
+        with torch.no_grad():
+            out = model.generate(ids, do_sample=False, max_new_tokens=12, pad_token_id=tok.eos_token_id)
+        return re.sub(r"<think>.*?</think>", "", tok.decode(out[0, ids.shape[1]:], skip_special_tokens=True),
+                      flags=re.DOTALL).strip()
+
+    print(f"FROZEN baseline on {n} mixed-op tasks (UNAMBIGUOUS instructions) — is the gap compute or interpret?\n")
+    rs, solved = [], 0
+    for i in range(n):
+        t = gen_task(random.Random(10_000 + i), p_hard=1.0)
+        v = _nums(gen(t["prompt"]))
+        r, b = score(str(v[0]) if v else "", t)
+        rs.append(r); solved += int(b.get("solved", False))
+        print(f"  [{t['name']:9}] {t['named']} instr-> derived={(str(v[0]) if v else '')!r} gold={t['gold']} r={r:+.2f} {b['verdict']}")
+    print(f"\n  mean reward={sum(rs)/n:+.2f} | solve-rate={solved/n:.0%} | hallucination={sum(1 for r in rs if r<0)/n:.0%}")
+    print("  solve-rate HIGH now = the old gap was INTERPRETATION (vague NL), not compute -> no real compute gap.")
+    print("  solve-rate still LOW = a real COMPUTE gap -> SFT warm-start then RL is the move.")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--baseline", action="store_true", help="eval frozen model on hard tasks (clear prompts)")
+    ap.add_argument("--n-baseline", type=int, default=15)
     ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
     ap.add_argument("--steps", type=int, default=200)
     ap.add_argument("--k", type=int, default=8, help="rollouts per task (GRPO group size)")
@@ -221,6 +261,8 @@ def main():
     if a.selftest:
         import sys
         sys.exit(0 if _selftest() else 1)
+    if a.baseline:
+        return run_baseline_eval(a.model, a.n_baseline)
     train(a.model, a.steps, a.k, a.lr, a.r_lora, a.seed, a.layers, a.eval_every, a.ent_coef, a.temperature)
 
 
