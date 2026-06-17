@@ -1012,6 +1012,14 @@ def _engine_tests():
           and propagated and pool.slots["A"].value == "a v2" and pool.slots["B"].value == "b v2"
           and pool.slots["B"].state == VALID, f"propagated={propagated} B={pool.slots['B'].value!r}")
 
+    # T14 — derive is a FALLBACK: when retrieval HITS, the filler is used and derive is NOT called.
+    called = {"d": False}
+    def _d(slot, pool): called["d"] = True; return "DERIVED"
+    s = [SlotSpec("A", [], "fact", "ASSERT", query=lambda p: "a x", derive=_d)]
+    pool = Pool(s); SlotGraph(s).solve(pool, first_word_ret([node("a", "a v1")]), take_first)
+    check("T14 derive is fallback (not called when retrieval hits)",
+          pool.slots["A"].value == "a v1" and not called["d"], f"value={pool.slots['A'].value!r} d_called={called['d']}")
+
     n_pass = sum(1 for _, c, _ in results if c)
     print(f"\n=== ENGINE BACKEND: {n_pass}/{len(results)} PASS ===")
     return n_pass == len(results)
@@ -1022,9 +1030,99 @@ def pool_get(slots, name):                # helper for query lambdas inside _eng
     return s.value if s and s.state in (VALID, TENTATIVE) else ""
 
 
+# ── retrieve-OR-DERIVE with a REAL 4B: when the graph has NO fact for a slot, the frozen LM DERIVES
+# the value from upstream slots (TRANSFORM). Tests the value (computable -> correct), the contrast
+# (no derive -> unfillable), and the BOUNDARY (non-computable arbitrary fact -> hallucinated). ──
+def _derive_demo(model_name, layer, alpha, ntok):
+    import os, re
+    from v5.lm_loader import load_frozen_lm
+    from transformers import AutoTokenizer
+    trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
+    model = load_frozen_lm(model_name); model.eval()
+    tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=trust)
+    dev = next(model.parameters()).device
+
+    def gen(prompt, nt=16):
+        msgs = [{"role": "user", "content": prompt}]
+        kw = dict(add_generation_prompt=True, return_tensors="pt", return_dict=True)
+        try:
+            enc = tok.apply_chat_template(msgs, enable_thinking=False, **kw).to(dev)
+        except TypeError:
+            enc = tok.apply_chat_template(msgs, **kw).to(dev)
+        out = model.generate(**enc, max_new_tokens=nt, do_sample=False, pad_token_id=tok.eos_token_id)
+        return re.sub(r"<think>.*?</think>", "", tok.decode(out[0, enc["input_ids"].shape[1]:],
+                      skip_special_tokens=True), flags=re.DOTALL).strip()
+    def num(s):
+        m = re.search(r"-?\d+", s); return m.group(0) if m else ""
+
+    # DERIVABLE: TOTAL = costA + costB, with NO "total" fact in the graph -> must be derived from upstream.
+    # fictional widget names so it is genuinely a computation, not recall.
+    ITEMS = [("Fizzbolt", 7, "Glimstone", 5, 12), ("Quorblade", 13, "Snarvane", 8, 21),
+             ("Vexrod", 20, "Mirethorn", 14, 34)]
+
+    def build(na, ca, nb, cb, with_derive):
+        graph = [{"id": "fa", "kind": "fact", "text": f"Widget {na} costs {ca} credits."},
+                 {"id": "fb", "kind": "fact", "text": f"Widget {nb} costs {cb} credits."}]
+        def retr(q, kind):
+            ql = q.lower()
+            if na.lower() in ql: return [graph[0]]
+            if nb.lower() in ql: return [graph[1]]
+            return []                                             # TOTAL query -> NO fact -> retrieval MISSES
+        def fill(slot, ev, pool):
+            if slot.name == "TOTAL":
+                return ""                                         # no evidence -> derive must handle it
+            return num(gen(f"{ev[0]['text']} How many credits does it cost? Answer with only the number:")) if ev else ""
+        def derive(slot, pool):                                   # TRANSFORM: compute from UPSTREAM slot values
+            a, b = pool.get("COST_A"), pool.get("COST_B")
+            return num(gen(f"Widget {na} costs {a} credits and widget {nb} costs {b} credits. What is the "
+                           f"TOTAL cost of buying one of each? Answer with only the number:"))
+        specs = [SlotSpec("COST_A", [], "fact", "ASSERT", query=lambda p: f"cost of widget {na}"),
+                 SlotSpec("COST_B", [], "fact", "ASSERT", query=lambda p: f"cost of widget {nb}"),
+                 SlotSpec("TOTAL", ["COST_A", "COST_B"], "fact", "ASSERT", query=lambda p: "total combined cost",
+                          derive=(derive if with_derive else None))]
+        return SlotGraph(specs), Pool(specs), retr, fill
+
+    print("retrieve-OR-DERIVE (4B): the graph has NO 'total' fact -> the LM must DERIVE it from upstream.\n")
+    print("DERIVABLE (TOTAL = costA + costB):")
+    correct = 0
+    for na, ca, nb, cb, gold in ITEMS:
+        sg, pool, retr, fill = build(na, ca, nb, cb, True)
+        sg.solve(pool, retr, fill, log=None)
+        got = pool.slots["TOTAL"].value
+        sg0, pool0, retr0, fill0 = build(na, ca, nb, cb, False)
+        sg0.solve(pool0, retr0, fill0, enable_backtrack=False, log=None)   # no derive -> show unfillable cleanly
+        ok = got == str(gold); correct += ok
+        print(f"  [{na} {ca} + {nb} {cb} = {gold}]  WITH-derive TOTAL={got!r} correct={ok} (COST_A={pool.get('COST_A')!r} "
+              f"COST_B={pool.get('COST_B')!r}) | NO-derive TOTAL={pool0.slots['TOTAL'].value!r}/{pool0.slots['TOTAL'].state}")
+    print(f"  derive-correct: {correct}/{len(ITEMS)}  (and NO-derive leaves TOTAL unfilled/insufficient = derive is load-bearing)\n")
+
+    # BOUNDARY control: a value that is NOT computable from upstream -> derive HALLUCINATES (ungrounded).
+    print("BOUNDARY (non-derivable arbitrary fact — derive should NOT be trusted here):")
+    na, ca = ITEMS[0][0], ITEMS[0][1]
+    graph = [{"id": "fa", "kind": "fact", "text": f"Widget {na} costs {ca} credits."}]
+    def retr_c(q, kind):
+        return [graph[0]] if na.lower() in q.lower() else []
+    def fill_c(slot, ev, pool):
+        return num(gen(f"{ev[0]['text']} How many credits? Answer with only the number:")) if (ev and slot.name == "COST") else ""
+    def derive_secret(slot, pool):
+        return gen(f"Widget {na} costs {pool.get('COST')} credits. What is the manufacturer's secret "
+                   f"4-digit discount code for it? Answer with only the code:", nt=12)
+    specs = [SlotSpec("COST", [], "fact", "ASSERT", query=lambda p: f"cost of widget {na}"),
+             SlotSpec("SECRET", ["COST"], "fact", "ASSERT", query=lambda p: "secret discount code",
+                      derive=derive_secret)]
+    sg, pool = SlotGraph(specs), Pool(specs)
+    sg.solve(pool, retr_c, fill_c, log=None)
+    print(f"  [secret code]  derive produced={pool.get('SECRET')!r}  -> HALLUCINATED (not in the graph, ungrounded).")
+    print("  BOUNDARY: derive only computes values DERIVABLE from upstream (arithmetic/composition); it is")
+    print("  NOT a fact-gap filler. For arbitrary missing facts it invents -> must stay INSUFFICIENT, not derive.")
+    print("\n  INSPECT: did WITH-derive compute the right totals from the retrieved costs, did NO-derive leave")
+    print("  TOTAL unfilled, and did the boundary case hallucinate? That is the honest scope of derive.")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Slot-graph reasoning substrate.")
     ap.add_argument("--demo", action="store_true", help="run the toy loop-mechanics demo (no model)")
+    ap.add_argument("--derive", action="store_true", help="retrieve-OR-DERIVE with the 4B (compute-from-upstream + boundary)")
     ap.add_argument("--test", action="store_true", help="run the no-model engine backend test suite (asserts)")
     ap.add_argument("--backtrack", action="store_true", help="#10: backtracking + INSUFFICIENT + derive (no model)")
     ap.add_argument("--v3", action="store_true", help="V3: save a template, reuse on a 2nd task (2nd-task-easier)")
@@ -1046,6 +1144,8 @@ def main(argv=None):
     elif a.reason_selftest:
         import sys
         sys.exit(0 if _reason_selftest() else 1)
+    elif a.derive:
+        _derive_demo(a.model, a.layer, a.alpha, a.ntok)
     elif a.backtrack:
         _backtrack_demo()
     elif a.selfimprove:
