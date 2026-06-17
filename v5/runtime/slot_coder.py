@@ -541,8 +541,41 @@ def _reason_demo(model_name, layer, alpha, ntok):
     from v5.lm_loader import load_frozen_lm
     from v5.operator_injector import OperatorInjector
     from v5.operator_schema import op_kind_for
-    from v5.code_reasoning_suite import ITEMS              # the PROVEN op>RAG code items (don't reinvent)
     from transformers import AutoTokenizer
+
+    # the PROVEN op>RAG code items (inlined; code_reasoning_suite.py removed in the repo migration).
+    # (kind, question ending "Answer: (", correct, wrong, CORRECT insight -> ASSERT/+, MISCONCEPTION -> INVALIDATE/-)
+    ITEMS = [
+        ("bug", "def add(x, lst=[]):\n    lst.append(x)\n    return lst\n\nadd(1) returned [1]. The next "
+         "call add(2) returns (A) [2] (B) [1, 2]. Answer: (", "B", "A",
+         "A default list argument is created once at definition and shared across all calls, so it accumulates.",
+         "Each function call creates a fresh empty list for a default list argument."),
+        ("bug", "fns = [lambda: i for i in range(3)]\n\nfns[0]() returns (A) 0 (B) 2. Answer: (", "B", "A",
+         "Closures capture the loop variable by reference, so after the loop they all see its final value.",
+         "Each lambda captures the current value of the loop variable at the moment it is created."),
+        ("bug", "In CPython:  a = 257; b = 257;  the expression (a is b) evaluates to (A) True (B) False. "
+         "Answer: (", "B", "A",
+         "CPython caches small integers from -5 to 256; 257 is outside that range, so the two are distinct "
+         "objects and 'is' is False.",
+         "Equal integers are always the same object in Python, so 'is' returns True."),
+        ("bug", "import time\ndef f(t=time.time()):\n    return t\n\nCalling f() at different times returns "
+         "(A) a different value each call (B) the same value every call. Answer: (", "B", "A",
+         "Default argument values are evaluated once when the function is defined, not on each call.",
+         "Default arguments are re-evaluated on every call, so time.time() gives a fresh value each time."),
+        ("fix", "Issue: a KeyError is raised when an expected config key is missing. The more targeted, "
+         "robust fix is (A) use dict.get(key, default) (B) wrap a large block in try/except Exception. "
+         "Answer: (", "A", "B",
+         "Use dict.get with a default for an expected-missing key; reserve try/except for genuinely "
+         "exceptional cases, since broad except hides other bugs.",
+         "Wrapping the whole block in try/except Exception is the safest, most robust way to handle a "
+         "missing key."),
+        ("fix", "Issue: O(n^2) slowness caused by repeated list.index() calls inside a loop. The fix that "
+         "addresses the root cause is (A) build a dict/set for O(1) lookups (B) add an lru_cache decorator "
+         "to the function. Answer: (", "A", "B",
+         "Repeated linear scans (list.index in a loop) are fixed by a dict/set giving O(1) lookup; caching "
+         "does not help when the inputs are all distinct.",
+         "Adding an lru_cache decorator removes the O(n^2) cost of the repeated list.index calls."),
+    ]
 
     trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
     model = load_frozen_lm(model_name); model.eval()
