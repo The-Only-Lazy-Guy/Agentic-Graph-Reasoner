@@ -21,28 +21,34 @@ import re
 
 from v5.runtime.derive_reward import derive_reward, _nums
 
-# mixed-op formula templates over named upstream A,B,C (the gap = composing DIFFERENT ops).
+# HARD = mixed-op (the gap = composing DIFFERENT ops). EASY = single-op the 4B can sometimes do (gives
+# GRPO a foothold). Curriculum ramps p_hard 0->1 so groups have within-group variance early (no cold-start).
 TEMPLATES = [
-    ("sum3",     lambda a, b, c: a + b + c,        "the total cost including all three parts"),
     ("sum_disc", lambda a, b, c: a + b - c,        "the subtotal of the two items after the discount"),
     ("prod_add", lambda a, b, c: a * b + c,        "the cost of the units plus the flat fee"),
     ("sum_prod", lambda a, b, c: (a + b) * c,      "the total when the two parts are bought in that quantity"),
     ("prod_sub", lambda a, b, c: a * b - c,        "the cost of the units after the rebate"),
 ]
+EASY_T = [
+    ("e_sum2", lambda a, b, c: a + b,              "the total of the two items"),
+    ("e_sum3", lambda a, b, c: a + b + c,          "the total of all three items"),
+    ("e_prod", lambda a, b, c: a * b,              "the cost for the given quantity"),
+]
 NOISE = ["The order id is 5567.", "It ships from aisle 12.", "Founded in 2019.",
          "There are 100 reviews.", "This is the tier 3 plan.", "Catalog page 88."]
 
 
-def gen_task(rng: random.Random) -> dict:
-    name, formula, instr = rng.choice(TEMPLATES)
+def gen_task(rng: random.Random, p_hard: float = 1.0) -> dict:
+    hard = rng.random() < p_hard
+    name, formula, instr = rng.choice(TEMPLATES if hard else EASY_T)
     a, b, c = rng.randint(2, 15), rng.randint(2, 15), rng.randint(1, 6)
     named = {"A": str(a), "B": str(b), "C": str(c)}
     gold = int(formula(a, b, c))
-    noise = rng.sample(NOISE, 2)
+    noise = rng.sample(NOISE, 2 if hard else 1)
     givens = f"A = {a}; B = {b}; C = {c}"
     prompt = (f"Given values: {givens}. (Notes, irrelevant: {' '.join(noise)}) "
               f"Compute {instr}. Use ONLY the given values; ignore the notes. Answer with only the number:")
-    return {"name": name, "prompt": prompt, "named": named, "gold": gold,
+    return {"name": name, "hard": hard, "prompt": prompt, "named": named, "gold": gold,
             "formula": (lambda nm, f=formula: f(int(nm["A"]), int(nm["B"]), int(nm["C"])))}
 
 
@@ -154,7 +160,8 @@ def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every, ent_coef, 
     print(f"[eval @0] held-out mean reward={base_mean:+.3f} hallucination={base_hall:.0%}", flush=True)
     zero_var = 0                                            # count groups with no within-group reward spread
     for step in range(1, steps + 1):
-        t = gen_task(rng)
+        p_hard = max(0.0, min(1.0, (step - 0.25 * steps) / (0.5 * steps)))   # curriculum: easy -> hard
+        t = gen_task(rng, p_hard)
         pids = encode(t["prompt"])
         comps, rewards = [], []
         for _ in range(K):
@@ -162,23 +169,28 @@ def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every, ent_coef, 
             comp = out[:, pids.shape[1]:]
             val = _nums(tok.decode(comp[0], skip_special_tokens=True))
             comps.append(comp); rewards.append(score(str(val[0]) if val else "", t)[0])
-        advs = advantages(rewards)
         mean_r = sum(rewards) / K
         r_std = (sum((r - mean_r) ** 2 for r in rewards) / K) ** 0.5    # within-group spread = the RL signal
+        if r_std < 1e-9:                                                # no signal -> SKIP (don't let entropy run away)
+            zero_var += 1
+            if steps <= 40 or step % 20 == 0:
+                print(f"[step {step:3}] task={t['name']:9} p_hard={p_hard:.2f} mean_r={mean_r:+.2f} r_std=0 SKIP "
+                      f"rewards={[round(r, 1) for r in rewards]}", flush=True)
+            continue
+        advs = advantages(rewards)
         loss = 0.0; ent_total = 0.0
         for comp, a in zip(comps, advs):
             lp, ent = seq_logprob(pids, comp)
-            loss = loss - a * lp - ent_coef * ent                      # policy gradient + entropy bonus
+            loss = loss - a * lp - ent_coef * ent                      # policy gradient + small entropy bonus
             ent_total += float(ent.detach())
         loss = loss / K
         loss.backward()
         gnorm = torch.nn.utils.clip_grad_norm_(trainable, 1.0)          # >0 => gradient is flowing to the LoRA
         opt.step(); opt.zero_grad()
-        if r_std < 1e-9:
-            zero_var += 1
         if steps <= 40 or step % 20 == 0:
-            print(f"[step {step:3}] task={t['name']:9} mean_r={mean_r:+.2f} r_std={r_std:.2f} ent={ent_total/K:.2f} "
-                  f"loss={float(loss.detach()):+.3f} gnorm={float(gnorm):.3f} rewards={[round(r,1) for r in rewards]}", flush=True)
+            print(f"[step {step:3}] task={t['name']:9} p_hard={p_hard:.2f} mean_r={mean_r:+.2f} r_std={r_std:.2f} "
+                  f"ent={ent_total/K:.2f} loss={float(loss.detach()):+.3f} gnorm={float(gnorm):.3f} "
+                  f"rewards={[round(r, 1) for r in rewards]}", flush=True)
         if step % eval_every == 0:
             m, h = evaluate(held)
             print(f"[eval @{step}] held-out mean reward={m:+.3f} hallucination={h:.0%}  (base {base_mean:+.3f}/{base_hall:.0%})", flush=True)
@@ -203,7 +215,7 @@ def main():
     ap.add_argument("--layers", type=int, nargs="+", default=[20, 22, 24, 26, 28],
                     help="layers to put LoRA on (the compose/inject band)")
     ap.add_argument("--eval-every", type=int, default=50)
-    ap.add_argument("--ent-coef", type=float, default=0.02, help="entropy bonus (exploration; prevents collapse to copies)")
+    ap.add_argument("--ent-coef", type=float, default=0.005, help="small entropy bonus (only on informative groups)")
     ap.add_argument("--temperature", type=float, default=1.0, help="rollout sampling temperature")
     a = ap.parse_args()
     if a.selftest:
