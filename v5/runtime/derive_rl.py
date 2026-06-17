@@ -150,6 +150,7 @@ def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every):
 
     base_mean, base_hall = evaluate(held)
     print(f"[eval @0] held-out mean reward={base_mean:+.3f} hallucination={base_hall:.0%}", flush=True)
+    zero_var = 0                                            # count groups with no within-group reward spread
     for step in range(1, steps + 1):
         t = gen_task(rng)
         pids = encode(t["prompt"])
@@ -160,18 +161,27 @@ def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every):
             val = _nums(tok.decode(comp[0], skip_special_tokens=True))
             comps.append(comp); rewards.append(score(str(val[0]) if val else "", t)[0])
         advs = advantages(rewards)
+        mean_r = sum(rewards) / K
+        r_std = (sum((r - mean_r) ** 2 for r in rewards) / K) ** 0.5    # within-group spread = the RL signal
         loss = 0.0
         for comp, a in zip(comps, advs):
             loss = loss - a * seq_logprob(pids, comp)
         loss = loss / K
-        loss.backward(); torch.nn.utils.clip_grad_norm_(trainable, 1.0); opt.step(); opt.zero_grad()
-        if step % 20 == 0:
-            print(f"[step {step}] task={t['name']:9} mean_reward={sum(rewards)/K:+.2f} loss={float(loss):+.3f}", flush=True)
+        loss.backward()
+        gnorm = torch.nn.utils.clip_grad_norm_(trainable, 1.0)          # >0 => gradient is flowing to the LoRA
+        opt.step(); opt.zero_grad()
+        if r_std < 1e-9:
+            zero_var += 1
+        if steps <= 40 or step % 20 == 0:
+            print(f"[step {step:3}] task={t['name']:9} mean_r={mean_r:+.2f} r_std={r_std:.2f} "
+                  f"loss={float(loss):+.3f} gnorm={float(gnorm):.3f} rewards={[round(r,1) for r in rewards]}", flush=True)
         if step % eval_every == 0:
             m, h = evaluate(held)
             print(f"[eval @{step}] held-out mean reward={m:+.3f} hallucination={h:.0%}  (base {base_mean:+.3f}/{base_hall:.0%})", flush=True)
     m, h = evaluate(held)
     print(f"\n=== RL DONE === held-out mean reward {base_mean:+.3f}->{m:+.3f} | hallucination {base_hall:.0%}->{h:.0%}")
+    print(f"  zero-variance groups (no RL signal) = {zero_var}/{steps} ({zero_var/steps:.0%}) — if high, the base policy")
+    print(f"  rarely succeeds so GRPO groups have no spread -> need curriculum / more exploration (cold-start).")
     print("  REAL only if the lift is on HELD-OUT mixed-op tasks (not the trained ones) and hallucination drops.")
     out = "artifacts/derive_lora"
     model.save_pretrained(out); print(f"  LoRA saved -> {out}")
