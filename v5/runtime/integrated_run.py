@@ -93,7 +93,11 @@ def main():
     tok = AutoTokenizer.from_pretrained(a.model, trust_remote_code=trust)
     dev = next(model.parameters()).device
 
-    # ITEM 2 — LoRA loaded (the RL-trained derive adapter)
+    # ITEM 3 — operators armed: build the injector on the BASE model BEFORE the peft wrap (its forward
+    # hook sits on the base decoder layer, survives LoRA injection, and still fires through PeftModel).
+    inj = OperatorInjector(model, tok, a.layer, a.alpha)
+
+    # ITEM 2 — LoRA loaded (the RL-trained derive adapter); wrap AFTER arming the injector.
     adapter_ok = Path(a.adapter).exists() and any(Path(a.adapter).iterdir())
     if adapter_ok:
         from peft import PeftModel
@@ -103,7 +107,6 @@ def main():
     else:
         print(f"[wiring] WARNING: no LoRA at {a.adapter} — derive runs on the BASE model (item 2 NOT satisfied)")
 
-    inj = OperatorInjector(model, tok, a.layer, a.alpha)                # ITEM 3 — operators armed
     emb = RealEmbedder(dev)                                             # ITEM 4 — real embedder
     GRAPH, GOLD = build_graph_and_data()
     gv = {n["id"]: torch.tensor(emb.embed_nodes({n["id"]: n["text"]})[n["id"]], device=dev) for n in GRAPH}
