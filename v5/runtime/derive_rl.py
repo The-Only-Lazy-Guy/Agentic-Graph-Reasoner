@@ -122,10 +122,12 @@ def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every):
 
     def encode(prompt):
         m = [{"role": "user", "content": prompt}]
+        kw = dict(add_generation_prompt=True, return_tensors="pt", return_dict=True)
         try:
-            return tok.apply_chat_template(m, add_generation_prompt=True, enable_thinking=False, return_tensors="pt").to(dev)
+            enc = tok.apply_chat_template(m, enable_thinking=False, **kw)
         except TypeError:
-            return tok.apply_chat_template(m, add_generation_prompt=True, return_tensors="pt").to(dev)
+            enc = tok.apply_chat_template(m, **kw)
+        return enc["input_ids"].to(dev)                     # the bare input_ids tensor (this tf version returns a BatchEncoding)
 
     def seq_logprob(prompt_ids, comp_ids):
         full = torch.cat([prompt_ids, comp_ids], dim=1)
