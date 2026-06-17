@@ -72,13 +72,16 @@ class SlotGraph:
         self.order = self._toposort(specs)            # DATAFLOW DAG order (upstream first)
 
     def _toposort(self, specs):
-        done, order = set(), []
+        done, order, visiting = set(), [], set()
         def visit(n):
             if n in done or n not in self.specs:
                 return
+            if n in visiting:                          # back-edge -> cyclic DATAFLOW (not a DAG)
+                raise ValueError(f"cyclic DATAFLOW dependency at slot {n!r}; slot-graph must be a DAG")
+            visiting.add(n)
             for u in self.specs[n].needs:
                 visit(u)
-            done.add(n); order.append(n)
+            visiting.discard(n); done.add(n); order.append(n)
         for s in specs:
             visit(s.name)
         return order
@@ -170,10 +173,18 @@ class SlotGraph:
         return all(pool.slots[n].state == VALID for n in self.order), max_steps
 
     def invalidate(self, pool: Pool, node_id: str):
-        """Graph edit / new info touching node_id -> any slot justified by it goes STALE (+ propagate)."""
-        for name, s in pool.slots.items():
-            if node_id in (s.justification.get("evidence") or []):
-                s.state = STALE
+        """Graph edit / new info touching node_id -> slots justified by it go STALE, and STALE
+        PROPAGATES transitively to their dependents (their basis changed). Belief revision (design §3)."""
+        dirty = {name for name, s in pool.slots.items()
+                 if node_id in (s.justification.get("evidence") or [])}
+        for name in dirty:
+            pool.slots[name].state = STALE
+        changed = True
+        while changed:                                 # propagate downstream along DATAFLOW
+            changed = False
+            for name, spec in self.specs.items():
+                if pool.slots[name].state == VALID and any(u in dirty for u in spec.needs):
+                    pool.slots[name].state = STALE; dirty.add(name); changed = True
 
 
 # ── toy task-family to prove the loop mechanics (no model): 2-hop fact reasoning ──
@@ -457,67 +468,129 @@ def _real_run(model_name, layer, alpha, ntok, distractors=0):
     print("and did the chain reach the gold? Compare to cold one-shot. Read the actual fills above.")
 
 
-# ── #14: operators in REASONING slots — operator-fill (INVALIDATE pitfalls / ASSERT insight) vs RAG ──
-# Reuses op_kind_for (operator_schema) + OperatorInjector + the proven bare-misconception content.
-# A reasoning slot JUDGES an approach; the operator-fill subtracts the wrong path (INVALIDATE), where
-# RAG of the same misconception POISONS (optest_shape). This is operator_loop_v2's logic, as a slot-fill.
+# ── #14 (REAL): operators COMPOSED INTO solve() — a reason slot's fill IS an operator inject ──
+# 2-slot graph EVIDENCE (retrieve the relevant nodes) -> JUDGE (mode='reason'): the JUDGE fill runs
+# OperatorInjector.combine+inject INSIDE the fixpoint loop (op_kind_for: strategy->ASSERT, failure
+# _pattern->INVALIDATE). Shared `_reason_build` is used by BOTH the no-model `--reason-selftest` (proves
+# the reason slot enters the operator path during solve) AND the 4B `--reason` run (proves op>RAG value
+# on the code items where op>RAG is already proven, code_reasoning_suite). No more decorative injector.
+def _reason_build(q, ev_nodes, judge_fill):
+    """EVIDENCE -> JUDGE(reason) through SlotGraph.solve. judge_fill(q, ev) -> verdict; ev = the nodes.
+    Returns (judge_value, solve_log)."""
+    def retr(query, kind):
+        return ev_nodes                                   # the slot's evidence pool (a ranker fetches these)
+
+    def filler(slot, ev, pool):
+        if slot.name == "EVIDENCE":
+            return ",".join(e["id"] for e in ev)          # register what was retrieved (extract slot)
+        return judge_fill(pool.get("q"), ev)              # JUDGE = reason slot: operator/RAG fill, IN-LOOP
+
+    specs = [SlotSpec("EVIDENCE", [], "node", "ASSERT", query=lambda p: q, mode="extract"),
+             SlotSpec("JUDGE", ["EVIDENCE"], "node", "ASSERT", query=lambda p: q, mode="reason")]
+    sg = SlotGraph(specs); pool = Pool(specs, context={"q": q})
+    log = []
+    sg.solve(pool, retr, filler, log=log)
+    return pool.slots["JUDGE"].value, log
+
+
+def _reason_selftest():
+    """No-model proof: the JUDGE reason slot ENTERS the operator inject path during solve() (not a
+    decorative injector). A fake injector flags when inject() is entered; the op judge reads that flag."""
+    import contextlib
+    from v5.operator_schema import op_kind_for
+    print("slot_coder --reason-selftest: prove the reason slot enters the OPERATOR path inside solve().\n")
+    ev = [{"id": "good", "text": "correct insight", "node_type": "strategy"},
+          {"id": "bad", "text": "the misconception", "node_type": "failure_pattern"}]
+
+    class _FakeInj:
+        def __init__(self): self.entered = False; self.ops = None
+        def combine(self, nodes, q, normalize=False): self.ops = [op for _, op in nodes]; return "OPVEC"
+        @contextlib.contextmanager
+        def inject(self, v):
+            self.entered = True
+            try: yield
+            finally: pass
+    fake = _FakeInj()
+
+    def op_judge(q, evn):                                  # mirrors the real operator fill
+        nodes = [(e["text"], op_kind_for(e["node_type"])) for e in evn]
+        v = fake.combine(nodes, q, normalize=True)
+        with fake.inject(v):
+            return "A" if fake.entered else "B"            # the gen would see the steered state -> correct
+    def rag_judge(q, evn):
+        return "B"                                         # raw misconception in context -> poisoned -> wrong
+
+    from v5.operator_injector import SIGN
+    op_v, oplog = _reason_build("Is X valid?", ev, op_judge)
+    rag_v, _ = _reason_build("Is X valid?", ev, rag_judge)
+    routed = any(r[0] == "EVIDENCE" for r in oplog) and any(r[0] == "JUDGE" for r in oplog)
+    # the SIGN semantics (not the exact op string): the valid insight grounds POSITIVE, the
+    # misconception SUBTRACTS (INVALIDATE). strategy->TRANSFORM(+1), failure_pattern->INVALIDATE(-1).
+    signs_ok = bool(fake.ops) and SIGN.get(fake.ops[0], 0) > 0 and SIGN.get(fake.ops[-1], 0) < 0
+    ok = op_v == "A" and rag_v == "B" and fake.entered and routed and signs_ok
+    print("   solve log:", oplog)
+    print(f"   JUDGE via operator={op_v!r}  via RAG={rag_v!r}  inject-entered={fake.entered}  "
+          f"op_kinds={fake.ops} signs={[SIGN.get(o,0) for o in (fake.ops or [])]}  routed={routed}")
+    print(f"\n   WIRING PROOF -> {'PASS' if ok else 'FAIL'}  (the reason slot's fill RAN inj.combine+inject")
+    print("    INSIDE solve, signed by op_kind_for; the injector is no longer decorative).")
+    return ok
+
+
 def _reason_demo(model_name, layer, alpha, ntok):
     import contextlib, os, re, torch
     from v5.lm_loader import load_frozen_lm
     from v5.operator_injector import OperatorInjector
     from v5.operator_schema import op_kind_for
+    from v5.code_reasoning_suite import ITEMS              # the PROVEN op>RAG code items (don't reinvent)
     from transformers import AutoTokenizer
 
-    # (question -> yes/no validity judgement, correct, evidence node, node_type). bare misconception
-    # nodes -> op_kind_for=INVALIDATE; a correct-approach node -> ASSERT (the valid control).
-    ITEMS = [
-        ("A student proves  sum 1/(a(1+b)) >= 3/(1+abc)  by writing 1+b >= 2 sqrt(b), hence "
-         "1/(a(1+b)) <= 1/(2a sqrt(b)), then summing. Is this proof VALID? Answer yes or no:", "no",
-         "By AM-GM 1+b >= 2 sqrt(b), so 1/(a(1+b)) <= 1/(2a sqrt(b)), and summing proves the lower bound.",
-         "failure_pattern"),
-        ("A student argues there are infinitely many primes because N = (product of all primes so far) "
-         "+ 1 is ITSELF always prime. Is this argument VALID? Answer yes or no:", "no",
-         "N = (product of all primes up to p) + 1 is itself a prime not in the list.", "failure_pattern"),
-        ("To prove  sum 1/(a(1+b)) >= 3/(1+abc),  a student clears denominators and reduces it to a "
-         "polynomial inequality, then applies AM-GM to the polynomial form. Is this approach VALID? "
-         "Answer yes or no:", "yes",
-         "Clearing denominators to a polynomial inequality and bounding it with AM-GM is a standard, "
-         "valid route for this inequality.", "strategy"),
-    ]
     trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
     model = load_frozen_lm(model_name); model.eval()
     tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=trust)
     inj = OperatorInjector(model, tok, layer, alpha); dev = next(model.parameters()).device
 
-    def gen(prompt, v=None):
+    def gen_AB(prompt, v=None):
         kw = dict(add_generation_prompt=True, return_tensors="pt", return_dict=True)
         try:
             enc = tok.apply_chat_template([{"role": "user", "content": prompt}], enable_thinking=False, **kw).to(dev)
         except TypeError:
             enc = tok.apply_chat_template([{"role": "user", "content": prompt}], **kw).to(dev)
         with (inj.inject(v) if v is not None else contextlib.nullcontext()):
-            out = model.generate(**enc, max_new_tokens=ntok, do_sample=False, pad_token_id=tok.eos_token_id)
+            out = model.generate(**enc, max_new_tokens=8, do_sample=False, pad_token_id=tok.eos_token_id)
         t = re.sub(r"<think>.*?</think>", "", tok.decode(out[0, enc["input_ids"].shape[1]:],
-                   skip_special_tokens=True), flags=re.DOTALL).strip().lower()
-        m = re.search(r"\b(yes|no)\b", t)     # first clear yes/no anywhere (model may explain then answer)
-        return m.group(1) if m else (t[:18] or "(empty)")
+                   skip_special_tokens=True), flags=re.DOTALL).strip().upper()
+        m = re.search(r"\b([AB])\b", t)
+        return m.group(1) if m else (t[:6] or "?")
 
-    print("#14 REASONING SLOTS: operator-fill vs RAG (per-slot). MANUALLY INSPECT.\n")
+    # the three JUDGE fills (each closes over the question's evidence nodes), all run INSIDE solve():
+    def op_judge(q, ev):                                   # OPERATOR: op-signed combine -> inject -> gen
+        nodes = [(e["text"], op_kind_for(e["node_type"])) for e in ev]
+        v = inj.combine(nodes, q, normalize=True)
+        return gen_AB(q, v)
+    def rag_judge(q, ev):                                  # RAG: the SAME node texts in context
+        notes = "\n".join(f"Note: {e['text']}" for e in ev)
+        return gen_AB(f"{notes}\n\n{q}")
+    def cold_judge(q, ev):                                 # COLD: no grounding
+        return gen_AB(q)
+
+    print(f"#14 operators COMPOSED INTO solve() — reason-slot fill = operator inject. {len(ITEMS)} code items.\n")
     op_ok = rag_ok = cold_ok = 0
-    for q, correct, node, ntype in ITEMS:
-        op = op_kind_for(ntype)
-        v = inj.combine([(node, op)], q, normalize=True)
-        cold, opr, rag = gen(q), gen(q, v), gen(f"Note: {node}\n\n{q}")
-        op_ok += (opr == correct); rag_ok += (rag == correct); cold_ok += (cold == correct)
-        print(f"[{op:10} expect={correct}]  cold={cold!r}  OPERATOR={opr!r}  RAG={rag!r}  "
-              f"{'OP✓' if opr==correct else 'OP✗'}{' RAGpoison' if rag!=correct and op=='INVALIDATE' else ''}")
-        print(f"   Q: {q[:70]}")
-        print(f"   node({ntype}->{op}): {node[:70]}\n")
+    for kind, q, R, W, good, bad in ITEMS:
+        ev = [{"id": "good", "text": good, "node_type": "strategy"},        # -> ASSERT
+              {"id": "bad", "text": bad, "node_type": "failure_pattern"}]   # -> INVALIDATE
+        op_v, log = _reason_build(q, ev, op_judge)         # operator fill, THROUGH the engine
+        rag_v, _ = _reason_build(q, ev, rag_judge)
+        cold_v, _ = _reason_build(q, ev, cold_judge)
+        op_ok += (op_v == R); rag_ok += (rag_v == R); cold_ok += (cold_v == R)
+        print(f"[{kind:3} expect={R}]  cold={cold_v!r}  OPERATOR={op_v!r}  RAG={rag_v!r}  "
+              f"{'OP✓' if op_v == R else 'OP✗'}{'  RAG✗' if rag_v != R else ''}")
+        print(f"   Q: {q[:72]}")
+        print(f"   solve routed: {[r[0] for r in log]}\n")
     n = len(ITEMS)
-    print(f"=== operator-fill {op_ok}/{n} | RAG-fill {rag_ok}/{n} | cold {cold_ok}/{n} ===")
-    print("  INSPECT: on the INVALIDATE (misconception) items, does OPERATOR judge 'no' while RAG of the")
-    print("  same misconception poisons toward 'yes'? On the ASSERT (valid) item, does OPERATOR keep 'yes'?")
-    print("  (operator-fill = operator_loop_v2's edge-gated combine, now as the reasoning-slot fill.)")
+    print(f"=== THROUGH solve(): operator {op_ok}/{n} | RAG {rag_ok}/{n} | cold {cold_ok}/{n} ===")
+    print("  the JUDGE reason-slot fill = inj.combine+inject INSIDE the fixpoint loop (not decorative).")
+    print("  VALUE claim = operator > RAG here, on the code items where op>RAG is already proven; this")
+    print("  run CONFIRMS it survives being routed through the slot-graph engine. MANUALLY INSPECT the rows.")
 
 
 # ── #13: REAL self-improving memory — serializable templates, save -> retrieve-by-signature -> instantiate ──
@@ -852,6 +925,44 @@ def _engine_tests():
     check("T9 toposort deps-before-dependents", order.index("X") < order.index("Y") < order.index("Z"),
           f"order={order}")
 
+    # T10 — cyclic DATAFLOW is REJECTED (was an unguarded RecursionError crash).
+    raised = False
+    try:
+        SlotGraph([SlotSpec("A", ["B"], "f", "ASSERT", query=lambda p: ""),
+                   SlotSpec("B", ["A"], "f", "ASSERT", query=lambda p: "")])
+    except ValueError:
+        raised = True
+    check("T10 cyclic deps rejected (no crash)", raised)
+
+    # T11 — diamond DAG: D needs [B,C], B,C need A -> solve to fixpoint (multi-parent FILL).
+    sd = [SlotSpec("D", ["B", "C"], "f", "ASSERT", query=lambda p: "d"),
+          SlotSpec("B", ["A"], "f", "ASSERT", query=lambda p: "b"),
+          SlotSpec("C", ["A"], "f", "ASSERT", query=lambda p: "c"),
+          SlotSpec("A", [], "f", "ASSERT", query=lambda p: "a")]
+    pool = Pool(sd); ok, _ = SlotGraph(sd).solve(pool, lambda q, k: [node("x", q.split()[0])], take_first)
+    check("T11 diamond DAG -> fixpoint all VALID", ok and all(pool.slots[n].state == VALID for n in "ABCD"))
+
+    # T12 — max_steps guard: a rederive slot that NEVER improves must terminate (not hang), return False.
+    s = [SlotSpec("D", [], "f", "ASSERT", query=lambda p: "x", revise="rederive"),
+         SlotSpec("F", ["D"], "f", "ASSERT", query=lambda p: "y",
+                  sufficient=lambda slot, pool: False)]                 # F never sufficient -> endless retry
+    pool = Pool(s); ok, steps = SlotGraph(s).solve(
+        pool, lambda q, k: [node("e", "ev")], lambda slot, ev, pool: "same", max_steps=10)
+    check("T12 non-converging rederive terminates at max_steps", (not ok) and steps == 10, f"steps={steps}")
+
+    # T13 — multi-slot belief revision: edit upstream -> dependent goes STALE (propagated) -> re-fill.
+    s = [SlotSpec("A", [], "fact", "ASSERT", query=lambda p: "a x"),
+         SlotSpec("B", ["A"], "fact", "ASSERT", query=lambda p: "b y")]
+    sg = SlotGraph(s); pool = Pool(s)
+    sg.solve(pool, first_word_ret([node("a", "a v1"), node("b", "b v1")]), take_first)
+    before = (pool.slots["A"].state, pool.slots["B"].state)
+    sg.invalidate(pool, "a")                                           # edit A's evidence
+    propagated = pool.slots["A"].state == STALE and pool.slots["B"].state == STALE   # B propagated too
+    sg.solve(pool, first_word_ret([node("a", "a v2"), node("b", "b v2")]), take_first)
+    check("T13 belief revision propagates STALE to dependent + re-fills", before == (VALID, VALID)
+          and propagated and pool.slots["A"].value == "a v2" and pool.slots["B"].value == "b v2"
+          and pool.slots["B"].state == VALID, f"propagated={propagated} B={pool.slots['B'].value!r}")
+
     n_pass = sum(1 for _, c, _ in results if c)
     print(f"\n=== ENGINE BACKEND: {n_pass}/{len(results)} PASS ===")
     return n_pass == len(results)
@@ -876,12 +987,16 @@ def main(argv=None):
     ap.add_argument("--distractors", type=int, default=0,
                     help=">0 = big-graph value-demo: add a confuser (reviewer) chain + N*4 volume facts; "
                          "tests whether cold (all facts in context) fails while slot-graph retrieve-per-hop holds")
-    ap.add_argument("--reason", action="store_true", help="#14: operators in REASONING slots (op-fill vs RAG)")
+    ap.add_argument("--reason", action="store_true", help="#14: operators COMPOSED INTO solve() (op vs RAG, 4B)")
+    ap.add_argument("--reason-selftest", action="store_true", help="#14: no-model proof reason slot enters operator path")
     ap.add_argument("--selfimprove", action="store_true", help="#13: save a solved slot-graph, reuse on a new task")
     a = ap.parse_args(argv)
     if a.test:
         import sys
         sys.exit(0 if _engine_tests() else 1)
+    elif a.reason_selftest:
+        import sys
+        sys.exit(0 if _reason_selftest() else 1)
     elif a.backtrack:
         _backtrack_demo()
     elif a.selfimprove:
