@@ -92,7 +92,7 @@ def _selftest():
     return ok
 
 
-def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every, ent_coef, temperature):
+def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every, ent_coef, temperature, sft_steps):
     import torch
     import torch.nn as nn
     from transformers import AutoTokenizer
@@ -158,6 +158,28 @@ def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every, ent_coef, 
 
     base_mean, base_hall = evaluate(held)
     print(f"[eval @0] held-out mean reward={base_mean:+.3f} hallucination={base_hall:.0%}", flush=True)
+
+    # ── SFT WARM-START (design §9): teach the composition from CORRECT demos so RL has a foothold ──
+    # numbers are random+infinite -> the LoRA can't memorize answers, must learn the PROCEDURE (generalizes
+    # only if held-out solve-rate rises). Direct (prompt -> gold number) cross-entropy on the gold tokens.
+    if sft_steps > 0:
+        ce = torch.nn.CrossEntropyLoss()
+        for s in range(1, sft_steps + 1):
+            t = gen_task(rng, p_hard=1.0)                  # teach the HARD mixed-op compositions directly
+            pids = encode(t["prompt"])
+            gids = tok(str(t["gold"]), return_tensors="pt", add_special_tokens=False).input_ids.to(dev)
+            full = torch.cat([pids, gids], dim=1)
+            logits = model(full).logits
+            start = pids.shape[1]
+            pred = logits[:, start - 1:start - 1 + gids.shape[1]].reshape(-1, logits.shape[-1])
+            loss = ce(pred.float(), gids.reshape(-1))
+            loss.backward(); torch.nn.utils.clip_grad_norm_(trainable, 1.0); opt.step(); opt.zero_grad()
+            if s <= 5 or s % 25 == 0:
+                print(f"[sft {s:3}] task={t['name']:9} gold={t['gold']} ce_loss={float(loss.detach()):.3f}", flush=True)
+        sm, sh = evaluate(held)
+        print(f"[eval after SFT] held-out mean reward={sm:+.3f} hallucination={sh:.0%}  (base {base_mean:+.3f}/{base_hall:.0%})", flush=True)
+        print("  SFT generalizes ONLY if solve-rate rises on HELD-OUT random tasks (can't memorize). Then RL refines.\n")
+
     zero_var = 0                                            # count groups with no within-group reward spread
     for step in range(1, steps + 1):
         p_hard = max(0.0, min(1.0, (step - 0.25 * steps) / (0.5 * steps)))   # curriculum: easy -> hard
@@ -257,13 +279,14 @@ def main():
     ap.add_argument("--eval-every", type=int, default=50)
     ap.add_argument("--ent-coef", type=float, default=0.005, help="small entropy bonus (only on informative groups)")
     ap.add_argument("--temperature", type=float, default=1.0, help="rollout sampling temperature")
+    ap.add_argument("--sft-steps", type=int, default=0, help="SFT warm-start steps before RL (design §9 cold-start fix)")
     a = ap.parse_args()
     if a.selftest:
         import sys
         sys.exit(0 if _selftest() else 1)
     if a.baseline:
         return run_baseline_eval(a.model, a.n_baseline)
-    train(a.model, a.steps, a.k, a.lr, a.r_lora, a.seed, a.layers, a.eval_every, a.ent_coef, a.temperature)
+    train(a.model, a.steps, a.k, a.lr, a.r_lora, a.seed, a.layers, a.eval_every, a.ent_coef, a.temperature, a.sft_steps)
 
 
 if __name__ == "__main__":
