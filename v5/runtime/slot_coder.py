@@ -30,6 +30,16 @@ class SlotSpec:
     query: Callable[[Dict[str, "Slot"]], str]   # SLOT-AWARE: build the retrieval query from the pool
     ask: Callable[[Dict[str, "Slot"]], str] = None   # the LM sub-question to fill the slot (real run)
     mode: str = "extract"                  # 'extract' = exact content -> RAG; 'reason' = decision -> OPERATORS
+    # retrieve-OR-DERIVE: when retrieval returns nothing usable, derive the value from upstream slots
+    # (the TRANSFORM operator). Returns "" if it cannot derive -> slot goes INSUFFICIENT -> backtrack.
+    derive: Callable[["Slot", "Pool"], str] = None
+    # own-evidence GATE: is THIS slot's basis sufficient (not just "are my deps valid")? Default = the
+    # slot produced a non-empty value. SWE FIX overrides this with applyable/verify.
+    sufficient: Callable[["Slot", "Pool"], bool] = None
+    # how a downstream failure REVISES this slot when backtracking to it:
+    #   'evidence' = rule out the supporting evidence + re-retrieve (retrieval ambiguity, e.g. a confuser)
+    #   'rederive' = keep the evidence, re-fill with more effort/feedback (synthesis, e.g. re-DIAGNOSE)
+    revise: str = "evidence"
 
 
 @dataclass
@@ -73,37 +83,91 @@ class SlotGraph:
             visit(s.name)
         return order
 
-    def _gate_sufficient(self, pool: Pool, name: str) -> bool:
-        # sufficiency = all of this slot's needs are filled valid (the basis is complete)
+    def _deps_complete(self, pool: Pool, name: str) -> bool:
+        # all of this slot's DATAFLOW needs are filled valid (the upstream basis is complete)
         return all(pool.slots.get(u, Slot(u)).state == VALID or u in pool.context
                    for u in self.specs[name].needs)
 
+    def _sufficient(self, pool: Pool, name: str) -> bool:
+        """GATE = own-evidence sufficiency AND upstream complete. The slot's own check (default:
+        produced a non-empty value) must pass too -- not just 'are my deps valid'."""
+        slot = pool.slots[name]; spec = self.specs[name]
+        own = spec.sufficient(slot, pool) if spec.sufficient else bool(slot.value)
+        return bool(own) and self._deps_complete(pool, name)
+
     def solve(self, pool: Pool, retriever: Callable[[str, str], list],
-              filler: Callable[[Slot, list, Pool], str], max_steps: int = 24, log: list | None = None):
-        """Fixpoint: fill empty/stale/insufficient slots (upstream-first) until all valid+sufficient."""
+              filler: Callable[[Slot, list, Pool], str], max_steps: int = 24, log: list | None = None,
+              derive: Callable[[Slot, Pool], str] | None = None, enable_backtrack: bool = True):
+        """Fixpoint over the TSG. Per non-(valid+sufficient) slot, upstream-first:
+          FILL   : slot-aware retrieve (minus nogoods) -> filler; if empty -> DERIVE from upstream.
+          GATE   : own-evidence sufficiency + deps complete -> VALID, else INSUFFICIENT.
+          BACKTRACK (dependency-directed): an INSUFFICIENT slot revises its weakest VALID upstream --
+                    records the upstream's evidence as a NOGOOD and marks it STALE so re-fill picks
+                    differently -- then retries. No upstream to revise -> the slot is unsolvable (parked).
+        Returns (all_valid, steps)."""
+        from collections import defaultdict
+        nogood: Dict[str, set] = defaultdict(set)      # slot -> evidence ids ruled out (de Kleer nogoods)
+        failed: set = set()                            # slots proven unsolvable -> parked (picker skips)
         for step in range(max_steps):
             target = None
-            for name in self.order:                    # topological: fill upstream first
+            for name in self.order:                    # topological: upstream first
                 s = pool.slots[name]
-                if s.state in (EMPTY, STALE, INSUFFICIENT):
+                if name not in failed and s.state in (EMPTY, STALE, INSUFFICIENT):
                     target = name; break
             if target is None:
                 if log is not None: log.append(("FIXPOINT", step))
-                return True, step
-            spec = self.specs[target]
-            q = spec.query(pool.slots | {})            # SLOT-AWARE query (knows the need)
-            evidence = retriever(q, spec.evidence_kind) # targeted retrieval for THIS slot
-            value = filler(pool.slots[target], evidence, pool)   # operator-inject + LM fill
-            complete = bool(value) and self._gate_sufficient(pool, target)
-            pool.store(target, value, {"q": q, "evidence": [e.get("id") for e in evidence]},
-                       VALID if complete else TENTATIVE)
-            # PROPAGATE forward: dependents go STALE (their basis changed)
+                return all(pool.slots[n].state == VALID for n in self.order), step
+            spec = self.specs[target]; slot = pool.slots[target]
+
+            # ── INSUFFICIENT -> BACKTRACK: revise the nearest VALID upstream (dependency-directed) ──
+            if slot.state == INSUFFICIENT and enable_backtrack:
+                ups = [u for u in spec.needs if pool.slots.get(u) and pool.slots[u].state == VALID]
+                if ups:
+                    weak = max(ups, key=lambda u: self.order.index(u))   # nearest upstream = closest cause
+                    if self.specs[weak].revise == "rederive":            # synthesis: keep evidence, re-fill harder
+                        pool.slots[weak].state = STALE
+                    else:                                                # retrieval: rule out the SUPPORTING
+                        j = pool.slots[weak].justification               # evidence (not the whole bag) + re-retrieve
+                        for eid in (j.get("used") or j.get("evidence") or []):
+                            nogood[weak].add(eid)
+                        pool.slots[weak].state = STALE
+                    slot.state = EMPTY                                   # retry once the upstream changes
+                    if log is not None: log.append(("BACKTRACK", target, "revise", weak, self.specs[weak].revise))
+                    continue
+                failed.add(target)                                       # nothing to revise -> give up
+                if log is not None: log.append(("UNSOLVABLE", target))
+                continue
+            if slot.state == INSUFFICIENT:               # backtrack disabled -> park (old behavior)
+                failed.add(target)
+                if log is not None: log.append(("STUCK", target))
+                continue
+
+            # ── FILL: slot-aware retrieve (minus nogoods) -> filler; retrieve-OR-DERIVE ──
+            q = spec.query(pool.slots | {})
+            ev = [e for e in retriever(q, spec.evidence_kind) if e.get("id") not in nogood[target]]
+            value = filler(slot, ev, pool) if ev else ""
+            ev_ids = [e.get("id") for e in ev]                           # full provenance (for invalidate)
+            used = [e.get("id") for e in ev if value and value in (e.get("text") or "")]  # what SUPPORTS it
+            dfn = spec.derive or derive
+            if not value and dfn is not None:                            # retrieval missed -> DERIVE
+                value = dfn(slot, pool)
+                if value:
+                    ev_ids = used = list(spec.needs)                     # justified by upstream slots
+                    if log is not None: log.append((target, "DERIVE " + value[:32], "derived", q[:34]))
+            if not value:                                                # neither retrieve nor derive
+                pool.store(target, "", {"q": q, "evidence": ev_ids, "used": used}, INSUFFICIENT)
+                if log is not None: log.append((target, "(unfilled)", INSUFFICIENT, q[:40]))
+                continue
+            pool.store(target, value, {"q": q, "evidence": ev_ids, "used": used or ev_ids[:1]}, TENTATIVE)
+            # ── GATE: own-evidence sufficiency + deps complete ──
+            slot.state = VALID if self._sufficient(pool, target) else INSUFFICIENT
+            # ── PROPAGATE forward: dependents go STALE (their basis changed) ──
             for name, spec2 in self.specs.items():
                 if target in spec2.needs and pool.slots[name].state == VALID:
                     pool.slots[name].state = STALE
-            if log is not None:
-                log.append((target, value[:40], pool.slots[target].state, q[:40]))
-        return False, max_steps
+            if log is not None and slot.state == VALID:
+                log.append((target, value[:40], slot.state, q[:40]))
+        return all(pool.slots[n].state == VALID for n in self.order), max_steps
 
     def invalidate(self, pool: Pool, node_id: str):
         """Graph edit / new info touching node_id -> any slot justified by it goes STALE (+ propagate)."""
@@ -592,9 +656,217 @@ def _selfimprove_demo(model_name, layer, alpha, ntok):
     print(f"  This is grow-reasoning-not-params: the graph accumulates reasoning STRUCTURES.")
 
 
+# ── #10: dependency-directed BACKTRACKING + INSUFFICIENT + retrieve-OR-DERIVE (no model, deterministic) ──
+# Proves the engine behaviors that were design-only before: a CONFUSER (reviewer ranked above author)
+# poisons the chain so a downstream slot can't fill -> INSUFFICIENT -> backtrack rules out the bad
+# upstream value (nogood) and walks back until the chain resolves; a terminal slot with NO retrievable
+# fact is filled by DERIVE from upstream. A/B (backtrack off vs on) = the right-for-right-reason proof.
+def _backtrack_demo():
+    GRAPH = [
+        {"id": "r1", "kind": "fact", "text": "The Codex was reviewed by Bob Krell."},   # CONFUSER (reviewer)
+        {"id": "a1", "kind": "fact", "text": "The Codex was written by Ana Stahl."},     # the real author
+        {"id": "bk", "kind": "fact", "text": "Bob Krell founded the town of Redhollow."},
+        {"id": "as", "kind": "fact", "text": "Ana Stahl founded the town of Greenford."},
+        {"id": "gf", "kind": "fact", "text": "The town of Greenford mines a metal called auralite."},
+        # NOTE: no "metal mined by Redhollow" fact -> the confuser path dead-ends -> backtrack must recover.
+        {"id": "n1", "kind": "fact", "text": "The Codex has nine chapters."},
+    ]
+    GOLD = "auralite"
+
+    def _author(t):
+        i = t.lower().rfind(" by "); tail = t[i + 4:].strip(" .") if i >= 0 else ""
+        out = []
+        for w in tail.split():
+            cw = w.strip(".,")
+            if cw[:1].isupper(): out.append(cw)
+            else: break
+        return " ".join(out)
+
+    def _after(t, kw):
+        i = t.lower().find(kw); tail = t[i + len(kw):].strip(" .") if i >= 0 else ""
+        return tail.split()[0].strip(".,") if tail else ""
+
+    def retriever(query, kind):                 # deterministic keyword-routed ranker (imperfect on AUTHOR)
+        ql = query.lower()
+        if "metal" in ql or "mines" in ql:
+            return [n for n in GRAPH if "mines a metal" in n["text"]]
+        if "town" in ql or "founded" in ql:
+            return [n for n in GRAPH if "founded the town" in n["text"]]
+        if "author" in ql or "who" in ql or "wrote" in ql:
+            return [next(n for n in GRAPH if n["id"] == "r1"),     # CONFUSER (reviewer) ranked FIRST
+                    next(n for n in GRAPH if n["id"] == "a1")]
+        return []                                                  # SUMMARY query -> nothing -> DERIVE
+
+    specs = [
+        SlotSpec("AUTHOR", [], "fact", "ASSERT", query=lambda p: "author of the Codex"),
+        SlotSpec("CITY", ["AUTHOR"], "fact", "ASSERT", query=lambda p: f"town founded by {p['AUTHOR'].value}"),
+        SlotSpec("METAL", ["CITY"], "fact", "ASSERT", query=lambda p: f"metal from the town {p['CITY'].value}"),
+        SlotSpec("SUMMARY", ["METAL"], "fact", "ASSERT", query=lambda p: "one-line recap for the Codex",
+                 derive=lambda slot, pool: (f"The Codex's metal is {pool.slots['METAL'].value}."
+                                            if pool.slots["METAL"].value else "")),
+    ]
+    sbyn = {s.name: s for s in specs}
+
+    def filler(slot, ev, pool):                 # LM stub: answer ONLY if evidence mentions the upstream entity
+        need = sbyn[slot.name].needs
+        up = pool.slots[need[0]].value if need else ""
+        cands = [e for e in ev if (not up or up in e["text"])]
+        if not cands:
+            return ""
+        t = cands[0]["text"]
+        if slot.name == "AUTHOR": return _author(t)
+        if slot.name == "CITY":   return _after(t, "town of ")
+        if slot.name == "METAL":  return _after(t, "called ")
+        return ""
+
+    def run(enable):
+        sg = SlotGraph(specs); pool = Pool(specs, context={"issue": "What metal traces to the Codex's author?"})
+        log = []
+        ok, steps = sg.solve(pool, retriever, filler, log=log, enable_backtrack=enable)
+        return ok, steps, pool, log
+
+    print("#10 BACKTRACKING + INSUFFICIENT + retrieve-OR-DERIVE — deterministic, MANUALLY INSPECT.\n")
+    print("Chain AUTHOR->CITY->METAL->SUMMARY. The ranker puts the REVIEWER (Bob Krell) above the author")
+    print("(Ana Stahl) -> METAL dead-ends on Redhollow. SUMMARY has no fact -> must DERIVE.\n")
+    for label, enable in [("BACKTRACK OFF (old engine)", False), ("BACKTRACK ON (fixed engine)", True)]:
+        ok, steps, pool, log = run(enable)
+        final = pool.slots["METAL"].value
+        print(f"=== {label} ===")
+        for row in log:
+            print("   ", row)
+        print(f"   POOL: {{ {', '.join(f'{n}={s.value!r}/{s.state}' for n, s in pool.slots.items())} }}")
+        print(f"   fixpoint={ok} steps={steps}  METAL={final!r}  SUMMARY={pool.slots['SUMMARY'].value!r}  "
+              f"correct={GOLD in final}\n")
+    print("EXPECT: OFF -> METAL unfilled (INSUFFICIENT, never recovered) -> WRONG. "
+          "ON -> backtrack rules out the\nreviewer, walks back AUTHOR, chain resolves to 'auralite', "
+          "SUMMARY derived. INSPECT the BACKTRACK/DERIVE log rows.")
+
+
+# ── BACKEND TEST SUITE: deterministic asserts over the engine (no model). Every state + transition. ──
+def _engine_tests():
+    def node(i, t): return {"id": i, "kind": "fact", "text": t}
+    def first_word_ret(nodes):
+        def r(q, kind):
+            key = q.split()[0].lower() if q.split() else ""
+            return [n for n in nodes if key and key in n["text"].lower()]
+        return r
+    def take_first(slot, ev, pool):
+        return ev[0]["text"] if ev else ""
+
+    results = []
+    def check(name, cond, detail=""):
+        results.append((name, bool(cond), detail))
+        print(f"  [{'PASS' if cond else 'FAIL'}] {name}{('  -- ' + detail) if detail and not cond else ''}")
+
+    # T1 — linear happy path: both slots fill -> fixpoint, all VALID.
+    s = [SlotSpec("A", [], "fact", "ASSERT", query=lambda p: "alpha x"),
+         SlotSpec("B", ["A"], "fact", "ASSERT", query=lambda p: "beta y")]
+    nodes = [node("a", "alpha thing"), node("b", "beta thing")]
+    pool = Pool(s); ok, steps = SlotGraph(s).solve(pool, first_word_ret(nodes), take_first)
+    check("T1 linear->fixpoint all VALID", ok and all(pool.slots[n].state == VALID for n in "AB"),
+          f"ok={ok} states={[pool.slots[n].state for n in 'AB']}")
+
+    # T2 — retrieve-OR-DERIVE: B has no retrievable fact (query 'none') -> derive from A.
+    s = [SlotSpec("A", [], "fact", "ASSERT", query=lambda p: "alpha x"),
+         SlotSpec("B", ["A"], "fact", "ASSERT", query=lambda p: "none",
+                  derive=lambda slot, pool: f"derived[{pool.get('A')[:5]}]")]
+    pool = Pool(s); ok, _ = SlotGraph(s).solve(pool, first_word_ret([node("a", "alpha thing")]), take_first)
+    check("T2 retrieve-OR-derive fills B", ok and pool.slots["B"].value.startswith("derived")
+          and pool.slots["B"].state == VALID, f"B={pool.slots['B'].value!r}/{pool.slots['B'].state}")
+
+    # T3 — unsolvable: no evidence, no derive, no upstream -> INSUFFICIENT, parked, terminates (not hang).
+    s = [SlotSpec("A", [], "fact", "ASSERT", query=lambda p: "none")]
+    pool = Pool(s); ok, steps = SlotGraph(s).solve(pool, lambda q, k: [], take_first, max_steps=12)
+    check("T3 unsolvable -> False, INSUFFICIENT, terminates", (not ok)
+          and pool.slots["A"].state == INSUFFICIENT and steps < 12, f"ok={ok} steps={steps}")
+
+    # T4/T5/T8 — CONFUSER chain: ranker puts reviewer above author; METAL dead-ends -> backtrack must
+    # rule out ONLY the confuser (surgical nogood) and recover the right author (not collapse to empty).
+    conf = [node("rev", "Doc reviewed by Bob"), node("aut", "Doc written by Ana"),
+            node("bt", "Bob founded Redtown"), node("at", "Ana founded Greentown"),
+            node("gm", "Greentown makes gold")]                      # NOTE: no Redtown metal
+    def conf_ret(q, kind):
+        ql = q.lower()
+        if "metal" in ql: return [n for n in conf if "makes" in n["text"]]
+        if "town" in ql:  return [n for n in conf if "founded" in n["text"]]
+        return [conf[0], conf[1]]                                    # AUTHOR: reviewer FIRST (the mistake)
+    def conf_fill(slot, ev, pool):
+        need = {"AUTHOR": None, "CITY": "AUTHOR", "METAL": "CITY"}[slot.name]
+        up = pool.get(need) if need else ""
+        cands = [e for e in ev if (not up or up in e["text"])]
+        if not cands: return ""
+        t = cands[0]["text"]
+        if slot.name == "AUTHOR": return t.split(" by ")[-1].strip()           # Bob / Ana
+        if slot.name == "CITY":   return t.split("founded ")[-1].strip()        # Redtown / Greentown
+        return t.split("makes ")[-1].strip()                                    # gold
+    cs = [SlotSpec("AUTHOR", [], "fact", "ASSERT", query=lambda p: "author Doc"),
+          SlotSpec("CITY", ["AUTHOR"], "fact", "ASSERT", query=lambda p: f"town founded {pool_get(p,'AUTHOR')}"),
+          SlotSpec("METAL", ["CITY"], "fact", "ASSERT", query=lambda p: f"metal {pool_get(p,'CITY')}")]
+    t4log = []
+    pool = Pool(cs); ok_on, _ = SlotGraph(cs).solve(pool, conf_ret, conf_fill, log=t4log)
+    bt_fired = any(r[0] == "BACKTRACK" for r in t4log)
+    picked_confuser = any(r[0] == "AUTHOR" and "Bob" in str(r[1]) for r in t4log)  # confuser WAS chosen first
+    check("T4 backtrack recovers chain (confuser picked, BACKTRACK fired, METAL=gold)", ok_on
+          and pool.slots["METAL"].value == "gold" and pool.slots["AUTHOR"].value == "Ana"
+          and bt_fired and picked_confuser,
+          f"AUTHOR={pool.slots['AUTHOR'].value!r} METAL={pool.slots['METAL'].value!r} "
+          f"bt_fired={bt_fired} confuser_first={picked_confuser}")
+    check("T8 surgical nogood: AUTHOR recovered to Ana (not empty-collapse)",
+          pool.slots["AUTHOR"].value == "Ana" and pool.slots["AUTHOR"].state == VALID)
+    pool2 = Pool(cs); ok_off, _ = SlotGraph(cs).solve(pool2, conf_ret, conf_fill, enable_backtrack=False)
+    check("T5 backtrack OFF control -> METAL unfilled, False", (not ok_off)
+          and pool2.slots["METAL"].value == "", f"ok={ok_off} METAL={pool2.slots['METAL'].value!r}")
+
+    # T6 — belief revision: solve, edit the graph + invalidate -> dependent re-fills new value.
+    s = [SlotSpec("A", [], "fact", "ASSERT", query=lambda p: "alpha x")]
+    g1 = [node("a", "alpha OLD")]; sg = SlotGraph(s); pool = Pool(s)
+    sg.solve(pool, first_word_ret(g1), take_first)
+    v_old = pool.slots["A"].value
+    g2 = [node("a", "alpha NEW")]
+    sg.invalidate(pool, "a")                                          # graph edit touches node 'a'
+    stale = pool.slots["A"].state == STALE
+    sg.solve(pool, first_word_ret(g2), take_first)                    # re-solve over the edited graph
+    check("T6 invalidate->STALE->re-fill new value", stale and v_old == "alpha OLD"
+          and pool.slots["A"].value == "alpha NEW", f"stale={stale} now={pool.slots['A'].value!r}")
+
+    # T7 — own-evidence GATE (sufficient()=False with a NON-empty value) + rederive recovery.
+    cnt = {"D": 0}
+    def t7_fill(slot, ev, pool):
+        if slot.name == "D":
+            n = cnt["D"]; cnt["D"] += 1
+            return "shallow" if n == 0 else "deep"
+        return "GOOD-fix" if "deep" in pool.get("D") else "BAD-fix"     # F applyable only if D deep
+    s = [SlotSpec("D", [], "fact", "ASSERT", query=lambda p: "x", revise="rederive"),
+         SlotSpec("F", ["D"], "fact", "ASSERT", query=lambda p: "y",
+                  sufficient=lambda slot, pool: slot.value.startswith("GOOD"))]
+    pool = Pool(s); ok, _ = SlotGraph(s).solve(pool, lambda q, k: [node("e", "ev")], t7_fill)
+    check("T7 own-GATE rejects BAD value -> rederive -> GOOD", ok
+          and pool.slots["F"].value == "GOOD-fix" and cnt["D"] >= 2,
+          f"F={pool.slots['F'].value!r} D_attempts={cnt['D']}")
+
+    # T9 — toposort: every dep precedes its dependent.
+    s = [SlotSpec("Z", ["Y"], "f", "ASSERT", query=lambda p: ""),
+         SlotSpec("Y", ["X"], "f", "ASSERT", query=lambda p: ""),
+         SlotSpec("X", [], "f", "ASSERT", query=lambda p: "")]
+    order = SlotGraph(s).order
+    check("T9 toposort deps-before-dependents", order.index("X") < order.index("Y") < order.index("Z"),
+          f"order={order}")
+
+    n_pass = sum(1 for _, c, _ in results if c)
+    print(f"\n=== ENGINE BACKEND: {n_pass}/{len(results)} PASS ===")
+    return n_pass == len(results)
+
+
+def pool_get(slots, name):                # helper for query lambdas inside _engine_tests (slots = pool.slots)
+    s = slots.get(name)
+    return s.value if s and s.state in (VALID, TENTATIVE) else ""
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Slot-graph reasoning substrate.")
     ap.add_argument("--demo", action="store_true", help="run the toy loop-mechanics demo (no model)")
+    ap.add_argument("--test", action="store_true", help="run the no-model engine backend test suite (asserts)")
+    ap.add_argument("--backtrack", action="store_true", help="#10: backtracking + INSUFFICIENT + derive (no model)")
     ap.add_argument("--v3", action="store_true", help="V3: save a template, reuse on a 2nd task (2nd-task-easier)")
     ap.add_argument("--real", action="store_true", help="#8: REAL frozen-4B fill + embedder retrieval, verbose dumps")
     ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
@@ -607,7 +879,12 @@ def main(argv=None):
     ap.add_argument("--reason", action="store_true", help="#14: operators in REASONING slots (op-fill vs RAG)")
     ap.add_argument("--selfimprove", action="store_true", help="#13: save a solved slot-graph, reuse on a new task")
     a = ap.parse_args(argv)
-    if a.selfimprove:
+    if a.test:
+        import sys
+        sys.exit(0 if _engine_tests() else 1)
+    elif a.backtrack:
+        _backtrack_demo()
+    elif a.selfimprove:
         _selfimprove_demo(a.model, a.layer, a.alpha, a.ntok)
     elif a.reason:
         _reason_demo(a.model, a.layer, a.alpha, a.ntok)
