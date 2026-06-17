@@ -46,6 +46,27 @@ def grounded_arith(value, upstream_values: Sequence[str], op: str = "+") -> tupl
     return False, f"cannot ground {target} in {ups} with op '{op}'"
 
 
+def grounded_formula(value, upstream_named: dict, formula: Callable[[dict], float]) -> tuple[bool, str]:
+    """GROUNDED via the slot's DECLARED multi-step formula over NAMED upstream values (recompute, don't
+    trust the model). upstream_named = {name: value_str}; formula(nums:{name->int}) -> number. Handles
+    distractor-robust selection + multi-step ops: only the named upstream feed the formula."""
+    nums = {k: _nums(v)[0] for k, v in upstream_named.items() if _nums(v)}
+    if len(nums) < len(upstream_named):
+        return False, f"missing upstream numbers (have {nums})"
+    vn = _nums(value)
+    if not vn:
+        return False, "no number in the derived value"
+    try:
+        expect = int(formula(nums))
+    except Exception as e:                                    # malformed formula -> not gradeable
+        return False, f"formula error: {e}"
+    if vn[0] == expect:
+        return True, f"formula({nums}) = {expect}"
+    if vn[0] in nums.values():
+        return True, f"copy of an upstream value {vn[0]} (grounded, not the formula)"
+    return False, f"{vn[0]} != formula({nums}) = {expect}; ungrounded/wrong-compose"
+
+
 def is_unique(value, upstream_values: Sequence[str], retrieved_texts: Sequence[str] = ()) -> bool:
     """slightly UNIQUE = the derived value is NOT a verbatim copy of an upstream value or a retrieved
     fact — it composes something new (else derive added nothing over retrieval)."""
@@ -58,14 +79,21 @@ def is_unique(value, upstream_values: Sequence[str], retrieved_texts: Sequence[s
 
 
 def derive_reward(value, upstream_values: Sequence[str], gold=None, op: str = "+",
-                  retrieved_texts: Sequence[str] = (),
+                  retrieved_texts: Sequence[str] = (), upstream_named: dict | None = None,
+                  formula: Callable | None = None,
                   grounded_fn: Callable = grounded_arith,
                   solves_fn: Callable | None = None,
                   base: float = 1.0, uniq_bonus: float = 0.5, hallucinate_penalty: float = 1.0):
     """The RL reward. Order matters: GROUNDEDNESS is the gate — an ungrounded fill is PUNISHED even if
     it equals gold (no lucky-hallucination credit). Then solve + uniqueness shape the positive reward.
+    Pass (upstream_named, formula) for multi-step grounding, else (upstream_values, op) for single-op.
       returns (reward: float, breakdown: dict)."""
-    g, why = grounded_fn(value, upstream_values, op)
+    if formula is not None and upstream_named is not None:
+        g, why = grounded_formula(value, upstream_named, formula)
+        uvals = list(upstream_named.values())
+    else:
+        g, why = grounded_fn(value, upstream_values, op)
+        uvals = list(upstream_values)
     if not g:
         return -hallucinate_penalty, {"grounded": False, "why": why, "verdict": "PUNISH (ungrounded)"}
     if solves_fn is not None:
@@ -73,7 +101,7 @@ def derive_reward(value, upstream_values: Sequence[str], gold=None, op: str = "+
     else:                                                      # default: arithmetic correctness vs gold
         vn = _nums(value)
         solved = bool(vn) and gold is not None and vn[0] == int(gold)
-    uniq = is_unique(value, upstream_values, retrieved_texts)
+    uniq = is_unique(value, uvals, retrieved_texts)
     if solved:
         r = base + (uniq_bonus if uniq else 0.0)
         return r, {"grounded": True, "solved": True, "unique": uniq, "why": why,
