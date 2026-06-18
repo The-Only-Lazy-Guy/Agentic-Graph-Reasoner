@@ -3,8 +3,8 @@
 > At-a-glance dump of the latest runs (raw outputs, numbers, repro commands) so
 > you don't have to dig through commits/logs. Updated each working session.
 
-**Last updated:** 2026-06-18
-**HEAD:** `2606116` (branch `main`)
+**Last updated:** 2026-06-19
+**HEAD:** `a4034e1` (branch `main`)
 
 ---
 
@@ -151,6 +151,87 @@ right thing:
 That is the correct control behavior for the coding-derive thesis: the loop
 must force the model to solve the intermediate writable slot, not merely emit a
 patch that happens to apply.
+
+### Second exact run: the PLAN gate was real, but too brittle
+
+The next Docker-scored session bundle, `artifacts/swe_slot_sessions/lite_test_n24_run2`,
+proved something useful even though the topline got worse:
+
+- gold-sanity: `5/5`
+- ONE-SHOT: `6/21`
+- SLOT(engine): `5/18`
+
+That drop was **not** a general collapse. It was a narrow regression caused by
+the new `PLAN` contract being too literal for real 4B outputs. Comparing the
+resolved sets shows that run2 SLOT mainly lost two previous resolves:
+
+- `astropy__astropy-6938`
+- `django__django-11099`
+
+and still kept the slot-only win on:
+
+- `astropy__astropy-14995`
+
+#### What the deep dump inspection showed
+
+`artifacts/swe_slot_sessions/lite_test_n24_run2/dump.txt` exposed three concrete
+planner failure shapes:
+
+1. `astropy__astropy-6938`
+   - diagnosis was correct
+   - oneshot exact solve still worked
+   - `PLAN` copied the right lines with the **wrong indentation**
+   - result: the anchor check rejected the plan before `FIX` ran
+
+2. `django__django-11099`
+   - diagnosis was correct
+   - oneshot exact solve still worked
+   - `PLAN` quoted the two validator class blocks in the **wrong source order**
+   - result: the combined `SEARCH` never existed verbatim in source, so the
+     graph rejected the plan before `FIX`
+
+3. `django__django-11422`
+   - diagnosis was on the right function
+   - `PLAN` emitted an **oversized / partially truncated** search block
+   - result: the anchor became fragile enough to fail the exact-source gate
+
+So the lesson is important: the structural `PLAN` slot was the right move, but
+the first implementation assumed model-perfect quoting. In practice the 4B is
+close-but-not-perfect on:
+
+- indentation
+- source-order of repeated sites
+- oversized anchor blocks
+
+#### Debug fix landed after run2
+
+`v5/runtime/swe_slot.py` now repairs approximate plans back onto the actual
+shown source **before** the graph gates on them:
+
+- parse the model's `FILE/SEARCH/CHANGE`
+- find the best matching exact anchor inside the shown file body
+- snap indentation/order back to the real source when possible
+- keep the strict `FIX` scope check, but stop throwing away good diagnoses over
+  cosmetic anchor drift
+
+The planner prompt was also tightened:
+
+- `SEARCH` should be the **smallest exact anchor** (prefer 1-8 lines)
+- preserve indentation exactly
+- do not quote a whole class/function when a small snippet will do
+- if multiple sites need the same change, use one representative anchor and say
+  so in `CHANGE`
+
+The no-model selftest now explicitly proves recovery from the real run2 failure
+shapes:
+
+- indentation drift
+- source-order drift
+- truncated anchor prefixes
+
+Practical meaning: run2 was not evidence against the slot graph. It was
+evidence that the **planner/source handshake** needed one more layer of
+deterministic grounding.
 
 ### Repro commands
 

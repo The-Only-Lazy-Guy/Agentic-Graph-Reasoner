@@ -38,6 +38,29 @@ def _same_file(a: str, b: str) -> bool:
     return bool(aa and bb) and (aa == bb or aa.endswith("/" + bb) or bb.endswith("/" + aa))
 
 
+def _split_src_files(src: str) -> dict[str, str]:
+    parts: dict[str, list[str]] = {}
+    cur_file = ""
+    cur_lines: list[str] = []
+    for line in (src or "").splitlines():
+        m = re.match(r"^# ([\w./\-]+\.\w+)\s*$", line)
+        if m:
+            if cur_file:
+                parts[cur_file] = cur_lines[:]
+            cur_file = _canon_path(m.group(1))
+            cur_lines = []
+            continue
+        if cur_file:
+            cur_lines.append(line)
+    if cur_file:
+        parts[cur_file] = cur_lines[:]
+    return {k: "\n".join(v).rstrip("\n") for k, v in parts.items()}
+
+
+def _format_plan(plan: dict[str, str]) -> str:
+    return f"FILE: {plan['file']}\nSEARCH:\n{plan['search']}\nCHANGE:\n{plan['change']}\n"
+
+
 def _parse_plan(text: str) -> dict[str, str]:
     file_match = re.search(r"(?mi)^FILE:\s*(.+?)\s*$", text or "")
     search_match = re.search(r"(?mis)^SEARCH:\s*\n(.*?)(?:\nCHANGE:\s*\n|\Z)", text or "")
@@ -47,6 +70,60 @@ def _parse_plan(text: str) -> dict[str, str]:
         "search": (search_match.group(1).strip("\n") if search_match else ""),
         "change": (change_match.group(1).strip() if change_match else ""),
     }
+
+
+def _best_search_anchor(file_body: str, search: str) -> str:
+    file_lines = file_body.splitlines()
+    groups: list[list[str]] = []
+    cur: list[str] = []
+    for line in (search or "").splitlines():
+        if line.strip():
+            cur.append(line.rstrip())
+        elif cur:
+            groups.append(cur[:])
+            cur = []
+    if cur:
+        groups.append(cur[:])
+    best_lines = 0
+    best_chars = 0
+    best_start = -1
+    for group in groups:
+        for start in range(len(file_lines)):
+            matched = 0
+            while matched < len(group) and start + matched < len(file_lines):
+                if file_lines[start + matched].strip() != group[matched].strip():
+                    break
+                matched += 1
+            if matched <= 0:
+                continue
+            chars = sum(len(file_lines[start + i].strip()) for i in range(matched))
+            if matched > best_lines or (matched == best_lines and chars > best_chars):
+                best_lines = matched
+                best_chars = chars
+                best_start = start
+    if best_start < 0:
+        return ""
+    return "\n".join(file_lines[best_start: best_start + best_lines]).rstrip("\n")
+
+
+def _repair_plan_to_src(plan_text: str, src: str) -> tuple[str, bool]:
+    plan = _parse_plan(plan_text)
+    fpath = _canon_path(plan["file"])
+    if not (fpath and plan["change"].strip()):
+        return plan_text, False
+    file_body = _split_src_files(src).get(fpath, "")
+    if not file_body:
+        return plan_text, False
+    search = plan["search"] or ""
+    compact = [ln for ln in search.splitlines() if ln.strip()]
+    if _plan_sufficient(plan_text, src) and len(compact) <= 8 and "\n\n" not in search:
+        return plan_text, False
+    repaired = _best_search_anchor(file_body, search)
+    if not repaired:
+        return plan_text, False
+    plan["search"] = repaired
+    new_text = _format_plan(plan)
+    return new_text, new_text != plan_text
 
 
 def _plan_sufficient(plan_text: str, src: str) -> bool:
@@ -98,19 +175,24 @@ def fix_user(issue, src, diagnosis="", plan=""):
     if plan:
         s += f"EDIT PLAN (follow it exactly):\n{plan}\n\n"
     return (s + "Fix the exact line(s) causing the bug. Output ONLY search/replace blocks: SEARCH "
-            "must copy the source EXACTLY (character-for-character); REPLACE must DIFFER. Keep it minimal.")
+            "must copy the source EXACTLY (character-for-character); REPLACE must DIFFER. Keep it minimal. "
+            "If the diagnosis/change says the same edit must be made in multiple matching sites in the same "
+            "file, update each matching site, but do not touch unrelated code.")
 
 
 def plan_user(issue, src, diagnosis, attempt):
     nudge = "" if attempt == 0 else (
-        " NOTE: the previous fix either ignored the planned anchor or edited the wrong place. Quote the "
-        "EXACT file path from the source header and the EXACT source snippet that must change.")
+        " NOTE: the previous plan/fix missed the exact anchor. Copy the indentation EXACTLY and choose a "
+        "smaller anchor from the shown source.")
     return (
         f"ISSUE:\n{issue[:1400]}\n\nRELEVANT SOURCE:\n{src}\n\nROOT-CAUSE DIAGNOSIS:\n{diagnosis}\n\n"
         "Plan the edit before patching. Output ONLY this format:\n"
         "FILE: path/from/source.py\nSEARCH:\n<exact existing code copied verbatim from the source>\n"
         "CHANGE:\n<one sentence saying what should change and why>\n"
-        "The SEARCH block must be copied EXACTLY from the source above, and FILE must match a shown source header."
+        "The SEARCH block must be the SMALLEST exact source anchor that pins the buggy location (prefer 1-8 lines, "
+        "keep the original indentation, do not quote a whole class/function when a smaller snippet will do). "
+        "If the same edit repeats in one file, choose one representative exact anchor in source order and mention "
+        "the repeated sites in CHANGE. FILE must match a shown source header."
         f"{nudge}"
     )
 
@@ -180,11 +262,48 @@ def slot_solve(issue, src, diagnose_fn, plan_fn, fix_fn, max_steps=8, log=None):
 # ── no-model wiring proof: the engine MUST reject an applyable-but-misaligned fix, then re-plan and recover ──
 def _selftest():
     print("swe_slot --selftest: proving the SLOT path runs SlotGraph.solve (no model).\n")
+    plan_src = (
+        "# x.py\n"
+        "def f():\n"
+        "    if cond:\n"
+        "        return bad()\n"
+        "\n"
+        "# y.py\n"
+        "class Alpha:\n"
+        "    value = 1\n"
+        "\n"
+        "class Beta:\n"
+        "    value = 1\n"
+    )
+    raw_indent = (
+        "FILE: x.py\nSEARCH:\n        if cond:\n            return bad()\nCHANGE:\n"
+        "Use the fixed return.\n"
+    )
+    fixed_indent, repaired_indent = _repair_plan_to_src(raw_indent, plan_src)
+    indent_ok = repaired_indent and _plan_sufficient(fixed_indent, plan_src)
+    raw_order = (
+        "FILE: y.py\nSEARCH:\nclass Beta:\n    value = 1\n\nclass Alpha:\n    value = 1\nCHANGE:\n"
+        "Update both values.\n"
+    )
+    fixed_order, repaired_order = _repair_plan_to_src(raw_order, plan_src)
+    order_ok = repaired_order and _plan_sufficient(fixed_order, plan_src)
+    raw_trunc = (
+        "FILE: x.py\nSEARCH:\ndef f():\n    if cond:\n        return bad(\nCHANGE:\n"
+        "Close the call and fix the value.\n"
+    )
+    fixed_trunc, repaired_trunc = _repair_plan_to_src(raw_trunc, plan_src)
+    trunc_ok = _plan_sufficient(fixed_trunc, plan_src)
+    print(f"   plan repair (indent drift) : {'PASS' if indent_ok else 'FAIL'}")
+    print(f"   plan repair (order drift)  : {'PASS' if order_ok else 'FAIL'}")
+    print(f"   plan repair (truncation)   : {'PASS' if trunc_ok else 'FAIL'}"
+          f"{' (snapped)' if repaired_trunc else ' (already sufficient)'}")
+
     src = "# x.py\ndef check(x, y):\n    if y < 5:\n        return y < 5\n    return x < 5\n"
     def diagnose_fn(issue, src, attempt):
         return "PRECISE: change `return x < 5` to `return x <= 5` in x.py"
     def plan_fn(issue, src, diagnosis, attempt):
-        return ("FILE: x.py\nSEARCH:\nreturn x < 5\nCHANGE:\nChange `<` to `<=` in the return line.\n")
+        raw = "FILE: x.py\nSEARCH:\nreturn x < 5\nCHANGE:\nChange `<` to `<=` in the return line.\n"
+        return _repair_plan_to_src(raw, src)[0]
     fix_attempts = {"n": 0}
     def fix_fn(issue, src, diagnosis, plan):
         fix_attempts["n"] += 1
@@ -205,7 +324,10 @@ def _selftest():
     replanned = len(trace["plans"]) >= 2
     anchored = trace["fix_attempts"][-1]["anchored"] if trace["fix_attempts"] else False
     rejected_wrong_scope = any(a["applyable"] and not a["anchored"] for a in trace["fix_attempts"][:-1])
-    ok_wired = bool(patch) and ok and backtracked and replanned and anchored and rejected_wrong_scope
+    ok_wired = (
+        indent_ok and order_ok and trunc_ok and bool(patch) and ok and backtracked and replanned
+        and anchored and rejected_wrong_scope
+    )
     print(f"\n   WIRING PROOF: backtrack-fired={backtracked}  re-planned={replanned}  "
           f"rejected-applyable-wrong-scope={rejected_wrong_scope}  recovered-anchored={anchored}"
           f"  -> {'PASS' if ok_wired else 'FAIL'}")
@@ -365,7 +487,8 @@ def main():
         def diagnose_fn(issue, src, attempt):
             return gen("You are a precise debugging assistant.", diag_user(issue, src, attempt), 160)
         def plan_fn(issue, src, diagnosis, attempt):
-            return gen("You are a precise patch planner.", plan_user(issue, src, diagnosis, attempt), 220)
+            raw = gen("You are a precise patch planner.", plan_user(issue, src, diagnosis, attempt), 220)
+            return _repair_plan_to_src(raw, src)[0]
         def fix_fn(issue, src, diagnosis, plan):
             g = gen(SR_SYS, fix_user(issue, src, diagnosis, plan), a.max_new)
             blocks = parse_sr(g)
