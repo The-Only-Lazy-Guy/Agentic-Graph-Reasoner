@@ -23,6 +23,10 @@ def _norm(s: str) -> str:
     return "\n".join(line.rstrip() for line in (s or "").strip().splitlines())
 
 
+def _norm_line(s: str) -> str:
+    return (s or "").strip()
+
+
 def grounded_applyable(blocks: Sequence[dict], source: str) -> tuple[bool, str]:
     """Every non-empty SEARCH must occur in the source (the patch can actually apply)."""
     src = _norm(source)
@@ -41,8 +45,9 @@ def is_real_edit(blocks: Sequence[dict]) -> bool:
 
 
 def _added_lines(diff: str) -> set:
-    return {_norm(l[1:]) for l in (diff or "").splitlines() if l.startswith("+") and not l.startswith("+++")
-            if _norm(l[1:])}
+    return {_norm_line(l[1:]) for l in (diff or "").splitlines()
+            if l.startswith("+") and not l.startswith("+++")
+            if _norm_line(l[1:])}
 
 
 def solves_goldoverlap(blocks: Sequence[dict], gold_patch: str, thresh: float = 0.5) -> bool:
@@ -53,10 +58,11 @@ def solves_goldoverlap(blocks: Sequence[dict], gold_patch: str, thresh: float = 
         return False
     repl = set()
     for b in blocks:
-        s = set(_norm(b.get("search", "")).splitlines())
-        for l in _norm(b.get("replace", "")).splitlines():
-            if l and l not in s:                          # genuinely new lines this patch introduces
-                repl.add(l)
+        s = {_norm_line(l) for l in (b.get("search", "") or "").splitlines() if _norm_line(l)}
+        for l in (b.get("replace", "") or "").splitlines():
+            ln = _norm_line(l)
+            if ln and ln not in s:                       # genuinely new lines this patch introduces
+                repl.add(ln)
     if not repl:
         return False
     hit = len(repl & gold) / max(1, len(repl))
