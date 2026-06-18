@@ -31,7 +31,7 @@ from pathlib import Path
 from v5.graph_grower.swe_verify import DATASET_MAP, parse_report, run_sbcli, write_predictions
 from v5.runtime.derive_rl import advantages       # reuse the proven GRPO advantage
 from v5.runtime.search_replace import SR_SYS, apply_sr, parse_sr
-from v5.runtime.swe_reward import swe_reward
+from v5.runtime.swe_reward import is_real_edit, solves_goldoverlap, swe_reward
 
 
 def gold_to_sr(diff: str) -> list[dict]:
@@ -209,14 +209,41 @@ def _verify_blocks_exact(task: dict, blocks: list[dict], verifier: SWEExactVerif
     return verifier.verify_patch(task, patch, tag="reward")
 
 
-def score(completion: str, task: dict, reward_mode: str = "proxy",
-          verifier: SWEExactVerifier | None = None):
-    blocks = parse_sr(completion)
+def _score_task_blocks(task: dict, blocks: list[dict], reward_mode: str = "proxy",
+                       verifier: SWEExactVerifier | None = None):
+    """Score a parsed SR patch on the REAL checked-out repo, not just the stitched source snippet.
+
+    This keeps the cheap proxy honest: the grounded gate is "the patch really applies to the repo and
+    produces a non-empty git diff", while `solved` can still be proxy-overlap or exact SWE verification.
+    """
+    applied, patch = materialize_patch(task, blocks)
+    if applied <= 0 or not patch.strip():
+        return -1.0, {"grounded": False, "why": "patch did not apply to the checked-out repo",
+                      "verdict": "PUNISH (unapplyable)"}
+    real = is_real_edit(blocks)
+    if not real:
+        return 0.0, {"grounded": True, "real_edit": False,
+                     "why": "patch applied but SEARCH == REPLACE / no semantic edit emitted",
+                     "verdict": "zero (applies but a NO-OP / identical branches)"}
     if reward_mode == "verifier":
         if verifier is None:
             raise ValueError("reward_mode='verifier' requires an exact verifier")
-        return swe_reward(blocks, task["src"], solves_fn=lambda _blocks: _verify_blocks_exact(task, blocks, verifier))
-    return swe_reward(blocks, task["src"], gold_patch=task["gold"])
+        solved = verifier.verify_patch(task, patch, tag="reward")
+    else:
+        solved = solves_goldoverlap(blocks, task["gold"])
+    if solved:
+        return 1.5, {"grounded": True, "real_edit": True, "solved": True,
+                     "why": "applied to repo and solved",
+                     "verdict": "REWARD (applies + solves + real edit)"}
+    return 0.1, {"grounded": True, "real_edit": True, "solved": False,
+                 "why": "applied to repo but does not match the solve target",
+                 "verdict": "small (applies + real edit, does not solve)"}
+
+
+def score(completion: str, task: dict, reward_mode: str = "proxy",
+          verifier: SWEExactVerifier | None = None):
+    blocks = parse_sr(completion)
+    return _score_task_blocks(task, blocks, reward_mode=reward_mode, verifier=verifier)
 
 
 def load_swe_tasks(n, traces_p, nodes_p, dataset, repo_root, src_bodies, src_lines):
@@ -239,8 +266,11 @@ def load_swe_tasks(n, traces_p, nodes_p, dataset, repo_root, src_bodies, src_lin
         gold_sr = gold_to_sr(inst.get("patch", ""))
         if not src.strip() or not gold_sr:
             continue
+        gold_sr_lines = sum(len((b.get("search", "") or "").splitlines()) + len((b.get("replace", "") or "").splitlines())
+                            for b in gold_sr)
         tasks.append({"iid": iid, "issue": t["issue"], "src": src, "gold": inst.get("patch", ""),
-                      "gold_sr_text": sr_to_text(gold_sr), "dest": str(dest)})
+                      "gold_sr_text": sr_to_text(gold_sr), "dest": str(dest),
+                      "n_gold_blocks": len(gold_sr), "gold_sr_lines": gold_sr_lines})
     return tasks
 
 
@@ -312,6 +342,7 @@ def train(model_name, tasks, steps, K, lr, r_lora, seed, layers, eval_every, ent
     rng = random.Random(seed)
     n_held = max(4, len(tasks) // 5)
     held, train_tasks = tasks[:n_held], tasks[n_held:]
+    train_tasks_easy = sorted(train_tasks, key=lambda t: (t.get("n_gold_blocks", 99), t.get("gold_sr_lines", 9999), len(t["issue"])))
 
     def encode(system, user):
         m = [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -440,11 +471,16 @@ def train(model_name, tasks, steps, K, lr, r_lora, seed, layers, eval_every, ent
 
     zero_var = 0
     for step in range(1, steps + 1):
-        t = rng.choice(train_tasks)
+        # Curriculum: start with the easiest gold patches (few blocks / short SR), then widen to all tasks.
+        widen = min(1.0, step / max(1, int(0.4 * steps)))
+        pool_frac = 0.25 + 0.75 * widen
+        pool_n = max(1, int(len(train_tasks_easy) * pool_frac))
+        t = rng.choice(train_tasks_easy[:pool_n])
         pids = encode(SR_SYS, fix_user(t["issue"], t["src"]))
         comps, rewards = [], []
-        for _ in range(K):
-            out = gen_ids(pids, sample=True)
+        rollout_modes = [False] + [True] * max(0, K - 1)   # anchor each GRPO group with one greedy decode
+        for sample in rollout_modes:
+            out = gen_ids(pids, sample=sample)
             comp = out[:, pids.shape[1]:]
             completion = tok.decode(comp[0], skip_special_tokens=True)
             comps.append(comp)
@@ -470,7 +506,7 @@ def train(model_name, tasks, steps, K, lr, r_lora, seed, layers, eval_every, ent
         opt.step()
         opt.zero_grad(set_to_none=True)
         if step % 10 == 0:
-            print(f"[step {step:3}] {t['iid']:24} mean_r={mean_r:+.2f} r_std={r_std:.2f} ent={ent_sum/K:.2f} loss={loss_sum:+.3f} gnorm={float(gnorm):.3f} rewards={[round(r,1) for r in rewards]}", flush=True)
+            print(f"[step {step:3}] {t['iid']:24} pool={pool_n}/{len(train_tasks_easy)} mean_r={mean_r:+.2f} r_std={r_std:.2f} ent={ent_sum/K:.2f} loss={loss_sum:+.3f} gnorm={float(gnorm):.3f} rewards={[round(r,1) for r in rewards]}", flush=True)
         if step % eval_every == 0:
             m, ap, sv = evaluate(held)
             print(f"[eval @{step}] held mean_reward={m:+.3f} applyable={ap:.0%} gold-solve={sv:.0%}", flush=True)
