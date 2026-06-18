@@ -3,8 +3,119 @@
 > At-a-glance dump of the latest runs (raw outputs, numbers, repro commands) so
 > you don't have to dig through commits/logs. Updated each working session.
 
-**Last updated:** 2026-06-15
-**HEAD:** `7768680` (branch `main`)
+**Last updated:** 2026-06-18
+**HEAD:** `2606116` (branch `main`)
+
+---
+
+## Session update (2026-06-18) — SWE pivot: exact-eval the SLOT graph first, then RL the DIAGNOSE slot
+
+> **One line:** the first serious test of `--derive` on coding tasks should be the
+> **operator slot graph**, not whole-patch GRPO. So the next rung is:
+> `DIAGNOSE -> FIX`, scored by the **real SWE verifier**, then train the
+> intermediate slot.
+
+### Why we are pivoting
+The recent `v5.runtime.swe_rl` runs on 39 SWE tasks were useful, but they showed
+the failure mode clearly:
+
+- patch-level action space is too wide for the first coding-RL rung
+- proxy reward mostly collapses to `unapplyable` / tiny reward
+- held-out exact solve stayed at `0%`
+- many GRPO groups had **zero variance** (`60/60` in the last run), so RL had
+  almost no learning signal
+
+That is not evidence that the graph/derive idea failed. It is evidence that we
+were training on the **wrong surface** first. The repo's design is slot-native:
+if retrieved source/evidence already solves a slot, the model should use it
+directly; if not, the model should **derive** a missing intermediate result in a
+writable slot, and only then emit the final patch.
+
+For SWE, the natural first intermediate is the **DIAGNOSE** slot, not the entire
+SEARCH/REPLACE patch. `FIX` is downstream of diagnosis.
+
+### What changed in code
+
+1. `v5/runtime/swe_exact_verify.py`
+   - new shared exact SWE verifier adapter
+   - wraps the existing `swe_verify` harness glue
+   - handles Docker / `sbcli` preflight, prediction writing, caching, and
+     gold-sanity
+
+2. `v5/runtime/swe_slot.py`
+   - now supports exact verification directly
+   - new flags:
+     - `--split`
+     - `--exact-verify`
+     - `--verify-backend docker|sbcli`
+     - `--verify-out-dir`
+     - `--verify-max-workers`
+     - `--verify-timeout`
+     - `--verify-poll-secs`
+     - `--verify-gold-sanity`
+   - still emits `artifacts/swe_oneshot_preds.jsonl` and
+     `artifacts/swe_slot_preds.jsonl`
+   - but can now also run:
+     - gold-sanity first
+     - exact resolve for **ONE-SHOT** vs **SLOT(engine)** in the same command
+
+3. `v5/runtime/swe_rl.py`
+   - now reuses the shared verifier helper instead of carrying its own copy
+   - no change in training intent yet; this was just cleanup so the slot path
+     can share the exact-eval machinery
+
+### The new experiment order
+
+1. **Exact-eval the slot runner**
+   - prove `DIAGNOSE -> FIX` beats one-shot on real SWE resolve, not just
+     applyability
+
+2. **Then build `swe_slot_rl.py`**
+   - RL target = the intermediate coding subproblem, especially `DIAGNOSE`
+   - downstream score = exact verifier result after `FIX`
+   - this is much closer to the actual operator-slot-graph thesis:
+     RL should pressure the model to fill a missing slot by derivation
+
+3. **Only later revisit whole-patch RL**
+   - after we know the slot graph itself buys exact solves
+
+### Repro commands
+
+Slot-graph wiring proof (no model):
+```bash
+python -m v5.runtime.swe_slot --selftest
+```
+
+Slot graph vs one-shot, emit predictions only:
+```bash
+V5_LM_TRUST_REMOTE_CODE=1 python -m v5.runtime.swe_slot \
+  --dataset lite --split test --n-eval 24
+```
+
+Slot graph vs one-shot, with exact verifier on the same box:
+```bash
+V5_LM_TRUST_REMOTE_CODE=1 python -m v5.runtime.swe_slot \
+  --dataset lite --split test --n-eval 24 \
+  --exact-verify --verify-backend docker --verify-gold-sanity 5
+```
+
+If the verifier is on a separate box, `swe_slot` still writes the two prediction
+files and you can score them manually:
+```bash
+python -m v5.graph_grower.swe_verify --gold-sanity --dataset lite --split test --limit 5
+python -m v5.graph_grower.swe_verify --predictions artifacts/swe_oneshot_preds.jsonl --dataset lite --split test --run-id oneshot
+python -m v5.graph_grower.swe_verify --predictions artifacts/swe_slot_preds.jsonl --dataset lite --split test --run-id slot
+```
+
+### Current conclusion
+The next honest step is **not** "train `swe_rl` longer." It is:
+
+- exact-score the **slot-native** coding path
+- see whether the operator slot graph actually improves resolve
+- then put RL pressure on the **DIAGNOSE** slot
+
+That keeps the work aligned with the repo's real thesis: not generic patch
+search, but learned derivation inside a structured writable slot graph.
 
 ---
 
