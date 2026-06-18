@@ -396,7 +396,7 @@ def main():
     slot_path = str(outputs["slot"])
     n1 = write_predictions(oneshot_preds, oneshot_path, "v5_oneshot")
     n2 = write_predictions(slot_preds, slot_path, "v5_slot")
-    print(f"\n=== #9 SYNTHESIS (engine-wired DIAGNOSE->FIX vs one-shot, given support) ===")
+    print(f"\n=== #9 SYNTHESIS (engine-wired DIAGNOSE->PLAN->FIX vs one-shot, given support) ===")
     print(f"  applyable@1:  ONE-SHOT {oneshot_app}/{scored}  |  SLOT(engine) {slot_app}/{scored}")
     print(f"  emitted predictions: oneshot {n1} -> {oneshot_path} | slot {n2} -> {slot_path}")
     print(f"  dump (MANUALLY INSPECT the diagnoses + retry behavior) -> {outputs['dump']}")
