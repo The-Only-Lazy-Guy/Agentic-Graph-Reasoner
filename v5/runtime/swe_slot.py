@@ -385,9 +385,29 @@ def _verify_run_ids(outputs, dataset: str, split: str) -> tuple[str, str]:
     return f"{base}_oneshot", f"{base}_slot"
 
 
+def _apply_smoke_overrides(args):
+    if not args.smoke:
+        return args
+    orig_n = args.n_eval
+    orig_gold = args.verify_gold_sanity
+    args.n_eval = min(args.n_eval, max(1, args.smoke_n_eval))
+    if args.exact_verify:
+        args.verify_gold_sanity = min(args.verify_gold_sanity, args.n_eval, max(1, args.smoke_gold_sanity))
+    print(f"[SMOKE] preflight enabled: n_eval {orig_n} -> {args.n_eval}", flush=True)
+    if args.exact_verify:
+        print(f"[SMOKE] verifier preflight: gold_sanity {orig_gold} -> {args.verify_gold_sanity}", flush=True)
+    return args
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--selftest", action="store_true", help="no-model proof the SLOT path uses the engine")
+    ap.add_argument("--smoke", action="store_true",
+                    help="cheap preflight: run a tiny generation slice before the full expensive session")
+    ap.add_argument("--smoke-n-eval", type=int, default=2,
+                    help="when --smoke is set, cap n_eval to this many instances")
+    ap.add_argument("--smoke-gold-sanity", type=int, default=2,
+                    help="when --smoke and --exact-verify are both set, cap gold-sanity to this many instances")
     ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
     ap.add_argument("--traces", default="data/swe/grounded_traces.jsonl")
     ap.add_argument("--nodes", default="artifacts/graph_growth/swe_code_candidates.jsonl")
@@ -416,6 +436,7 @@ def main():
     a = ap.parse_args()
     if a.selftest:
         raise SystemExit(0 if _selftest() else 1)
+    a = _apply_smoke_overrides(a)
     outputs = _prepare_outputs(a)
     oneshot_run_id, slot_run_id = _verify_run_ids(outputs, a.dataset, a.split)
 
@@ -540,6 +561,16 @@ def main():
             print(f"  patch emission: ONE-SHOT {emit1}/{scored} ({e1:.0%}) | SLOT(engine) {emit2}/{scored} ({e2:.0%})")
     else:
         print("  exact verify not run here. To score these predictions on the verifier box:")
+        smoke_gold = min(2, max(1, scored))
+        smoke_oneshot = min(2, max(1, n1)) if n1 else 0
+        smoke_slot = min(2, max(1, n2)) if n2 else 0
+        print("  quick smoke first (cheap sanity before full Docker run):")
+        print(f"    python -m v5.graph_grower.swe_verify --gold-sanity --dataset {a.dataset} --split {a.split} --limit {smoke_gold}")
+        if smoke_oneshot:
+            print(f"    python -m v5.graph_grower.swe_verify --predictions {oneshot_path} --dataset {a.dataset} --split {a.split} --run-id {oneshot_run_id}_smoke --predictions-limit {smoke_oneshot}")
+        if smoke_slot:
+            print(f"    python -m v5.graph_grower.swe_verify --predictions {slot_path} --dataset {a.dataset} --split {a.split} --run-id {slot_run_id}_smoke --predictions-limit {smoke_slot}")
+        print("  then the full batch:")
         print(f"    python -m v5.graph_grower.swe_verify --gold-sanity --dataset {a.dataset} --split {a.split} --limit 5")
         print(f"    python -m v5.graph_grower.swe_verify --predictions {oneshot_path} --dataset {a.dataset} --split {a.split} --run-id {oneshot_run_id}")
         print(f"    python -m v5.graph_grower.swe_verify --predictions {slot_path} --dataset {a.dataset} --split {a.split} --run-id {slot_run_id}")
@@ -563,6 +594,13 @@ def main():
                 "slot": {"count": slot_app, "total": scored},
             },
             "verify_commands": {
+                "gold_sanity_smoke": f"python -m v5.graph_grower.swe_verify --gold-sanity --dataset {a.dataset} --split {a.split} --limit {min(2, max(1, scored))}",
+                "oneshot_smoke": (f"python -m v5.graph_grower.swe_verify --predictions {oneshot_path} --dataset {a.dataset} "
+                                   f"--split {a.split} --run-id {oneshot_run_id}_smoke --predictions-limit {min(2, max(1, n1))}")
+                                   if n1 else "",
+                "slot_smoke": (f"python -m v5.graph_grower.swe_verify --predictions {slot_path} --dataset {a.dataset} "
+                                f"--split {a.split} --run-id {slot_run_id}_smoke --predictions-limit {min(2, max(1, n2))}")
+                                if n2 else "",
                 "gold_sanity": f"python -m v5.graph_grower.swe_verify --gold-sanity --dataset {a.dataset} --split {a.split} --limit 5",
                 "oneshot": f"python -m v5.graph_grower.swe_verify --predictions {oneshot_path} --dataset {a.dataset} --split {a.split} --run-id {oneshot_run_id}",
                 "slot": f"python -m v5.graph_grower.swe_verify --predictions {slot_path} --dataset {a.dataset} --split {a.split} --run-id {slot_run_id}",

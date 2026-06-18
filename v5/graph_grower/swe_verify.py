@@ -54,6 +54,31 @@ def write_predictions(id2patch: Dict[str, str], path: str, model_name: str = MOD
     return n
 
 
+def read_prediction_instance_ids(path: str, limit: int) -> List[str]:
+    """Read the first N prediction instance_ids from a jsonl file for cheap smoke verifies."""
+    if limit <= 0 or not os.path.exists(path):
+        return []
+    ids: List[str] = []
+    seen = set()
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            iid = str(row.get("instance_id", "")).strip()
+            if not iid or iid in seen:
+                continue
+            ids.append(iid)
+            seen.add(iid)
+            if len(ids) >= limit:
+                break
+    return ids
+
+
 def run_swebench(preds_path: str, dataset: str, run_id: str,
                  instance_ids: Optional[Sequence[str]] = None, max_workers: int = 4,
                  model_name: str = MODEL_NAME, timeout: int = 1800) -> Dict[str, bool]:
@@ -179,6 +204,8 @@ def main(argv=None) -> int:
     ap.add_argument("--split", default="test")
     ap.add_argument("--limit", type=int, default=5)
     ap.add_argument("--instance-ids", nargs="*", default=None)
+    ap.add_argument("--predictions-limit", type=int, default=0,
+                    help="verify only the first N instance_ids found in the predictions file (cheap smoke run)")
     ap.add_argument("--run-id", default="v5verify")
     ap.add_argument("--max-workers", type=int, default=4)
     ap.add_argument("--out-dir", default="artifacts/graph_growth/swe_verify")
@@ -208,6 +235,12 @@ def main(argv=None) -> int:
         return gold_sanity(args.dataset, args.split, args.limit, args.instance_ids,
                            args.run_id, args.max_workers, args.out_dir, backend=args.backend)
     if args.predictions:
+        if not args.instance_ids and args.predictions_limit > 0:
+            args.instance_ids = read_prediction_instance_ids(args.predictions, args.predictions_limit)
+            if not args.instance_ids:
+                print(f"FATAL: no prediction ids found in {args.predictions} for --predictions-limit {args.predictions_limit}")
+                return 2
+            print(f"prediction smoke: verifying first {len(args.instance_ids)} ids from {args.predictions}")
         res = _verify(args.predictions, args.dataset, args.run_id, args.backend,
                       args.instance_ids, args.max_workers, args.out_dir, args.split)
         if not res:

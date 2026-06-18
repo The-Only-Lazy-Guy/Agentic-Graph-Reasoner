@@ -4,7 +4,7 @@
 > you don't have to dig through commits/logs. Updated each working session.
 
 **Last updated:** 2026-06-19
-**HEAD:** `a4034e1` (branch `main`)
+**HEAD:** `2ed6301` (branch `main`)
 
 ---
 
@@ -240,6 +240,15 @@ Slot-graph wiring proof (no model):
 python -m v5.runtime.swe_slot --selftest
 ```
 
+Cheap preflight before a long generation run:
+```bash
+V5_LM_TRUST_REMOTE_CODE=1 python -m v5.runtime.swe_slot \
+  --smoke \
+  --dataset lite --split test --n-eval 24 \
+  --session-out-dir artifacts/swe_slot_sessions \
+  --session-name lite_test_smoke
+```
+
 Slot graph vs one-shot, emit predictions only:
 ```bash
 V5_LM_TRUST_REMOTE_CODE=1 python -m v5.runtime.swe_slot \
@@ -264,6 +273,11 @@ V5_LM_TRUST_REMOTE_CODE=1 python -m v5.runtime.swe_slot \
 If the verifier is on a separate box, run on the GPU box with `--session-out-dir`,
 copy that bundle to the Docker box, then score the emitted jsonl files there:
 ```bash
+python -m v5.graph_grower.swe_verify --gold-sanity --dataset lite --split test --limit 2
+python -m v5.graph_grower.swe_verify --predictions artifacts/swe_slot_sessions/lite_test_n24_run1/oneshot.jsonl --dataset lite --split test --run-id lite_test_n24_run1_oneshot_smoke --predictions-limit 2
+python -m v5.graph_grower.swe_verify --predictions artifacts/swe_slot_sessions/lite_test_n24_run1/slot.jsonl --dataset lite --split test --run-id lite_test_n24_run1_slot_smoke --predictions-limit 2
+
+# then the full batch
 python -m v5.graph_grower.swe_verify --gold-sanity --dataset lite --split test --limit 5
 python -m v5.graph_grower.swe_verify --predictions artifacts/swe_slot_sessions/lite_test_n24_run1/oneshot.jsonl --dataset lite --split test --run-id lite_test_n24_run1_oneshot
 python -m v5.graph_grower.swe_verify --predictions artifacts/swe_slot_sessions/lite_test_n24_run1/slot.jsonl --dataset lite --split test --run-id lite_test_n24_run1_slot
