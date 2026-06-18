@@ -1,0 +1,30 @@
+{
+  "session_name": "lite_test_n24_run1",
+  "dataset": "lite",
+  "split": "test",
+  "model": "Qwen/Qwen3.5-4B",
+  "n_eval_requested": 24,
+  "n_eval_scored": 23,
+  "max_steps": 8,
+  "max_new": 400,
+  "predictions": {
+    "oneshot": "artifacts/swe_slot_sessions/lite_test_n24_run1/oneshot.jsonl",
+    "slot": "artifacts/swe_slot_sessions/lite_test_n24_run1/slot.jsonl"
+  },
+  "dump_path": "artifacts/swe_slot_sessions/lite_test_n24_run1/dump.txt",
+  "applyable": {
+    "oneshot": {
+      "count": 22,
+      "total": 23
+    },
+    "slot": {
+      "count": 21,
+      "total": 23
+    }
+  },
+  "verify_commands": {
+    "gold_sanity": "python -m v5.graph_grower.swe_verify --gold-sanity --dataset lite --split test --limit 5",
+    "oneshot": "python -m v5.graph_grower.swe_verify --predictions artifacts/swe_slot_sessions/lite_test_n24_run1/oneshot.jsonl --dataset lite --split test --run-id oneshot",
+    "slot": "python -m v5.graph_grower.swe_verify --predictions artifacts/swe_slot_sessions/lite_test_n24_run1/slot.jsonl --dataset lite --split test --run-id slot"
+  }
+}

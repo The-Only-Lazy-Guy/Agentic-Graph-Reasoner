@@ -1,0 +1,627 @@
+
+===== astropy__astropy-12907 =====
+ISSUE: Modeling's `separability_matrix` does not compute separability correctly for nested CompoundModels
+Consider the following model:
+
+```python
+from astropy.modeling import models as m
+from astropy.mo
+
+SLOT log: [('DIAGNOSE', 'The root cause is that the `_cstack` fun', 'valid', 'root cause of the bug'), ('FIX', '(unfilled)', 'insufficient', 'minimal applyable fix'), ('BACKTRACK', 'FIX', 'revise', 'DIAGNOSE', 'rederive'), ('DIAGNOSE', 'The root cause is that the `_cstack` fun', 'valid', 'root cause of the bug'), ('FIX', '(unfilled)', 'insufficient', 'minimal applyable fix'), ('BACKTRACK', 'FIX', 'revise', 'DIAGNOSE', 'rederive'), ('DIAGNOSE', 'The root cause is that the `_cstack` fun', 'valid', 'root cause of the bug'), ('FIX', '(unfilled)', 'insufficient', 'minimal applyable fix')]
+DIAGNOSES (3 attempts):
+  [0] The root cause is that the `_cstack` function in `astropy/modeling/separable.py` incorrectly assumes that when the `right` operand is a `Model`, its coordinate matrix (`cright`) should be placed at the bottom of the combined matrix with a specific row offset (`-right.shape[0]`), which fails to account for the internal dimensionality of nested CompoundModels. To fix this, the logic for constructing `cright` when `right` is a `Model` must be changed to use `np.vstack` (or equivalent stacking logic) to properly concatenate the coordinate matrices vertically, ensuring that the output dimensions of the left model and the input dimensions of the right model are correctly aligned regardless of nesting depth. Specifically, replace the block handling `isinstance(right,
+  [1] The root cause is that the `_cstack` function incorrectly assumes the `right` operand is a flat array when it is actually a nested `CompoundModel`, causing it to misplace the identity matrix and corrupt the separability calculation for the inner model's inputs/outputs.
+
+You must change line 38 in `astropy/modeling/separable.py` from:
+`cright = np.zeros((noutp, right.shape[1]))`
+to:
+`cright = _coord_matrix(right, 'right', noutp)`
+  [2] The root cause is that the `_cstack` function incorrectly assumes the `right` operand is a flat array when it is actually a nested `CompoundModel`, causing it to misplace the identity matrix and corrupt the separability calculation for the inner model's inputs/outputs.
+
+You must change line 38 in `astropy/modeling/separable.py` from:
+`cright = np.zeros((noutp, right.shape[1]))`
+to:
+`cright = _coord_matrix(right, 'right', noutp)`
+FIX attempts applyable: [False, False, False]
+ONESHOT applyable=True:
+astropy/modeling/separable.py
+<<<<<<< SEARCH
+def _cstack(left, right):
+    """
+    Function corresponding to '&' operation.
+
+    Parameters
+    ----------
+    left, right : `astropy.modeling.Model` or ndarray
+        If input is of an array, it is the output of `coord_matrix`.
+
+    Returns
+    -------
+    result : ndarray
+        Result from this operation.
+
+    """
+    noutp = _compute_n_outputs(left, right)
+
+    if isinstance(left, Model):
+        cleft = _coord_matrix(left, 'left', noutp)
+   
+
+===== astropy__astropy-14182 =====
+ISSUE: Please support header rows in RestructuredText output
+### Description
+
+It would be great if the following would work:
+
+```Python
+>>> from astropy.table import QTable
+>>> import astropy.units as 
+
+SLOT log: [('DIAGNOSE', 'The root cause is that the `write` metho', 'valid', 'root cause of the bug'), ('FIX', 'diff --git a/astropy/io/ascii/rst.py b/a', 'valid', 'minimal applyable fix'), ('FIXPOINT', 2)]
+DIAGNOSES (1 attempts):
+  [0] The root cause is that the `write` method in the `RST` class (and its subclass `SimpleRSTData`) unconditionally duplicates the header row by inserting it at the beginning and end of the output lines, ignoring any custom header rows passed via the `header_rows` parameter. To fix this, the `write` method in the `RST` class must be modified to check if `header_rows` is provided; if so, it should use the provided headers instead of duplicating the default header row.
+FIX attempts applyable: [True]
+ONESHOT applyable=True:
+astropy/io/ascii/rst.py
+<<<<<<< SEARCH
+    def write(self, lines):
+        lines = super().write(lines)
+        lines = [lines[1]] + lines + [lines[1]]
+        return lines
+=======
+    def write(self, lines):
+        lines = super().write(lines)
+        if lines:
+            lines = [lines[0]] + lines + [lines[0]]
+        return lines
+>>>>>>> REPLACE
+
+===== astropy__astropy-14365 =====
+ISSUE: ascii.qdp Table format assumes QDP commands are upper case
+### Description
+
+ascii.qdp assumes that commands in a QDP file are upper case, for example, for errors they must be "READ SERR 1 2" whereas Q
+
+SLOT log: [('DIAGNOSE', 'The root cause is that the regular expre', 'valid', 'root cause of the bug'), ('FIX', 'diff --git a/astropy/io/ascii/qdp.py b/a', 'valid', 'minimal applyable fix'), ('FIXPOINT', 2)]
+DIAGNOSES (1 attempts):
+  [0] The root cause is that the regular expression `_command_re` in the `_line_type` function explicitly requires command keywords to be uppercase (e.g., `READ`), causing it to fail on lowercase inputs like `read serr`. To fix this, the regex pattern must be modified to make the command keywords case-insensitive by adding the `(?i)` flag or wrapping the keywords in a case-insensitive group.
+FIX attempts applyable: [True]
+ONESHOT applyable=True:
+astropy/io/ascii/qdp.py
+<<<<<<< SEARCH
+    _command_re = r"READ [TS]ERR(\s+[0-9]+)+"
+=======
+    _command_re = r"(READ|read)[TS]ERR(\s+[0-9]+)+"
+>>>>>>> REPLACE
+
+===== astropy__astropy-14995 =====
+ISSUE: In v5.3, NDDataRef mask propagation fails when one of the operand does not have a mask
+### Description
+
+This applies to v5.3. 
+
+It looks like when one of the operand does not have a mask, the mask p
+
+SLOT log: [('DIAGNOSE', 'The root cause is in the `_arithmetic_ma', 'valid', 'root cause of the bug'), ('FIX', 'diff --git a/astropy/nddata/mixins/ndari', 'valid', 'minimal applyable fix'), ('FIXPOINT', 2)]
+DIAGNOSES (1 attempts):
+  [0] The root cause is in the `_arithmetic_mask` method of `NDArithmeticMixin` (specifically the `else` block starting at line ~230 in the provided snippet), which blindly calls `handle_mask(self.mask, operand.mask, **kwds)` without first checking if either operand's mask is `None`. When `handle_mask` is `np.bitwise_or` and one operand lacks a mask, the code attempts to perform a bitwise operation between a valid mask and `None`, causing the failure.
+
+To fix this, the `else` block must be modified to check if `self.mask` or `operand.mask` is `None` before executing the `handle_mask` operation; if either is `None`, the method should return a deep copy of the
+FIX attempts applyable: [True]
+ONESHOT applyable=True:
+astropy/nddata/mixins/ndarithmetic.py
+<<<<<<< SEARCH
+    def _arithmetic_mask(self, operation, operand, handle_mask, axis=None, **kwds):
+        """
+        Calculate the resulting mask.
+
+        This is implemented as the piecewise ``or`` operation if both have a
+        mask.
+
+        Parameters
+        ----------
+        operation : callable
+            see :meth:`NDArithmeticMixin._arithmetic` parameter description.
+            By default, the ``operation`` will be ignored.
+
+        operand 
+
+===== astropy__astropy-6938 =====
+ISSUE: Possible bug in io.fits related to D exponents
+I came across the following code in ``fitsrec.py``:
+
+```python
+        # Replace exponent separator in floating point numbers
+        if 'D' in forma
+
+SLOT log: [('DIAGNOSE', 'The root cause of the bug is that `outpu', 'valid', 'root cause of the bug'), ('FIX', 'diff --git a/astropy/io/fits/fitsrec.py ', 'valid', 'minimal applyable fix'), ('FIXPOINT', 2)]
+DIAGNOSES (1 attempts):
+  [0] The root cause of the bug is that `output_field.replace()` is called on a `chararray` object, which does not support in-place modification and instead returns a new string; consequently, the original `output_field` array remains unchanged, leaving the exponent separator as 'E' instead of 'D'. To fix this, the `replace` call on `output_field` must be replaced with an in-place assignment using `output_field[:] = output_field.replace(encode_ascii('E'), encode_ascii('D'))` within the `_scale_back_ascii` function.
+FIX attempts applyable: [True]
+ONESHOT applyable=True:
+astropy/io/fits/fitsrec.py
+<<<<<<< SEARCH
+        # Replace exponent separator in floating point numbers
+        if 'D' in format:
+            output_field.replace(encode_ascii('E'), encode_ascii('D'))
+=======
+        # Replace exponent separator in floating point numbers
+        if 'D' in format:
+            output_field[:] = output_field.replace(encode_ascii('E'), encode_ascii('D'))
+>>>>>>> REPLACE
+
+===== astropy__astropy-7746 =====
+ISSUE: Issue when passing empty lists/arrays to WCS transformations
+The following should not fail but instead should return empty lists/arrays:
+
+```
+In [1]: from astropy.wcs import WCS
+
+In [2]: wcs = WC
+
+SLOT log: [('DIAGNOSE', 'The root cause is that `wcs.py` attempts', 'valid', 'root cause of the bug'), ('FIX', 'diff --git a/astropy/wcs/wcs.py b/astrop', 'valid', 'minimal applyable fix'), ('FIXPOINT', 2)]
+DIAGNOSES (1 attempts):
+  [0] The root cause is that `wcs.py` attempts to broadcast empty input arrays using `np.broadcast_arrays`, which fails because empty arrays lack the necessary shape information to determine how to align them, rather than treating them as valid zero-length coordinate sets. To fix this, the `_array_converter` function (specifically the `_return_list_of_arrays` helper) must add a check at the start of `_return_list_of_arrays` to detect if all input arrays are empty and immediately return an empty list of arrays with the correct shape, bypassing the `np.broadcast_arrays` call.
+FIX attempts applyable: [True]
+ONESHOT applyable=True:
+astropy/wcs/wcs.py
+<<<<<<< SEARCH
+        def _return_list_of_arrays(axes, origin):
+            try:
+                axes = np.broadcast_arrays(*axes)
+            except ValueError:
+                raise ValueError(
+                    "Coordinate arrays are not broadcastable to each other")
+
+            xy = np.hstack([x.reshape((x.size, 1)) for x in axes])
+=======
+        def _return_list_of_arrays(axes, origin):
+            try:
+                axes = np.broadcast_arrays(*axes)
+            ex
+
+===== django__django-10924 =====
+ISSUE: Allow FilePathField path to accept a callable.
+Description
+	
+I have a special case where I want to create a model containing the path to some local files on the server/dev machine. Seeing as the place
+
+SLOT log: [('DIAGNOSE', 'The root cause is that the `FilePathFiel', 'valid', 'root cause of the bug'), ('FIX', 'diff --git a/django/db/models/fields/__i', 'valid', 'minimal applyable fix'), ('FIXPOINT', 2)]
+DIAGNOSES (1 attempts):
+  [0] The root cause is that the `FilePathField` stores the `path` argument as a raw value (potentially a callable like `os.path.join`) in `self.path` and serializes it directly to a string during migration deconstruction, causing the callable to be lost or evaluated incorrectly when the migration is applied on a different machine. To fix this, the `deconstruct` method must detect if `self.path` is a callable and serialize it as a Python literal (e.g., `lambda` or `os.path.join`) in the returned `kwargs` instead of converting it to a string, while the `__init__` method should accept and store callables without immediately evaluating them.
+FIX attempts applyable: [True]
+ONESHOT applyable=True:
+django/db/models/fields/__init__.py
+<<<<<<< SEARCH
+    def deconstruct(self):
+        name, path, args, kwargs = super().deconstruct()
+        if self.path != '':
+            kwargs['path'] = self.path
+=======
+    def deconstruct(self):
+        name, path, args, kwargs = super().deconstruct()
+        if self.path != '':
+            if callable(self.path):
+                kwargs['path'] = self.path
+            else:
+                kwargs['path'] = self.path
+>>>>>>> REPLACE
+
+===== django__django-11001 =====
+ISSUE: Incorrect removal of order_by clause created as multiline RawSQL
+Description
+	
+Hi.
+The SQLCompiler is ripping off one of my "order by" clause, because he "thinks" the clause was already "seen" (in SQL
+
+SLOT log: [('DIAGNOSE', 'The root cause is that `SQLCompiler.get_', 'valid', 'root cause of the bug'), ('FIX', 'diff --git a/django/db/models/sql/compil', 'valid', 'minimal applyable fix'), ('FIXPOINT', 2)]
+DIAGNOSES (1 attempts):
+  [0] The root cause is that `SQLCompiler.get_order_by()` uses a regular expression to strip existing ordering clauses from the raw SQL string, but this regex fails on multiline `RawSQL` strings because it only captures the last line containing `ASC` or `DESC`, incorrectly marking subsequent identical lines as already processed. To fix this, the `get_order_by()` method must normalize the input SQL string by removing newline characters (e.g., via `' '.join(sql.split('\n'))`) before applying the regex search to ensure the entire clause is matched correctly.
+FIX attempts applyable: [True]
+ONESHOT applyable=True:
+django/db/models/sql/compiler.py
+<<<<<<< SEARCH
+        self.ordering_parts = re.compile(r'(.*)\s(ASC|DESC)(.*)')
+=======
+        self.ordering_parts = re.compile(r'(.*)\s(ASC|DESC)(.*)')
+>>>>>>> REPLACE
+
+===== django__django-11019 =====
+ISSUE: Merging 3 or more media objects can throw unnecessary MediaOrderConflictWarnings
+Description
+	
+Consider the following form definition, where text-editor-extras.js depends on text-editor.js but all oth
+
+SLOT log: [('DIAGNOSE', 'The root cause is that the `__add__` met', 'valid', 'root cause of the bug'), ('FIX', 'diff --git a/django/forms/widgets.py b/d', 'valid', 'minimal applyable fix'), ('FIXPOINT', 2)]
+DIAGNOSES (1 attempts):
+  [0] The root cause is that the `__add__` method in `django/forms/widgets.py` (lines 140-143) simply concatenates the `_js_lists` of the operands without reordering them, causing the final merged list to contain duplicate files in reverse order when multiple widgets depend on the same script. To fix this, the `merge` method (lines 145-147) must be called during the accumulation of lists in `__add__` instead of just appending the raw lists, ensuring that existing files are moved to the front of the new list to maintain the correct dependency order.
+FIX attempts applyable: [True]
+ONESHOT applyable=True:
+django/forms/widgets.py
+<<<<<<< SEARCH
+    @property
+    def _js(self):
+        js = self._js_lists[0]
+        # filter(None, ...) avoids calling merge() with empty lists.
+        for obj in filter(None, self._js_lists[1:]):
+            js = self.merge(js, obj)
+        return js
+=======
+    @property
+    def _js(self):
+        js = self._js_lists[0]
+        # filter(None, ...) avoids calling merge() with empty lists.
+        for obj in filter(None, self._js_lists[1:]):
+            js = self.merg
+
+===== django__django-11039 =====
+ISSUE: sqlmigrate wraps it's outpout in BEGIN/COMMIT even if the database doesn't support transactional DDL
+Description
+	 
+		(last modified by Simon Charette)
+	 
+The migration executor only adds the outer BE
+
+SLOT log: [('DIAGNOSE', 'The root cause is that the `sqlmigrate` ', 'valid', 'root cause of the bug'), ('FIX', 'diff --git a/django/core/management/comm', 'valid', 'minimal applyable fix'), ('FIXPOINT', 2)]
+DIAGNOSES (1 attempts):
+  [0] The root cause is that the `sqlmigrate` command unconditionally wraps SQL output in `BEGIN/COMMIT` based solely on the `migration.atomic` flag, ignoring whether the specific database connection supports transactional DDL operations. To fix this, the assignment of `self.output_transaction` on line 62 must be updated to also check `connection.features.can_rollback_ddl`, ensuring transactions are only used when both the migration is atomic and the database supports rollback.
+FIX attempts applyable: [True]
+ONESHOT applyable=True:
+django/core/management/commands/sqlmigrate.py
+<<<<<<< SEARCH
+        # Show begin/end around output only for atomic migrations
+        self.output_transaction = migration.atomic
+=======
+        # Show begin/end around output only for atomic migrations
+        # and if the database supports transactional DDL
+        self.output_transaction = migration.atomic and connection.features.can_rollback_ddl
+>>>>>>> REPLACE
+
+===== django__django-11049 =====
+ISSUE: Correct expected format in invalid DurationField error message
+Description
+	
+If you enter a duration "14:00" into a duration field, it translates to "00:14:00" which is 14 minutes.
+The current error m
+
+SLOT log: [('DIAGNOSE', 'The root cause is the incorrect format s', 'valid', 'root cause of the bug'), ('FIX', 'diff --git a/django/db/models/fields/__i', 'valid', 'minimal applyable fix'), ('FIXPOINT', 2)]
+DIAGNOSES (1 attempts):
+  [0] The root cause is the incorrect format string `"[DD] [HH:[MM:]]ss[.uuuuuu]"` in the `default_error_messages` dictionary of the `DurationField` class, which falsely implies that seconds are optional and minutes are required when hours are present. This string must be updated to `"[DD] [[HH:]MM:]ss[.uuuuuu]"` to accurately reflect that seconds are mandatory, minutes are optional, and hours are only required if minutes are provided.
+
+**Change required:**
+Update line 104 in `django/db/models/fields/__init__.py` within the `DurationField` class:
+Change:
+```python
+'default_error_messages': {
+    'invalid': _("'%(value)s' value has
+FIX attempts applyable: [True]
+ONESHOT applyable=True:
+django/db/models/fields/__init__.py
+<<<<<<< SEARCH
+    default_error_messages = {
+        'invalid': _("'%(value)s' value has an invalid format. It must be in "
+                     "[DD] [HH:[MM:]]ss[.uuuuuu] format.")
+    }
+=======
+    default_error_messages = {
+        'invalid': _("'%(value)s' value has an invalid format. It must be in "
+                     "[DD] [[HH:]MM:]ss[.uuuuuu] format.")
+    }
+>>>>>>> REPLACE
+
+===== django__django-11099 =====
+ISSUE: UsernameValidator allows trailing newline in usernames
+Description
+	
+ASCIIUsernameValidator and UnicodeUsernameValidator use the regex 
+r'^[\w.@+-]+$'
+The intent is to only allow alphanumeric characte
+
+SLOT log: [('DIAGNOSE', 'The root cause of the bug is that the re', 'valid', 'root cause of the bug'), ('FIX', 'diff --git a/django/contrib/auth/validat', 'valid', 'minimal applyable fix'), ('FIXPOINT', 2)]
+DIAGNOSES (1 attempts):
+  [0] The root cause of the bug is that the regex pattern `^[\w.@+-]+$` in `ASCIIUsernameValidator` and `UnicodeUsernameValidator` uses the `$` anchor, which incorrectly matches a trailing newline character due to Python's default regex behavior. To fix this, the `regex` attribute in both the `ASCIIUsernameValidator` and `UnicodeUsernameValidator` classes must be updated from `r'^[\w.@+-]+$'` to `r'\A[\w.@+-]+\Z'`.
+FIX attempts applyable: [True]
+ONESHOT applyable=True:
+django/contrib/auth/validators.py
+<<<<<<< SEARCH
+class UnicodeUsernameValidator(validators.RegexValidator):
+    regex = r'^[\w.@+-]+$'
+=======
+class UnicodeUsernameValidator(validators.RegexValidator):
+    regex = r'\A[\w.@+-]+\Z'
+>>>>>>> REPLACE
+django/contrib/auth/validators.py
+<<<<<<< SEARCH
+class ASCIIUsernameValidator(validators.RegexValidator):
+    regex = r'^[\w.@+-]+$'
+=======
+class ASCIIUsernameValidator(validators.RegexValidator):
+    regex = r'\A[\w.@+-]+\Z'
+>>>>>>> REPLACE
+
+===== django__django-11133 =====
+ISSUE: HttpResponse doesn't handle memoryview objects
+Description
+	
+I am trying to write a BinaryField retrieved from the database into a HttpResponse. When the database is Sqlite this works correctly, but P
+
+SLOT log: [('DIAGNOSE', 'The root cause is that `HttpResponse.mak', 'valid', 'root cause of the bug'), ('FIX', 'diff --git a/django/http/response.py b/d', 'valid', 'minimal applyable fix'), ('FIXPOINT', 2)]
+DIAGNOSES (1 attempts):
+  [0] The root cause is that `HttpResponse.make_bytes` lacks an explicit check for `memoryview` objects, causing the code to fall through to the final fallback which converts the object to its string representation (e.g., `"<memory at 0x...>"`) instead of extracting its raw bytes. You must add a condition `if isinstance(value, memoryview): return bytes(value)` immediately after the `bytes` check in the `make_bytes` function to ensure the memoryview is correctly converted to a bytestring.
+FIX attempts applyable: [True]
+ONESHOT applyable=True:
+django/http/response.py
+<<<<<<< SEARCH
+    def make_bytes(self, value):
+        """Turn a value into a bytestring encoded in the output charset."""
+        # Per PEP 3333, this response body must be bytes. To avoid returning
+        # an instance of a subclass, this function returns `bytes(value)`.
+        # This doesn't make a copy when `value` already contains bytes.
+
+        # Handle string types -- we can't rely on force_bytes here because:
+        # - Python attempts str conversion first
+  
+
+===== django__django-11283 =====
+ISSUE: Migration auth.0011_update_proxy_permissions fails for models recreated as a proxy.
+Description
+	 
+		(last modified by Mariusz Felisiak)
+	 
+I am trying to update my project to Django 2.2. When I launc
+
+SLOT log: [('DIAGNOSE', 'The root cause is that the migration log', 'valid', 'root cause of the bug'), ('FIX', 'diff --git a/django/contrib/auth/migrati', 'valid', 'minimal applyable fix'), ('FIXPOINT', 2)]
+DIAGNOSES (1 attempts):
+  [0] The root cause is that the migration logic iterates over all models in the database, including those that have already been migrated to use the proxy model's `content_type`, and attempts to update them again, resulting in duplicate key violations. Specifically, the `update_proxy_model_permissions` function must be modified to skip models where the permission's `content_type` already matches the proxy model's `content_type` (i.e., `opts.proxy_content_type`) before executing the update.
+FIX attempts applyable: [True]
+ONESHOT applyable=True:
+django/contrib/auth/migrations/0011_update_proxy_permissions.py
+<<<<<<< SEARCH
+def update_proxy_model_permissions(apps, schema_editor, reverse=False):
+    """
+    Update the content_type of proxy model permissions to use the ContentType
+    of the proxy model.
+    """
+    Permission = apps.get_model('auth', 'Permission')
+    ContentType = apps.get_model('contenttypes', 'ContentType')
+    for Model in apps.get_models():
+        opts = Model._meta
+        if not opts.proxy:
+            continue
+  
+
+===== django__django-11422 =====
+ISSUE: Autoreloader with StatReloader doesn't track changes in manage.py.
+Description
+	 
+		(last modified by Mariusz Felisiak)
+	 
+This is a bit convoluted, but here we go.
+Environment (OSX 10.11):
+$ python -
+
+SLOT log: [('DIAGNOSE', 'The root cause is that `iter_modules_and', 'valid', 'root cause of the bug'), ('FIX', 'diff --git a/django/utils/autoreload.py ', 'valid', 'minimal applyable fix'), ('FIXPOINT', 2)]
+DIAGNOSES (1 attempts):
+  [0] The root cause is that `iter_modules_and_files` in `django/utils/autoreload.py` skips `manage.py` because it is loaded via `importlib` without a concrete file location (`spec.has_location` is `False`), causing the function to return an empty set of file paths for the entry script. To fix this, the function must explicitly add the path to the entry script (passed as `extra_files` or derived from the main module's location) to the `sys_file_paths` list before returning the result, ensuring the file watcher monitors the script itself.
+FIX attempts applyable: [True]
+ONESHOT applyable=True:
+django/utils/autoreload.py
+<<<<<<< SEARCH
+@functools.lru_cache(maxsize=1)
+def iter_modules_and_files(modules, extra_files):
+    """Iterate through all modules needed to be watched."""
+    sys_file_paths = []
+    for module in modules:
+        # During debugging (with PyDev) the 'typing.io' and 'typing.re' objects
+        # are added to sys.modules, however they are types not modules and so
+        # cause issues here.
+        if not isinstance(module, ModuleType) or getattr(module, '__spec__', N
+
+===== django__django-11564 =====
+ISSUE: Add support for SCRIPT_NAME in STATIC_URL and MEDIA_URL
+Description
+	 
+		(last modified by Rostyslav Bryzgunov)
+	 
+By default, {% static '...' %} tag just appends STATIC_URL in the path. When running 
+
+SLOT log: [('DIAGNOSE', "The root cause is that Django's static f", 'valid', 'root cause of the bug'), ('FIX', '(unfilled)', 'insufficient', 'minimal applyable fix'), ('BACKTRACK', 'FIX', 'revise', 'DIAGNOSE', 'rederive'), ('DIAGNOSE', "The root cause is that Django's static f", 'valid', 'root cause of the bug'), ('FIX', '(unfilled)', 'insufficient', 'minimal applyable fix'), ('BACKTRACK', 'FIX', 'revise', 'DIAGNOSE', 'rederive'), ('DIAGNOSE', "The root cause is that Django's static f", 'valid', 'root cause of the bug'), ('FIX', '(unfilled)', 'insufficient', 'minimal applyable fix')]
+DIAGNOSES (3 attempts):
+  [0] The root cause is that Django's static file tags (`{% static %}`) and storage backends (`FileSystemStorage`, `StaticFilesStorage`) construct URLs using only the configured `STATIC_URL` and `MEDIA_URL` values, completely ignoring the `SCRIPT_NAME` WSGI parameter which is required when the application runs on a sub-path. To fix this, the `render` method in the static file tag must be updated to prepend `request.META['SCRIPT_NAME']` to the generated URL before returning it, and the storage backends must be modified to similarly incorporate `SCRIPT_NAME` when constructing file paths.
+  [1] The root cause is that Django's static file tags and storage backends do not dynamically prepend the `SCRIPT_NAME` WSGI parameter to `STATIC_URL` and `MEDIA_URL` when generating URLs, causing broken links when the application runs on a sub-path. To fix this, the `render` method in `django/template/default_tags.py` (specifically the `StaticNode` class) must be modified to check `request.META.get('SCRIPT_NAME')` and prepend it to the generated URL before returning it, ensuring the URL is context-aware regardless of how the settings were configured.
+  [2] The root cause is that Django's static file tags and storage backends do not dynamically prepend the `SCRIPT_NAME` WSGI parameter to `STATIC_URL` and `MEDIA_URL` when generating URLs, causing broken links when the application runs on a sub-path. To fix this, the `render` method in `django/template/default_tags.py` (specifically the `StaticNode` class) must be modified to check `request.META.get('SCRIPT_NAME')` and prepend it to the generated URL before returning it, ensuring the URL is context-aware regardless of how the settings were configured.
+FIX attempts applyable: [False, False, False]
+ONESHOT applyable=False:
+No changes were made to the provided source code. The issue described in the bug report pertains to the `django.template.defaulttags.static` tag and `django.contrib.staticfiles.storage` modules, which are not present in the provided snippet of `django/conf/__init__.py`. The `django.conf` module contains the `LazySettings` class and related configuration logic, which is unrelated to the `SCRIPT_NAME` handling for static files.
+
+===== django__django-11583 =====
+ISSUE: Auto-reloading with StatReloader very intermittently throws "ValueError: embedded null byte".
+Description
+	
+Raising this mainly so that it's tracked, as I have no idea how to reproduce it, nor why it'
+
+SLOT log: [('DIAGNOSE', 'The root cause is that `Path.resolve(str', 'valid', 'root cause of the bug'), ('FIX', 'diff --git a/django/utils/autoreload.py ', 'valid', 'minimal applyable fix'), ('FIXPOINT', 2)]
+DIAGNOSES (1 attempts):
+  [0] The root cause is that `Path.resolve(strict=True)` throws a `ValueError` when the input path string contains a null byte (`\x00`), which can occur if a module's `__file__` attribute or `__spec__.origin` unexpectedly contains embedded null bytes (a known quirk in Python 3.6+ with certain typing modules or specific file systems). To fix this, the `iter_modules_and_files` function in `django/utils/autoreload.py` must wrap the `path.resolve(strict=True)` call in a `try/except ValueError` block (similar to the existing `FileNotFoundError` handler) and skip the path if the error occurs, preventing the crash.
+
+**Specific Change:**
+In `django/utils/autoreload.py`, inside the
+FIX attempts applyable: [True]
+ONESHOT applyable=True:
+django/utils/autoreload.py
+<<<<<<< SEARCH
+    results = set()
+    for filename in itertools.chain(sys_file_paths, extra_files):
+        if not filename:
+            continue
+        path = Path(filename)
+        try:
+            resolved_path = path.resolve(strict=True).absolute()
+        except FileNotFoundError:
+            # The module could have been removed, don't fail loudly if this
+            # is the case.
+            continue
+        results.add(resolved_path)
+    return frozenset(resu
+
+===== django__django-11620 =====
+ISSUE: When DEBUG is True, raising Http404 in a path converter's to_python method does not result in a technical response
+Description
+	
+This is the response I get (plain text): 
+A server error occurred. Plea
+
+SLOT log: [('DIAGNOSE', 'The root cause is that `Http404` excepti', 'valid', 'root cause of the bug'), ('FIX', 'diff --git a/django/views/debug.py b/dja', 'valid', 'minimal applyable fix'), ('FIXPOINT', 2)]
+DIAGNOSES (1 attempts):
+  [0] The root cause is that `Http404` exceptions raised inside a path converter's `to_python` method are caught by the URL resolver as a generic `ValueError` (since `Http404` inherits from it), causing the resolver to skip the converter and attempt the next pattern instead of treating it as a definitive 404. To fix this, the `technical_404_response` function in `django/views/debug.py` must explicitly check if the exception is an `Http404` instance and return the technical 404 template immediately if so, rather than attempting to resolve the path again or falling back to default behavior. Specifically, add an `elif isinstance(exception, Http404): return HttpResponseNotFound(...)` block after the existing `
+FIX attempts applyable: [True]
+ONESHOT applyable=True:
+django/views/debug.py
+<<<<<<< SEARCH
+def technical_404_response(request, exception):
+    """Create a technical 404 error response. `exception` is the Http404."""
+    try:
+        error_url = exception.args[0]['path']
+    except (IndexError, TypeError, KeyError):
+        error_url = request.path_info[1:]  # Trim leading slash
+
+    try:
+        tried = exception.args[0]['tried']
+    except (IndexError, TypeError, KeyError):
+        tried = []
+    else:
+        if (not tried or (                  #
+
+===== django__django-11630 =====
+ISSUE: Django throws error when different apps with different models have the same name table name.
+Description
+	
+Error message:
+table_name: (models.E028) db_table 'table_name' is used by multiple models: ba
+
+SLOT log: [('DIAGNOSE', "The root cause is that Django's `check_a", 'valid', 'root cause of the bug'), ('FIX', 'diff --git a/django/core/checks/model_ch', 'valid', 'minimal applyable fix'), ('FIXPOINT', 2)]
+DIAGNOSES (1 attempts):
+  [0] The root cause is that Django's `check_all_models` function in `django/core/checks/model_checks.py` incorrectly flags any shared table name as an error, failing to distinguish between tables in the same app versus tables in different apps. To fix this, the logic inside the `for db_table, model_labels in db_table_models.items():` loop (specifically the check `if len(model_labels) != 1`) must be modified to only raise an error if the conflicting models belong to different apps; if all models sharing the table name are within the same app, the check should pass.
+FIX attempts applyable: [True]
+ONESHOT applyable=True:
+django/core/checks/model_checks.py
+<<<<<<< SEARCH
+    for db_table, model_labels in db_table_models.items():
+        if len(model_labels) != 1:
+            errors.append(
+                Error(
+                    "db_table '%s' is used by multiple models: %s."
+                    % (db_table, ', '.join(db_table_models[db_table])),
+                    obj=db_table,
+                    id='models.E028',
+                )
+            )
+=======
+    for db_table, model_labels in db_table_models.item
+
+===== django__django-11742 =====
+ISSUE: Add check to ensure max_length fits longest choice.
+Description
+	
+There is currently no check to ensure that Field.max_length is large enough to fit the longest value in Field.choices.
+This would be v
+
+SLOT log: [('DIAGNOSE', 'The root cause of the bug is that the `_', 'valid', 'root cause of the bug'), ('FIX', 'diff --git a/django/db/models/fields/__i', 'valid', 'minimal applyable fix'), ('FIXPOINT', 2)]
+DIAGNOSES (1 attempts):
+  [0] The root cause of the bug is that the `_check_choices` method in `django/db/models/fields/__init__.py` currently only validates the structure of the `choices` iterable but fails to verify that `Field.max_length` is sufficient to accommodate the longest string value within those choices. To fix this, the function must be updated to iterate through the `choices` list, calculate the maximum length of any string value, and return a `checks.Error` if `self.max_length` is less than that calculated maximum.
+FIX attempts applyable: [True]
+ONESHOT applyable=True:
+django/db/models/fields/__init__.py
+<<<<<<< SEARCH
+    def _check_choices(self):
+        if not self.choices:
+            return []
+
+        def is_value(value, accept_promise=True):
+            return isinstance(value, (str, Promise) if accept_promise else str) or not is_iterable(value)
+
+        if is_value(self.choices, accept_promise=False):
+            return [
+                checks.Error(
+                    "'choices' must be an iterable (e.g., a list or tuple).",
+                    obj=
+
+===== django__django-11797 =====
+ISSUE: Filtering on query result overrides GROUP BY of internal query
+Description
+	
+from django.contrib.auth import models
+a = models.User.objects.filter(email__isnull=True).values('email').annotate(m=Max('i
+
+SLOT log: [('DIAGNOSE', 'The root cause is that `django/db/models', 'valid', 'root cause of the bug'), ('FIX', 'diff --git a/django/db/models/lookups.py', 'valid', 'minimal applyable fix'), ('FIXPOINT', 2)]
+DIAGNOSES (1 attempts):
+  [0] The root cause is that `django/db/models/lookups.py`'s `process_rhs` method incorrectly assumes any subquery limited to one row (`has_limit_one()`) only needs to return the primary key, causing it to strip the `values('email')` clause and replace the grouping field with `pk`. To fix this, the logic inside `process_rhs` must be updated to check if the original query's `values()` clause was explicitly called with specific fields (other than just `pk`) before blindly clearing the select clause and adding only `['pk']`.
+FIX attempts applyable: [True]
+ONESHOT applyable=True:
+django/db/models/lookups.py
+<<<<<<< SEARCH
+    def process_rhs(self, compiler, connection):
+        from django.db.models.sql.query import Query
+        if isinstance(self.rhs, Query):
+            if self.rhs.has_limit_one():
+                # The subquery must select only the pk.
+                self.rhs.clear_select_clause()
+                self.rhs.add_fields(['pk'])
+            else:
+                raise ValueError(
+                    'The QuerySet value for an exact lookup must be limited
+
+===== django__django-11815 =====
+ISSUE: Migrations uses value of enum object instead of its name.
+Description
+	 
+		(last modified by oasl)
+	 
+When using Enum object as a default value for a CharField, the generated migration file uses the v
+
+SLOT log: [('DIAGNOSE', 'The root cause is that `django.db.migrat', 'valid', 'root cause of the bug'), ('FIX', 'diff --git a/django/db/migrations/serial', 'valid', 'minimal applyable fix'), ('FIXPOINT', 2)]
+DIAGNOSES (1 attempts):
+  [0] The root cause is that `django.db.migrations.serializer.BaseSerializer.serialize()` incorrectly serializes `Enum` default values by calling `str(self.value)`, which returns the translated string (e.g., "Good") instead of the enum's internal name (e.g., "GOOD"). To fix this, the `serialize` method in `django/db/migrations/serializer.py` must be updated to detect `Enum` instances and explicitly return their `name` attribute (e.g., `self.value.name`) rather than relying on the default string conversion.
+FIX attempts applyable: [True]
+ONESHOT applyable=True:
+django/db/migrations/serializer.py
+<<<<<<< SEARCH
+        if self.value.__name__ == '<lambda>':
+            raise ValueError("Cannot serialize function: lambda")
+        if self.value.__module__ is None:
+=======
+        if self.value.__name__ == '<lambda>':
+            raise ValueError("Cannot serialize function: lambda")
+        if self.value.__module__ is None:
+            raise ValueError("Cannot serialize function: module is None")
+        # Handle Enum objects: serialize by name, not value
+
+
+===== django__django-11848 =====
+ISSUE: django.utils.http.parse_http_date two digit year check is incorrect
+Description
+	 
+		(last modified by Ad Timmering)
+	 
+RFC 850 does not mention this, but in RFC 7231 (and there's something similar in
+
+SLOT log: [('DIAGNOSE', 'The root cause is that `parse_http_date`', 'valid', 'root cause of the bug'), ('FIX', 'diff --git a/django/utils/http.py b/djan', 'valid', 'minimal applyable fix'), ('FIXPOINT', 2)]
+DIAGNOSES (1 attempts):
+  [0] The root cause is that `parse_http_date` in `django/utils/http.py` uses a hardcoded threshold (year < 70) to assume two-digit years 00-69 belong to the 2000s and 70-99 to the 1900s, ignoring the RFC 7231 requirement to interpret ambiguous years based on the current year. To fix this, the conditional logic checking `if year < 70` must be replaced with a dynamic calculation that compares the two-digit year against the current year to determine the correct century (e.g., adding 2000 if the year is within 50 years of the current year, otherwise adding 1900).
+FIX attempts applyable: [True]
+ONESHOT applyable=True:
+django/utils/http.py
+<<<<<<< SEARCH
+        year = int(m.group('year'))
+        if year < 100:
+            if year < 70:
+                year += 2000
+            else:
+                year += 1900
+=======
+        year = int(m.group('year'))
+        if year < 100:
+            year += 1900
+            if year > 2069:
+                year -= 100
+>>>>>>> REPLACE
