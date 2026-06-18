@@ -26,6 +26,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
@@ -57,6 +58,9 @@ def run_swebench(preds_path: str, dataset: str, run_id: str,
                  instance_ids: Optional[Sequence[str]] = None, max_workers: int = 4,
                  model_name: str = MODEL_NAME, timeout: int = 1800) -> Dict[str, bool]:
     """Shell out to the official harness; return {instance_id: resolved bool}."""
+    if not os.path.exists(preds_path):
+        print(f"  ERROR: predictions file does not exist: {preds_path}", flush=True)
+        return {}
     ds = DATASET_MAP.get(dataset, dataset)
     cmd = [sys.executable, "-m", "swebench.harness.run_evaluation",
            "--dataset_name", ds, "--predictions_path", preds_path,
@@ -65,17 +69,26 @@ def run_swebench(preds_path: str, dataset: str, run_id: str,
     if instance_ids:
         cmd += ["--instance_ids", *instance_ids]
     print("  $ " + " ".join(cmd), flush=True)
+    started = time.time()
     proc = subprocess.run(cmd, text=True, capture_output=True, timeout=timeout)
     sys.stdout.write(proc.stdout[-4000:]); sys.stderr.write(proc.stderr[-2000:])
-    return parse_report(model_name, run_id)
+    if proc.returncode != 0:
+        print(f"  ERROR: swebench harness exited {proc.returncode}; ignoring any stale prior reports for run_id={run_id}.", flush=True)
+        return {}
+    return parse_report(model_name, run_id, min_mtime=started - 1.0)
 
 
-def parse_report(model_name: str, run_id: str) -> Dict[str, bool]:
+def parse_report(model_name: str, run_id: str, min_mtime: float | None = None) -> Dict[str, bool]:
     """swebench writes <model_name>.<run_id>.json with resolved/unresolved id lists."""
     cands = glob.glob(f"{model_name}.{run_id}.json") + glob.glob(f"*{run_id}*.json")
+    cands = [p for p in dict.fromkeys(cands) if os.path.isfile(p)]
+    if min_mtime is not None:
+        cands = [p for p in cands if os.path.getmtime(p) >= min_mtime]
+    cands = sorted(cands, key=os.path.getmtime, reverse=True)
     for p in cands:
         try:
-            d = json.load(open(p, encoding="utf-8"))
+            with open(p, encoding="utf-8") as f:
+                d = json.load(f)
         except Exception:   # noqa: BLE001
             continue
         if "resolved_ids" in d or "resolved_instances" in d:
@@ -134,7 +147,8 @@ def run_sbcli(preds_path: str, dataset: str, run_id: str, split: str = "test",
         cands = [p for p in glob.glob(os.path.join(out_dir, "*.json")) if run_id in os.path.basename(p)]
         if cands:
             try:
-                d = json.load(open(max(cands, key=os.path.getmtime), encoding="utf-8"))
+                with open(max(cands, key=os.path.getmtime), encoding="utf-8") as f:
+                    d = json.load(f)
             except Exception:   # noqa: BLE001
                 d = {}
         pend, subm = d.get("pending_instances", 1), d.get("submitted_instances", 0)
@@ -196,10 +210,13 @@ def main(argv=None) -> int:
     if args.predictions:
         res = _verify(args.predictions, args.dataset, args.run_id, args.backend,
                       args.instance_ids, args.max_workers, args.out_dir, args.split)
+        if not res:
+            print("\nverification failed or produced no results; not writing a resolved count from stale files.")
+            return 1
         ok = sum(1 for v in res.values() if v)
         report = os.path.join(args.out_dir, f"verify_{args.run_id}.json")
-        json.dump({"resolved": ok, "total": len(res),
-                   "results": res}, open(report, "w"), indent=2)
+        with open(report, "w", encoding="utf-8") as f:
+            json.dump({"resolved": ok, "total": len(res), "results": res}, f, indent=2)
         print(f"\nresolved {ok}/{len(res)} -> {report}")
         return 0
     print("nothing to do: pass --gold-sanity or --predictions <jsonl>")

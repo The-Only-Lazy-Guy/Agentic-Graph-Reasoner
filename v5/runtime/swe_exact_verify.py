@@ -9,11 +9,10 @@ from __future__ import annotations
 import hashlib
 import os
 import subprocess
-import sys
 import time
 from pathlib import Path
 
-from v5.graph_grower.swe_verify import DATASET_MAP, parse_report, run_sbcli, write_predictions
+from v5.graph_grower.swe_verify import run_sbcli, run_swebench, write_predictions
 
 
 class SWEExactVerifier:
@@ -66,21 +65,9 @@ class SWEExactVerifier:
         return self.out_dir / f"{run_id}.predictions.jsonl"
 
     def _run_docker(self, preds_path: str, run_id: str, instance_ids: list[str]) -> dict[str, bool]:
-        ds = DATASET_MAP.get(self.dataset, self.dataset)
-        cmd = [sys.executable, "-m", "swebench.harness.run_evaluation",
-               "--dataset_name", ds, "--predictions_path", preds_path,
-               "--run_id", run_id, "--max_workers", str(self.max_workers),
-               "--cache_level", "env"]
-        if instance_ids:
-            cmd += ["--instance_ids", *instance_ids]
-        proc = subprocess.run(cmd, text=True, capture_output=True, timeout=self.timeout)
-        if proc.returncode != 0:
-            print(f"WARN: swebench harness exited {proc.returncode} for run_id={run_id}", flush=True)
-            if proc.stdout:
-                sys.stdout.write(proc.stdout[-3000:])
-            if proc.stderr:
-                sys.stderr.write(proc.stderr[-1500:])
-        return parse_report(self.model_name, run_id)
+        return run_swebench(preds_path, self.dataset, run_id, instance_ids=instance_ids,
+                            max_workers=self.max_workers, model_name=self.model_name,
+                            timeout=self.timeout)
 
     def _run(self, preds_path: str, run_id: str, instance_ids: list[str]) -> dict[str, bool]:
         if self.backend == "sbcli":

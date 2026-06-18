@@ -157,6 +157,14 @@ def _prepare_outputs(args):
     }
 
 
+def _verify_run_ids(outputs, dataset: str, split: str) -> tuple[str, str]:
+    if outputs["name"]:
+        base = outputs["name"]
+    else:
+        base = _slug(f"swe_slot_{dataset}_{split}")
+    return f"{base}_oneshot", f"{base}_slot"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--selftest", action="store_true", help="no-model proof the SLOT path uses the engine")
@@ -189,6 +197,7 @@ def main():
     if a.selftest:
         raise SystemExit(0 if _selftest() else 1)
     outputs = _prepare_outputs(a)
+    oneshot_run_id, slot_run_id = _verify_run_ids(outputs, a.dataset, a.split)
 
     import torch
     from transformers import AutoTokenizer
@@ -303,8 +312,8 @@ def main():
     else:
         print("  exact verify not run here. To score these predictions on the verifier box:")
         print(f"    python -m v5.graph_grower.swe_verify --gold-sanity --dataset {a.dataset} --split {a.split} --limit 5")
-        print(f"    python -m v5.graph_grower.swe_verify --predictions {oneshot_path} --dataset {a.dataset} --split {a.split} --run-id oneshot")
-        print(f"    python -m v5.graph_grower.swe_verify --predictions {slot_path} --dataset {a.dataset} --split {a.split} --run-id slot")
+        print(f"    python -m v5.graph_grower.swe_verify --predictions {oneshot_path} --dataset {a.dataset} --split {a.split} --run-id {oneshot_run_id}")
+        print(f"    python -m v5.graph_grower.swe_verify --predictions {slot_path} --dataset {a.dataset} --split {a.split} --run-id {slot_run_id}")
     if outputs["summary"] is not None:
         summary = {
             "session_name": outputs["name"],
@@ -326,8 +335,8 @@ def main():
             },
             "verify_commands": {
                 "gold_sanity": f"python -m v5.graph_grower.swe_verify --gold-sanity --dataset {a.dataset} --split {a.split} --limit 5",
-                "oneshot": f"python -m v5.graph_grower.swe_verify --predictions {oneshot_path} --dataset {a.dataset} --split {a.split} --run-id oneshot",
-                "slot": f"python -m v5.graph_grower.swe_verify --predictions {slot_path} --dataset {a.dataset} --split {a.split} --run-id slot",
+                "oneshot": f"python -m v5.graph_grower.swe_verify --predictions {oneshot_path} --dataset {a.dataset} --split {a.split} --run-id {oneshot_run_id}",
+                "slot": f"python -m v5.graph_grower.swe_verify --predictions {slot_path} --dataset {a.dataset} --split {a.split} --run-id {slot_run_id}",
             },
         }
         if exact1 is not None and exact2 is not None:

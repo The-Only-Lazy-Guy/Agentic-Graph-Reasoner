@@ -117,8 +117,8 @@ If the verifier is on a separate box, run on the GPU box with `--session-out-dir
 copy that bundle to the Docker box, then score the emitted jsonl files there:
 ```bash
 python -m v5.graph_grower.swe_verify --gold-sanity --dataset lite --split test --limit 5
-python -m v5.graph_grower.swe_verify --predictions artifacts/swe_slot_sessions/lite_test_n24_run1/oneshot.jsonl --dataset lite --split test --run-id oneshot
-python -m v5.graph_grower.swe_verify --predictions artifacts/swe_slot_sessions/lite_test_n24_run1/slot.jsonl --dataset lite --split test --run-id slot
+python -m v5.graph_grower.swe_verify --predictions artifacts/swe_slot_sessions/lite_test_n24_run1/oneshot.jsonl --dataset lite --split test --run-id lite_test_n24_run1_oneshot
+python -m v5.graph_grower.swe_verify --predictions artifacts/swe_slot_sessions/lite_test_n24_run1/slot.jsonl --dataset lite --split test --run-id lite_test_n24_run1_slot
 ```
 
 ### Current conclusion
