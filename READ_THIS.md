@@ -85,6 +85,73 @@ SEARCH/REPLACE patch. `FIX` is downstream of diagnosis.
 3. **Only later revisit whole-patch RL**
    - after we know the slot graph itself buys exact solves
 
+### What the first exact verifier run actually showed
+
+Docker-box exact verification on the emitted session bundle
+`artifacts/swe_slot_sessions/lite_test_n24_run1` gave:
+
+- gold-sanity: `5/5`
+- ONE-SHOT: `6/21`
+- SLOT(engine): `7/21`
+
+Important detail: SLOT was a **strict superset** in this run. It did **not**
+trade wins around; it kept every one-shot resolve and added one new solve:
+`astropy__astropy-14995`.
+
+That added solve is the right kind of lift, not noise. On
+`astropy__astropy-14995`, the one-shot patch was broad and mangled the method
+body, while the SLOT path wrote the surgical `None`-guard in
+`_arithmetic_mask`, and the verifier confirmed the flip.
+
+### What the dump inspection taught us
+
+The first engine-wired run also exposed the structural weakness very clearly:
+
+- almost every scored case terminated at `FIXPOINT 2`
+- the typical trace was just `DIAGNOSE -> FIX -> FIXPOINT`
+- only the clearly bad cases (`astropy__astropy-12907`,
+  `django__django-11564`) exercised deeper retry / backtrack
+
+So the engine was real, but the **contract was too weak**: `FIX` became
+`VALID` as soon as it produced any non-empty applyable patch. That made the
+slot path behave too much like "one-shot patching with a diagnosis preface."
+
+### Structural fix landed: add a PLAN slot and tighten FIX sufficiency
+
+To make this a real operator slot-graph test rather than a shallow wrapper, the
+SWE synthesis loop now runs:
+
+`DIAGNOSE -> PLAN -> FIX`
+
+where:
+
+- `PLAN` must emit:
+  - `FILE: ...`
+  - `SEARCH:` exact quoted source anchor
+  - `CHANGE:` intended edit
+- `PLAN` is only sufficient if:
+  - the file path matches a shown source header
+  - the quoted `SEARCH` anchor occurs verbatim in the provided source
+- `FIX` is only sufficient if:
+  - it emits an applyable patch, **and**
+  - the emitted SR blocks actually match the planned file + quoted anchor
+
+This matters because it fixes the failure mode the dump revealed: an applyable
+patch is no longer enough to hit fixpoint if it edits the wrong local region.
+
+The no-model proof in `python -m v5.runtime.swe_slot --selftest` now checks the
+right thing:
+
+- attempt 1 emits an **applyable but wrong-scope** fix
+- the graph marks `FIX` insufficient
+- backtrack revises `PLAN`
+- attempt 2 emits an **anchored** fix
+- only then does the graph reach fixpoint
+
+That is the correct control behavior for the coding-derive thesis: the loop
+must force the model to solve the intermediate writable slot, not merely emit a
+patch that happens to apply.
+
 ### Repro commands
 
 Slot-graph wiring proof (no model):

@@ -1,13 +1,14 @@
-"""#9 (synthesis-focused, ENGINE-WIRED) — slot-graph DIAGNOSE->FIX vs one-shot, through SlotGraph.solve.
+"""#9 (synthesis-focused, ENGINE-WIRED) — slot-graph DIAGNOSE->PLAN->FIX vs one-shot, through SlotGraph.solve.
 
 Localization held FIXED (gold support symbols) to isolate SYNTHESIS from the ~0.30 localization wall.
-The SLOT path now runs the REAL engine (slot_coder.SlotGraph): DIAGNOSE (revise='rederive') -> FIX.
-An unapplyable FIX -> empty value -> INSUFFICIENT -> dependency-directed BACKTRACK to DIAGNOSE ->
-re-diagnose deeper -> re-FIX, to a fixpoint (or max_steps). Compared to ONE-SHOT (single SR emit).
+The SLOT path now runs the REAL engine (slot_coder.SlotGraph): DIAGNOSE (revise='rederive') ->
+PLAN (quote the exact source anchor + intended change) -> FIX. An ungrounded PLAN or an unapplyable /
+misaligned FIX -> INSUFFICIENT -> dependency-directed BACKTRACK to the nearest upstream slot, then
+re-plan / re-diagnose deeper, to a fixpoint (or max_steps). Compared to ONE-SHOT (single SR emit).
 
 `slot_solve()` is shared by the real 4B run AND a no-model `--selftest` that PROVES the engine wiring
-(DIAGNOSE->FIX->INSUFFICIENT->backtrack->re-diagnose->applyable->fixpoint) without a GPU. This is the
-fix for the earlier mistake where swe_slot bypassed the engine entirely (see memory verify-wiring-not-proxy).
+(DIAGNOSE->PLAN->FIX->INSUFFICIENT->backtrack->re-plan->anchored-fix->fixpoint) without a GPU. This is
+the fix for the earlier mistake where swe_slot bypassed the engine entirely (see memory verify-wiring-not-proxy).
 
   4B (A40): V5_LM_TRUST_REMOTE_CODE=1 python -m v5.runtime.swe_slot --n-eval 24
   session : ... --session-out-dir artifacts/swe_slot_sessions --session-name lite_n24_run1
@@ -28,6 +29,53 @@ from v5.runtime.swe_exact_verify import SWEExactVerifier
 from v5.runtime.slot_coder import SlotGraph, SlotSpec, Pool
 
 
+def _canon_path(p: str) -> str:
+    return (p or "").replace("\\", "/").strip()
+
+
+def _same_file(a: str, b: str) -> bool:
+    aa, bb = _canon_path(a), _canon_path(b)
+    return bool(aa and bb) and (aa == bb or aa.endswith("/" + bb) or bb.endswith("/" + aa))
+
+
+def _parse_plan(text: str) -> dict[str, str]:
+    file_match = re.search(r"(?mi)^FILE:\s*(.+?)\s*$", text or "")
+    search_match = re.search(r"(?mis)^SEARCH:\s*\n(.*?)(?:\nCHANGE:\s*\n|\Z)", text or "")
+    change_match = re.search(r"(?mis)^CHANGE:\s*\n(.*)$", text or "")
+    return {
+        "file": (file_match.group(1).strip() if file_match else ""),
+        "search": (search_match.group(1).strip("\n") if search_match else ""),
+        "change": (change_match.group(1).strip() if change_match else ""),
+    }
+
+
+def _plan_sufficient(plan_text: str, src: str) -> bool:
+    plan = _parse_plan(plan_text)
+    fpath = _canon_path(plan["file"])
+    search = (plan["search"] or "").strip()
+    return bool(
+        fpath
+        and search
+        and plan["change"].strip()
+        and (f"# {fpath}" in src or fpath in src)
+        and search in src
+    )
+
+
+def _blocks_match_plan(blocks: list[dict], plan_text: str) -> bool:
+    plan = _parse_plan(plan_text)
+    fpath = plan["file"]
+    search = (plan["search"] or "").strip()
+    if not (fpath and search):
+        return False
+    for b in blocks or []:
+        if _same_file(b.get("file", ""), fpath):
+            bsearch = (b.get("search") or "").strip()
+            if search and (search in bsearch or bsearch in search):
+                return True
+    return False
+
+
 def _unmatched(blocks, dest):
     from v5.runtime.sr_withcode import _file_text
     return [b for b in blocks if (b.get("search") or "").strip()
@@ -43,12 +91,28 @@ def _patch(blocks, dest):                     # applyable -> git diff (the swebe
     return p
 
 
-def fix_user(issue, src, diagnosis=""):
+def fix_user(issue, src, diagnosis="", plan=""):
     s = f"ISSUE:\n{issue[:1400]}\n\nRELEVANT SOURCE (the bug is in here):\n{src}\n\n"
     if diagnosis:
         s += f"ROOT-CAUSE DIAGNOSIS (use it):\n{diagnosis}\n\n"
+    if plan:
+        s += f"EDIT PLAN (follow it exactly):\n{plan}\n\n"
     return (s + "Fix the exact line(s) causing the bug. Output ONLY search/replace blocks: SEARCH "
             "must copy the source EXACTLY (character-for-character); REPLACE must DIFFER. Keep it minimal.")
+
+
+def plan_user(issue, src, diagnosis, attempt):
+    nudge = "" if attempt == 0 else (
+        " NOTE: the previous fix either ignored the planned anchor or edited the wrong place. Quote the "
+        "EXACT file path from the source header and the EXACT source snippet that must change.")
+    return (
+        f"ISSUE:\n{issue[:1400]}\n\nRELEVANT SOURCE:\n{src}\n\nROOT-CAUSE DIAGNOSIS:\n{diagnosis}\n\n"
+        "Plan the edit before patching. Output ONLY this format:\n"
+        "FILE: path/from/source.py\nSEARCH:\n<exact existing code copied verbatim from the source>\n"
+        "CHANGE:\n<one sentence saying what should change and why>\n"
+        "The SEARCH block must be copied EXACTLY from the source above, and FILE must match a shown source header."
+        f"{nudge}"
+    )
 
 
 def diag_user(issue, src, attempt):
@@ -59,13 +123,15 @@ def diag_user(issue, src, attempt):
             f"bug and exactly what must change (name the function/lines). Be specific.{nudge}")
 
 
-def slot_solve(issue, src, diagnose_fn, fix_fn, max_steps=8, log=None):
-    """The SHARED slot-graph: DIAGNOSE (rederive on failure) -> FIX (applyable = sufficient).
-      diagnose_fn(issue, src, attempt) -> diagnosis text
-      fix_fn(issue, src, diagnosis)    -> APPLYABLE patch text, or "" if unapplyable/no-op
+def slot_solve(issue, src, diagnose_fn, plan_fn, fix_fn, max_steps=8, log=None):
+    """The SHARED slot-graph: DIAGNOSE -> PLAN -> FIX.
+      diagnose_fn(issue, src, attempt)              -> diagnosis text
+      plan_fn(issue, src, diagnosis, attempt)       -> FILE/SEARCH/CHANGE plan text
+      fix_fn(issue, src, diagnosis, plan)           -> (APPLYABLE patch text, parsed SR blocks)
     Returns (patch, trace, fixpoint, steps). Same engine for the 4B run and the selftest."""
-    attempts = {"DIAGNOSE": 0}
-    trace = {"diagnoses": [], "fix_attempts": []}
+    attempts = {"DIAGNOSE": 0, "PLAN": 0}
+    trace = {"diagnoses": [], "plans": [], "fix_attempts": []}
+    fix_meta = {"blocks": [], "plan": ""}
 
     def retr(q, kind):
         return [{"id": "src", "text": src}]                    # localization fixed -> evidence = the source
@@ -76,14 +142,34 @@ def slot_solve(issue, src, diagnose_fn, fix_fn, max_steps=8, log=None):
             d = diagnose_fn(issue, src, n)
             trace["diagnoses"].append(d)
             return d
+        if slot.name == "PLAN":
+            diag = pool.get("DIAGNOSE")
+            n = attempts["PLAN"]; attempts["PLAN"] = n + 1
+            plan = plan_fn(issue, src, diag, n)
+            trace["plans"].append(plan)
+            return plan
         diag = pool.get("DIAGNOSE")
-        patch = fix_fn(issue, src, diag)                       # "" if unapplyable -> INSUFFICIENT -> backtrack
-        trace["fix_attempts"].append({"applyable": bool(patch), "diag_used": diag[:160]})
+        plan = pool.get("PLAN")
+        patch, blocks = fix_fn(issue, src, diag, plan)        # "" if unapplyable/no-op -> INSUFFICIENT -> backtrack
+        fix_meta["blocks"] = list(blocks or [])
+        fix_meta["plan"] = plan
+        trace["fix_attempts"].append({
+            "applyable": bool(patch),
+            "anchored": _blocks_match_plan(fix_meta["blocks"], plan),
+            "diag_used": diag[:160],
+        })
         return patch
 
     specs = [
         SlotSpec("DIAGNOSE", [], "src", "ASSERT", query=lambda p: "root cause of the bug", revise="rederive"),
-        SlotSpec("FIX", ["DIAGNOSE"], "src", "TRANSFORM", query=lambda p: "minimal applyable fix"),
+        SlotSpec("PLAN", ["DIAGNOSE"], "src", "ASSERT",
+                 query=lambda p: "exact quoted target lines and edit intent",
+                 revise="rederive",
+                 sufficient=lambda slot, pool: _plan_sufficient(slot.value, src)),
+        SlotSpec("FIX", ["DIAGNOSE", "PLAN"], "src", "TRANSFORM",
+                 query=lambda p: "minimal applyable fix aligned to the plan",
+                 sufficient=lambda slot, pool: bool(slot.value)
+                 and _blocks_match_plan(fix_meta["blocks"], fix_meta["plan"])),
     ]
     sg = SlotGraph(specs)
     pool = Pool(specs, context={"issue": issue, "src": src})
@@ -91,28 +177,40 @@ def slot_solve(issue, src, diagnose_fn, fix_fn, max_steps=8, log=None):
     return pool.slots["FIX"].value, trace, ok, steps
 
 
-# ── no-model wiring proof: the engine MUST drive DIAGNOSE->FIX->backtrack->re-diagnose->applyable ──
+# ── no-model wiring proof: the engine MUST reject an applyable-but-misaligned fix, then re-plan and recover ──
 def _selftest():
     print("swe_slot --selftest: proving the SLOT path runs SlotGraph.solve (no model).\n")
-    # stub model: shallow first diagnosis -> unapplyable fix; after backtrack, a deeper diagnosis -> applyable.
+    src = "# x.py\ndef check(x, y):\n    if y < 5:\n        return y < 5\n    return x < 5\n"
     def diagnose_fn(issue, src, attempt):
-        return "vague: something is wrong" if attempt == 0 else "PRECISE: change line 42 token `<` to `<=`"
-    def fix_fn(issue, src, diagnosis):
-        return "diff --git a/x b/x\n+fixed\n" if diagnosis.startswith("PRECISE") else ""   # applyable only if precise
+        return "PRECISE: change `return x < 5` to `return x <= 5` in x.py"
+    def plan_fn(issue, src, diagnosis, attempt):
+        return ("FILE: x.py\nSEARCH:\nreturn x < 5\nCHANGE:\nChange `<` to `<=` in the return line.\n")
+    fix_attempts = {"n": 0}
+    def fix_fn(issue, src, diagnosis, plan):
+        fix_attempts["n"] += 1
+        if fix_attempts["n"] == 1:
+            blocks = [{"file": "x.py", "search": "return y < 5", "replace": "return y <= 5"}]
+            return "diff --git a/x.py b/x.py\n+wrong-scope\n", blocks
+        blocks = [{"file": "x.py", "search": "return x < 5", "replace": "return x <= 5"}]
+        return "diff --git a/x.py b/x.py\n+fixed\n", blocks
     log = []
-    patch, trace, ok, steps = slot_solve("issue", "source", diagnose_fn, fix_fn, log=log)
+    patch, trace, ok, steps = slot_solve("issue", src, diagnose_fn, plan_fn, fix_fn, log=log)
     for row in log:
         print("   ", row)
     print(f"\n   diagnoses          : {trace['diagnoses']}")
-    print(f"   fix attempts        : {[a['applyable'] for a in trace['fix_attempts']]}")
+    print(f"   plans              : {trace['plans']}")
+    print(f"   fix attempts       : {[(a['applyable'], a['anchored']) for a in trace['fix_attempts']]}")
     print(f"   fixpoint={ok} steps={steps}  final patch applyable={bool(patch)}")
     backtracked = any(r[0] == "BACKTRACK" for r in log)
-    rediagnosed = len(trace["diagnoses"]) >= 2
-    ok_wired = bool(patch) and ok and backtracked and rediagnosed
-    print(f"\n   WIRING PROOF: backtrack-fired={backtracked}  re-diagnosed={rediagnosed}  "
-          f"recovered-applyable={bool(patch)}  -> {'PASS' if ok_wired else 'FAIL'}")
-    print("   (attempt-1 fix unapplyable -> INSUFFICIENT -> backtrack to DIAGNOSE -> deeper diagnosis ->")
-    print("    attempt-2 fix applyable -> fixpoint. The engine, not a hand-coded 2-call pipeline.)")
+    replanned = len(trace["plans"]) >= 2
+    anchored = trace["fix_attempts"][-1]["anchored"] if trace["fix_attempts"] else False
+    rejected_wrong_scope = any(a["applyable"] and not a["anchored"] for a in trace["fix_attempts"][:-1])
+    ok_wired = bool(patch) and ok and backtracked and replanned and anchored and rejected_wrong_scope
+    print(f"\n   WIRING PROOF: backtrack-fired={backtracked}  re-planned={replanned}  "
+          f"rejected-applyable-wrong-scope={rejected_wrong_scope}  recovered-anchored={anchored}"
+          f"  -> {'PASS' if ok_wired else 'FAIL'}")
+    print("   (attempt-1 fix was applyable but ignored the planned anchor -> INSUFFICIENT -> backtrack")
+    print("    to PLAN -> attempt-2 follows the quoted source anchor -> fixpoint. The engine enforced scope.)")
     return ok_wired
 
 
@@ -263,14 +361,18 @@ def main():
             oneshot_preds[iid] = p1
             oneshot_eval.append((task, p1))
 
-        # SLOT path THROUGH THE ENGINE (DIAGNOSE -> FIX, backtrack/re-diagnose on unapplyable)
+        # SLOT path THROUGH THE ENGINE (DIAGNOSE -> PLAN -> FIX, backtrack on ungrounded plans / wrong-scope fixes)
         def diagnose_fn(issue, src, attempt):
             return gen("You are a precise debugging assistant.", diag_user(issue, src, attempt), 160)
-        def fix_fn(issue, src, diagnosis):
-            g = gen(SR_SYS, fix_user(issue, src, diagnosis), a.max_new)
-            return _patch(parse_sr(g), str(dest))           # "" unless applyable
+        def plan_fn(issue, src, diagnosis, attempt):
+            return gen("You are a precise patch planner.", plan_user(issue, src, diagnosis, attempt), 220)
+        def fix_fn(issue, src, diagnosis, plan):
+            g = gen(SR_SYS, fix_user(issue, src, diagnosis, plan), a.max_new)
+            blocks = parse_sr(g)
+            return _patch(blocks, str(dest)), blocks        # "" unless applyable
         log = []
-        p2, trace, fp, steps = slot_solve(issue, src, diagnose_fn, fix_fn, max_steps=a.max_steps, log=log)
+        p2, trace, fp, steps = slot_solve(issue, src, diagnose_fn, plan_fn, fix_fn,
+                                          max_steps=a.max_steps, log=log)
         app2 = bool(p2.strip())
         slot_app += app2
         if app2:
@@ -278,12 +380,16 @@ def main():
             slot_eval.append((task, p2))
 
         print(f"  [{k+1}/{len(ids)}] {iid:28} oneshot_app={app1} slot_app={app2} "
-              f"slot_steps={steps} diag_attempts={len(trace['diagnoses'])} fixpoint={fp}", flush=True)
+              f"slot_steps={steps} diag_attempts={len(trace['diagnoses'])} "
+              f"plan_attempts={len(trace['plans'])} fixpoint={fp}", flush=True)
         dump.write(f"\n===== {iid} =====\nISSUE: {issue[:200]}\n\n"
                    f"SLOT log: {log}\n"
                    f"DIAGNOSES ({len(trace['diagnoses'])} attempts):\n" +
                    "\n".join(f"  [{i}] {d}" for i, d in enumerate(trace['diagnoses'])) +
-                   f"\nFIX attempts applyable: {[x['applyable'] for x in trace['fix_attempts']]}\n"
+                   f"\nPLANS ({len(trace['plans'])} attempts):\n" +
+                   "\n".join(f"  [{i}] {p}" for i, p in enumerate(trace['plans'])) +
+                   f"\nFIX attempts (applyable, anchored): "
+                   f"{[(x['applyable'], x['anchored']) for x in trace['fix_attempts']]}\n"
                    f"ONESHOT applyable={app1}:\n{g1[:500]}\n")
     dump.close()
     oneshot_path = str(outputs["oneshot"])
