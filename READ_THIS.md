@@ -47,14 +47,20 @@ SEARCH/REPLACE patch. `FIX` is downstream of diagnosis.
    - new flags:
      - `--split`
      - `--exact-verify`
+     - `--session-out-dir`
+     - `--session-name`
      - `--verify-backend docker|sbcli`
      - `--verify-out-dir`
      - `--verify-max-workers`
      - `--verify-timeout`
      - `--verify-poll-secs`
      - `--verify-gold-sanity`
-   - still emits `artifacts/swe_oneshot_preds.jsonl` and
-     `artifacts/swe_slot_preds.jsonl`
+   - still emits prediction jsonl files, but can now also write a **session
+     bundle** containing:
+     - `oneshot.jsonl`
+     - `slot.jsonl`
+     - `dump.txt`
+     - `summary.json`
    - but can now also run:
      - gold-sanity first
      - exact resolve for **ONE-SHOT** vs **SLOT(engine)** in the same command
@@ -92,6 +98,14 @@ V5_LM_TRUST_REMOTE_CODE=1 python -m v5.runtime.swe_slot \
   --dataset lite --split test --n-eval 24
 ```
 
+Remote GPU box -> write a named session bundle for Docker scoring elsewhere:
+```bash
+V5_LM_TRUST_REMOTE_CODE=1 python -m v5.runtime.swe_slot \
+  --dataset lite --split test --n-eval 24 \
+  --session-out-dir artifacts/swe_slot_sessions \
+  --session-name lite_test_n24_run1
+```
+
 Slot graph vs one-shot, with exact verifier on the same box:
 ```bash
 V5_LM_TRUST_REMOTE_CODE=1 python -m v5.runtime.swe_slot \
@@ -99,12 +113,12 @@ V5_LM_TRUST_REMOTE_CODE=1 python -m v5.runtime.swe_slot \
   --exact-verify --verify-backend docker --verify-gold-sanity 5
 ```
 
-If the verifier is on a separate box, `swe_slot` still writes the two prediction
-files and you can score them manually:
+If the verifier is on a separate box, run on the GPU box with `--session-out-dir`,
+copy that bundle to the Docker box, then score the emitted jsonl files there:
 ```bash
 python -m v5.graph_grower.swe_verify --gold-sanity --dataset lite --split test --limit 5
-python -m v5.graph_grower.swe_verify --predictions artifacts/swe_oneshot_preds.jsonl --dataset lite --split test --run-id oneshot
-python -m v5.graph_grower.swe_verify --predictions artifacts/swe_slot_preds.jsonl --dataset lite --split test --run-id slot
+python -m v5.graph_grower.swe_verify --predictions artifacts/swe_slot_sessions/lite_test_n24_run1/oneshot.jsonl --dataset lite --split test --run-id oneshot
+python -m v5.graph_grower.swe_verify --predictions artifacts/swe_slot_sessions/lite_test_n24_run1/slot.jsonl --dataset lite --split test --run-id slot
 ```
 
 ### Current conclusion

@@ -10,15 +10,18 @@ re-diagnose deeper -> re-FIX, to a fixpoint (or max_steps). Compared to ONE-SHOT
 fix for the earlier mistake where swe_slot bypassed the engine entirely (see memory verify-wiring-not-proxy).
 
   4B (A40): V5_LM_TRUST_REMOTE_CODE=1 python -m v5.runtime.swe_slot --n-eval 24
+  session : ... --session-out-dir artifacts/swe_slot_sessions --session-name lite_n24_run1
   exact   : ... --exact-verify --verify-backend docker    # gold-sanity + exact resolve on this box
   wiring  : python -m v5.runtime.swe_slot --selftest      # no model, proves the slot-graph is invoked
 """
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 
 from v5.runtime.swe_exact_verify import SWEExactVerifier
@@ -123,6 +126,37 @@ def _exact_resolve_rate(verifier: SWEExactVerifier | None, name: str,
     return resolved / scored, emitted / scored, resolved, emitted
 
 
+def _slug(text: str) -> str:
+    keep = [c.lower() if c.isalnum() else "_" for c in (text or "session")]
+    s = "".join(keep).strip("_")
+    return s[:80] or "session"
+
+
+def _prepare_outputs(args):
+    if args.session_out_dir:
+        tag = _slug(args.session_name or f"swe_slot_{args.dataset}_{args.split}_{time.strftime('%Y%m%d_%H%M%S')}")
+        bundle = Path(args.session_out_dir) / tag
+        bundle.mkdir(parents=True, exist_ok=True)
+        return {
+            "name": tag,
+            "bundle": bundle,
+            "dump": bundle / "dump.txt",
+            "oneshot": bundle / "oneshot.jsonl",
+            "slot": bundle / "slot.jsonl",
+            "summary": bundle / "summary.json",
+        }
+    Path(args.dump).parent.mkdir(parents=True, exist_ok=True)
+    Path("artifacts").mkdir(parents=True, exist_ok=True)
+    return {
+        "name": "",
+        "bundle": None,
+        "dump": Path(args.dump),
+        "oneshot": Path("artifacts/swe_oneshot_preds.jsonl"),
+        "slot": Path("artifacts/swe_slot_preds.jsonl"),
+        "summary": None,
+    }
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--selftest", action="store_true", help="no-model proof the SLOT path uses the engine")
@@ -146,10 +180,15 @@ def main():
     ap.add_argument("--verify-poll-secs", type=int, default=20)
     ap.add_argument("--verify-gold-sanity", type=int, default=5,
                     help="when exact verify is active, require this many gold patches to resolve first")
+    ap.add_argument("--session-out-dir", default="",
+                    help="optional directory to write a per-run session bundle (predictions + dump + summary)")
+    ap.add_argument("--session-name", default="",
+                    help="optional session bundle name; default = swe_slot_<dataset>_<split>_<timestamp>")
     ap.add_argument("--dump", default="artifacts/swe_slot_dump.txt")
     a = ap.parse_args()
     if a.selftest:
         raise SystemExit(0 if _selftest() else 1)
+    outputs = _prepare_outputs(a)
 
     import torch
     from transformers import AutoTokenizer
@@ -186,7 +225,7 @@ def main():
                                 max_workers=a.verify_max_workers, timeout=a.verify_timeout,
                                 poll_secs=a.verify_poll_secs, model_name="swe_slot") if a.exact_verify else None
 
-    dump = open(a.dump, "w", encoding="utf-8")
+    dump = open(outputs["dump"], "w", encoding="utf-8")
     oneshot_app = slot_app = scored = 0
     oneshot_preds, slot_preds = {}, {}
     eval_tasks, oneshot_eval, slot_eval = [], [], []
@@ -238,12 +277,15 @@ def main():
                    f"\nFIX attempts applyable: {[x['applyable'] for x in trace['fix_attempts']]}\n"
                    f"ONESHOT applyable={app1}:\n{g1[:500]}\n")
     dump.close()
-    n1 = write_predictions(oneshot_preds, "artifacts/swe_oneshot_preds.jsonl", "v5_oneshot")
-    n2 = write_predictions(slot_preds, "artifacts/swe_slot_preds.jsonl", "v5_slot")
+    oneshot_path = str(outputs["oneshot"])
+    slot_path = str(outputs["slot"])
+    n1 = write_predictions(oneshot_preds, oneshot_path, "v5_oneshot")
+    n2 = write_predictions(slot_preds, slot_path, "v5_slot")
     print(f"\n=== #9 SYNTHESIS (engine-wired DIAGNOSE->FIX vs one-shot, given support) ===")
     print(f"  applyable@1:  ONE-SHOT {oneshot_app}/{scored}  |  SLOT(engine) {slot_app}/{scored}")
-    print(f"  emitted predictions: oneshot {n1} | slot {n2}")
-    print(f"  dump (MANUALLY INSPECT the diagnoses + retry behavior) -> {a.dump}")
+    print(f"  emitted predictions: oneshot {n1} -> {oneshot_path} | slot {n2} -> {slot_path}")
+    print(f"  dump (MANUALLY INSPECT the diagnoses + retry behavior) -> {outputs['dump']}")
+    exact1 = exact2 = None
     if verifier is not None:
         gold_n = min(a.verify_gold_sanity, len(eval_tasks))
         if gold_n > 0:
@@ -261,8 +303,42 @@ def main():
     else:
         print("  exact verify not run here. To score these predictions on the verifier box:")
         print(f"    python -m v5.graph_grower.swe_verify --gold-sanity --dataset {a.dataset} --split {a.split} --limit 5")
-        print(f"    python -m v5.graph_grower.swe_verify --predictions artifacts/swe_oneshot_preds.jsonl --dataset {a.dataset} --split {a.split} --run-id oneshot")
-        print(f"    python -m v5.graph_grower.swe_verify --predictions artifacts/swe_slot_preds.jsonl --dataset {a.dataset} --split {a.split} --run-id slot")
+        print(f"    python -m v5.graph_grower.swe_verify --predictions {oneshot_path} --dataset {a.dataset} --split {a.split} --run-id oneshot")
+        print(f"    python -m v5.graph_grower.swe_verify --predictions {slot_path} --dataset {a.dataset} --split {a.split} --run-id slot")
+    if outputs["summary"] is not None:
+        summary = {
+            "session_name": outputs["name"],
+            "dataset": a.dataset,
+            "split": a.split,
+            "model": a.model,
+            "n_eval_requested": a.n_eval,
+            "n_eval_scored": scored,
+            "max_steps": a.max_steps,
+            "max_new": a.max_new,
+            "predictions": {
+                "oneshot": oneshot_path,
+                "slot": slot_path,
+            },
+            "dump_path": str(outputs["dump"]),
+            "applyable": {
+                "oneshot": {"count": oneshot_app, "total": scored},
+                "slot": {"count": slot_app, "total": scored},
+            },
+            "verify_commands": {
+                "gold_sanity": f"python -m v5.graph_grower.swe_verify --gold-sanity --dataset {a.dataset} --split {a.split} --limit 5",
+                "oneshot": f"python -m v5.graph_grower.swe_verify --predictions {oneshot_path} --dataset {a.dataset} --split {a.split} --run-id oneshot",
+                "slot": f"python -m v5.graph_grower.swe_verify --predictions {slot_path} --dataset {a.dataset} --split {a.split} --run-id slot",
+            },
+        }
+        if exact1 is not None and exact2 is not None:
+            summary["exact_resolve"] = {
+                "oneshot": {"resolved": exact1[2], "emitted": exact1[3], "total": scored},
+                "slot": {"resolved": exact2[2], "emitted": exact2[3], "total": scored},
+            }
+        with open(outputs["summary"], "w", encoding="utf-8") as w:
+            json.dump(summary, w, indent=2)
+        print(f"  session bundle -> {outputs['bundle']}")
+        print(f"  session summary -> {outputs['summary']}")
 
 
 if __name__ == "__main__":
