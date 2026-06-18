@@ -274,21 +274,39 @@ def train(model_name, tasks, steps, K, lr, r_lora, seed, layers, eval_every, ent
     import random, torch, torch.nn as nn
     from transformers import AutoTokenizer
     from peft import LoraConfig, get_peft_model
-    from v5.lm_loader import load_frozen_lm
+    try:
+        from peft import prepare_model_for_kbit_training
+    except ImportError:  # older PEFTs
+        prepare_model_for_kbit_training = None
+    from v5.lm_loader import load_frozen_lm, resolve_dtype, resolve_quant
     from v5.runtime.swe_slot import fix_user
 
     trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
     base = load_frozen_lm(model_name)
     tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=trust)
     dev = next(base.parameters()).device
+    qmode = resolve_quant(None)
+    dtype = resolve_dtype(dev)
+    if qmode in ("4bit", "8bit") and prepare_model_for_kbit_training is not None:
+        base = prepare_model_for_kbit_training(base)
     leaf = sorted({n.split(".")[-1] for n, m in base.named_modules()
                    if isinstance(m, nn.Linear) and ".layers." in n and not any(x in n.lower() for x in ("lm_head", "embed"))})
     cfg = LoraConfig(r=r_lora, lora_alpha=2 * r_lora, lora_dropout=0.0, task_type="CAUSAL_LM",
                      target_modules=leaf, layers_to_transform=layers)
     model = get_peft_model(base, cfg); model.train()
+    if hasattr(model, "config") and hasattr(model.config, "use_cache"):
+        model.config.use_cache = False
+    if hasattr(model, "gradient_checkpointing_enable"):
+        try:
+            model.gradient_checkpointing_enable()
+        except Exception:
+            pass
     trainable = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(trainable, lr=lr)
     print(f"LoRA r={r_lora} layers {layers} | trainable {sum(p.numel() for p in trainable):,} | tasks {len(tasks)}", flush=True)
+    print(f"base load: quant={qmode} dtype={dtype} device={dev} | K={K} max_new={max_new}", flush=True)
+    if qmode == "none":
+        print("WARN: V5_LM_QUANT is unset -> full-precision base load. For the 4B on rented GPUs, prefer V5_LM_QUANT=4bit.", flush=True)
     if reward_mode == "verifier":
         print("reward_mode=verifier -> exact SWE tests are inside the rollout reward; this is the apex path and will be slow.", flush=True)
     rng = random.Random(seed)
@@ -307,11 +325,12 @@ def train(model_name, tasks, steps, K, lr, r_lora, seed, layers, eval_every, ent
     def gen_ids(pids, sample):
         with torch.no_grad():
             return model.generate(pids, do_sample=sample, temperature=temperature if sample else None,
-                                  top_p=0.95 if sample else None, max_new_tokens=max_new, pad_token_id=tok.eos_token_id)
+                                  top_p=0.95 if sample else None, max_new_tokens=max_new,
+                                  pad_token_id=tok.eos_token_id, use_cache=True)
 
     def seq_logprob(pids, comp):
         full = torch.cat([pids, comp], dim=1)
-        logp = torch.log_softmax(model(full).logits[:, :-1].float(), dim=-1)
+        logp = torch.log_softmax(model(full, use_cache=False).logits[:, :-1].float(), dim=-1)
         start = pids.shape[1] - 1
         span = logp[:, start:start + comp.shape[1]]
         sel = span.gather(-1, comp.unsqueeze(-1)).squeeze(-1).sum(-1)
@@ -403,7 +422,7 @@ def train(model_name, tasks, steps, K, lr, r_lora, seed, layers, eval_every, ent
             pids = encode(SR_SYS, fix_user(t["issue"], t["src"]))
             gids = tok(t["gold_sr_text"], return_tensors="pt", add_special_tokens=False).input_ids.to(dev)[:, :max_new]
             full = torch.cat([pids, gids], dim=1)
-            logits = model(full).logits
+            logits = model(full, use_cache=False).logits
             st = pids.shape[1]
             loss = ce(logits[:, st - 1:st - 1 + gids.shape[1]].reshape(-1, logits.shape[-1]).float(), gids.reshape(-1))
             loss.backward(); torch.nn.utils.clip_grad_norm_(trainable, 1.0); opt.step(); opt.zero_grad()
@@ -438,14 +457,20 @@ def train(model_name, tasks, steps, K, lr, r_lora, seed, layers, eval_every, ent
                 print(f"[step {step:3}] {t['iid']:24} mean_r={mean_r:+.2f} r_std=0 SKIP", flush=True)
             continue
         advs = advantages(rewards)
-        loss = 0.0
+        opt.zero_grad(set_to_none=True)
+        loss_sum = 0.0
+        ent_sum = 0.0
         for comp, adv in zip(comps, advs):
             lp, ent = seq_logprob(pids, comp)
-            loss = loss - adv * lp - ent_coef * ent
-        loss = loss / K
-        loss.backward(); torch.nn.utils.clip_grad_norm_(trainable, 1.0); opt.step(); opt.zero_grad()
+            sample_loss = (-adv * lp - ent_coef * ent) / K
+            loss_sum += float(sample_loss.detach())
+            ent_sum += float(ent.detach())
+            sample_loss.backward()
+        gnorm = torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+        opt.step()
+        opt.zero_grad(set_to_none=True)
         if step % 10 == 0:
-            print(f"[step {step:3}] {t['iid']:24} mean_r={mean_r:+.2f} r_std={r_std:.2f} rewards={[round(r,1) for r in rewards]}", flush=True)
+            print(f"[step {step:3}] {t['iid']:24} mean_r={mean_r:+.2f} r_std={r_std:.2f} ent={ent_sum/K:.2f} loss={loss_sum:+.3f} gnorm={float(gnorm):.3f} rewards={[round(r,1) for r in rewards]}", flush=True)
         if step % eval_every == 0:
             m, ap, sv = evaluate(held)
             print(f"[eval @{step}] held mean_reward={m:+.3f} applyable={ap:.0%} gold-solve={sv:.0%}", flush=True)
