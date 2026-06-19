@@ -8,6 +8,538 @@
 
 ---
 
+## Session update (2026-06-19) — tiny instance audits now exist, and they clarified the bottleneck
+
+> **One line:** `swe_slot.py` can now run a very small targeted audit on exact
+> SWE instances, dump the actual retrieved support per slot, and show whether
+> the failure is in retrieval, diagnosis, planning, or patch emission.
+
+### Session update (2026-06-19) — strategy hints are now wired into `swe_slot.py`, and the retrieval problem is sharper
+
+> **One line:** the slot loop can now accept short strategy/reasoning hints for
+> `PLAN` / `FIX`, and a cheap audit showed the mechanism works, but the
+> leakage-free retrieval policy is still only partially relevant on `11019`.
+
+What changed in `v5/runtime/swe_slot.py`:
+
+- added strategy-hint controls:
+  - `--strategy-nodes`
+  - `--strategy-source off|retrieved|own`
+  - `--strat-topk`
+  - `--strat-hints`
+- strategy hints are now injected into:
+  - `plan_user(...)`
+  - `fix_user(...)`
+- retrieval policy was tightened:
+  - old behavior: choose nearest other **issue instances**, then inherit their
+    strategy nodes
+  - new behavior: rank **strategy nodes** semantically, aggregate by instance,
+    then feed the top node texts as short hints
+
+Cheap local evidence (no long model run required):
+
+1. `django__django-11019`, `strategy-source=own`
+   - retrieved hints are exactly the right lesson:
+     - pairwise incremental merge fabricates fake ordering constraints
+     - derive constraints from original lists, not intermediate merges
+     - use a holistic/topological merge
+   - conclusion:
+     - the new hint channel can carry the right "how" signal
+
+2. `django__django-11019`, `strategy-source=retrieved`
+   - old policy returned mostly irrelevant Django URL / query hints
+   - new node-level policy is better, but still only partially relevant:
+     - top retrieved hints now include ordering / override bugs
+     - still not the exact N-way merge / topological-sort lesson
+   - conclusion:
+     - the problem is now more precise:
+       - **not** "slot path cannot ingest strategy"
+       - **not** "all retrieved strategy is garbage"
+       - it is "the leakage-free strategy pool does not yet surface a strongly
+         matching reusable lesson for this instance"
+
+What this means operationally:
+
+- `--strategy-source own` is useful as an **upper-bound debug switch**
+  - if `own` helps and `retrieved` does not, the remaining gap is retrieval /
+    reusable-memory coverage, not prompt wiring
+- `--strategy-source retrieved` is the honest evaluation mode
+- the next cheap test should be:
+  - generate one tiny session with `--strategy-source own`
+  - generate the same tiny session with `--strategy-source retrieved`
+  - compare the plans / emitted fixes before paying Docker time
+
+Practical note from this workstation:
+
+- a full live `python -m v5.runtime.swe_slot ... --strategy-source own` smoke on
+  the laptop was **not** a good signal here:
+  - it stalled during heavy startup/model bootstrap and never reached the
+    per-instance dump
+  - we killed it and relied on the faster retrieval / prompt-level audits above
+  - use the A40 box for real generation, then use local WSL Docker for verify
+
+### Session update (2026-06-19) — slot debug tightened, and one real failure mode is now nailed down
+
+> **One line:** support presentation is better now, but the biggest concrete
+> regression we found was simpler: constrained decode was hurting slot `FIX`
+> emission on at least one real SWE case.
+
+What changed in `v5/runtime/swe_slot.py`:
+
+- support sources now carry cleaner labels:
+  - function/class names
+  - line ranges
+  - better support dumps for manual audits
+- diagnosis support is now ranked and presented more explicitly:
+  - authoritative file set
+  - higher-priority hints first
+  - same-file evidence is preserved more aggressively
+- plan repair is stricter:
+  - single-file source bundles now snap the plan back into that file
+  - long search anchors now require a more code-like `CHANGE`
+- `DIAGNOSE` / `PLAN` prompts were tightened to reduce drift
+- constrained decode control is now split:
+  - `--fix-constrain` = one-shot only
+  - `--slot-fix-constrain` = experimental slot `FIX` constraint
+
+Why that split matters:
+
+- for `django__django-11019`, slot `FIX` with constrained decode was actively
+  hurting applyability
+- turning slot constraint off flipped the result from:
+  - `slot_app=False`
+  - to `slot_app=True`
+
+#### Focused local smokes
+
+1. `django__django-11019` with slot constraint still on
+   - session:
+     - `artifacts/swe_slot_sessions/local_diagfix_django11019`
+     - `artifacts/swe_slot_sessions/local_diagfix_django11019_v2`
+   - result:
+     - `oneshot_app=True`
+     - `slot_app=False`
+   - what improved:
+     - the right `merge()` support is now clearly present in the diagnosis /
+       plan evidence
+   - what still failed:
+     - slot `FIX` did not emit an applyable patch under slot constraint
+
+2. `django__django-11019` with slot constraint off
+   - session:
+     - `artifacts/swe_slot_sessions/local_diagfix_django11019_noconstrain`
+   - result:
+     - `oneshot_app=True`
+     - `slot_app=True`
+     - `fixpoint=True`
+   - emitted slot patch:
+     - applyable patch in `django/forms/widgets.py`
+   - decisive conclusion:
+     - slot constrained decode is not a free win; on this case it suppresses a
+       patch the unconstrained slot path can emit
+
+3. `django__django-11564` with slot constraint on and off
+   - sessions:
+     - `artifacts/swe_slot_sessions/local_diagfix_django11564`
+     - `artifacts/swe_slot_sessions/local_diagfix_django11564_v2`
+     - `artifacts/swe_slot_sessions/local_diagfix_django11564_noconstrain`
+     - `artifacts/swe_slot_sessions/local_diagfix_django11564_noconstrain_v2`
+   - result:
+     - `oneshot_app=False`
+     - `slot_app=False`
+     - unchanged with slot constraint removed
+   - what improved:
+     - planner can now be snapped back into `django/conf/__init__.py`
+   - what still failed:
+     - the model keeps semantically rejecting the authoritative file family and
+       insisting the real fix belongs in static tag / storage code
+   - conclusion:
+     - this case is **not** mainly a constrained-decode problem
+     - it is still a support-interpretation / operator problem
+
+#### Current best operating guidance
+
+- keep `--fix-constrain` available for one-shot emission
+- keep `--slot-fix-constrain` **off by default**
+- use tiny local instance smokes before any long verifier run
+
+#### What the evidence says next
+
+- `11019`:
+  - the slot path is recoverable with better decode policy
+- `11564`:
+  - prompt tightening alone is not enough
+  - next step should be a stronger file-local operator, likely one of:
+    - broaden support from the touched file when all hints collapse to one file
+    - pull richer `brief.retrieved_ids` / touched-file context into the slot run
+    - add a deterministic file-local fallback that proposes candidate anchors
+      inside the authoritative file instead of letting the model semantically
+      reject the file
+
+### Session update (2026-06-19) — cross-attention injector is now wired into `swe_slot.py` carefully, not blindly
+
+> **One line:** the first injector wiring was too aggressive and broke the
+> `PLAN` contract; the fixed version now uses cross-attention for
+> `DIAGNOSE` only, keeps `PLAN`/`FIX` on the strict prompt path, and lets
+> constrained decoding handle exact symbol emission.
+
+What changed in `v5/runtime/swe_slot.py`:
+
+- added `--injector-mode off|slot|all`
+- added `--adapter-ckpt` and `--gnn-ckpt`
+- added a hard adapter/model hidden-size guard
+  - `Qwen/Qwen2.5-1.5B-Instruct` now fails loudly:
+    - adapter expects `2560`
+    - model hidden size is `1536`
+- `--fix-constrain` now works for plain one-shot / `FIX` emission too, not only
+  the injected path
+- injector use is now **stage-aware**
+  - `DIAGNOSE`: injected
+  - `PLAN`: plain prompt, strict `FILE/SEARCH/CHANGE`
+  - `FIX`: plain prompt + optional constrained decode
+- injected diagnosis now uses a **compact support brief** instead of the full
+  source blob:
+  - full code evidence is carried by the graph channel
+  - prompt text only carries issue + short file/anchor hints
+
+Why this matters:
+
+- the design in `DESIGN_SLOT_GRAPH.md` is explicit:
+  - operators / injector help **reasoning decisions**
+  - exact code emission is still a prompt-grounded / retrieval-grounded job
+- the first naive injector pass violated that boundary and we saw it
+  immediately in a one-instance smoke:
+  - diagnosis was right
+  - injected `PLAN` drifted into generic prose instead of `FILE/SEARCH/CHANGE`
+  - result: no slot patch at all
+
+#### Cheap constructor smoke
+
+These are now worth running before any longer session:
+
+```bash
+V5_LM_TRUST_REMOTE_CODE=1 V5_LM_QUANT=4bit python -m v5.runtime.swe_slot \
+  --model Qwen/Qwen3.5-4B \
+  --injector-mode slot \
+  --n-eval 0
+
+V5_LM_TRUST_REMOTE_CODE=1 V5_LM_QUANT=4bit python -m v5.runtime.swe_slot \
+  --model Qwen/Qwen2.5-1.5B-Instruct \
+  --injector-mode slot \
+  --n-eval 0
+```
+
+Observed:
+
+- `Qwen/Qwen3.5-4B` + `4bit`: injector constructor/session path loads cleanly
+- `Qwen/Qwen2.5-1.5B-Instruct`: fails correctly with
+  `adapter/model hidden mismatch`
+
+#### Local micro-smoke that exposed the bug
+
+Case:
+- `django__django-11039`
+
+Bad first attempt:
+- session: `artifacts/swe_slot_sessions/local_injector_micro_django11039`
+- result:
+  - `oneshot_app=True`
+  - `slot_app=False`
+- exact failure:
+  - injected `DIAGNOSE` was fine
+  - injected `PLAN` emitted generic analysis text instead of
+    `FILE/SEARCH/CHANGE`
+  - so the slot engine never reached a usable fix
+
+Control:
+- session: `artifacts/swe_slot_sessions/local_plain_micro_django11039`
+- plain path succeeded:
+  - `oneshot_app=True`
+  - `slot_app=True`
+  - `fixpoint=True`
+
+After narrowing injection to `DIAGNOSE` only:
+- session: `artifacts/swe_slot_sessions/local_injector_micro_django11039_v2`
+- session: `artifacts/swe_slot_sessions/local_injector_micro_django11039_v3`
+- result:
+  - `oneshot_app=True`
+  - `slot_app=True`
+  - `slot_steps=3`
+  - `fixpoint=True`
+
+This is the important causal result:
+
+- the slot graph itself was not broken
+- the first injector wiring was breaking the **handoff contract**
+- stage-aware injection fixed that on the same real SWE case
+
+#### 3-instance local smoke after the fix
+
+Session:
+- `artifacts/swe_slot_sessions/local_injector_smoke3`
+
+Command shape:
+
+```bash
+V5_LM_TRUST_REMOTE_CODE=1 V5_LM_QUANT=4bit python -m v5.runtime.swe_slot \
+  --model Qwen/Qwen3.5-4B \
+  --injector-mode slot \
+  --fix-constrain \
+  --dataset lite --split test \
+  --instance-ids "django__django-11039,django__django-11019,django__django-11564" \
+  --n-eval 3 \
+  --src-bodies 3 --src-lines 60 \
+  --max-new 96 --max-steps 6 \
+  --audit-support-text \
+  --session-out-dir artifacts/swe_slot_sessions \
+  --session-name local_injector_smoke3
+```
+
+Result:
+
+- `django__django-11039`
+  - `oneshot_app=True`
+  - `slot_app=True`
+  - healthy
+- `django__django-11019`
+  - `oneshot_app=True`
+  - `slot_app=False`
+- `django__django-11564`
+  - `oneshot_app=False`
+  - `slot_app=False`
+
+Deep read of the failures:
+
+1. `django__django-11019`
+   - this is **not** a missing-support failure
+   - the support pool already contains the relevant `merge()` chunk
+     (`sym_86665621e60d`, `django/forms/widgets.py`, lines `115-145`)
+   - but the diagnosis path still fixates on weaker same-file hints and never
+     lands on the real merge logic
+   - meaning:
+     - remaining problem = evidence presentation / ranking / diagnosis focus
+     - not the cross-attention handoff bug we just fixed
+
+2. `django__django-11564`
+   - this is upstream of the slot reasoning path
+   - the support pool itself is entirely in `django/conf/__init__.py`
+   - the issue is about `SCRIPT_NAME` support for static/media URLs
+   - so the model never gets the right neighborhood at all
+   - meaning:
+     - this is a grounding / localization data problem
+     - not a slot-graph control problem
+
+Practical read:
+
+- the injector path is now wired in a way that respects the design
+- one real cross-attention communication bug is fixed
+- the next remaining walls are:
+  1. diagnosis evidence selection / presentation on multi-support same-file bugs
+  2. upstream support-pool quality on some instances
+
+So the correct next move is **not** "inject harder everywhere". It is:
+
+1. keep injected `DIAGNOSE`
+2. keep plain structured `PLAN`
+3. keep plain `FIX` + constrained decode
+4. improve evidence selection / support-brief quality
+5. separately audit bad support pools where the slot runtime never gets the
+   right file in the first place
+
+### New audit knobs
+
+`v5/runtime/swe_slot.py` now supports:
+
+- `--instance-ids`
+  - run exact SWE instances instead of the usual first-`n_eval` slice
+- `--audit-support-text`
+  - include compact support chunk text for each slot retrieval in the dump
+
+This is the cheap path for "does the pipeline actually follow the design on a
+real coding case?" before any Docker verification.
+
+Example:
+
+```bash
+python -m v5.runtime.swe_slot \
+  --model Qwen/Qwen2.5-1.5B-Instruct \
+  --dataset lite --split test \
+  --instance-ids astropy__astropy-14995,django__django-11099 \
+  --audit-support-text \
+  --max-new 220 \
+  --session-out-dir artifacts/swe_slot_sessions \
+  --session-name local_instance_audit_small2
+```
+
+### What the tiny audit showed
+
+Run:
+- `artifacts/swe_slot_sessions/local_instance_audit_small2`
+
+Results on the local 1.5B:
+- `astropy__astropy-14995`
+  - `diag_attempts=1`
+  - `plan_attempts=3`
+  - `slot_app=False`
+- `django__django-11099`
+  - `diag_attempts=2`
+  - `plan_attempts=3`
+  - `slot_app=False`
+
+So the local 1.5B still does **not** produce applyable patches on these hard
+cases. But the traces were informative instead of opaque.
+
+#### Case 1 — `astropy__astropy-14995`
+
+This case is encouraging:
+
+- the diagnosis is basically on target (`_arithmetic_mask`)
+- the planner consistently narrows onto the correct local chunk
+  (`sym_ab9d6646353d`)
+- the plan anchor becomes small and executable
+
+The failure is downstream:
+- `FIX` still emits no applyable patch
+
+Reading: on this case the slot graph is doing the right *control* work already;
+the remaining wall is small-model patch emission.
+
+#### Case 2 — `django__django-11099`
+
+This case is the better "bigger picture" stress test:
+
+- retrieval is fine: both validator classes are in support
+- diagnosis is unstable and partly wrong
+- planner needed cleanup because the model emitted markdown/diff wrappers and a
+  suffix path instead of a clean canonical plan
+
+After a local cleanup pass in `swe_slot.py`, the plan now normalizes to:
+- `FILE: django/contrib/auth/validators.py`
+- `SEARCH: regex = r'^[\\w.@+-]+$'`
+- plain `CHANGE:` text
+
+That is better than the earlier raw fenced plan, but the case still does not
+reach an applyable patch on the 1.5B.
+
+Reading: this is the kind of case where decomposition should eventually help,
+because the real task is not one monolithic edit. It is closer to:
+- identify the regex bug
+- identify the repeated validator sites
+- propagate the same change over both classes
+
+### Current honest take
+
+The tiny audit changed the picture in a useful way:
+
+- for some cases (`astropy__astropy-14995`), the main wall is **patch emission**
+- for others (`django__django-11099`), the main wall is **multi-site plan
+  structure**, which is exactly where a future decomposition slot should enter
+
+That means the next SWE step should not be "run a big batch and hope." It
+should be:
+
+1. keep using tiny targeted audits first
+2. add a decomposition-capable path for repeated / multi-site edits
+3. only then rerun broader sessions or Docker verification
+
+---
+
+## Session update (2026-06-19) — runtime decomposition is now real in the slot engine
+
+> **One line:** the design's flexible path is now implemented in code:
+> a slot can solve directly when retrieval is enough, or it can expand into
+> child subproblems at runtime, solve branches, and merge back to a fixpoint.
+
+### What landed
+
+1. `v5/runtime/slot_coder.py`
+   - added `SlotSpec.expand` and a first-class `Expansion` object
+   - a slot can now, on `INSUFFICIENT`, spawn child slots dynamically instead
+     of only backtracking over a fixed DAG
+   - expansion can:
+     - add child slots
+     - add new parent dependencies
+     - replace the parent's `derive` with a merge/synthesis function
+     - optionally disable further direct retrieval on the parent so it becomes
+       a real merge slot over the children
+   - nested expansion works too: a child slot may itself expand into a deeper
+     branch structure
+
+2. engine test surface
+   - the backend suite grew from `14/14` to `16/16`
+   - new proofs:
+     - direct answer **bypasses** expansion when a slot can already be solved
+     - missing direct answer triggers:
+       `TOTAL -> expand(BASE, ADJUST)`,
+       then `ADJUST -> expand(PLUS, MINUS)`,
+       then derive/merge back up to `TOTAL`
+
+3. new local inspection demo
+   - `python -m v5.runtime.slot_coder --decompose`
+   - this is the cheap, no-model forcing-function check for the exact behavior
+     we kept talking about in the design:
+     split, solve branch-local subproblems, merge later
+
+### Local proofs run
+
+- `python -m py_compile v5/runtime/slot_coder.py`
+  - PASS
+
+- `python -m v5.runtime.slot_coder --test`
+  - PASS
+  - `16/16`
+
+- `python -m v5.runtime.slot_coder --decompose`
+  - direct case:
+    - `TOTAL='17'`
+    - no `EXPAND` rows
+  - decomposition case:
+    - `EXPAND TOTAL -> [BASE, ADJUST]`
+    - `EXPAND ADJUST -> [PLUS, MINUS]`
+    - `ADJUST` derives `5`
+    - `TOTAL` derives `17`
+    - reaches real fixpoint
+
+### Why this matters
+
+This closes a real gap between the design and the runtime.
+
+Before this session:
+- the design clearly implied retrieve-if-enough, otherwise split into
+  subproblems and merge later
+- the runtime mostly had fixed slot families plus backtracking
+
+After this session:
+- the engine itself can now do runtime graph growth for a task
+- decomposition is no longer just a document-level claim
+
+### Honest scope
+
+This is **engine-level support**, not yet full SWE-task exploitation.
+
+`v5/runtime/swe_slot.py` is still primarily a fixed task family
+(`DIAGNOSE -> PLAN -> FIX`) with backtracking and stronger slot gating.
+It does **not yet** ask the model to emit dynamic coding subgraphs such as:
+
+- split a diagnosis into two independent subproblems
+- solve each against different retrieved support
+- synthesize a merged plan/fix from those branches
+
+That is now the next wiring step. The hard part changed from
+"invent the mechanism" to "teach the SWE task family when to use the mechanism."
+
+### Cheap repro commands
+
+```bash
+python -m v5.runtime.slot_coder --test
+python -m v5.runtime.slot_coder --decompose
+```
+
+If either of those breaks, do **not** run long SWE verifier jobs yet. Fix the
+engine first, then move outward.
+
+---
+
 ## Session update (2026-06-19) — local SWE smoke is now honest, stable, and more diagnostic
 
 > **One line:** the local SWE slot path on Windows now survives end-to-end smoke,

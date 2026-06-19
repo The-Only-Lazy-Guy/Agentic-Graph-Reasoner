@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
@@ -61,6 +62,33 @@ def _format_plan(plan: dict[str, str]) -> str:
     return f"FILE: {plan['file']}\nSEARCH:\n{plan['search']}\nCHANGE:\n{plan['change']}\n"
 
 
+def _render_fix_plan(plan_text: str) -> str:
+    plan = _parse_plan(plan_text)
+    if not any(plan.values()):
+        return plan_text
+    parts = []
+    if plan["file"]:
+        parts.append(f"TARGET FILE:\n{plan['file']}")
+    if plan["search"]:
+        parts.append(f"TARGET SEARCH ANCHOR:\n{plan['search']}")
+    if plan["change"]:
+        parts.append(f"EDIT INTENT:\n{plan['change']}")
+    return "\n\n".join(parts)
+
+
+DIAG_SYS = (
+    "You are a terse debugging assistant. Use only the retrieved file set. "
+    "Follow the user's FILE/FOCUS/WHY/CHANGE schema exactly, with no bullets, no numbered list, "
+    "no markdown fences, and no 'Thinking Process' or speculation about files not shown."
+)
+
+
+PLAN_SYS = (
+    "You are a strict patch planner. Output ONLY FILE/SEARCH/CHANGE with no preface or trailing commentary. "
+    "FILE must stay inside the authoritative file set shown by the user prompt."
+)
+
+
 def _tokset(text: str) -> set[str]:
     toks = set()
     for m in re.finditer(r"[A-Za-z_][A-Za-z0-9_./-]*", text or ""):
@@ -78,6 +106,62 @@ def _tokset(text: str) -> set[str]:
     return toks
 
 
+def _source_text_no_header(text: str) -> str:
+    lines = (text or "").splitlines()
+    if lines and re.match(r"^# [\w./\-]+\.\w+\s*$", lines[0].strip()):
+        lines = lines[1:]
+    return "\n".join(lines)
+
+
+def _extract_symbol_label(text: str) -> str:
+    body = _source_text_no_header(text)
+    lines = body.splitlines()
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("@") and idx + 1 < len(lines):
+            nxt = lines[idx + 1].strip()
+            if re.match(r"^(def|class)\s+\w+", nxt):
+                return f"{stripped} {nxt}".strip()
+        if re.match(r"^(def|class)\s+\w+", stripped):
+            return stripped.rstrip(":")
+    for line in lines:
+        stripped = line.strip()
+        if stripped:
+            return stripped[:100]
+    return ""
+
+
+def _source_label(source: dict) -> str:
+    label = (source.get("label") or "").strip()
+    if label:
+        return label
+    return _extract_symbol_label(source.get("text", ""))
+
+
+def _source_span(source: dict) -> int:
+    loc = source.get("lineno")
+    if isinstance(loc, (list, tuple)) and len(loc) >= 2:
+        try:
+            return max(1, int(loc[1]) - int(loc[0]) + 1)
+        except Exception:
+            pass
+    return max(1, len(_source_text_no_header(source.get("text", "")).splitlines()))
+
+
+def _source_has_definition(source: dict) -> bool:
+    return bool(re.search(r"(?m)^\s*(?:def|class)\s+\w+", _source_text_no_header(source.get("text", ""))))
+
+
+def _source_has_executable(source: dict) -> bool:
+    return any(
+        re.search(r"^\s*(if|elif|else|for|while|with|try|except|return|raise|assert|yield)\b", line)
+        or ("=" in line and "==" not in line)
+        for line in _source_text_no_header(source.get("text", "")).splitlines()
+    )
+
+
 def _compose_src(chunks: list[dict]) -> str:
     parts = []
     seen = set()
@@ -89,6 +173,18 @@ def _compose_src(chunks: list[dict]) -> str:
         seen.add(cid)
         parts.append(text)
     return "\n\n".join(parts)
+
+
+def _unit(vec) -> list[float]:
+    vals = [float(x) for x in (vec or [])]
+    norm = math.sqrt(sum(v * v for v in vals))
+    if norm <= 1e-9:
+        return [0.0 for _ in vals]
+    return [v / norm for v in vals]
+
+
+def _dot(a, b) -> float:
+    return float(sum(float(x) * float(y) for x, y in zip(a or [], b or [])))
 
 
 def _rank_src_chunks(query: str, sources: list[dict], top_k: int = 2) -> list[dict]:
@@ -109,6 +205,49 @@ def _rank_src_chunks(query: str, sources: list[dict], top_k: int = 2) -> list[di
         return []
     ranked.sort(key=lambda row: (-row[0], -row[1], -row[2], row[3], row[4]))
     return [row[5] for row in ranked[:max(1, top_k)]]
+
+
+def _rank_diagnose_sources(issue: str, sources: list[dict]) -> list[dict]:
+    qtok = _tokset(issue)
+    ranked = []
+    for idx, source in enumerate(sources or []):
+        label = _source_label(source)
+        text = _source_text_no_header(source.get("text", ""))
+        full = "\n".join(part for part in (source.get("file", ""), label, text) if part)
+        stok = _tokset(full)
+        overlap = len(qtok & stok)
+        locality = max((len(qtok & _tokset(line)) for line in full.splitlines()), default=0)
+        span = _source_span(source)
+        has_def = 1 if _source_has_definition(source) else 0
+        has_exec = 1 if _source_has_executable(source) else 0
+        size_bonus = 10 if 8 <= span <= 80 else (4 if span <= 140 else -4)
+        score = (
+            overlap * 16.0
+            + locality * 12.0
+            + has_def * 18.0
+            + has_exec * 6.0
+            + size_bonus
+            - max(span - 120, 0) * 0.15
+        )
+        ranked.append((score, locality, overlap, -has_def, span, idx, source))
+    ranked.sort(key=lambda row: (-row[0], -row[1], -row[2], row[3], row[4], row[5]))
+    return [row[6] for row in ranked]
+
+
+def _authoritative_files_text(sources: list[dict]) -> str:
+    files = []
+    seen = set()
+    for source in sources or []:
+        fpath = _canon_path(source.get("file", ""))
+        if fpath and fpath not in seen:
+            files.append(fpath)
+            seen.add(fpath)
+    if not files:
+        return ""
+    if len(files) == 1:
+        return f"AUTHORITATIVE FILE:\n- {files[0]}"
+    rows = "\n".join(f"- {f}" for f in files[:6])
+    return f"AUTHORITATIVE FILES (stay inside these unless a hint explicitly names another file):\n{rows}"
 
 
 def _parse_plan(text: str) -> dict[str, str]:
@@ -238,6 +377,98 @@ def _change_from_hint(text: str) -> str:
     return first
 
 
+def _looks_codeish_change_line(line: str) -> bool:
+    stripped = (line or "").strip()
+    if not stripped:
+        return False
+    if stripped.startswith(("`", "#")):
+        return False
+    if re.search(r"\br[\"'].*[\"']", stripped):
+        return True
+    if any(tok in stripped for tok in (" = ", " =r", "==", "return ", "raise ", "yield ", "assert ", ":", "->")):
+        return True
+    if re.match(r"^[\w.\[\]()'\"\\/+*@<>= -]+$", stripped) and any(ch in stripped for ch in "=()[]'\""):
+        return True
+    return False
+
+
+def _is_repeat_instruction(line: str) -> bool:
+    return bool(re.search(r"\b(each|every|all|both|matching occurrence|matching site|repeated site)\b", line or "", re.I))
+
+
+def _extract_change_code_lines(lines: list[str], max_lines: int = 4) -> list[str]:
+    out: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if _looks_codeish_change_line(stripped):
+            out.append(stripped)
+        elif out:
+            break
+        if len(out) >= max_lines:
+            break
+    return out
+
+
+def _normalize_change(change: str, hint_text: str = "") -> str:
+    raw = (change or "").strip()
+    if not raw:
+        return _change_from_hint(hint_text)
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip() and not ln.strip().startswith("```")]
+    if not lines:
+        return _change_from_hint(hint_text)
+    action_idx = next(
+        (idx for idx, ln in enumerate(lines)
+         if ln.lower().startswith(("replace ", "change ", "update ", "use ", "set ", "remove ", "add "))),
+        None,
+    )
+    if action_idx is not None:
+        action = lines[action_idx]
+        code_lines = _extract_change_code_lines(lines[action_idx + 1:])
+        if code_lines:
+            extras = [ln for ln in lines[action_idx + 1:] if _is_repeat_instruction(ln)]
+            return "\n".join([action] + code_lines + extras[:2])
+    if any(_looks_codeish_change_line(ln) for ln in lines):
+        compact = []
+        for ln in lines[:5]:
+            compact.append(ln)
+        return "\n".join(compact)
+    if "```" in raw or len(lines) > 4:
+        return _change_from_hint(raw) or _change_from_hint(hint_text)
+    return "\n".join(lines)
+
+
+def _normalize_search(search: str) -> str:
+    lines = [ln.rstrip() for ln in (search or "").splitlines() if not ln.strip().startswith("```")]
+    return "\n".join(lines).strip("\n")
+
+
+def _resolve_src_file(path: str, src_files: dict[str, str]) -> str:
+    fpath = _canon_path(path)
+    if not fpath:
+        return ""
+    if fpath in src_files:
+        return fpath
+    cands = [cand for cand in src_files if _same_file(cand, fpath)]
+    return cands[0] if len(cands) == 1 else ""
+
+
+def _repeat_search_count(file_body: str, search: str) -> int:
+    search = (search or "").strip()
+    if not search:
+        return 0
+    return file_body.count(search)
+
+
+def _augment_repeat_change(change: str, file_body: str, search: str) -> str:
+    count = _repeat_search_count(file_body, search)
+    if count <= 1:
+        return change
+    if re.search(r"\b(each|every|all|both|matching occurrence|matching site|repeated site)\b", change, re.I):
+        return change
+    suffix = f" Apply the same edit to all {count} matching occurrences in this file."
+    return (change or "").rstrip() + suffix
+
+
 def _looks_placeholder_path(path: str) -> bool:
     p = _canon_path(path).lower()
     return (
@@ -252,10 +483,17 @@ def _looks_placeholder_path(path: str) -> bool:
 def _repair_plan_to_src(plan_text: str, src: str, hint_text: str = "") -> tuple[str, bool]:
     plan = _parse_plan(plan_text)
     src_files = _split_src_files(src)
-    fpath = _canon_path(plan["file"])
-    search = plan["search"] or ""
+    fpath = _resolve_src_file(plan["file"], src_files) or _canon_path(plan["file"])
+    search = _normalize_search(plan["search"] or "")
+    plan["change"] = _normalize_change(plan["change"], hint_text)
+    plan["file"] = fpath
+    plan["search"] = search
     if not plan["change"].strip():
         plan["change"] = _change_from_hint(hint_text)
+    if len(src_files) == 1:
+        only_file = next(iter(src_files))
+        if fpath != only_file:
+            fpath = only_file
     if _looks_placeholder_path(fpath):
         if len(src_files) == 1:
             fpath = next(iter(src_files))
@@ -271,8 +509,10 @@ def _repair_plan_to_src(plan_text: str, src: str, hint_text: str = "") -> tuple[
                     best_chars = chars
             if best_file:
                 fpath = best_file
+    fpath = _resolve_src_file(fpath, src_files) or fpath
     if not (fpath and plan["change"].strip()):
-        return plan_text, False
+        normalized = _format_plan({"file": fpath, "search": search, "change": plan["change"]})
+        return normalized, normalized != plan_text
     file_body = src_files.get(fpath, "")
     if not file_body:
         return plan_text, False
@@ -284,29 +524,37 @@ def _repair_plan_to_src(plan_text: str, src: str, hint_text: str = "") -> tuple[
         and "..." not in search
         and not _looks_placeholder_path(plan["file"])
     ):
-        return plan_text, False
+        plan["change"] = _augment_repeat_change(plan["change"], file_body, search)
+        normalized = _format_plan(plan)
+        return normalized, normalized != plan_text
     repaired = _best_search_anchor(file_body, search)
     if not repaired:
         return plan_text, False
     repaired = _trim_search_anchor(file_body, repaired, hint_text or plan["change"])
     plan["file"] = fpath
     plan["search"] = repaired
+    plan["change"] = _augment_repeat_change(plan["change"], file_body, repaired)
     new_text = _format_plan(plan)
     return new_text, new_text != plan_text
 
 
 def _plan_sufficient(plan_text: str, src: str) -> bool:
     plan = _parse_plan(plan_text)
-    fpath = _canon_path(plan["file"])
-    search = (plan["search"] or "").strip()
+    src_files = _split_src_files(src)
+    fpath = _resolve_src_file(plan["file"], src_files) or _canon_path(plan["file"])
+    search = _normalize_search(plan["search"] or "")
+    search_lines = [ln for ln in search.splitlines() if ln.strip()]
+    requires_code_change = len(search_lines) >= 8
+    has_code_change = bool(_extract_change_code_lines((plan["change"] or "").splitlines()))
     return bool(
         fpath
         and not _looks_placeholder_path(fpath)
         and search
         and "..." not in search
         and plan["change"].strip()
-        and (f"# {fpath}" in src or fpath in src)
-        and search in src
+        and (has_code_change or not requires_code_change)
+        and fpath in src_files
+        and search in src_files.get(fpath, "")
     )
 
 
@@ -324,6 +572,42 @@ def _blocks_match_plan(blocks: list[dict], plan_text: str) -> bool:
     return False
 
 
+def _select_slot_evidence(slot_name: str, ev: list[dict], sources: list[dict]) -> list[dict]:
+    if not ev:
+        return []
+    cap = {"DIAGNOSE": 4, "PLAN": 4, "FIX": 4}.get(slot_name, 2)
+    out: list[dict] = []
+    seen: set[str] = set()
+
+    def add(source: dict):
+        sid = source.get("id")
+        if sid and sid not in seen and len(out) < cap:
+            out.append(source)
+            seen.add(sid)
+
+    if slot_name == "DIAGNOSE":
+        ranked = _rank_diagnose_sources("", list(sources or []))
+        primary_file = _canon_path(ev[0].get("file", "")) if ev else ""
+        for source in ev[:2]:
+            add(source)
+        if primary_file:
+            for source in ranked:
+                if _same_file(source.get("file", ""), primary_file):
+                    add(source)
+        for source in ranked:
+            add(source)
+        return out
+
+    for source in ev[:2]:
+        add(source)
+    primary_file = _canon_path(ev[0].get("file", "")) if ev else ""
+    if primary_file:
+        for source in sources or []:
+            if _same_file(source.get("file", ""), primary_file):
+                add(source)
+    return out[:cap]
+
+
 def _unmatched(blocks, dest):
     from v5.runtime.sr_withcode import _file_text
     return [b for b in blocks if (b.get("search") or "").strip()
@@ -339,46 +623,111 @@ def _patch(blocks, dest):                     # applyable -> git diff (the swebe
     return p
 
 
-def fix_user(issue, src, diagnosis="", plan=""):
+def fix_user(issue, src, diagnosis="", plan="", hints=None):
     s = f"ISSUE:\n{issue[:1400]}\n\nRELEVANT SOURCE (the bug is in here):\n{src}\n\n"
-    if diagnosis:
-        s += f"ROOT-CAUSE DIAGNOSIS (use it):\n{diagnosis}\n\n"
+    s += _strategy_hint_block(hints or [], title="RELATED STRATEGY HINTS", max_items=2)
+    if diagnosis and not plan:
+        s += f"ROOT-CAUSE DIAGNOSIS (use it, do not invent a different bug):\n{diagnosis}\n\n"
     if plan:
-        s += f"EDIT PLAN (follow it exactly):\n{plan}\n\n"
-    return (s + "Fix the exact line(s) causing the bug. Output ONLY search/replace blocks: SEARCH "
-            "must copy the source EXACTLY (character-for-character); REPLACE must DIFFER. Keep it minimal. "
-            "If the diagnosis/change says the same edit must be made in multiple matching sites in the same "
-            "file, update each matching site, but do not touch unrelated code.")
+        s += f"EDIT PLAN (authoritative; realize it literally):\n{_render_fix_plan(plan)}\n\n"
+    return (s + "Fix the exact line(s) causing the bug. Output ONLY search/replace blocks. Do NOT output the plan "
+            "schema (`FILE`, `SEARCH`, `CHANGE`, `TARGET FILE`, `TARGET SEARCH ANCHOR`, or `EDIT INTENT`). The line before each "
+            "SEARCH marker must be the exact file path from the plan. SEARCH must copy the source EXACTLY "
+            "(character-for-character); REPLACE must DIFFER. Keep it minimal. If CHANGE gives explicit replacement "
+            "code or says the same edit applies to multiple matching sites in the same file, realize that literally "
+            "with one block per site or another exact minimal grounding. Do not touch unrelated code.")
 
 
-def plan_user(issue, src, diagnosis, attempt):
+def plan_user(issue, src, diagnosis, attempt, hints=None):
     nudge = "" if attempt == 0 else (
         " NOTE: the previous plan/fix missed the exact anchor. Copy the indentation EXACTLY and choose a "
         "smaller anchor from the shown source.")
+    file_guard = _authoritative_files_text(
+        [{"file": fpath, "text": body} for fpath, body in _split_src_files(src).items()]
+    )
+    hint_block = _strategy_hint_block(hints or [], title="RELATED STRATEGY HINTS", max_items=3)
     return (
-        f"ISSUE:\n{issue[:1400]}\n\nRELEVANT SOURCE:\n{src}\n\nROOT-CAUSE DIAGNOSIS:\n{diagnosis}\n\n"
+        f"ISSUE:\n{issue[:1400]}\n\n{file_guard}\n\n{hint_block}RELEVANT SOURCE:\n{src}\n\nROOT-CAUSE DIAGNOSIS:\n{diagnosis}\n\n"
         "Plan the edit before patching. Output ONLY this format:\n"
         "FILE: path/from/source.py\nSEARCH:\n<exact existing code copied verbatim from the source>\n"
         "CHANGE:\n<one sentence saying what should change and why>\n"
+        "CHANGE may continue on the next lines with the exact replacement line(s) when you know them.\n"
+        "Use the diagnosis literally: preserve its file/focus unless the shown source proves the anchor needs to be narrower. "
         "The SEARCH block must be the SMALLEST exact source anchor that pins the buggy location (prefer 1-8 lines, "
         "keep the original indentation, do not quote a whole class/function or docstring when a smaller executable "
         "snippet will do). "
+        "For algorithmic or control-flow edits, CHANGE must include the exact replacement line(s), not only prose. "
         "If the same edit repeats in one file, choose one representative exact anchor in source order and mention "
-        "the repeated sites in CHANGE. FILE must match a shown source header. Do not use ellipses, markdown fences, "
-        "or placeholder paths; CHANGE must stay a plain-English sentence."
+        "the repeated sites in CHANGE. FILE must match a shown source header and stay inside the authoritative file set above. Do not use ellipses, markdown fences, "
+        "or placeholder paths; CHANGE must stay concrete and executable."
         f"{nudge}"
     )
+
+
+def _support_brief(chunks: list[dict], max_items: int = 6, max_preview: int = 180) -> str:
+    rows = []
+    for chunk in (chunks or [])[:max_items]:
+        file = chunk.get("file") or chunk.get("id") or "unknown"
+        loc = chunk.get("lineno") or []
+        if isinstance(loc, (list, tuple)) and len(loc) >= 2:
+            file = f"{file}:{loc[0]}-{loc[1]}"
+        label = _source_label(chunk)
+        preview = re.sub(r"\s+", " ", _source_text_no_header(chunk.get("text", ""))).strip()
+        if len(preview) > max_preview:
+            preview = preview[:max_preview].rsplit(" ", 1)[0].rstrip(" ,.;:") + "..."
+        prefix = f"- {file}"
+        if label:
+            prefix += f" [{label}]"
+        rows.append(f"{prefix} :: {preview}")
+    return "\n".join(rows)
+
+
+def _strategy_hint_block(hints: list[dict], title: str = "STRATEGY HINTS", max_items: int = 3) -> str:
+    if not hints:
+        return ""
+    body = _support_brief(hints, max_items=max_items, max_preview=220)
+    return f"{title} (approach-level only; adapt to the shown source, do not copy literally):\n{body}\n\n"
 
 
 def diag_user(issue, src, attempt):
     nudge = "" if attempt == 0 else (
         " NOTE: a previous diagnosis led to an UNAPPLYABLE or no-op fix. Be more specific — name the "
         "EXACT function and the EXACT line/token to change, copied verbatim from the source above.")
-    return (f"ISSUE:\n{issue[:1400]}\n\nSOURCE:\n{src}\n\nIn 2-3 sentences, state the ROOT CAUSE of the "
-            f"bug and exactly what must change (name the function/lines). Be specific.{nudge}")
+    files = _authoritative_files_text([{"file": fpath, "text": body} for fpath, body in _split_src_files(src).items()])
+    return (
+        f"ISSUE:\n{issue[:1400]}\n\n{files}\n\nSOURCE:\n{src}\n\n"
+        "Output ONLY this format:\n"
+        "FILE: path/from/source.py\n"
+        "FOCUS: exact function/class/helper name or a short exact anchor from the source\n"
+        "WHY: one sentence root cause\n"
+        "CHANGE: one sentence describing the exact change\n"
+        "FILE must match a shown source header. FOCUS must stay inside the shown source and name something real from it. "
+        f"Do not mention any other file families.{nudge}"
+    )
 
 
-def slot_solve(issue, src, diagnose_fn, plan_fn, fix_fn, max_steps=8, log=None):
+def diag_user_injected(issue, sources, attempt):
+    nudge = "" if attempt == 0 else (
+        " NOTE: a previous diagnosis led to an UNAPPLYABLE or no-op fix. Be more specific — name the "
+        "EXACT function and the EXACT line/token to change.")
+    ranked = _rank_diagnose_sources(issue, sources)
+    file_guard = _authoritative_files_text(ranked)
+    brief = _support_brief(ranked)
+    return (
+        f"ISSUE:\n{issue[:1400]}\n\n"
+        f"{file_guard}\n\n"
+        f"RETRIEVED SUPPORT HINTS (higher-priority hints first; full code evidence is supplied through the graph channel):\n{brief}\n\n"
+        "Output ONLY this format:\n"
+        "FILE: one authoritative file from the hints above\n"
+        "FOCUS: exact function/class/helper name from the hints\n"
+        "WHY: one sentence root cause\n"
+        "CHANGE: one sentence describing the exact change\n"
+        "If all hints point to one file, FILE must be that file. Do not mention any other file family "
+        f"unless one of the hints explicitly names it.{nudge}"
+    )
+
+
+def slot_solve(issue, src, diagnose_fn, plan_fn, fix_fn, max_steps=8, log=None, capture_evidence=False):
     """The SHARED slot-graph: DIAGNOSE -> PLAN -> FIX.
       diagnose_fn(issue, src, attempt)              -> diagnosis text
       plan_fn(issue, src, diagnosis, attempt)       -> FILE/SEARCH/CHANGE plan text
@@ -404,18 +753,14 @@ def slot_solve(issue, src, diagnose_fn, plan_fn, fix_fn, max_steps=8, log=None):
 
     def filler(slot, ev, pool):
         slot_ev = ev
-        if slot.name == "PLAN":
-            slot_ev = ev[:1]
-        elif slot.name == "FIX":
-            slot_ev = ev[:2]
-        else:
-            slot_ev = ev[:2]
+        slot_ev = _select_slot_evidence(slot.name, ev, sources)
         slot_src = _compose_src(slot_ev) or full_src
         trace["retrievals"].append({
             "slot": slot.name,
             "query": last_query["text"],
             "ids": [e.get("id") for e in slot_ev],
             "files": [e.get("file") for e in slot_ev],
+            "evidence": _support_digest(slot_ev) if capture_evidence else [],
         })
         if slot.name == "DIAGNOSE":
             n = attempts["DIAGNOSE"]; attempts["DIAGNOSE"] = n + 1
@@ -435,15 +780,23 @@ def slot_solve(issue, src, diagnose_fn, plan_fn, fix_fn, max_steps=8, log=None):
             return plan
         diag = pool.get("DIAGNOSE")
         plan = pool.get("PLAN")
-        patch, blocks = "", []
+        patch, blocks, raw_fix = "", [], ""
         for retry in range(2):
-            patch, blocks = fix_fn(issue, slot_src, diag, plan)        # "" if unapplyable/no-op -> INSUFFICIENT
+            out = fix_fn(issue, slot_src, diag, plan)        # "" if unapplyable/no-op -> INSUFFICIENT
+            if isinstance(out, tuple) and len(out) == 3:
+                patch, blocks, raw_fix = out
+            else:
+                patch, blocks = out
+                raw_fix = ""
             fix_meta["blocks"] = list(blocks or [])
             fix_meta["plan"] = plan
             trace["fix_attempts"].append({
                 "applyable": bool(patch),
                 "anchored": _blocks_match_plan(fix_meta["blocks"], plan),
                 "diag_used": diag[:160],
+                "n_blocks": len(blocks or []),
+                "files": [b.get("file", "") for b in (blocks or [])],
+                "raw": raw_fix[:1600],
             })
             if patch and _blocks_match_plan(fix_meta["blocks"], plan):
                 break
@@ -468,6 +821,190 @@ def slot_solve(issue, src, diagnose_fn, plan_fn, fix_fn, max_steps=8, log=None):
     pool = Pool(specs, context={"issue": issue, "src": full_src})
     ok, steps = sg.solve(pool, retr, filler, max_steps=max_steps, log=log)
     return pool.slots["FIX"].value, trace, ok, steps
+
+
+def _parse_instance_ids(text: str) -> list[str]:
+    if not (text or "").strip():
+        return []
+    out = []
+    seen = set()
+    for part in re.split(r"[\s,]+", text.strip()):
+        iid = part.strip()
+        if iid and iid not in seen:
+            out.append(iid)
+            seen.add(iid)
+    return out
+
+
+def _support_digest(sources: list[dict], max_chars: int = 240) -> list[dict]:
+    out = []
+    for source in sources or []:
+        text = (_source_text_no_header(source.get("text", "")) or "").strip()
+        compact = re.sub(r"\s+", " ", text)
+        if len(compact) > max_chars:
+            compact = compact[:max_chars].rsplit(" ", 1)[0] + "..."
+        out.append({
+            "id": source.get("id"),
+            "file": source.get("file"),
+            "lineno": source.get("lineno"),
+            "label": _source_label(source),
+            "text": compact,
+        })
+    return out
+
+
+def _strategy_sources(
+    iid: str,
+    issue: str,
+    traces: dict,
+    strategy_items_by_inst: dict,
+    issue_vecs: dict[str, list[float]],
+    strategy_source: str,
+    strat_topk: int,
+    strat_hints: int,
+) -> list[dict]:
+    if strategy_source == "off" or not strategy_items_by_inst:
+        return []
+    chosen: list[dict] = []
+    if strategy_source == "own":
+        chosen = list(strategy_items_by_inst.get(iid, []))
+    else:
+        qv = issue_vecs.get(iid)
+        if not qv:
+            return []
+        scored_instances: list[tuple[float, str]] = []
+        for sid, items in strategy_items_by_inst.items():
+            if sid == iid or sid not in traces:
+                continue
+            best = max((_dot(qv, item.get("vec", [])) for item in items), default=float("-inf"))
+            scored_instances.append((best, sid))
+        scored_instances.sort(reverse=True)
+        neighbors = [sid for _score, sid in scored_instances[:max(1, strat_topk)]]
+        for sid in neighbors[:max(1, strat_topk)]:
+            ranked = sorted(
+                strategy_items_by_inst.get(sid, []),
+                key=lambda item: _dot(qv, item.get("vec", [])),
+                reverse=True,
+            )
+            chosen.extend(ranked)
+    out = []
+    seen_texts = set()
+    for item in chosen:
+        clean = (item.get("text") or "").strip()
+        if not clean:
+            continue
+        sig = re.sub(r"\s+", " ", clean.lower())
+        if sig in seen_texts:
+            continue
+        seen_texts.add(sig)
+        out.append({
+            "id": item.get("id"),
+            "file": "",
+            "lineno": [],
+            "label": item.get("node_type", ""),
+            "node_type": item.get("node_type", ""),
+            "text": clean,
+        })
+        if len(out) >= max(0, strat_hints):
+            break
+    return out
+
+
+def _infer_model_hidden_size(model) -> int:
+    for name in ("hidden_size", "d_model", "n_embd"):
+        val = getattr(getattr(model, "config", None), name, None)
+        if isinstance(val, int) and val > 0:
+            return val
+    emb = model.get_input_embeddings()
+    if emb is not None and hasattr(emb, "weight"):
+        return int(emb.weight.shape[1])
+    raise ValueError("could not infer LM hidden size from model config or embeddings")
+
+
+def _infer_adapter_lm_hidden(adapter_state: dict) -> int:
+    for key in (
+        "planning_block.aux.node.h_proj.weight",
+        "evidence_block.aux.node.h_proj.weight",
+        "aux_heads.node.h_proj.weight",
+    ):
+        if key in adapter_state:
+            return int(adapter_state[key].shape[1])
+    raise ValueError("could not infer LM hidden size from adapter checkpoint")
+
+
+class _InjectedRuntime:
+    def __init__(self, model_name: str, adapter_ckpt: str, gnn_ckpt: str, trust_remote_code: bool):
+        import torch
+        from transformers import AutoTokenizer
+        from v5.adapter import GraphAttentionInjector
+        from v5.cross_attention import V5AttentionAdapter
+        from v5.gnn_encoder import RGCNEncoder
+        from v5.goal_encoder import GoalEncoder
+        from v5.graph_grower.constrained_decode import make_inpatch_processor
+        from v5.lm_loader import load_frozen_lm
+        from v5.training.providers import RealEmbedder
+        from v5.training.stage4_generate import _gen, _stub_graph
+
+        self._torch = torch
+        self._make_inpatch_processor = make_inpatch_processor
+        self._gen_fn = _gen
+        self._stub_graph = _stub_graph
+        self.model = load_frozen_lm(model_name)
+        self.model.eval()
+        self.tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=trust_remote_code)
+        self.device = next(self.model.parameters()).device
+        self.lm_hidden_dim = _infer_model_hidden_size(self.model)
+        state = torch.load(adapter_ckpt, map_location=self.device)
+        adapter_dim = _infer_adapter_lm_hidden(state)
+        if adapter_dim != self.lm_hidden_dim:
+            raise ValueError(
+                f"adapter/model hidden mismatch: adapter expects {adapter_dim}, model has {self.lm_hidden_dim}"
+            )
+        self.embedder = RealEmbedder(self.device)
+        self.gnn = RGCNEncoder().to(self.device)
+        if gnn_ckpt:
+            self.gnn.load_state_dict(torch.load(gnn_ckpt, map_location=self.device))
+        self.gnn.eval()
+        self.goal_enc = GoalEncoder().to(self.device).eval()
+        self.adapter = V5AttentionAdapter(r_plan=3, r_evidence=4, lm_hidden_dim=self.lm_hidden_dim).to(self.device)
+        self.adapter.load_state_dict(state)
+        self.adapter.eval()
+        self.injector = GraphAttentionInjector(self.adapter, self.gnn, self.goal_enc, device=self.device)
+        self.task_frame = {"task_family": "code_fix", "required_slots": []}
+
+    def prepare_session(self, support_ids: list[str], support_sources: list[dict], meta: dict):
+        node_ids = support_ids[:24]
+        node_texts = {}
+        source_by_id = {s.get("id"): s.get("text", "") for s in support_sources or []}
+        for sid in node_ids:
+            text = source_by_id.get(sid) or meta[sid].get("text", "")
+            if text:
+                node_texts[sid] = text
+        if not node_texts:
+            return
+        text_emb = self.embedder.embed_nodes(node_texts)
+        self.injector.prepare_session(
+            self._stub_graph(node_ids, node_texts, {sid: "fact" for sid in node_ids}),
+            node_ids,
+            text_emb,
+            self.task_frame,
+            r_plan=3,
+            r_evidence=4,
+        )
+
+    def generate(self, system: str, user: str, ntok: int, constrain_symbols: list[str] | None = None) -> str:
+        msgs = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        text = self._gen_fn(
+            self.model,
+            self.tok,
+            msgs,
+            self.device,
+            self.injector,
+            True,
+            ntok,
+            constrain_symbols=constrain_symbols or None,
+        )
+        return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 
 # ── no-model wiring proof: the engine MUST reject an applyable-but-misaligned fix, then re-plan and recover ──
@@ -514,10 +1051,38 @@ def _selftest():
     )
     fixed_trunc, repaired_trunc = _repair_plan_to_src(raw_trunc, plan_src)
     trunc_ok = _plan_sufficient(fixed_trunc, plan_src)
+    raw_change = (
+        "Replace the regex with:\n"
+        "regex = r'\\A[\\w.@+-]+\\Z'\n"
+        "Apply the same edit to both validators.\n"
+    )
+    norm_change = _normalize_change(raw_change, "")
+    change_ok = "regex =" in norm_change and "both validators" in norm_change
+    multi_sources = [
+        {"id": "u", "file": "django/contrib/auth/validators.py", "text": "# django/contrib/auth/validators.py\nclass UnicodeUsernameValidator:\n    regex = r'^[\\w.@+-]+$'"},
+        {"id": "a", "file": "django/contrib/auth/validators.py", "text": "# django/contrib/auth/validators.py\nclass ASCIIUsernameValidator:\n    regex = r'^[\\w.@+-]+$'"},
+        {"id": "other", "file": "django/forms/forms.py", "text": "# django/forms/forms.py\nclass Form:\n    pass"},
+    ]
+    plan_ev = _select_slot_evidence("PLAN", [multi_sources[0]], multi_sources)
+    evidence_ok = len(plan_ev) >= 2 and all(_same_file(s["file"], "django/contrib/auth/validators.py") for s in plan_ev[:2])
+    repeat_plan = (
+        "FILE: django/contrib/auth/validators.py\n"
+        "SEARCH:\nregex = r'^[\\w.@+-]+$'\n"
+        "CHANGE:\nReplace the regex with:\nregex = r'\\A[\\w.@+-]+\\Z'\n"
+    )
+    fixed_repeat, repaired_repeat = _repair_plan_to_src(
+        repeat_plan,
+        "# django/contrib/auth/validators.py\nclass ASCIIUsernameValidator:\n    regex = r'^[\\w.@+-]+$'\n\nclass UnicodeUsernameValidator:\n    regex = r'^[\\w.@+-]+$'\n",
+        "Replace the regex with the anchored form.",
+    )
+    repeat_ok = repaired_repeat and "matching occurrences" in fixed_repeat
     print(f"   plan repair (indent drift) : {'PASS' if indent_ok else 'FAIL'}")
     print(f"   plan repair (order drift)  : {'PASS' if order_ok else 'FAIL'}")
     print(f"   plan repair (truncation)   : {'PASS' if trunc_ok else 'FAIL'}"
           f"{' (snapped)' if repaired_trunc else ' (already sufficient)'}")
+    print(f"   change preservation        : {'PASS' if change_ok else 'FAIL'}")
+    print(f"   same-file support keep     : {'PASS' if evidence_ok else 'FAIL'}")
+    print(f"   repeat-site hinting        : {'PASS' if repeat_ok else 'FAIL'}")
 
     src = "# x.py\ndef check(x, y):\n    if y < 5:\n        return y < 5\n    return x < 5\n"
     def diagnose_fn(issue, src, attempt):
@@ -546,7 +1111,8 @@ def _selftest():
     anchored = trace["fix_attempts"][-1]["anchored"] if trace["fix_attempts"] else False
     rejected_wrong_scope = any(a["applyable"] and not a["anchored"] for a in trace["fix_attempts"][:-1])
     ok_wired = (
-        retrieval_ok and indent_ok and order_ok and trunc_ok and bool(patch) and ok and backtracked and replanned
+        retrieval_ok and indent_ok and order_ok and trunc_ok and change_ok and evidence_ok and repeat_ok
+        and bool(patch) and ok and backtracked and replanned
         and anchored and rejected_wrong_scope
     )
     print(f"\n   WIRING PROOF: backtrack-fired={backtracked}  re-planned={replanned}  "
@@ -614,10 +1180,12 @@ def _build_support_sources(dest: Path, support: list[str], meta: dict, src_lines
         body = read_body(str(dest), m["file"], m["lineno"], src_lines)
         if not body:
             continue
+        label = _extract_symbol_label(m.get("text", "")) or _extract_symbol_label(body)
         out.append({
             "id": sid,
             "file": m["file"],
             "lineno": m["lineno"],
+            "label": label,
             "text": f"# {m['file']}\n{body}",
         })
     return out
@@ -647,14 +1215,37 @@ def main():
     ap.add_argument("--smoke-gold-sanity", type=int, default=2,
                     help="when --smoke and --exact-verify are both set, cap gold-sanity to this many instances")
     ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
+    ap.add_argument("--injector-mode", choices=["off", "slot", "all"], default="off",
+                    help="use the graph cross-attention injector for slot generations (`slot`) or both one-shot and slot (`all`)")
+    ap.add_argument("--adapter-ckpt", default="artifacts/stage_cache/adapter_code_s3.pt",
+                    help="cross-attention adapter checkpoint for injector mode")
+    ap.add_argument("--gnn-ckpt", default="",
+                    help="optional trained GNN checkpoint for injector mode; else random-frozen GNN")
+    ap.add_argument("--fix-constrain", action="store_true",
+                    help="constrain one-shot decoding toward graph symbols from the retrieved support")
+    ap.add_argument("--slot-fix-constrain", action="store_true",
+                    help="experimentally constrain slot FIX decoding too; keep off unless a smoke shows it helps")
     ap.add_argument("--traces", default="data/swe/grounded_traces.jsonl")
     ap.add_argument("--nodes", default="artifacts/graph_growth/swe_code_candidates.jsonl")
+    ap.add_argument("--strategy-nodes", nargs="+",
+                    default=["artifacts/graph_growth/swe_strategy_candidates_clean.jsonl"],
+                    help="planning-pool strategy/reasoning nodes for PLAN/FIX hints")
+    ap.add_argument("--strategy-source", choices=["off", "retrieved", "own"], default="retrieved",
+                    help="off = no strategy hints; retrieved = nearest other-task strategy hints; own = upper-bound debug")
+    ap.add_argument("--strat-topk", type=int, default=2,
+                    help="for strategy-source=retrieved, pull hints from this many nearest other tasks")
+    ap.add_argument("--strat-hints", type=int, default=4,
+                    help="cap strategy hints per instance to keep PLAN/FIX context short")
     ap.add_argument("--dataset", default="lite")
     ap.add_argument("--split", default="test")
+    ap.add_argument("--instance-ids", default="",
+                    help="optional comma/space-separated SWE instance ids to run exactly (overrides n_eval selection)")
     ap.add_argument("--repo-root", default="data/swe_repos")
     ap.add_argument("--n-eval", type=int, default=10)
     ap.add_argument("--src-bodies", type=int, default=4)
     ap.add_argument("--src-lines", type=int, default=70)
+    ap.add_argument("--audit-support-text", action="store_true",
+                    help="for tiny instance audits, include compact retrieved support text in the trace dump")
     ap.add_argument("--max-new", type=int, default=400)
     ap.add_argument("--max-steps", type=int, default=8)
     ap.add_argument("--exact-verify", action="store_true",
@@ -678,37 +1269,114 @@ def main():
     outputs = _prepare_outputs(a)
     oneshot_run_id, slot_run_id = _verify_run_ids(outputs, a.dataset, a.split)
 
-    import torch
     from transformers import AutoTokenizer
     from v5.lm_loader import load_frozen_lm
     from v5.graph_grower.swe_load import load_instances, checkout_repo
-    from v5.graph_grower.swe_probe import load_traces
-    from v5.runtime.sr_withcode import load_symbol_meta, read_body
+    from v5.graph_grower.swe_probe import load_traces, _symbol_name
+    from v5.runtime.sr_withcode import load_symbol_meta
+    from v5.runtime.verifier_retry import load_strategy_meta
+    from v5.training.providers import RealEmbedder
     from v5.runtime.search_replace import SR_SYS, parse_sr
     from v5.graph_grower.swe_verify import write_predictions
 
     trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
     traces = load_traces([a.traces])
     meta = load_symbol_meta([a.nodes])
+    strategy_meta = load_strategy_meta(a.strategy_nodes) if a.strategy_source != "off" else {}
+    strategy_items_by_inst = {}
     insts = {t["instance_id"]: t for t in load_instances(a.dataset, a.split, limit=0)}
-    ids = [i for i in traces if i in insts and all(s in meta for s in traces[i]["support_ids"])][:a.n_eval]
+    requested_ids = _parse_instance_ids(a.instance_ids)
+    if requested_ids:
+        ids = [i for i in requested_ids if i in traces and i in insts and all(s in meta for s in traces[i]["support_ids"])]
+        missing = [i for i in requested_ids if i not in ids]
+        if missing:
+            print(f"warning: skipped unavailable/unsupported instance ids: {missing}", flush=True)
+    else:
+        ids = [i for i in traces if i in insts and all(s in meta for s in traces[i]["support_ids"])][:a.n_eval]
     print(f"instances={len(ids)} | symbol meta={len(meta)}", flush=True)
+    issue_vecs = {}
+    if strategy_meta:
+        import torch
+        embedder = RealEmbedder(torch.device("cpu"))
+        strat_texts = {}
+        for sid, items in strategy_meta.items():
+            for nid, text, _node_type in items:
+                clean = (text or "").strip()
+                if clean:
+                    strat_texts[nid] = clean
+        strat_vecs = {
+            nid: _unit(vec)
+            for nid, vec in embedder.embed_nodes(strat_texts).items()
+        }
+        strategy_items_by_inst = {
+            sid: [
+                {"id": nid, "text": text or "", "node_type": node_type, "vec": strat_vecs.get(nid, [])}
+                for nid, text, node_type in items
+                if (text or "").strip()
+            ]
+            for sid, items in strategy_meta.items()
+        }
+        issue_texts = {
+            sid: traces[sid]["issue"]
+            for sid in strategy_meta
+            if sid in traces
+        }
+        issue_vecs = {
+            sid: _unit(vec)
+            for sid, vec in embedder.embed_nodes(issue_texts).items()
+        }
+        print(
+            f"strategy instances={len(strategy_meta)} | strategy nodes={len(strat_texts)} "
+            f"| strategy-source={a.strategy_source}",
+            flush=True,
+        )
 
-    model = load_frozen_lm(a.model); model.eval()
-    tok = AutoTokenizer.from_pretrained(a.model, trust_remote_code=trust)
-    dev = next(model.parameters()).device
+    inj_runtime = _InjectedRuntime(a.model, a.adapter_ckpt, a.gnn_ckpt, trust) if a.injector_mode != "off" else None
+    if inj_runtime is not None:
+        model = inj_runtime.model
+        tok = inj_runtime.tok
+        dev = inj_runtime.device
+    else:
+        import torch
+        model = load_frozen_lm(a.model); model.eval()
+        tok = AutoTokenizer.from_pretrained(a.model, trust_remote_code=trust)
+        dev = next(model.parameters()).device
 
-    @torch.no_grad()
-    def gen(system, user, ntok):
+    def gen(system, user, ntok, *, inject=False, constrain_symbols=None):
+        if inject and inj_runtime is not None:
+            return inj_runtime.generate(system, user, ntok, constrain_symbols=constrain_symbols)
+        import torch
+        from transformers import LogitsProcessorList
+        from v5.graph_grower.constrained_decode import make_inpatch_processor
         msgs = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         kw = dict(add_generation_prompt=True, return_tensors="pt", return_dict=True)
         try:
             enc = tok.apply_chat_template(msgs, enable_thinking=False, **kw).to(dev)
         except TypeError:
             enc = tok.apply_chat_template(msgs, **kw).to(dev)
-        out = model.generate(**enc, max_new_tokens=ntok, do_sample=False, pad_token_id=tok.eos_token_id)
+        procs = None
+        if constrain_symbols:
+            plen = enc["input_ids"].shape[1]
+            procs = LogitsProcessorList([make_inpatch_processor(tok, constrain_symbols, plen)])
+        with torch.no_grad():
+            out = model.generate(
+                **enc,
+                max_new_tokens=ntok,
+                do_sample=False,
+                logits_processor=procs,
+                pad_token_id=tok.eos_token_id,
+            )
         t = tok.decode(out[0, enc["input_ids"].shape[1]:], skip_special_tokens=True)
         return re.sub(r"<think>.*?</think>", "", t, flags=re.DOTALL).strip()
+
+    def should_inject(stage: str) -> bool:
+        if inj_runtime is None:
+            return False
+        if stage == "diagnose":
+            return a.injector_mode in ("slot", "all")
+        if stage == "oneshot":
+            return a.injector_mode == "all"
+        return False
     verifier = SWEExactVerifier(a.dataset, a.split, a.verify_backend, a.verify_out_dir,
                                 max_workers=a.verify_max_workers, timeout=a.verify_timeout,
                                 poll_secs=a.verify_poll_secs, model_name="swe_slot") if a.exact_verify else None
@@ -730,11 +1398,33 @@ def main():
             print(f"  [{k+1}] {iid} no source read"); continue
         scored += 1
         issue = t["issue"]
+        strategy_sources = _strategy_sources(
+            iid,
+            issue,
+            traces,
+            strategy_items_by_inst,
+            issue_vecs,
+            a.strategy_source,
+            a.strat_topk,
+            a.strat_hints,
+        )
+        support_symbols = sorted({
+            name for sid in support
+            if (name := _symbol_name(meta[sid].get("text", "")))
+        })
+        if inj_runtime is not None:
+            inj_runtime.prepare_session(support, support_sources, meta)
         task = {"iid": iid, "gold": inst.get("patch", "")}
         eval_tasks.append(task)
 
         # ONE-SHOT baseline (single SR emit)
-        g1 = gen(SR_SYS, fix_user(issue, src), a.max_new)
+        g1 = gen(
+            SR_SYS,
+            fix_user(issue, src, hints=strategy_sources),
+            a.max_new,
+            inject=should_inject("oneshot"),
+            constrain_symbols=(support_symbols if a.fix_constrain else None),
+        )
         b1 = parse_sr(g1); app1 = bool(b1) and not _unmatched(b1, str(dest))
         oneshot_app += app1
         p1 = _patch(b1, str(dest))
@@ -744,17 +1434,38 @@ def main():
 
         # SLOT path THROUGH THE ENGINE (DIAGNOSE -> PLAN -> FIX, backtrack on ungrounded plans / wrong-scope fixes)
         def diagnose_fn(issue, src, attempt):
-            return gen("You are a precise debugging assistant.", diag_user(issue, src, attempt), 160)
+            prompt = (
+                diag_user_injected(issue, support_sources, attempt)
+                if should_inject("diagnose")
+                else diag_user(issue, src, attempt)
+            )
+            return gen(
+                DIAG_SYS,
+                prompt,
+                160,
+                inject=should_inject("diagnose"),
+            )
         def plan_fn(issue, src, diagnosis, attempt):
-            raw = gen("You are a precise patch planner.", plan_user(issue, src, diagnosis, attempt), 220)
+            raw = gen(
+                PLAN_SYS,
+                plan_user(issue, src, diagnosis, attempt, hints=strategy_sources),
+                220,
+                inject=False,
+            )
             return _repair_plan_to_src(raw, src, diagnosis)[0]
         def fix_fn(issue, src, diagnosis, plan):
-            g = gen(SR_SYS, fix_user(issue, src, diagnosis, plan), a.max_new)
+            g = gen(
+                SR_SYS,
+                fix_user(issue, src, diagnosis, plan, hints=strategy_sources),
+                a.max_new,
+                inject=False,
+                constrain_symbols=(support_symbols if a.slot_fix_constrain else None),
+            )
             blocks = parse_sr(g)
-            return _patch(blocks, str(dest)), blocks        # "" unless applyable
+            return _patch(blocks, str(dest)), blocks, g        # "" unless applyable
         log = []
         p2, trace, fp, steps = slot_solve(issue, {"full": src, "sources": support_sources}, diagnose_fn, plan_fn, fix_fn,
-                                          max_steps=a.max_steps, log=log)
+                                          max_steps=a.max_steps, log=log, capture_evidence=a.audit_support_text)
         app2 = bool(p2.strip())
         slot_app += app2
         if app2:
@@ -765,6 +1476,9 @@ def main():
               f"slot_steps={steps} diag_attempts={len(trace['diagnoses'])} "
               f"plan_attempts={len(trace['plans'])} fixpoint={fp}", flush=True)
         dump.write(f"\n===== {iid} =====\nISSUE: {issue[:200]}\n\n"
+                   f"SUPPORT IDS: {support}\n"
+                   f"SUPPORT SOURCES: {_support_digest(support_sources) if a.audit_support_text else [s['id'] for s in support_sources]}\n\n"
+                   f"STRATEGY HINTS ({a.strategy_source}): {_support_digest(strategy_sources) if a.audit_support_text else [s['id'] for s in strategy_sources]}\n\n"
                    f"SLOT log: {log}\n"
                    f"RETRIEVALS: {trace['retrievals']}\n"
                    f"DIAGNOSES ({len(trace['diagnoses'])} attempts):\n" +
@@ -773,6 +1487,12 @@ def main():
                    "\n".join(f"  [{i}] {p}" for i, p in enumerate(trace['plans'])) +
                    f"\nFIX attempts (applyable, anchored): "
                    f"{[(x['applyable'], x['anchored']) for x in trace['fix_attempts']]}\n"
+                   f"RAW FIXES:\n" +
+                   "\n".join(
+                       f"  [{i}] blocks={x['n_blocks']} files={x['files']}\n{x['raw']}"
+                       for i, x in enumerate(trace["fix_attempts"])
+                   ) +
+                   "\n"
                    f"ONESHOT applyable={app1}:\n{g1[:500]}\n")
     dump.close()
     oneshot_path = str(outputs["oneshot"])
@@ -818,11 +1538,13 @@ def main():
             "session_name": outputs["name"],
             "dataset": a.dataset,
             "split": a.split,
+            "instance_ids": requested_ids,
             "model": a.model,
             "n_eval_requested": a.n_eval,
             "n_eval_scored": scored,
             "max_steps": a.max_steps,
             "max_new": a.max_new,
+            "audit_support_text": a.audit_support_text,
             "predictions": {
                 "oneshot": oneshot_path,
                 "slot": slot_path,
