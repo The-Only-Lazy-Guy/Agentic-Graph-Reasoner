@@ -8,9 +8,11 @@ parse the touched files.
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -26,10 +28,28 @@ FIELDS = ["instance_id", "repo", "base_commit", "problem_statement", "patch",
 SMALL_REPOS = ["psf/requests", "pallets/flask"]
 
 
-def load_instances(name: str = "lite", split: str = "test", limit: int = 0,
-                   repos: Optional[Sequence[str]] = None) -> List[Dict[str, Any]]:
+def _cached_dataset_key(name: str) -> tuple[str, str]:
+    repo_id = DATASETS.get(name, name)
+    return repo_id.replace("/", "___").lower(), repo_id.split("/")[-1].lower()
+
+
+def _load_cached_split(name: str, split: str):
+    from datasets import Dataset
+    cache_key, file_prefix = _cached_dataset_key(name)
+    base = Path.home() / ".cache" / "huggingface" / "datasets" / cache_key / "default" / "0.0.0"
+    matches = sorted(glob.glob(str(base / "*" / f"{file_prefix}-{split}.arrow")))
+    for path in matches:
+        if Path(path).is_file():
+            return Dataset.from_file(path)
+    return None
+
+
+def _load_instances_direct(name: str = "lite", split: str = "test", limit: int = 0,
+                           repos: Optional[Sequence[str]] = None) -> List[Dict[str, Any]]:
     from datasets import load_dataset
-    ds = load_dataset(DATASETS.get(name, name), split=split)
+    ds = _load_cached_split(name, split)
+    if ds is None:
+        ds = load_dataset(DATASETS.get(name, name), split=split)
     out: List[Dict[str, Any]] = []
     for row in ds:
         if repos and row["repo"] not in repos:
@@ -38,6 +58,46 @@ def load_instances(name: str = "lite", split: str = "test", limit: int = 0,
         if limit and len(out) >= limit:
             break
     return out
+
+
+def _load_instances_subprocess(name: str, split: str, limit: int,
+                               repos: Optional[Sequence[str]]) -> List[Dict[str, Any]]:
+    payload = {
+        "name": name,
+        "split": split,
+        "limit": limit,
+        "repos": list(repos) if repos else None,
+    }
+    code = (
+        "import json, sys\n"
+        "from v5.graph_grower.swe_load import _load_instances_direct\n"
+        "args = json.loads(sys.argv[1])\n"
+        "rows = _load_instances_direct(args['name'], args['split'], args['limit'], args['repos'])\n"
+        "print(json.dumps(rows), end='')\n"
+    )
+    r = subprocess.run(
+        [sys.executable, "-c", code, json.dumps(payload)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if r.returncode != 0:
+        raise RuntimeError(
+            "subprocess SWE instance load failed:\n"
+            f"stdout:\n{r.stdout[-600:]}\n"
+            f"stderr:\n{r.stderr[-600:]}"
+        )
+    return json.loads(r.stdout or "[]")
+
+
+def load_instances(name: str = "lite", split: str = "test", limit: int = 0,
+                   repos: Optional[Sequence[str]] = None) -> List[Dict[str, Any]]:
+    # Windows-local inspection has shown intermittent hard exits in the in-process
+    # datasets/pyarrow stack. Isolate the read so local smoke runs stay alive.
+    if sys.platform.startswith("win"):
+        return _load_instances_subprocess(name, split, limit, repos)
+    return _load_instances_direct(name, split, limit, repos)
 
 
 def patch_files(patch: str) -> List[str]:

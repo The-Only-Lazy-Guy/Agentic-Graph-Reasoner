@@ -61,6 +61,56 @@ def _format_plan(plan: dict[str, str]) -> str:
     return f"FILE: {plan['file']}\nSEARCH:\n{plan['search']}\nCHANGE:\n{plan['change']}\n"
 
 
+def _tokset(text: str) -> set[str]:
+    toks = set()
+    for m in re.finditer(r"[A-Za-z_][A-Za-z0-9_./-]*", text or ""):
+        raw = m.group(0).lower()
+        if len(raw) >= 3:
+            toks.add(raw)
+        pieces = [p for p in re.split(r"[^a-z0-9]+", raw) if len(p) >= 3]
+        toks.update(pieces)
+        for piece in pieces:
+            toks.update(
+                part.lower()
+                for part in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?=[A-Z]|$)|\d+", piece)
+                if len(part) >= 3
+            )
+    return toks
+
+
+def _compose_src(chunks: list[dict]) -> str:
+    parts = []
+    seen = set()
+    for chunk in chunks or []:
+        cid = chunk.get("id")
+        text = (chunk.get("text") or "").strip("\n")
+        if not text or cid in seen:
+            continue
+        seen.add(cid)
+        parts.append(text)
+    return "\n\n".join(parts)
+
+
+def _rank_src_chunks(query: str, sources: list[dict], top_k: int = 2) -> list[dict]:
+    qtok = _tokset(query)
+    ranked = []
+    for idx, source in enumerate(sources or []):
+        text = f"{source.get('file', '')}\n{source.get('text', '')}"
+        stok = _tokset(text)
+        overlap = len(qtok & stok)
+        lines = max(1, len((source.get("text") or "").splitlines()))
+        locality = max(
+            (len(qtok & _tokset(line)) for line in (source.get("text") or "").splitlines()),
+            default=0,
+        )
+        score = overlap * 15.0 + locality * 12.0 - min(lines, 200) * 2.0
+        ranked.append((score, locality, overlap, lines, idx, source))
+    if not ranked:
+        return []
+    ranked.sort(key=lambda row: (-row[0], -row[1], -row[2], row[3], row[4]))
+    return [row[5] for row in ranked[:max(1, top_k)]]
+
+
 def _parse_plan(text: str) -> dict[str, str]:
     file_match = re.search(r"(?mi)^FILE:\s*(.+?)\s*$", text or "")
     search_match = re.search(r"(?mis)^SEARCH:\s*\n(.*?)(?:\nCHANGE:\s*\n|\Z)", text or "")
@@ -72,12 +122,13 @@ def _parse_plan(text: str) -> dict[str, str]:
     }
 
 
-def _best_search_anchor(file_body: str, search: str) -> str:
+def _best_search_anchor_match(file_body: str, search: str) -> tuple[str, int, int]:
     file_lines = file_body.splitlines()
     groups: list[list[str]] = []
     cur: list[str] = []
     for line in (search or "").splitlines():
-        if line.strip():
+        stripped = line.strip()
+        if stripped and "..." not in stripped:
             cur.append(line.rstrip())
         elif cur:
             groups.append(cur[:])
@@ -88,39 +139,157 @@ def _best_search_anchor(file_body: str, search: str) -> str:
     best_chars = 0
     best_start = -1
     for group in groups:
-        for start in range(len(file_lines)):
-            matched = 0
-            while matched < len(group) and start + matched < len(file_lines):
-                if file_lines[start + matched].strip() != group[matched].strip():
-                    break
-                matched += 1
-            if matched <= 0:
-                continue
-            chars = sum(len(file_lines[start + i].strip()) for i in range(matched))
-            if matched > best_lines or (matched == best_lines and chars > best_chars):
-                best_lines = matched
-                best_chars = chars
-                best_start = start
+        for offset in range(len(group)):
+            probe = group[offset:]
+            for start in range(len(file_lines)):
+                matched = 0
+                while matched < len(probe) and start + matched < len(file_lines):
+                    if file_lines[start + matched].strip() != probe[matched].strip():
+                        break
+                    matched += 1
+                if matched <= 0:
+                    continue
+                chars = sum(len(file_lines[start + i].strip()) for i in range(matched))
+                if matched > best_lines or (matched == best_lines and chars > best_chars):
+                    best_lines = matched
+                    best_chars = chars
+                    best_start = start
     if best_start < 0:
+        return "", 0, 0
+    anchor = "\n".join(file_lines[best_start: best_start + best_lines]).rstrip("\n")
+    return anchor, best_lines, best_chars
+
+
+def _best_search_anchor(file_body: str, search: str) -> str:
+    return _best_search_anchor_match(file_body, search)[0]
+
+
+def _match_exact_span(file_body: str, search: str) -> tuple[int, int]:
+    file_lines = file_body.splitlines()
+    search_lines = search.splitlines()
+    if not search_lines:
+        return -1, 0
+    for start in range(len(file_lines) - len(search_lines) + 1):
+        if file_lines[start:start + len(search_lines)] == search_lines:
+            return start, len(search_lines)
+    return -1, 0
+
+
+def _trim_search_anchor(file_body: str, search: str, hint: str, max_lines: int = 8) -> str:
+    start, span_len = _match_exact_span(file_body, search)
+    if start < 0:
+        return search
+    hint_toks = _tokset(hint)
+    if not hint_toks:
+        return search
+    file_lines = file_body.splitlines()
+    span = file_lines[start:start + span_len]
+    has_exec = any(
+        re.match(r"^\s*(if|elif|else|return|raise|assert|for|while|with|try|except)\b", line)
+        or "=" in line
+        for line in span
+    )
+    if span_len <= max_lines and has_exec:
+        return search
+    if not has_exec:
+        stop = min(len(file_lines), start + max(span_len, max_lines) + 24)
+        expanded = file_lines[start:stop]
+        first_exec = next(
+            (
+                idx for idx, line in enumerate(expanded)
+                if re.match(r"^\s*(if|elif|else|return|raise|assert|for|while|with|try|except)\b", line)
+                or "=" in line
+            ),
+            0,
+        )
+        span = expanded[first_exec:] if first_exec < len(expanded) else expanded
+    best = search
+    best_score = float("-inf")
+    for i in range(len(span)):
+        for j in range(i + 1, min(len(span), i + max_lines) + 1):
+            window_lines = span[i:j]
+            wtext = "\n".join(window_lines).rstrip("\n")
+            wtoks = _tokset(wtext)
+            overlap = len(hint_toks & wtoks)
+            if overlap <= 0:
+                continue
+            code_bonus = sum(
+                1
+                for line in window_lines
+                if re.match(r"^\s*(if|elif|else|return|raise|assert|for|while|with|try|except)\b", line)
+                or "=" in line
+            )
+            prose_penalty = sum(1 for line in window_lines if '"""' in line or "'''" in line)
+            score = overlap * 20.0 + code_bonus * 4.0 - len(window_lines) * 1.5 - prose_penalty * 8.0
+            if score > best_score:
+                best_score = score
+                best = wtext
+    return best
+
+
+def _change_from_hint(text: str) -> str:
+    raw = (text or "").strip()
+    if not raw:
         return ""
-    return "\n".join(file_lines[best_start: best_start + best_lines]).rstrip("\n")
+    first = raw.splitlines()[0].strip()
+    first = re.sub(r"\s+", " ", first)
+    if len(first) > 220:
+        first = first[:220].rsplit(" ", 1)[0].rstrip(" ,.;:")
+    return first
 
 
-def _repair_plan_to_src(plan_text: str, src: str) -> tuple[str, bool]:
+def _looks_placeholder_path(path: str) -> bool:
+    p = _canon_path(path).lower()
+    return (
+        not p
+        or "path/to/" in p
+        or "path/from/" in p
+        or p in {"source.py", "file.py"}
+        or p.startswith("/path/")
+    )
+
+
+def _repair_plan_to_src(plan_text: str, src: str, hint_text: str = "") -> tuple[str, bool]:
     plan = _parse_plan(plan_text)
+    src_files = _split_src_files(src)
     fpath = _canon_path(plan["file"])
+    search = plan["search"] or ""
+    if not plan["change"].strip():
+        plan["change"] = _change_from_hint(hint_text)
+    if _looks_placeholder_path(fpath):
+        if len(src_files) == 1:
+            fpath = next(iter(src_files))
+        else:
+            best_file = ""
+            best_lines = 0
+            best_chars = 0
+            for cand, file_body in src_files.items():
+                _anchor, lines, chars = _best_search_anchor_match(file_body, search)
+                if lines > best_lines or (lines == best_lines and chars > best_chars):
+                    best_file = cand
+                    best_lines = lines
+                    best_chars = chars
+            if best_file:
+                fpath = best_file
     if not (fpath and plan["change"].strip()):
         return plan_text, False
-    file_body = _split_src_files(src).get(fpath, "")
+    file_body = src_files.get(fpath, "")
     if not file_body:
         return plan_text, False
-    search = plan["search"] or ""
     compact = [ln for ln in search.splitlines() if ln.strip()]
-    if _plan_sufficient(plan_text, src) and len(compact) <= 8 and "\n\n" not in search:
+    if (
+        _plan_sufficient(_format_plan({"file": fpath, "search": search, "change": plan["change"]}), src)
+        and len(compact) <= 8
+        and "\n\n" not in search
+        and "..." not in search
+        and not _looks_placeholder_path(plan["file"])
+    ):
         return plan_text, False
     repaired = _best_search_anchor(file_body, search)
     if not repaired:
         return plan_text, False
+    repaired = _trim_search_anchor(file_body, repaired, hint_text or plan["change"])
+    plan["file"] = fpath
     plan["search"] = repaired
     new_text = _format_plan(plan)
     return new_text, new_text != plan_text
@@ -132,7 +301,9 @@ def _plan_sufficient(plan_text: str, src: str) -> bool:
     search = (plan["search"] or "").strip()
     return bool(
         fpath
+        and not _looks_placeholder_path(fpath)
         and search
+        and "..." not in search
         and plan["change"].strip()
         and (f"# {fpath}" in src or fpath in src)
         and search in src
@@ -190,9 +361,11 @@ def plan_user(issue, src, diagnosis, attempt):
         "FILE: path/from/source.py\nSEARCH:\n<exact existing code copied verbatim from the source>\n"
         "CHANGE:\n<one sentence saying what should change and why>\n"
         "The SEARCH block must be the SMALLEST exact source anchor that pins the buggy location (prefer 1-8 lines, "
-        "keep the original indentation, do not quote a whole class/function when a smaller snippet will do). "
+        "keep the original indentation, do not quote a whole class/function or docstring when a smaller executable "
+        "snippet will do). "
         "If the same edit repeats in one file, choose one representative exact anchor in source order and mention "
-        "the repeated sites in CHANGE. FILE must match a shown source header."
+        "the repeated sites in CHANGE. FILE must match a shown source header. Do not use ellipses, markdown fences, "
+        "or placeholder paths; CHANGE must stay a plain-English sentence."
         f"{nudge}"
     )
 
@@ -212,49 +385,87 @@ def slot_solve(issue, src, diagnose_fn, plan_fn, fix_fn, max_steps=8, log=None):
       fix_fn(issue, src, diagnosis, plan)           -> (APPLYABLE patch text, parsed SR blocks)
     Returns (patch, trace, fixpoint, steps). Same engine for the 4B run and the selftest."""
     attempts = {"DIAGNOSE": 0, "PLAN": 0}
-    trace = {"diagnoses": [], "plans": [], "fix_attempts": []}
+    trace = {"diagnoses": [], "plans": [], "fix_attempts": [], "retrievals": []}
     fix_meta = {"blocks": [], "plan": ""}
+    sources = []
+    if isinstance(src, dict):
+        full_src = src.get("full", "")
+        sources = list(src.get("sources") or [])
+    else:
+        full_src = src
+
+    last_query = {"text": ""}
 
     def retr(q, kind):
-        return [{"id": "src", "text": src}]                    # localization fixed -> evidence = the source
+        last_query["text"] = q
+        if sources:
+            return _rank_src_chunks(q, sources, top_k=2)
+        return [{"id": "src", "text": full_src}]              # fallback: one coarse source blob
 
     def filler(slot, ev, pool):
+        slot_ev = ev
+        if slot.name == "PLAN":
+            slot_ev = ev[:1]
+        elif slot.name == "FIX":
+            slot_ev = ev[:2]
+        else:
+            slot_ev = ev[:2]
+        slot_src = _compose_src(slot_ev) or full_src
+        trace["retrievals"].append({
+            "slot": slot.name,
+            "query": last_query["text"],
+            "ids": [e.get("id") for e in slot_ev],
+            "files": [e.get("file") for e in slot_ev],
+        })
         if slot.name == "DIAGNOSE":
             n = attempts["DIAGNOSE"]; attempts["DIAGNOSE"] = n + 1
-            d = diagnose_fn(issue, src, n)
+            d = diagnose_fn(issue, slot_src, n)
             trace["diagnoses"].append(d)
             return d
         if slot.name == "PLAN":
             diag = pool.get("DIAGNOSE")
             n = attempts["PLAN"]; attempts["PLAN"] = n + 1
-            plan = plan_fn(issue, src, diag, n)
+            plan = ""
+            for retry in range(2):
+                plan = plan_fn(issue, slot_src, diag, n + retry)
+                plan, _ = _repair_plan_to_src(plan, slot_src, diag)
+                if _plan_sufficient(plan, full_src):
+                    break
             trace["plans"].append(plan)
             return plan
         diag = pool.get("DIAGNOSE")
         plan = pool.get("PLAN")
-        patch, blocks = fix_fn(issue, src, diag, plan)        # "" if unapplyable/no-op -> INSUFFICIENT -> backtrack
-        fix_meta["blocks"] = list(blocks or [])
-        fix_meta["plan"] = plan
-        trace["fix_attempts"].append({
-            "applyable": bool(patch),
-            "anchored": _blocks_match_plan(fix_meta["blocks"], plan),
-            "diag_used": diag[:160],
-        })
+        patch, blocks = "", []
+        for retry in range(2):
+            patch, blocks = fix_fn(issue, slot_src, diag, plan)        # "" if unapplyable/no-op -> INSUFFICIENT
+            fix_meta["blocks"] = list(blocks or [])
+            fix_meta["plan"] = plan
+            trace["fix_attempts"].append({
+                "applyable": bool(patch),
+                "anchored": _blocks_match_plan(fix_meta["blocks"], plan),
+                "diag_used": diag[:160],
+            })
+            if patch and _blocks_match_plan(fix_meta["blocks"], plan):
+                break
+            # Preserve graph-level backtracking for wrong-scope applyable fixes; only use the
+            # local retry to recover from empty/unparseable emissions.
+            if patch or retry >= 1:
+                break
         return patch
 
     specs = [
-        SlotSpec("DIAGNOSE", [], "src", "ASSERT", query=lambda p: "root cause of the bug", revise="rederive"),
+        SlotSpec("DIAGNOSE", [], "src", "ASSERT", query=lambda p: issue[:240], revise="rederive"),
         SlotSpec("PLAN", ["DIAGNOSE"], "src", "ASSERT",
-                 query=lambda p: "exact quoted target lines and edit intent",
+                 query=lambda p: f"{issue[:220]}\n{(p['DIAGNOSE'].value or '')[:220]}",
                  revise="rederive",
-                 sufficient=lambda slot, pool: _plan_sufficient(slot.value, src)),
+                 sufficient=lambda slot, pool: _plan_sufficient(slot.value, full_src)),
         SlotSpec("FIX", ["DIAGNOSE", "PLAN"], "src", "TRANSFORM",
-                 query=lambda p: "minimal applyable fix aligned to the plan",
+                 query=lambda p: f"{(p['PLAN'].value or '')[:260]}\n{(p['DIAGNOSE'].value or '')[:180]}",
                  sufficient=lambda slot, pool: bool(slot.value)
                  and _blocks_match_plan(fix_meta["blocks"], fix_meta["plan"])),
     ]
     sg = SlotGraph(specs)
-    pool = Pool(specs, context={"issue": issue, "src": src})
+    pool = Pool(specs, context={"issue": issue, "src": full_src})
     ok, steps = sg.solve(pool, retr, filler, max_steps=max_steps, log=log)
     return pool.slots["FIX"].value, trace, ok, steps
 
@@ -262,6 +473,16 @@ def slot_solve(issue, src, diagnose_fn, plan_fn, fix_fn, max_steps=8, log=None):
 # ── no-model wiring proof: the engine MUST reject an applyable-but-misaligned fix, then re-plan and recover ──
 def _selftest():
     print("swe_slot --selftest: proving the SLOT path runs SlotGraph.solve (no model).\n")
+    ranked = _rank_src_chunks(
+        "bitwise mask operand none propagation",
+        [
+            {"id": "broad", "file": "x.py", "text": "# x.py\nclass Big:\n    mask = True\n    propagation = True\n"},
+            {"id": "tight", "file": "x.py", "text": "# x.py\ndef _arithmetic_mask(self, operand):\n    return operand.mask\n"},
+        ],
+        top_k=1,
+    )
+    retrieval_ok = bool(ranked) and ranked[0]["id"] == "tight"
+    print(f"   slot retrieval (narrowing) : {'PASS' if retrieval_ok else 'FAIL'}")
     plan_src = (
         "# x.py\n"
         "def f():\n"
@@ -325,7 +546,7 @@ def _selftest():
     anchored = trace["fix_attempts"][-1]["anchored"] if trace["fix_attempts"] else False
     rejected_wrong_scope = any(a["applyable"] and not a["anchored"] for a in trace["fix_attempts"][:-1])
     ok_wired = (
-        indent_ok and order_ok and trunc_ok and bool(patch) and ok and backtracked and replanned
+        retrieval_ok and indent_ok and order_ok and trunc_ok and bool(patch) and ok and backtracked and replanned
         and anchored and rejected_wrong_scope
     )
     print(f"\n   WIRING PROOF: backtrack-fired={backtracked}  re-planned={replanned}  "
@@ -383,6 +604,23 @@ def _verify_run_ids(outputs, dataset: str, split: str) -> tuple[str, str]:
     else:
         base = _slug(f"swe_slot_{dataset}_{split}")
     return f"{base}_oneshot", f"{base}_slot"
+
+
+def _build_support_sources(dest: Path, support: list[str], meta: dict, src_lines: int) -> list[dict]:
+    from v5.runtime.sr_withcode import read_body
+    out = []
+    for sid in support:
+        m = meta[sid]
+        body = read_body(str(dest), m["file"], m["lineno"], src_lines)
+        if not body:
+            continue
+        out.append({
+            "id": sid,
+            "file": m["file"],
+            "lineno": m["lineno"],
+            "text": f"# {m['file']}\n{body}",
+        })
+    return out
 
 
 def _apply_smoke_overrides(args):
@@ -450,6 +688,12 @@ def main():
     from v5.graph_grower.swe_verify import write_predictions
 
     trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
+    traces = load_traces([a.traces])
+    meta = load_symbol_meta([a.nodes])
+    insts = {t["instance_id"]: t for t in load_instances(a.dataset, a.split, limit=0)}
+    ids = [i for i in traces if i in insts and all(s in meta for s in traces[i]["support_ids"])][:a.n_eval]
+    print(f"instances={len(ids)} | symbol meta={len(meta)}", flush=True)
+
     model = load_frozen_lm(a.model); model.eval()
     tok = AutoTokenizer.from_pretrained(a.model, trust_remote_code=trust)
     dev = next(model.parameters()).device
@@ -465,12 +709,6 @@ def main():
         out = model.generate(**enc, max_new_tokens=ntok, do_sample=False, pad_token_id=tok.eos_token_id)
         t = tok.decode(out[0, enc["input_ids"].shape[1]:], skip_special_tokens=True)
         return re.sub(r"<think>.*?</think>", "", t, flags=re.DOTALL).strip()
-
-    traces = load_traces([a.traces])
-    meta = load_symbol_meta([a.nodes])
-    insts = {t["instance_id"]: t for t in load_instances(a.dataset, a.split, limit=0)}
-    ids = [i for i in traces if i in insts and all(s in meta for s in traces[i]["support_ids"])][:a.n_eval]
-    print(f"instances={len(ids)} | symbol meta={len(meta)}", flush=True)
     verifier = SWEExactVerifier(a.dataset, a.split, a.verify_backend, a.verify_out_dir,
                                 max_workers=a.verify_max_workers, timeout=a.verify_timeout,
                                 poll_secs=a.verify_poll_secs, model_name="swe_slot") if a.exact_verify else None
@@ -486,8 +724,8 @@ def main():
         ok, _ = checkout_repo(inst["repo"], inst["base_commit"], dest, timeout=1800)
         if not ok:
             print(f"  [{k+1}] {iid} checkout FAILED"); continue
-        src = "\n\n".join(f"# {meta[s]['file']}\n{body}" for s in support[:a.src_bodies]
-                          if (body := read_body(str(dest), meta[s]["file"], meta[s]["lineno"], a.src_lines)))
+        support_sources = _build_support_sources(dest, support, meta, a.src_lines)
+        src = _compose_src(support_sources[:a.src_bodies])
         if not src.strip():
             print(f"  [{k+1}] {iid} no source read"); continue
         scored += 1
@@ -509,13 +747,13 @@ def main():
             return gen("You are a precise debugging assistant.", diag_user(issue, src, attempt), 160)
         def plan_fn(issue, src, diagnosis, attempt):
             raw = gen("You are a precise patch planner.", plan_user(issue, src, diagnosis, attempt), 220)
-            return _repair_plan_to_src(raw, src)[0]
+            return _repair_plan_to_src(raw, src, diagnosis)[0]
         def fix_fn(issue, src, diagnosis, plan):
             g = gen(SR_SYS, fix_user(issue, src, diagnosis, plan), a.max_new)
             blocks = parse_sr(g)
             return _patch(blocks, str(dest)), blocks        # "" unless applyable
         log = []
-        p2, trace, fp, steps = slot_solve(issue, src, diagnose_fn, plan_fn, fix_fn,
+        p2, trace, fp, steps = slot_solve(issue, {"full": src, "sources": support_sources}, diagnose_fn, plan_fn, fix_fn,
                                           max_steps=a.max_steps, log=log)
         app2 = bool(p2.strip())
         slot_app += app2
@@ -528,6 +766,7 @@ def main():
               f"plan_attempts={len(trace['plans'])} fixpoint={fp}", flush=True)
         dump.write(f"\n===== {iid} =====\nISSUE: {issue[:200]}\n\n"
                    f"SLOT log: {log}\n"
+                   f"RETRIEVALS: {trace['retrievals']}\n"
                    f"DIAGNOSES ({len(trace['diagnoses'])} attempts):\n" +
                    "\n".join(f"  [{i}] {d}" for i, d in enumerate(trace['diagnoses'])) +
                    f"\nPLANS ({len(trace['plans'])} attempts):\n" +

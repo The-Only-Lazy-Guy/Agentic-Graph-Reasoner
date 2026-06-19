@@ -8,6 +8,96 @@
 
 ---
 
+## Session update (2026-06-19) — local SWE smoke is now honest, stable, and more diagnostic
+
+> **One line:** the local SWE slot path on Windows now survives end-to-end smoke,
+> uses slot-specific support chunks, and reaches `FIX` for real; the remaining
+> blocker is weak patch emission on the small local model, not loader crashes or
+> fake slot behavior.
+
+### What was fixed
+
+1. `v5/graph_grower/swe_load.py`
+   - SWE instance loading now isolates Windows-local dataset reads in a fresh
+     Python subprocess.
+   - reason: the in-process `datasets` / `pyarrow` stack could hard-exit the
+     local smoke after unrelated imports; this made debugging misleading.
+   - practical effect: `load_instances()` is now stable in the real
+     `swe_slot.py` pipeline on this box.
+
+2. `v5/runtime/swe_slot.py`
+   - retrieval is now slot-aware over the per-support source chunks instead of
+     reusing one coarse source blob for every slot.
+   - retrieval ranking now prefers tighter local chunks for `PLAN` / `FIX`
+     instead of broad same-file context when the diagnosis names a specific
+     function.
+   - local `FIX` retry no longer swallows applyable wrong-scope patches inside a
+     single fill; those now surface to the graph so backtracking stays real.
+   - plan repair now:
+     - fills a missing `CHANGE:` from the diagnosis when needed
+     - repairs placeholder paths / indentation drift
+     - snaps ellipsis-heavy planner output back to an exact local source anchor
+
+### Proofs run locally after the fix
+
+- `python -m v5.runtime.swe_slot --selftest`
+  - PASS
+  - proves the real graph behavior is still intact:
+    `DIAGNOSE -> PLAN -> FIX -> INSUFFICIENT -> BACKTRACK -> re-PLAN -> anchored FIX`
+
+- targeted multi-support audit on `astropy__astropy-14995`
+  - before diagnosis-aware ranking:
+    - `PLAN` retrieval preferred the broad `sym_735c3a404154` chunk
+  - after ranking fix:
+    - `PLAN` retrieval prefers the tighter `_arithmetic_mask` chunk
+      `sym_ab9d6646353d`
+  - planner repair now converts a fuzzy ellipsis plan into a concrete exact
+    branch-region anchor instead of only keeping the function signature
+
+- full local smoke with cached `Qwen/Qwen2.5-1.5B-Instruct`
+  - session: `artifacts/swe_slot_sessions/local_smoke_qwen25_15b_v2`
+  - result on `astropy__astropy-12907`:
+    - `diag_attempts=1` (was 3 before the repair pass)
+    - `plan_attempts=3`
+    - `FIX` is now actually reached
+    - remaining failure: `FIX` emits no applyable patch on this small local model
+
+### Honest current read
+
+This is a real improvement in debugging quality:
+
+- before: local smoke could crash in the loader or stall in repeated
+  `DIAGNOSE` attempts, which made it unclear whether the slot graph was even
+  being exercised correctly
+- now: local smoke is stable enough to inspect retrievals, diagnoses, plans, and
+  fix attempts; failures are downstream and interpretable
+
+But this is **not** yet a solve-quality win on the local 1.5B smoke model.
+The current boundary is:
+
+- retrieval / plan grounding: materially better
+- graph control behavior: correct
+- local patch emission quality: still weak
+
+### Recommended workflow from here
+
+1. run local smoke first:
+```bash
+python -m v5.runtime.swe_slot --selftest
+python -m v5.runtime.swe_slot --smoke --model Qwen/Qwen2.5-1.5B-Instruct --dataset lite --split test --n-eval 1 --smoke-n-eval 1 --session-out-dir artifacts/swe_slot_sessions --session-name local_smoke_qwen25_15b_v2
+```
+
+2. inspect the emitted dump before any long Docker verification:
+   - `artifacts/swe_slot_sessions/local_smoke_qwen25_15b_v2/dump.txt`
+
+3. only then run the expensive remote 4B / Docker sessions
+
+The next improvement target is the `FIX` step itself: make the patch emitter use
+the now-grounded `PLAN` more faithfully, rather than broadening or truncating the
+SEARCH/REPLACE block.
+
+---
+
 ## Session update (2026-06-18) — SWE pivot: exact-eval the SLOT graph first, then RL the DIAGNOSE slot
 
 > **One line:** the first serious test of `--derive` on coding tasks should be the
