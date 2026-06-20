@@ -1,0 +1,37 @@
+{
+  "session_name": "dbg_11019_retrieved_c",
+  "dataset": "lite",
+  "split": "test",
+  "instance_ids": [
+    "django__django-11019"
+  ],
+  "model": "Qwen/Qwen3.5-4B",
+  "n_eval_requested": 1,
+  "n_eval_scored": 1,
+  "max_steps": 8,
+  "max_new": 400,
+  "audit_support_text": true,
+  "predictions": {
+    "oneshot": "artifacts/swe_slot_sessions/dbg_11019_retrieved_c/oneshot.jsonl",
+    "slot": "artifacts/swe_slot_sessions/dbg_11019_retrieved_c/slot.jsonl"
+  },
+  "dump_path": "artifacts/swe_slot_sessions/dbg_11019_retrieved_c/dump.txt",
+  "applyable": {
+    "oneshot": {
+      "count": 1,
+      "total": 1
+    },
+    "slot": {
+      "count": 0,
+      "total": 1
+    }
+  },
+  "verify_commands": {
+    "gold_sanity_smoke": "python -m v5.graph_grower.swe_verify --gold-sanity --dataset lite --split test --limit 1",
+    "oneshot_smoke": "python -m v5.graph_grower.swe_verify --predictions artifacts/swe_slot_sessions/dbg_11019_retrieved_c/oneshot.jsonl --dataset lite --split test --run-id dbg_11019_retrieved_c_oneshot_smoke --predictions-limit 1",
+    "slot_smoke": "",
+    "gold_sanity": "python -m v5.graph_grower.swe_verify --gold-sanity --dataset lite --split test --limit 5",
+    "oneshot": "python -m v5.graph_grower.swe_verify --predictions artifacts/swe_slot_sessions/dbg_11019_retrieved_c/oneshot.jsonl --dataset lite --split test --run-id dbg_11019_retrieved_c_oneshot",
+    "slot": "python -m v5.graph_grower.swe_verify --predictions artifacts/swe_slot_sessions/dbg_11019_retrieved_c/slot.jsonl --dataset lite --split test --run-id dbg_11019_retrieved_c_slot"
+  }
+}
