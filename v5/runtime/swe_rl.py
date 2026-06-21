@@ -32,9 +32,30 @@ from v5.runtime.search_replace import SR_SYS, apply_sr, parse_sr
 from v5.runtime.swe_reward import is_real_edit, solves_goldoverlap, swe_reward
 
 
-def gold_to_sr(diff: str) -> list[dict]:
+def _trim_common_context(search: list[str], replace: list[str], keep: int = 1) -> tuple[list[str], list[str]]:
+    """Trim the shared leading/trailing CONTEXT lines a hunk carries, keeping `keep` lines of anchor on
+    each side. The whole-hunk SEARCH is long + hard to reproduce exactly (-> unapplyable -> reward -1)
+    and bloats the SFT target past max_new; the minimal changed region + a small anchor is reproducible
+    and applyable while staying unique enough to locate."""
+    p = 0
+    while p < len(search) and p < len(replace) and search[p] == replace[p]:
+        p += 1
+    s = 0
+    while s < len(search) - p and s < len(replace) - p and search[-1 - s] == replace[-1 - s]:
+        s += 1
+    lead = max(0, p - keep)                                   # keep `keep` context lines before the change
+    tail_s = len(search) - max(0, s - keep)
+    tail_r = len(replace) - max(0, s - keep)
+    ns, nr = search[lead:tail_s], replace[lead:tail_r]
+    if not ns and not nr:                                    # pure no-op hunk -> leave as-is (shouldn't happen)
+        return search, replace
+    return ns, nr
+
+
+def gold_to_sr(diff: str, minimal: bool = True) -> list[dict]:
     """unified diff -> SEARCH/REPLACE blocks. SEARCH = context+removed (the original), REPLACE =
-    context+added (the new), per hunk; file = the +++ path."""
+    context+added (the new), per hunk; file = the +++ path. With minimal=True, trim shared context to
+    the changed region + a 1-line anchor (reproducible/applyable + fits the SFT target)."""
     blocks, file, lines, i = [], None, diff.splitlines(), 0
     while i < len(lines):
         l = lines[i]
@@ -58,6 +79,8 @@ def gold_to_sr(diff: str) -> list[dict]:
                     break
                 i += 1
             if file and (search or replace):
+                if minimal:
+                    search, replace = _trim_common_context(search, replace)
                 blocks.append({"file": file, "search": "\n".join(search), "replace": "\n".join(replace)})
         else:
             i += 1
@@ -76,6 +99,9 @@ def _restore_repo(repo_dir: str) -> None:
 def materialize_patch(task: dict, blocks: list[dict]) -> tuple[int, str]:
     """Apply SR blocks to the checked-out repo, capture the git diff, then restore the checkout."""
     dest = task["dest"]
+    blocks = [b for b in blocks if (b.get("file") or "").strip() and (b.get("search") or "").strip()]
+    if not blocks:                                           # no usable block (e.g. model omitted the file line)
+        return 0, ""                                        # -> unapplyable, NOT a crash (apply_sr would read the repo dir)
     _restore_repo(dest)
     try:
         applied, patch = apply_sr(dest, blocks)
@@ -91,15 +117,40 @@ def _verify_blocks_exact(task: dict, blocks: list[dict], verifier: SWEExactVerif
     return verifier.verify_patch(task, patch, tag="reward")
 
 
+def _file_text_cached(task: dict, rel: str) -> str:
+    """Read+cache a repo file's text (LF-normalized) for the in-memory applyability check (no git)."""
+    cache = task.setdefault("_filecache", {})
+    if rel not in cache:
+        fp = Path(task["dest"]) / (rel or "")
+        cache[rel] = fp.read_text(encoding="utf-8", errors="ignore") if fp.is_file() else ""
+    return cache[rel]
+
+
+def _applyable_inmem(task: dict, blocks: list[dict]) -> int:
+    """Same applyability check as apply_sr (b['search'] in file text), but in-memory + cached -> NO git
+    subprocess per rollout. The proxy reward only needs applied>0 (it scores via gold-overlap, not the
+    diff), so this is the fast in-loop path; verifier/emit paths still materialize the real git diff."""
+    applied = 0
+    for b in blocks:
+        f, s = (b.get("file") or "").strip(), (b.get("search") or "")
+        if f and s.strip() and s in _file_text_cached(task, f):
+            applied += 1
+    return applied
+
+
 def _score_task_blocks(task: dict, blocks: list[dict], reward_mode: str = "proxy",
                        verifier: SWEExactVerifier | None = None):
-    """Score a parsed SR patch on the REAL checked-out repo, not just the stitched source snippet.
-
-    This keeps the cheap proxy honest: the grounded gate is "the patch really applies to the repo and
-    produces a non-empty git diff", while `solved` can still be proxy-overlap or exact SWE verification.
+    """Score a parsed SR patch against the REAL repo. PROXY mode checks applyability IN-MEMORY (cached
+    file text, no git subprocess -> fast in-loop); VERIFIER mode materializes the git diff + runs tests.
     """
-    applied, patch = materialize_patch(task, blocks)
-    if applied <= 0 or not patch.strip():
+    if reward_mode == "verifier":
+        applied, patch = materialize_patch(task, blocks)
+        grounded_ok = applied > 0 and bool(patch.strip())
+    else:
+        applied = _applyable_inmem(task, blocks)
+        grounded_ok = applied > 0
+        patch = ""
+    if not grounded_ok:
         return -1.0, {"grounded": False, "why": "patch did not apply to the checked-out repo",
                       "verdict": "PUNISH (unapplyable)"}
     real = is_real_edit(blocks)
@@ -329,7 +380,8 @@ def train(model_name, tasks, steps, K, lr, r_lora, seed, layers, eval_every, ent
         for s in range(1, sft_steps + 1):
             t = rng.choice(train_tasks)
             pids = encode(SR_SYS, fix_user(t["issue"], t["src"]))
-            gids = tok(t["gold_sr_text"], return_tensors="pt", add_special_tokens=False).input_ids.to(dev)[:, :max_new]
+            sft_cap = max(max_new, 640)                      # teach the FULL minimal gold target, not the small gen window
+            gids = tok(t["gold_sr_text"], return_tensors="pt", add_special_tokens=False).input_ids.to(dev)[:, :sft_cap]
             full = torch.cat([pids, gids], dim=1)
             logits = model(full, use_cache=False).logits
             st = pids.shape[1]
@@ -430,9 +482,11 @@ def main():
     ap.add_argument("--layers", type=int, nargs="+", default=[20, 22, 24, 26, 28])
     ap.add_argument("--eval-every", type=int, default=30)
     ap.add_argument("--ent-coef", type=float, default=0.005)
-    ap.add_argument("--temperature", type=float, default=1.0)
+    ap.add_argument("--temperature", type=float, default=0.7,
+                    help="lower for SWE: exact-char SEARCH is fragile, high temp -> unapplyable rollouts -> -1/SKIP")
     ap.add_argument("--sft-steps", type=int, default=120)
-    ap.add_argument("--max-new", type=int, default=320)
+    ap.add_argument("--max-new", type=int, default=512,
+                    help="must exceed the gold patch length or generation truncates -> unapplyable")
     ap.add_argument("--reward-mode", choices=["proxy", "verifier"], default="proxy",
                     help="proxy = gold-overlap reward; verifier = exact SWE pass/fail reward")
     ap.add_argument("--verify-every", type=int, default=0,
