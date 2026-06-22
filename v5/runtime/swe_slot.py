@@ -742,6 +742,11 @@ def slot_solve(issue, src, diagnose_fn, plan_fn, fix_fn, max_steps=8, log=None, 
         sources = list(src.get("sources") or [])
     else:
         full_src = src
+    # GATE/snap plans against the REAL repo files (full content), not the truncated shown
+    # window: a correct verbatim anchor often lives in a function outside the top-N slot_src
+    # chunks, so checking `search in full_src` wrongly rejects valid plans. Falls back to
+    # full_src when no real checkout is provided (e.g. the no-model selftest).
+    gate_src = (src.get("gate") if isinstance(src, dict) else "") or full_src
 
     last_query = {"text": ""}
 
@@ -773,8 +778,8 @@ def slot_solve(issue, src, diagnose_fn, plan_fn, fix_fn, max_steps=8, log=None, 
             plan = ""
             for retry in range(2):
                 plan = plan_fn(issue, slot_src, diag, n + retry)
-                plan, _ = _repair_plan_to_src(plan, slot_src, diag)
-                if _plan_sufficient(plan, full_src):
+                plan, _ = _repair_plan_to_src(plan, gate_src, diag)
+                if _plan_sufficient(plan, gate_src):
                     break
             trace["plans"].append(plan)
             return plan
@@ -811,7 +816,7 @@ def slot_solve(issue, src, diagnose_fn, plan_fn, fix_fn, max_steps=8, log=None, 
         SlotSpec("PLAN", ["DIAGNOSE"], "src", "ASSERT",
                  query=lambda p: f"{issue[:220]}\n{(p['DIAGNOSE'].value or '')[:220]}",
                  revise="rederive",
-                 sufficient=lambda slot, pool: _plan_sufficient(slot.value, full_src)),
+                 sufficient=lambda slot, pool: _plan_sufficient(slot.value, gate_src)),
         SlotSpec("FIX", ["DIAGNOSE", "PLAN"], "src", "TRANSFORM",
                  query=lambda p: f"{(p['PLAN'].value or '')[:260]}\n{(p['DIAGNOSE'].value or '')[:180]}",
                  sufficient=lambda slot, pool: bool(slot.value)
@@ -1191,6 +1196,26 @@ def _build_support_sources(dest: Path, support: list[str], meta: dict, src_lines
     return out
 
 
+def _full_files_src(dest: Path, support: list[str], meta: dict) -> str:
+    """Header-formatted FULL contents of the real repo files referenced by the support.
+    Used to GATE/snap plans against ground-truth source (not the truncated shown window),
+    so a correct verbatim anchor in a function outside the top-N slot_src chunks still passes."""
+    seen: set[str] = set()
+    parts: list[str] = []
+    for sid in support:
+        f = meta.get(sid, {}).get("file")
+        if not f or f in seen:
+            continue
+        seen.add(f)
+        try:
+            body = (Path(dest) / f).read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        if body.strip():
+            parts.append(f"# {_canon_path(f)}\n{body}")
+    return "\n\n".join(parts)
+
+
 def _apply_smoke_overrides(args):
     if not args.smoke:
         return args
@@ -1464,7 +1489,8 @@ def main():
             blocks = parse_sr(g)
             return _patch(blocks, str(dest)), blocks, g        # "" unless applyable
         log = []
-        p2, trace, fp, steps = slot_solve(issue, {"full": src, "sources": support_sources}, diagnose_fn, plan_fn, fix_fn,
+        gate_src = _full_files_src(dest, support, meta)
+        p2, trace, fp, steps = slot_solve(issue, {"full": src, "sources": support_sources, "gate": gate_src}, diagnose_fn, plan_fn, fix_fn,
                                           max_steps=a.max_steps, log=log, capture_evidence=a.audit_support_text)
         app2 = bool(p2.strip())
         slot_app += app2
