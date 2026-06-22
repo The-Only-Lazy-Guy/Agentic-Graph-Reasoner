@@ -36,6 +36,10 @@ class SlotSpec:
     # own-evidence GATE: is THIS slot's basis sufficient (not just "are my deps valid")? Default = the
     # slot produced a non-empty value. SWE FIX overrides this with applyable/verify.
     sufficient: Callable[["Slot", "Pool"], bool] = None
+    # runtime decomposition: when a slot's direct retrieve/fill is insufficient, it may spawn child
+    # slots and turn itself into a merge slot over them. This is the design's flexible "split the task,
+    # solve branches, then synthesize" path.
+    expand: Callable[["Slot", "Pool"], "Expansion" | None] = None
     # how a downstream failure REVISES this slot when backtracking to it:
     #   'evidence' = rule out the supporting evidence + re-retrieve (retrieval ambiguity, e.g. a confuser)
     #   'rederive' = keep the evidence, re-fill with more effort/feedback (synthesis, e.g. re-DIAGNOSE)
@@ -48,6 +52,17 @@ class Slot:
     value: str = ""
     state: str = EMPTY
     justification: dict = field(default_factory=dict)   # {upstream:[...], evidence:[...]}
+
+
+@dataclass
+class Expansion:
+    slots: List[SlotSpec]
+    depends_on: List[str]
+    derive: Callable[["Slot", "Pool"], str] | None = None
+    sufficient: Callable[["Slot", "Pool"], bool] | None = None
+    revise: str | None = None
+    query: Callable[[Dict[str, "Slot"]], str] | None = None
+    disable_retrieval: bool = True
 
 
 class Pool:
@@ -65,11 +80,16 @@ class Pool:
     def store(self, name: str, value: str, just: dict, state: str):
         s = self.slots[name]; s.value, s.justification, s.state = value, just, state
 
+    def ensure_slots(self, specs: List[SlotSpec]):
+        for spec in specs:
+            self.slots.setdefault(spec.name, Slot(spec.name))
+
 
 class SlotGraph:
     def __init__(self, specs: List[SlotSpec]):
         self.specs = {s.name: s for s in specs}
         self.order = self._toposort(specs)            # DATAFLOW DAG order (upstream first)
+        self._expanded: set[str] = set()
 
     def _toposort(self, specs):
         done, order, visiting = set(), [], set()
@@ -98,6 +118,38 @@ class SlotGraph:
         own = spec.sufficient(slot, pool) if spec.sufficient else bool(slot.value)
         return bool(own) and self._deps_complete(pool, name)
 
+    def _recompute_order(self):
+        self.order = self._toposort(list(self.specs.values()))
+
+    def _apply_expansion(self, pool: Pool, target: str, expansion: Expansion, log: list | None = None):
+        if target in self._expanded:
+            return
+        parent = self.specs[target]
+        seen = set(self.specs)
+        for child in expansion.slots:
+            if child.name in seen:
+                raise ValueError(f"slot expansion for {target!r} reuses existing slot name {child.name!r}")
+            seen.add(child.name)
+        for child in expansion.slots:
+            self.specs[child.name] = child
+        pool.ensure_slots(expansion.slots)
+        parent.needs = list(dict.fromkeys(parent.needs + list(expansion.depends_on)))
+        if expansion.derive is not None:
+            parent.derive = expansion.derive
+        if expansion.sufficient is not None:
+            parent.sufficient = expansion.sufficient
+        if expansion.revise is not None:
+            parent.revise = expansion.revise
+        if expansion.query is not None:
+            parent.query = expansion.query
+        elif expansion.disable_retrieval:
+            parent.query = lambda p: ""
+        self._expanded.add(target)
+        self._recompute_order()
+        pool.slots[target].state = STALE
+        if log is not None:
+            log.append(("EXPAND", target, list(expansion.depends_on)))
+
     def solve(self, pool: Pool, retriever: Callable[[str, str], list],
               filler: Callable[[Slot, list, Pool], str], max_steps: int = 24, log: list | None = None,
               derive: Callable[[Slot, Pool], str] | None = None, enable_backtrack: bool = True):
@@ -121,6 +173,15 @@ class SlotGraph:
                 if log is not None: log.append(("FIXPOINT", step))
                 return all(pool.slots[n].state == VALID for n in self.order), step
             spec = self.specs[target]; slot = pool.slots[target]
+
+            # ── INSUFFICIENT -> EXPAND: direct fill was not enough, so the slot may split itself into
+            # child subproblems and turn into a merge slot over them. This is independent of whether
+            # upstream backtracking is enabled.
+            if slot.state == INSUFFICIENT and target not in self._expanded and spec.expand is not None:
+                exp = spec.expand(slot, pool)
+                if exp is not None and exp.slots and exp.depends_on:
+                    self._apply_expansion(pool, target, exp, log=log)
+                    continue
 
             # ── INSUFFICIENT -> BACKTRACK: revise the nearest VALID upstream (dependency-directed) ──
             if slot.state == INSUFFICIENT and enable_backtrack:
@@ -147,7 +208,7 @@ class SlotGraph:
 
             # ── FILL: slot-aware retrieve (minus nogoods) -> filler; retrieve-OR-DERIVE ──
             q = spec.query(pool.slots | {})
-            ev = [e for e in retriever(q, spec.evidence_kind) if e.get("id") not in nogood[target]]
+            ev = [e for e in retriever(q, spec.evidence_kind) if e.get("id") not in nogood[target]] if q else []
             value = filler(slot, ev, pool) if ev else ""
             ev_ids = [e.get("id") for e in ev]                           # full provenance (for invalidate)
             used = [e.get("id") for e in ev if value and value in (e.get("text") or "")]  # what SUPPORTS it
@@ -864,6 +925,78 @@ def _backtrack_demo():
           "SUMMARY derived. INSPECT the BACKTRACK/DERIVE log rows.")
 
 
+# ── runtime decomposition / split-merge proof: a slot may be solved directly OR expand into child
+# slots at runtime, with nested expansion on a branch, then MERGE back to the parent slot.
+def _decompose_demo():
+    def node(i, t): return {"id": i, "kind": "fact", "text": t}
+    graph_split = [
+        node("b", "base value 12"),
+        node("p", "positive delta 8"),
+        node("m", "negative delta 3"),
+    ]
+    graph_direct = graph_split + [node("t", "total value 17")]
+
+    def retriever_factory(nodes):
+        def retriever(query, kind):
+            ql = query.lower()
+            if "total value" in ql:
+                return [n for n in nodes if "total value" in n["text"]]
+            if "base value" in ql:
+                return [n for n in nodes if "base value" in n["text"]]
+            if "adjust value" in ql:
+                return [n for n in nodes if "adjust value" in n["text"]]
+            if "positive delta" in ql:
+                return [n for n in nodes if "positive delta" in n["text"]]
+            if "negative delta" in ql:
+                return [n for n in nodes if "negative delta" in n["text"]]
+            return []
+        return retriever
+
+    def num_from(slot, ev, pool):
+        import re
+        if not ev:
+            return ""
+        m = re.search(r"-?\d+", ev[0]["text"])
+        return m.group(0) if m else ""
+
+    def expand_adjust(slot, pool):
+        return Expansion(
+            slots=[
+                SlotSpec("PLUS", [], "fact", "ASSERT", query=lambda p: "positive delta"),
+                SlotSpec("MINUS", [], "fact", "ASSERT", query=lambda p: "negative delta"),
+            ],
+            depends_on=["PLUS", "MINUS"],
+            derive=lambda slot, pool: str(int(pool.get("PLUS")) - int(pool.get("MINUS"))),
+        )
+
+    def expand_total(slot, pool):
+        return Expansion(
+            slots=[
+                SlotSpec("BASE", [], "fact", "ASSERT", query=lambda p: "base value"),
+                SlotSpec("ADJUST", [], "fact", "ASSERT", query=lambda p: "adjust value", expand=expand_adjust),
+            ],
+            depends_on=["BASE", "ADJUST"],
+            derive=lambda slot, pool: str(int(pool.get("BASE")) + int(pool.get("ADJUST"))),
+        )
+
+    def run(label, nodes):
+        specs = [SlotSpec("TOTAL", [], "fact", "ASSERT", query=lambda p: "total value", expand=expand_total)]
+        sg = SlotGraph(specs); pool = Pool(specs); log = []
+        ok, steps = sg.solve(pool, retriever_factory(nodes), num_from, log=log)
+        print(f"=== {label} ===")
+        for row in log:
+            print("   ", row)
+        print(f"   TOTAL={pool.get('TOTAL')!r}  fixpoint={ok} steps={steps}")
+        dyn = [name for name in ("BASE", "ADJUST", "PLUS", "MINUS") if name in pool.slots]
+        print(f"   dynamic slots: {dyn}\n")
+
+    print("#15 runtime decomposition / split-merge demo — direct solve when enough, expand when not.\n")
+    run("DIRECT HIT (no expansion needed)", graph_direct)
+    run("SPLIT -> branch solve -> nested split -> merge", graph_split)
+    print("EXPECT: direct case reaches TOTAL=17 with no EXPAND rows. Split case shows EXPAND TOTAL and")
+    print("EXPAND ADJUST, then derives ADJUST=5 and TOTAL=17 from the child slots.")
+
+
 # ── BACKEND TEST SUITE: deterministic asserts over the engine (no model). Every state + transition. ──
 def _engine_tests():
     def node(i, t): return {"id": i, "kind": "fact", "text": t}
@@ -1020,6 +1153,63 @@ def _engine_tests():
     check("T14 derive is fallback (not called when retrieval hits)",
           pool.slots["A"].value == "a v1" and not called["d"], f"value={pool.slots['A'].value!r} d_called={called['d']}")
 
+    # T15/T16 — runtime decomposition: direct solve bypasses expansion when a full answer exists; otherwise
+    # the slot expands into child subproblems, one branch expands again, and the parent merges them.
+    def exp_ret_factory(nodes):
+        def retr(q, kind):
+            ql = q.lower()
+            if "total value" in ql:
+                return [n for n in nodes if "total value" in n["text"]]
+            if "base value" in ql:
+                return [n for n in nodes if "base value" in n["text"]]
+            if "adjust value" in ql:
+                return [n for n in nodes if "adjust value" in n["text"]]
+            if "positive delta" in ql:
+                return [n for n in nodes if "positive delta" in n["text"]]
+            if "negative delta" in ql:
+                return [n for n in nodes if "negative delta" in n["text"]]
+            return []
+        return retr
+    def exp_fill(slot, ev, pool):
+        import re
+        if not ev:
+            return ""
+        m = re.search(r"-?\d+", ev[0]["text"])
+        return m.group(0) if m else ""
+    def expand_adjust(slot, pool):
+        return Expansion(
+            slots=[
+                SlotSpec("PLUS", [], "fact", "ASSERT", query=lambda p: "positive delta"),
+                SlotSpec("MINUS", [], "fact", "ASSERT", query=lambda p: "negative delta"),
+            ],
+            depends_on=["PLUS", "MINUS"],
+            derive=lambda slot, pool: str(int(pool.get("PLUS")) - int(pool.get("MINUS"))),
+        )
+    def expand_total(slot, pool):
+        return Expansion(
+            slots=[
+                SlotSpec("BASE", [], "fact", "ASSERT", query=lambda p: "base value"),
+                SlotSpec("ADJUST", [], "fact", "ASSERT", query=lambda p: "adjust value", expand=expand_adjust),
+            ],
+            depends_on=["BASE", "ADJUST"],
+            derive=lambda slot, pool: str(int(pool.get("BASE")) + int(pool.get("ADJUST"))),
+        )
+    specs = [SlotSpec("TOTAL", [], "fact", "ASSERT", query=lambda p: "total value", expand=expand_total)]
+    direct_nodes = [node("t", "total value 17"), node("b", "base value 12"), node("p", "positive delta 8"), node("m", "negative delta 3")]
+    pool = Pool(specs); log = []; sg = SlotGraph(specs)
+    ok, _ = sg.solve(pool, exp_ret_factory(direct_nodes), exp_fill, log=log)
+    check("T15 direct answer bypasses expansion", ok and pool.get("TOTAL") == "17"
+          and not any(r[0] == "EXPAND" for r in log) and "BASE" not in pool.slots,
+          f"TOTAL={pool.get('TOTAL')!r} log={log}")
+    split_nodes = [node("b", "base value 12"), node("p", "positive delta 8"), node("m", "negative delta 3")]
+    specs2 = [SlotSpec("TOTAL", [], "fact", "ASSERT", query=lambda p: "total value", expand=expand_total)]
+    pool2 = Pool(specs2); log2 = []; sg2 = SlotGraph(specs2)
+    ok2, _ = sg2.solve(pool2, exp_ret_factory(split_nodes), exp_fill, log=log2)
+    ex = [r[1] for r in log2 if r[0] == "EXPAND"]
+    check("T16 runtime split->nested split->merge reaches fixpoint", ok2 and pool2.get("TOTAL") == "17"
+          and pool2.get("ADJUST") == "5" and ex == ["TOTAL", "ADJUST"],
+          f"TOTAL={pool2.get('TOTAL')!r} ADJUST={pool2.get('ADJUST')!r} expands={ex}")
+
     n_pass = sum(1 for _, c, _ in results if c)
     print(f"\n=== ENGINE BACKEND: {n_pass}/{len(results)} PASS ===")
     return n_pass == len(results)
@@ -1119,9 +1309,106 @@ def _derive_demo(model_name, layer, alpha, ntok):
     print("  TOTAL unfilled, and did the boundary case hallucinate? That is the honest scope of derive.")
 
 
+# ── MODEL <-> GRAPH DIALOGUE (frozen, no training) ───────────────────────────────────────────────
+# The model TALKS to the graph: it ASKS what it still needs, the graph ANSWERS (retrieval), the model
+# re-reads + reasons, and decides ENOUGH (commit) or ASK-AGAIN, to a fixpoint. ask/gate/answer are the
+# FROZEN LM; retrieve is graph lookup. Nothing here is trained — it is a control loop around frozen
+# parts (the model's own request is the query signal; retrieval is the response). Optional later: an
+# RL'd controller that sharpens ask/stop (design §9) — but the loop runs frozen TODAY.
+def model_graph_dialogue(ask, retrieve, gate, answer, kind: str = "fact", max_turns: int = 5,
+                         log: list | None = None):
+    """ask(evidence)->query | retrieve(query,kind)->[node] | gate(evidence)->bool | answer(evidence)->str.
+    Returns (value, evidence, turns)."""
+    evidence, seen, turns = [], set(), 0
+    for turns in range(1, max_turns + 1):
+        q = ask(evidence)                              # MODEL: "what do I still need?"  (its own query)
+        new = [e for e in retrieve(q, kind) if e.get("id") not in seen]
+        for e in new:
+            seen.add(e.get("id")); evidence.append(e)
+        if log is not None:
+            log.append(("ASK", q[:46], "GOT", [e.get("id") for e in new]))
+        if gate(evidence):                             # MODEL: "enough to answer now?"  (the pause)
+            if log is not None: log.append(("GATE", "sufficient", turns))
+            break
+    value = answer(evidence)                           # MODEL: produce the answer from what it gathered
+    if log is not None: log.append(("ANSWER", value[:40], "turns", turns))
+    return value, evidence, turns
+
+
+def dialogue_fill(gen, retrieve, slot_question: str, kind: str = "fact", max_turns: int = 5):
+    """Wrap a FROZEN `gen(prompt)->text` + a `retrieve(query,kind)->[node]` into the model<->graph loop,
+    returning a slot filler. The 4B path: gen = the chat-generate; retrieve = RealEmbedder over the graph."""
+    def _facts(ev):
+        return "\n".join(f"- {e['text']}" for e in ev) or "(nothing retrieved yet)"
+
+    def ask(ev):
+        out = gen(f"Goal: {slot_question}\nKnown so far:\n{_facts(ev)}\n\n"
+                  f"What ONE more fact do you need to reach the goal? Reply with a short search phrase only:")
+        return out.splitlines()[0].strip() if out.strip() else slot_question
+
+    def gate(ev):
+        out = gen(f"Goal: {slot_question}\nFacts:\n{_facts(ev)}\n\n"
+                  f"Can you now answer the goal from these facts alone? Answer yes or no:").lower()
+        return out.strip().startswith("y")
+
+    def answer(ev):
+        return gen(f"Facts:\n{_facts(ev)}\n\n{slot_question} Answer with only the value:")
+
+    def filler(slot, _ev, _pool):                      # engine filler signature; runs its OWN retrieval loop
+        val, ev, _t = model_graph_dialogue(ask, retrieve, gate, answer, kind=kind, max_turns=max_turns)
+        return val
+    return filler
+
+
+def _dialogue_demo():
+    print("MODEL<->GRAPH DIALOGUE (frozen, no training) — model ASKS, graph ANSWERS, loop to commit.\n")
+    GRAPH = [{"id": "cap", "kind": "fact", "text": "The capital of Aterra is Vionne."},
+             {"id": "riv", "kind": "fact", "text": "Vionne sits on the river Sel."},
+             {"id": "len", "kind": "fact", "text": "The river Sel is 900 km long."},
+             {"id": "noise", "kind": "fact", "text": "Bananas contain potassium."}]
+
+    def retrieve(q, kind):                             # keyword graph lookup (top-1)
+        qw = _toks(q)
+        ranked = sorted(GRAPH, key=lambda n: -len(qw & _toks(n["text"])))
+        return [ranked[0]] if (ranked and qw & _toks(ranked[0]["text"])) else []
+
+    # STUB MODEL: its query DEPENDS on what it already has (model-driven, not a fixed script).
+    def ask(ev):
+        have = " ".join(e["text"] for e in ev).lower()
+        if "vionne" not in have:           return "capital of Aterra"          # 1st: need the capital
+        if "sel" not in have:              return "river Vionne sits on"       # 2nd: need its river (uses hop-1)
+        return "river Sel length kilometers long"                              # 3rd: need the length (uses hop-2)
+    def gate(ev):
+        return any(("km" in e["text"] or "long" in e["text"]) for e in ev)     # enough once a length fact is in
+    def answer(ev):
+        return next((e["text"] for e in ev if "km" in e["text"]), "")
+
+    log = []
+    val, ev, turns = model_graph_dialogue(ask, retrieve, gate, answer, max_turns=6, log=log)
+    for row in log:
+        print("   ", row)
+    print(f"\n  ANSWER={val!r}  turns={turns}  evidence_ids={[e['id'] for e in ev]}")
+
+    # CONTROL: single-shot (one query, no dialogue) on the FULL question -> can't chain the hops.
+    one_q = "how long is Aterra's capital's river"
+    one = retrieve(one_q, "fact")
+    print(f"  SINGLE-SHOT (1 query {one_q!r}) -> {[e['id'] for e in one]} (no chain -> can't reach the length)")
+
+    queries = [r[1] for r in log if r[0] == "ASK"]
+    model_driven = len(set(queries)) == len(queries) and len(queries) >= 3      # each ask differs (uses prior evidence)
+    won = ("900" in val) and turns == 3 and model_driven and "len" not in [e["id"] for e in one]
+    print(f"\n  model-driven (queries differ per turn)={model_driven} | reached 900 in {turns} turns | "
+          f"single-shot missed the length={'len' not in [e['id'] for e in one]}")
+    print(f"  DIALOGUE SELFTEST -> {'PASS' if won else 'FAIL'}  (the model drove a 3-turn ask<->answer loop with the")
+    print("   graph, chaining hops single-shot retrieval cannot; FROZEN, no training).")
+    return won
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Slot-graph reasoning substrate.")
     ap.add_argument("--demo", action="store_true", help="run the toy loop-mechanics demo (no model)")
+    ap.add_argument("--dialogue", action="store_true", help="model<->graph dialogue loop (frozen, no model)")
+    ap.add_argument("--decompose", action="store_true", help="runtime split->branch->merge demo (no model)")
     ap.add_argument("--derive", action="store_true", help="retrieve-OR-DERIVE with the 4B (compute-from-upstream + boundary)")
     ap.add_argument("--test", action="store_true", help="run the no-model engine backend test suite (asserts)")
     ap.add_argument("--backtrack", action="store_true", help="#10: backtracking + INSUFFICIENT + derive (no model)")
@@ -1141,11 +1428,16 @@ def main(argv=None):
     if a.test:
         import sys
         sys.exit(0 if _engine_tests() else 1)
+    elif a.dialogue:
+        import sys
+        sys.exit(0 if _dialogue_demo() else 1)
     elif a.reason_selftest:
         import sys
         sys.exit(0 if _reason_selftest() else 1)
     elif a.derive:
         _derive_demo(a.model, a.layer, a.alpha, a.ntok)
+    elif a.decompose:
+        _decompose_demo()
     elif a.backtrack:
         _backtrack_demo()
     elif a.selfimprove:
@@ -1159,7 +1451,7 @@ def main(argv=None):
     elif a.demo:
         _toy_demo()
     else:
-        print("use --demo (mechanics) / --v3 (template reuse) / --real (frozen-4B fill, A40)")
+        print("use --demo / --decompose / --v3 / --real")
 
 
 if __name__ == "__main__":
