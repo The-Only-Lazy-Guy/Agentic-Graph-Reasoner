@@ -175,6 +175,47 @@ def _compose_src(chunks: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
+def _focus_body(gate_src: str, diag: str, max_lines: int = 120) -> str:
+    """Verbatim body of the DIAGNOSE-named FOCUS function, read from the REAL files (gate_src). The
+    sparse retrieved support often omits the exact call to edit, so the model regenerates it from
+    memory and diverges (applyable-but-wrong); feeding the real body gives it the source to COPY."""
+    if not (gate_src and diag):
+        return ""
+    m_focus = re.search(r'FOCUS:\s*([^\n(]+)', diag)
+    if not m_focus:
+        return ""
+    focus = m_focus.group(1).strip().split()[0].strip("`'\":()")
+    if not focus:
+        return ""
+    files = _split_src_files(gate_src)
+    m_file = re.search(r'FILE:\s*(\S+)', diag)
+    fpath = _resolve_src_file(m_file.group(1), files) if m_file else ""
+    pat = re.compile(rf'^(\s*)(?:def|class)\s+{re.escape(focus)}\b')
+    if not (fpath and fpath in files):
+        fpath = next((p for p, b in files.items() if pat.search(b)), "")
+    if not (fpath and fpath in files):
+        return ""
+    lines = files[fpath].splitlines()
+    start = next((i for i, ln in enumerate(lines) if pat.match(ln)), None)
+    if start is None:
+        return ""
+    indent = len(pat.match(lines[start]).group(1))
+    out = [lines[start]]
+    for ln in lines[start + 1: start + max_lines]:
+        if ln.strip() and (len(ln) - len(ln.lstrip())) <= indent and not ln.lstrip().startswith(("@", "#")):
+            break
+        out.append(ln)
+    return f"# {fpath}\n" + "\n".join(out).rstrip()
+
+
+def _augment_src(slot_src: str, gate_src: str, diag: str) -> str:
+    """Prepend the diagnosed function's REAL body so PLAN/FIX see the exact edit-site source to copy."""
+    fb = _focus_body(gate_src, diag)
+    if not fb or fb in slot_src:        # skip only if the WHOLE body is already shown (not just its signature)
+        return slot_src
+    return fb + "\n\n" + slot_src
+
+
 def _unit(vec) -> list[float]:
     vals = [float(x) for x in (vec or [])]
     norm = math.sqrt(sum(v * v for v in vals))
@@ -252,8 +293,12 @@ def _authoritative_files_text(sources: list[dict]) -> str:
 
 def _parse_plan(text: str) -> dict[str, str]:
     file_match = re.search(r"(?mi)^FILE:\s*(.+?)\s*$", text or "")
-    search_match = re.search(r"(?mis)^SEARCH:\s*\n(.*?)(?:\nCHANGE:\s*\n|\Z)", text or "")
-    change_match = re.search(r"(?mis)^CHANGE:\s*\n(.*)$", text or "")
+    # Accept BOTH next-line (`SEARCH:\n<code>`) and INLINE (`SEARCH: <code>`) forms: the model
+    # often emits the anchor inline, and the old `^SEARCH:\s*\n` required a newline -> empty search
+    # -> plan judged insufficient -> endless DIAGNOSE/PLAN backtrack, never reaching FIX. Stop SEARCH
+    # at the next `^CHANGE:` line regardless of which form CHANGE uses.
+    search_match = re.search(r"(?mis)^SEARCH:[ \t]*\n?(.*?)(?:^CHANGE:|\Z)", text or "")
+    change_match = re.search(r"(?mis)^CHANGE:[ \t]*\n?(.*)\Z", text or "")
     return {
         "file": (file_match.group(1).strip() if file_match else ""),
         "search": (search_match.group(1).strip("\n") if search_match else ""),
@@ -614,6 +659,58 @@ def _unmatched(blocks, dest):
             and (b.get("search") or "").strip() not in _file_text(dest, b.get("file"))]
 
 
+def _leading_ws(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def _reindent(text: str, delta: int) -> str:
+    """Shift leading-space indentation of every non-blank line by delta (+add / -remove up to)."""
+    if delta == 0 or not text:
+        return text
+    out = []
+    for ln in text.splitlines():
+        if not ln.strip():
+            out.append(ln)
+        elif delta > 0:
+            out.append(" " * delta + ln)
+        else:
+            k = 0
+            while k < -delta and k < len(ln) and ln[k] == " ":
+                k += 1
+            out.append(ln[k:])
+    return "\n".join(out)
+
+
+def _repair_sr_to_src(blocks, dest):
+    """Goal-#1 (B): snap each SR block's SEARCH to the EXACT source span so `search in file_text`
+    holds by construction (the applyable condition). `_best_search_anchor_match` matches the model's
+    SEARCH to real source lines WHITESPACE-INSENSITIVELY and returns the verbatim file lines; we adopt
+    that as SEARCH and re-indent REPLACE by the leading-ws delta so the edit stays valid. Confidence-
+    gated (strong match only) -- never corrupt a low-confidence block. Fixes the near-miss verbatim
+    failure (right lines / wrong indentation), NOT truncation or wrong localization."""
+    from v5.runtime.sr_withcode import _file_text
+    out = []
+    for b in blocks:
+        search = b.get("search") or ""
+        file_text = _file_text(dest, b.get("file"))
+        if not search.strip() or not file_text or search.strip() in file_text:
+            out.append(b)                                  # empty / no file / already applyable
+            continue
+        anchor, n_lines, _ = _best_search_anchor_match(file_text, search)
+        nonblank = [ln for ln in search.splitlines() if ln.strip()]
+        need = max(2, math.ceil(0.6 * len(nonblank)))
+        if not anchor or n_lines < need:
+            out.append(b)                                  # weak match -> leave untouched
+            continue
+        s0 = next((ln for ln in search.splitlines() if ln.strip()), "")
+        a0 = next((ln for ln in anchor.splitlines() if ln.strip()), "")
+        nb = dict(b)
+        nb["search"] = anchor
+        nb["replace"] = _reindent(b.get("replace") or "", _leading_ws(a0) - _leading_ws(s0))
+        out.append(nb)
+    return out
+
+
 def _patch(blocks, dest):                     # applyable -> git diff (the swebench prediction), then restore
     from v5.runtime.search_replace import apply_sr
     if not (bool(blocks) and not _unmatched(blocks, dest)):
@@ -623,13 +720,17 @@ def _patch(blocks, dest):                     # applyable -> git diff (the swebe
     return p
 
 
-def fix_user(issue, src, diagnosis="", plan="", hints=None):
+def fix_user(issue, src, diagnosis="", plan="", hints=None, test_failure=""):
     s = f"ISSUE:\n{issue[:1400]}\n\nRELEVANT SOURCE (the bug is in here):\n{src}\n\n"
     s += _strategy_hint_block(hints or [], title="RELATED STRATEGY HINTS", max_items=2)
     if diagnosis and not plan:
         s += f"ROOT-CAUSE DIAGNOSIS (use it, do not invent a different bug):\n{diagnosis}\n\n"
     if plan:
         s += f"EDIT PLAN (authoritative; realize it literally):\n{_render_fix_plan(plan)}\n\n"
+    if test_failure:
+        s += (f"PREVIOUS ATTEMPT APPLIED BUT FAILED THE REAL TESTS:\n{test_failure}\n\n"
+              "Your previous patch did not fix the bug. Diagnose why from the failure above and change "
+              "the fix accordingly; do not just resubmit the same edit.\n\n")
     return (s + "Fix the exact line(s) causing the bug. Output ONLY search/replace blocks. Do NOT output the plan "
             "schema (`FILE`, `SEARCH`, `CHANGE`, `TARGET FILE`, `TARGET SEARCH ANCHOR`, or `EDIT INTENT`). The line before each "
             "SEARCH marker must be the exact file path from the plan. SEARCH must copy the source EXACTLY "
@@ -775,19 +876,30 @@ def slot_solve(issue, src, diagnose_fn, plan_fn, fix_fn, max_steps=8, log=None, 
         if slot.name == "PLAN":
             diag = pool.get("DIAGNOSE")
             n = attempts["PLAN"]; attempts["PLAN"] = n + 1
+            psrc = _augment_src(slot_src, gate_src, diag)   # show the real edit-site function body
             plan = ""
             for retry in range(2):
-                plan = plan_fn(issue, slot_src, diag, n + retry)
-                plan, _ = _repair_plan_to_src(plan, gate_src, diag)
-                if _plan_sufficient(plan, gate_src):
+                raw_plan = plan_fn(issue, psrc, diag, n + retry)
+                plan, _ = _repair_plan_to_src(raw_plan, gate_src, diag)
+                ok = _plan_sufficient(plan, gate_src)
+                if os.environ.get("SWE_PLAN_DEBUG"):
+                    pp = _parse_plan(plan); gsf = _split_src_files(gate_src)
+                    fb = gsf.get(_resolve_src_file(pp["file"], gsf) or pp["file"], "")
+                    anc, nl, _c = _best_search_anchor_match(fb, pp["search"] or "")
+                    print(f"[PLAN-DEBUG retry{retry}] sufficient={ok} file={pp['file']!r} "
+                          f"file_in_gate={bool(fb)} search_in_src={(pp['search'] or '') in fb}\n"
+                          f"  SEARCH(repr)={pp['search']!r}\n"
+                          f"  best_anchor(lines={nl})={anc!r}", flush=True)
+                if ok:
                     break
             trace["plans"].append(plan)
             return plan
         diag = pool.get("DIAGNOSE")
         plan = pool.get("PLAN")
+        fsrc = _augment_src(slot_src, gate_src, diag)        # show the real edit-site function body
         patch, blocks, raw_fix = "", [], ""
         for retry in range(2):
-            out = fix_fn(issue, slot_src, diag, plan)        # "" if unapplyable/no-op -> INSUFFICIENT
+            out = fix_fn(issue, fsrc, diag, plan)            # "" if unapplyable/no-op -> INSUFFICIENT
             if isinstance(out, tuple) and len(out) == 3:
                 patch, blocks, raw_fix = out
             else:
@@ -988,8 +1100,16 @@ class _InjectedRuntime:
         if not node_texts:
             return
         text_emb = self.embedder.embed_nodes(node_texts)
+        stub = self._stub_graph(node_ids, node_texts, {sid: "fact" for sid in node_ids})
+        if not getattr(self, "_structure_warned", False):
+            # Phase-0b telemetry: prove empirically what STRUCTURE reaches the GNN. Today it is a
+            # stub -- all node_type="fact", edges=[] -- so the "structure-aware" injection is hollow.
+            ntypes = {getattr(n, "node_type", "?") for n in stub.nodes.values()}
+            print(f"[inject-structure] nodes={len(stub.nodes)} node_types={sorted(ntypes)} "
+                  f"edges={len(stub.edges)}  (stub: structure discarded before the GNN)", flush=True)
+            self._structure_warned = True
         self.injector.prepare_session(
-            self._stub_graph(node_ids, node_texts, {sid: "fact" for sid in node_ids}),
+            stub,
             node_ids,
             text_emb,
             self.task_frame,
@@ -1216,6 +1336,84 @@ def _full_files_src(dest: Path, support: list[str], meta: dict) -> str:
     return "\n\n".join(parts)
 
 
+def _ast_funcs(src_text: str):
+    """[(name, class, start, end, calls_set)] for every function in the source (real AST)."""
+    import ast
+    out = []
+    try:
+        tree = ast.parse(src_text)
+    except Exception:
+        return out
+
+    class _V(ast.NodeVisitor):
+        def __init__(s):
+            s.cls = None
+
+        def visit_ClassDef(s, n):
+            prev = s.cls; s.cls = n.name
+            for c in n.body:
+                s.visit(c)
+            s.cls = prev
+
+        def _fn(s, n):
+            calls = set()
+            for x in ast.walk(n):
+                if isinstance(x, ast.Call):
+                    nm = getattr(x.func, "attr", None) or getattr(x.func, "id", None)
+                    if nm:
+                        calls.add(nm)
+            out.append((n.name, s.cls, n.lineno, getattr(n, "end_lineno", n.lineno), calls))
+
+        def visit_FunctionDef(s, n):
+            s._fn(n)
+
+        def visit_AsyncFunctionDef(s, n):
+            s._fn(n)
+
+    _V().visit(tree)
+    return out
+
+
+def _traverse_support(dest, support, meta, max_add: int = 6):
+    """Expand the flat seed support with structurally-linked sites (same_class / calls), read from
+    the REAL checked-out source via AST. The graph is `contains`-only, so co-edited functions that
+    aren't textually similar to the issue are invisible to flat retrieval — this follows the edges
+    an array/flat-index can't. Returns support + up to max_add structural neighbors (deduped)."""
+    import re as _re
+    seed_by_file: dict = {}
+    for sid in support:
+        m = meta.get(sid) or {}
+        f = m.get("file"); mm = _re.search(r'(?:async def|def|class)\s+(\w+)', m.get("text", "") or "")
+        if f and mm:
+            seed_by_file.setdefault(f, set()).add(mm.group(1))
+    if not seed_by_file:
+        return support
+    sym_by: dict = {}
+    for sid, m in meta.items():
+        f = m.get("file"); mm = _re.search(r'(?:async def|def|class)\s+(\w+)', m.get("text", "") or "")
+        if f and mm:
+            sym_by.setdefault((f, mm.group(1)), sid)
+    add = []
+    for f, seeds in seed_by_file.items():
+        fp = Path(dest) / f
+        if not fp.exists():
+            continue
+        funcs = _ast_funcs(fp.read_text(encoding="utf-8", errors="ignore"))
+        seed_funcs = [fn for fn in funcs if fn[0] in seeds]
+        seed_classes = {fn[1] for fn in seed_funcs if fn[1]}
+        for name, cls, s, e, calls in funcs:
+            if name in seeds:
+                continue
+            linked = (cls is not None and cls in seed_classes)                       # same_class
+            if not linked:
+                linked = any(name in sf[4] for sf in seed_funcs) or any(sd in calls for sd in seeds)  # calls (either dir)
+            if linked:
+                sid = sym_by.get((f, name))
+                if sid and sid not in support and sid not in add:
+                    add.append(sid)
+    return support + add[:max_add]
+
+
 def _apply_smoke_overrides(args):
     if not args.smoke:
         return args
@@ -1246,6 +1444,14 @@ def main():
                     help="cross-attention adapter checkpoint for injector mode")
     ap.add_argument("--gnn-ckpt", default="",
                     help="optional trained GNN checkpoint for injector mode; else random-frozen GNN")
+    ap.add_argument("--inject-fix", action="store_true",
+                    help="CHEAP-MEASURE: inject graph evidence at the FIX stage (off by default; FIX is "
+                         "uninjected today). Builds the injector even with --injector-mode off, and injects "
+                         "ONLY at FIX so off-vs-inject isolates whether cross-attn changes code emission.")
+    ap.add_argument("--sr-snap", action="store_true",
+                    help="goal-#1 (B): snap each FIX SEARCH block to its EXACT source span before "
+                         "applying (verbatim-anchor repair), so a near-miss SEARCH (right lines / wrong "
+                         "whitespace) still applies. Off = today's raw parse_sr->_patch (for A/B).")
     ap.add_argument("--fix-constrain", action="store_true",
                     help="constrain one-shot decoding toward graph symbols from the retrieved support")
     ap.add_argument("--slot-fix-constrain", action="store_true",
@@ -1269,6 +1475,9 @@ def main():
     ap.add_argument("--n-eval", type=int, default=10)
     ap.add_argument("--src-bodies", type=int, default=4)
     ap.add_argument("--src-lines", type=int, default=70)
+    ap.add_argument("--traverse-edges", action="store_true",
+                    help="expand flat-retrieved support with same_class/calls neighbors from real AST "
+                         "(the graph is contains-only; this follows the code edges flat search can't)")
     ap.add_argument("--audit-support-text", action="store_true",
                     help="for tiny instance audits, include compact retrieved support text in the trace dump")
     ap.add_argument("--max-new", type=int, default=400)
@@ -1282,6 +1491,12 @@ def main():
     ap.add_argument("--verify-poll-secs", type=int, default=20)
     ap.add_argument("--verify-gold-sanity", type=int, default=5,
                     help="when exact verify is active, require this many gold patches to resolve first")
+    ap.add_argument("--test-feedback", action="store_true",
+                    help="TIER-2: after an applyable/anchored FIX, run the REAL test harness (Docker, "
+                         "expensive) on it; if it doesn't resolve, feed the harness's own failure detail "
+                         "back into the next FIX attempt instead of declaring success on syntax-match alone")
+    ap.add_argument("--test-feedback-retries", type=int, default=2,
+                    help="max FIX attempts per instance when --test-feedback is on (1 = no retry, just score)")
     ap.add_argument("--session-out-dir", default="",
                     help="optional directory to write a per-run session bundle (predictions + dump + summary)")
     ap.add_argument("--session-name", default="",
@@ -1356,7 +1571,8 @@ def main():
             flush=True,
         )
 
-    inj_runtime = _InjectedRuntime(a.model, a.adapter_ckpt, a.gnn_ckpt, trust) if a.injector_mode != "off" else None
+    inj_runtime = _InjectedRuntime(a.model, a.adapter_ckpt, a.gnn_ckpt, trust) \
+        if (a.injector_mode != "off" or a.inject_fix) else None
     if inj_runtime is not None:
         model = inj_runtime.model
         tok = inj_runtime.tok
@@ -1401,10 +1617,22 @@ def main():
             return a.injector_mode in ("slot", "all")
         if stage == "oneshot":
             return a.injector_mode == "all"
+        if stage == "fix":
+            return a.inject_fix
         return False
     verifier = SWEExactVerifier(a.dataset, a.split, a.verify_backend, a.verify_out_dir,
                                 max_workers=a.verify_max_workers, timeout=a.verify_timeout,
-                                poll_secs=a.verify_poll_secs, model_name="swe_slot") if a.exact_verify else None
+                                poll_secs=a.verify_poll_secs, model_name="swe_slot") \
+        if (a.exact_verify or a.test_feedback) else None
+    if a.test_feedback:
+        # mid-loop test-feedback only means something if the harness itself is trustworthy here ->
+        # prove it BEFORE the loop (not just at the end), else every feedback round this run is noise.
+        gold_n = min(a.verify_gold_sanity, len(ids))
+        gold_tasks = [{"iid": i, "gold": insts[i].get("patch", "")} for i in ids[:gold_n]]
+        ok, total = verifier.run_gold_sanity(gold_tasks, gold_n, tag="slot_pretest_gold_sanity")
+        print(f"[test-feedback] pre-loop gold-sanity: {ok}/{total} gold patches resolved", flush=True)
+        if ok != total:
+            raise SystemExit("gold-sanity failed; refusing to trust --test-feedback on a broken harness/env")
 
     dump = open(outputs["dump"], "w", encoding="utf-8")
     oneshot_app = slot_app = scored = 0
@@ -1417,6 +1645,11 @@ def main():
         ok, _ = checkout_repo(inst["repo"], inst["base_commit"], dest, timeout=1800)
         if not ok:
             print(f"  [{k+1}] {iid} checkout FAILED"); continue
+        if a.traverse_edges:
+            n0 = len(support)
+            support = _traverse_support(dest, support, meta)
+            if len(support) > n0:
+                print(f"  [{k+1}] {iid} traverse: +{len(support)-n0} structural neighbors", flush=True)
         support_sources = _build_support_sources(dest, support, meta, a.src_lines)
         src = _compose_src(support_sources[:a.src_bodies])
         if not src.strip():
@@ -1478,16 +1711,36 @@ def main():
                 inject=False,
             )
             return _repair_plan_to_src(raw, src, diagnosis)[0]
+        tf_log = []
         def fix_fn(issue, src, diagnosis, plan):
-            g = gen(
-                SR_SYS,
-                fix_user(issue, src, diagnosis, plan, hints=strategy_sources),
-                a.max_new,
-                inject=False,
-                constrain_symbols=(support_symbols if a.slot_fix_constrain else None),
-            )
-            blocks = parse_sr(g)
-            return _patch(blocks, str(dest)), blocks, g        # "" unless applyable
+            test_failure = ""
+            rounds = a.test_feedback_retries if a.test_feedback else 1
+            for tf_attempt in range(max(1, rounds)):
+                g = gen(
+                    SR_SYS,
+                    fix_user(issue, src, diagnosis, plan, hints=strategy_sources, test_failure=test_failure),
+                    a.max_new,
+                    inject=should_inject("fix"),
+                    constrain_symbols=(support_symbols if a.slot_fix_constrain else None),
+                )
+                blocks = parse_sr(g)
+                if a.sr_snap:
+                    blocks = _repair_sr_to_src(blocks, str(dest))   # goal-#1 (B): verbatim-anchor snap
+                patch = _patch(blocks, str(dest))              # "" unless applyable
+                ready = bool(a.test_feedback and verifier is not None and patch
+                            and _blocks_match_plan(blocks, plan))
+                if not ready:
+                    if a.test_feedback:
+                        tf_log.append({"attempt": tf_attempt, "ran_tests": False, "resolved": False,
+                                      "reason": "not applyable/anchored yet", "raw": g[:1200]})
+                    return patch, blocks, g
+                resolved, feedback = verifier.verify_patch_feedback(task, patch, tag=f"tf_{iid}")
+                tf_log.append({"attempt": tf_attempt, "ran_tests": True, "resolved": resolved,
+                              "feedback": feedback[:1500], "raw": g[:1200]})
+                if resolved:
+                    return patch, blocks, g
+                test_failure = feedback
+            return patch, blocks, g                             # retries exhausted; return last attempt
         log = []
         gate_src = _full_files_src(dest, support, meta)
         p2, trace, fp, steps = slot_solve(issue, {"full": src, "sources": support_sources, "gate": gate_src}, diagnose_fn, plan_fn, fix_fn,
@@ -1517,6 +1770,14 @@ def main():
                    "\n".join(
                        f"  [{i}] blocks={x['n_blocks']} files={x['files']}\n{x['raw']}"
                        for i, x in enumerate(trace["fix_attempts"])
+                   ) +
+                   "\n"
+                   f"TEST-FEEDBACK rounds ({len(tf_log)}):\n" +
+                   "\n".join(
+                       f"  [{r['attempt']}] ran_tests={r['ran_tests']} resolved={r['resolved']}"
+                       + (f" reason={r['reason']}" if "reason" in r else f" feedback={r.get('feedback','')}")
+                       + f"\n      raw={r['raw']}"
+                       for r in tf_log
                    ) +
                    "\n"
                    f"ONESHOT applyable={app1}:\n{g1[:500]}\n")
