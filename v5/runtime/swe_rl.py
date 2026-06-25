@@ -233,7 +233,7 @@ def _selftest():
 def train(model_name, tasks, steps, K, lr, r_lora, seed, layers, eval_every, ent_coef, temperature,
           sft_steps, max_new, reward_mode: str = "proxy", verifier: SWEExactVerifier | None = None,
           verify_every: int = 0, verify_gold_sanity: int = 0,
-          emit_preds_dir: str = "", emit_preds_every: int = 0):
+          emit_preds_dir: str = "", emit_preds_every: int = 0, use_exemplar: bool = False):
     import random, torch, torch.nn as nn
     from transformers import AutoTokenizer
     from peft import LoraConfig, get_peft_model
@@ -277,6 +277,29 @@ def train(model_name, tasks, steps, K, lr, r_lora, seed, layers, eval_every, ent
     held, train_tasks = tasks[:n_held], tasks[n_held:]
     train_tasks_easy = sorted(train_tasks, key=lambda t: (t.get("n_gold_blocks", 99), t.get("gold_sr_lines", 9999), len(t["issue"])))
 
+    # retrieve-or-derive policy: each task's RETRIEVED plan = the nearest OTHER task's gold patch (a
+    # resolved similar fix). Injected into the rollout prompt so the model learns to REUSE/adapt it.
+    _ex_map: dict = {}
+    if use_exemplar:
+        import numpy as _np
+        from v5.training.providers import RealEmbedder
+        def _unit_np(v):
+            a = _np.asarray(v, dtype=_np.float32); return a / (_np.linalg.norm(a) + 1e-9)
+        _emb = RealEmbedder(torch.device("cpu"))             # CPU: don't fight the trained 4B for VRAM
+        _ids = [p["iid"] for p in tasks]
+        _ev = _emb.embed_nodes({p["iid"]: p["issue"] for p in tasks})
+        _mat = _np.stack([_unit_np(_ev[i]) for i in _ids])
+        _gold = {p["iid"]: p.get("gold", "") for p in tasks}
+        for p in tasks:
+            qv = _unit_np(_ev[p["iid"]])
+            for j in _np.argsort(-(_mat @ qv)):
+                if _ids[j] != p["iid"]:
+                    _ex_map[p["iid"]] = _gold[_ids[j]]; break
+        print(f"[use-exemplar] nearest-exemplar map built for {len(_ex_map)} tasks", flush=True)
+
+    def _ex(t):
+        return _ex_map.get(t["iid"], "")
+
     def encode(system, user):
         m = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         kw = dict(add_generation_prompt=True, return_tensors="pt", return_dict=True)
@@ -305,7 +328,7 @@ def train(model_name, tasks, steps, K, lr, r_lora, seed, layers, eval_every, ent
     def evaluate(ts):
         model.eval(); rs, app, solv = [], 0, 0
         for t in ts:
-            pids = encode(SR_SYS, fix_user(t["issue"], t["src"]))
+            pids = encode(SR_SYS, fix_user(t["issue"], t["src"], exemplar=_ex(t)))
             out = gen_ids(pids, sample=False)
             r, b = score(tok.decode(out[0, pids.shape[1]:], skip_special_tokens=True), t,
                          reward_mode=reward_mode, verifier=verifier)
@@ -321,7 +344,7 @@ def train(model_name, tasks, steps, K, lr, r_lora, seed, layers, eval_every, ent
         task_patches: list[tuple[dict, str]] = []
         applyable = 0
         for t in ts:
-            pids = encode(SR_SYS, fix_user(t["issue"], t["src"]))
+            pids = encode(SR_SYS, fix_user(t["issue"], t["src"], exemplar=_ex(t)))
             out = gen_ids(pids, sample=False)
             completion = tok.decode(out[0, pids.shape[1]:], skip_special_tokens=True)
             blocks = parse_sr(completion)
@@ -349,7 +372,7 @@ def train(model_name, tasks, steps, K, lr, r_lora, seed, layers, eval_every, ent
         model.eval()
         task_patches: list[tuple[dict, str]] = []
         for t in ts:
-            pids = encode(SR_SYS, fix_user(t["issue"], t["src"]))
+            pids = encode(SR_SYS, fix_user(t["issue"], t["src"], exemplar=_ex(t)))
             out = gen_ids(pids, sample=False)
             completion = tok.decode(out[0, pids.shape[1]:], skip_special_tokens=True)
             blocks = parse_sr(completion)
@@ -379,7 +402,7 @@ def train(model_name, tasks, steps, K, lr, r_lora, seed, layers, eval_every, ent
         ce = torch.nn.CrossEntropyLoss()
         for s in range(1, sft_steps + 1):
             t = rng.choice(train_tasks)
-            pids = encode(SR_SYS, fix_user(t["issue"], t["src"]))
+            pids = encode(SR_SYS, fix_user(t["issue"], t["src"], exemplar=_ex(t)))
             sft_cap = max(max_new, 640)                      # teach the FULL minimal gold target, not the small gen window
             gids = tok(t["gold_sr_text"], return_tensors="pt", add_special_tokens=False).input_ids.to(dev)[:, :sft_cap]
             full = torch.cat([pids, gids], dim=1)
@@ -406,7 +429,7 @@ def train(model_name, tasks, steps, K, lr, r_lora, seed, layers, eval_every, ent
         pool_frac = 0.25 + 0.75 * widen
         pool_n = max(1, int(len(train_tasks_easy) * pool_frac))
         t = rng.choice(train_tasks_easy[:pool_n])
-        pids = encode(SR_SYS, fix_user(t["issue"], t["src"]))
+        pids = encode(SR_SYS, fix_user(t["issue"], t["src"], exemplar=_ex(t)))
         comps, rewards = [], []
         rollout_modes = [False] + [True] * max(0, K - 1)   # anchor each GRPO group with one greedy decode
         for sample in rollout_modes:
@@ -502,6 +525,9 @@ def main():
                     help="optional dir to write held-out prediction jsonl files for a separate swe_verify box")
     ap.add_argument("--emit-preds-every", type=int, default=0,
                     help="emit held prediction jsonl every N GRPO steps (0 = off); final emit happens if dir is set")
+    ap.add_argument("--use-exemplar", action="store_true",
+                    help="retrieve-or-derive: inject each task's nearest OTHER resolved task (gold patch) into the "
+                         "rollout prompt -> train the model to REUSE/adapt a retrieved plan (the binding, rung-2/3).")
     a = ap.parse_args()
     if a.selftest:
         import sys
@@ -518,7 +544,7 @@ def main():
           a.ent_coef, a.temperature, a.sft_steps, a.max_new,
           reward_mode=a.reward_mode, verifier=verifier,
           verify_every=a.verify_every, verify_gold_sanity=a.verify_gold_sanity,
-          emit_preds_dir=a.emit_preds_dir, emit_preds_every=a.emit_preds_every)
+          emit_preds_dir=a.emit_preds_dir, emit_preds_every=a.emit_preds_every, use_exemplar=a.use_exemplar)
 
 
 if __name__ == "__main__":
