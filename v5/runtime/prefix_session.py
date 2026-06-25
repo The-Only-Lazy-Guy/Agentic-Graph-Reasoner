@@ -12,6 +12,17 @@ import argparse, os, time
 import torch
 
 
+def clone_past_key_values(past):
+    if past is None:
+        return None
+    if hasattr(past, "clone"):
+        return past.clone()
+    if isinstance(past, tuple):
+        return tuple(tuple(t.clone() if torch.is_tensor(t) else t for t in layer) for layer in past)
+    import copy
+    return copy.deepcopy(past)
+
+
 class PrefixSession:
     """Hold a cached prefix KV; generate continuations on top of it.
 

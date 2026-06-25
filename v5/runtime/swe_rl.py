@@ -334,7 +334,7 @@ def train(
     from v5.lm_loader import load_frozen_lm, resolve_dtype, resolve_quant
     from v5.runtime.swe_slot import fix_user
     if staged:
-        from v5.runtime.prefix_session import PrefixSession
+        from v5.runtime.prefix_session import PrefixSession, clone_past_key_values
 
     trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
     base = load_frozen_lm(model_name)
@@ -524,7 +524,7 @@ def train(
         for sample_i in range(k_eval):
             # Fresh session rooted at the post-DIAGNOSE KV — no re-prefill.
             fsess = PrefixSession(model, tok, dev)
-            fsess.past = diag_past
+            fsess.past = clone_past_key_values(diag_past)
             fsess.cur_ids = diag_full
             with _make_fwd_ctx():
                 # GENERATE WITH SAMPLING so K diverse candidates emerge for GRPO
