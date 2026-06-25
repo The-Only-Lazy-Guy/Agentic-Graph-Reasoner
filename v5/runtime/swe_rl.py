@@ -233,7 +233,8 @@ def _selftest():
 def train(model_name, tasks, steps, K, lr, r_lora, seed, layers, eval_every, ent_coef, temperature,
           sft_steps, max_new, reward_mode: str = "proxy", verifier: SWEExactVerifier | None = None,
           verify_every: int = 0, verify_gold_sanity: int = 0,
-          emit_preds_dir: str = "", emit_preds_every: int = 0, use_exemplar: bool = False):
+          emit_preds_dir: str = "", emit_preds_every: int = 0, use_exemplar: bool = False,
+          eff_coef: float = 0.0):
     import random, torch, torch.nn as nn
     from transformers import AutoTokenizer
     from peft import LoraConfig, get_peft_model
@@ -437,7 +438,10 @@ def train(model_name, tasks, steps, K, lr, r_lora, seed, layers, eval_every, ent
             comp = out[:, pids.shape[1]:]
             completion = tok.decode(comp[0], skip_special_tokens=True)
             comps.append(comp)
-            rewards.append(score(completion, t, reward_mode=reward_mode, verifier=verifier)[0])
+            r = score(completion, t, reward_mode=reward_mode, verifier=verifier)[0]
+            if eff_coef > 0 and r >= 1.0:                  # EFFICIENCY: among WINS only (anti-hack: can't game
+                r += eff_coef * max(0.0, 1.0 - comp.shape[1] / max(1, max_new))   # short+wrong), prefer the cheaper fix
+            rewards.append(r)
         mean_r = sum(rewards) / K
         r_std = (sum((r - mean_r) ** 2 for r in rewards) / K) ** 0.5
         if r_std < 1e-9:
@@ -528,6 +532,9 @@ def main():
     ap.add_argument("--use-exemplar", action="store_true",
                     help="retrieve-or-derive: inject each task's nearest OTHER resolved task (gold patch) into the "
                          "rollout prompt -> train the model to REUSE/adapt a retrieved plan (the binding, rung-2/3).")
+    ap.add_argument("--eff-coef", type=float, default=0.0,
+                    help="EFFICIENCY reward: among WINS (reward>=1), add eff_coef*(1-len/max_new) -> prefer the "
+                         "cheaper/shorter fix (reuse over re-derive). Gated by solving = anti-hack. 0 = off.")
     a = ap.parse_args()
     if a.selftest:
         import sys
@@ -544,7 +551,8 @@ def main():
           a.ent_coef, a.temperature, a.sft_steps, a.max_new,
           reward_mode=a.reward_mode, verifier=verifier,
           verify_every=a.verify_every, verify_gold_sanity=a.verify_gold_sanity,
-          emit_preds_dir=a.emit_preds_dir, emit_preds_every=a.emit_preds_every, use_exemplar=a.use_exemplar)
+          emit_preds_dir=a.emit_preds_dir, emit_preds_every=a.emit_preds_every, use_exemplar=a.use_exemplar,
+          eff_coef=a.eff_coef)
 
 
 if __name__ == "__main__":

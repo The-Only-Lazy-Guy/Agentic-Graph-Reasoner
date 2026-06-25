@@ -51,7 +51,7 @@ def selftest():
 
 
 # %% CELL 4 — TRAIN: swe_rl + the retrieve-or-derive policy, proxy reward, emit held preds
-def train(n_tasks=80, sft_steps=200, steps=300, k=6, max_new=512):
+def train(n_tasks=80, sft_steps=200, steps=300, k=6, max_new=512, eff_coef=0.15):
     env = {**os.environ,
            "PYTHONPATH": REPO_ROOT,
            "V5_LM_TRUST_REMOTE_CODE": "1",
@@ -59,6 +59,7 @@ def train(n_tasks=80, sft_steps=200, steps=300, k=6, max_new=512):
     sh([sys.executable, "-m", "v5.runtime.swe_rl",
         "--n-tasks", str(n_tasks),
         "--use-exemplar",                          # <- the policy: retrieved plan in the rollout (binding)
+        "--eff-coef", str(eff_coef),               # <- efficiency: among WINS, prefer the cheaper/shorter fix
         "--reward-mode", "proxy",                  # gold-overlap; no Docker needed on Colab
         "--sft-steps", str(sft_steps),
         "--steps", str(steps),
