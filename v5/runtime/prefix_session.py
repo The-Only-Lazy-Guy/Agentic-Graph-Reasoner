@@ -58,6 +58,32 @@ class PrefixSession:
         self.past = getattr(out, "past_key_values", None)   # retained -> chaining saves; None -> re-prefill
         return new
 
+    @torch.no_grad()
+    def gen_sampled(self, suffix_ids, max_new, eos_id, temperature: float = 0.7, top_p: float = 0.95):
+        """Sampled-continue from the cached prefix. Same as gen() but with do_sample=True.
+        Used by staged GRPO rollouts to generate K DIVERSE FIX candidates from the same
+        post-DIAGNOSE KV state. Does NOT advance self.cur_ids or self.past (each FIX sample
+        is independent from the same post-DIAGNOSE snapshot — call on a cloned session)."""
+        suffix_ids = suffix_ids.to(self.device)
+        full = torch.cat([self.cur_ids, suffix_ids], dim=1)
+        attn = torch.ones_like(full)
+        out = self.model.generate(
+            input_ids=full,
+            attention_mask=attn,
+            past_key_values=self.past,
+            max_new_tokens=max_new,
+            do_sample=True,
+            temperature=temperature,
+            top_p=top_p,
+            pad_token_id=eos_id,
+            use_cache=True,
+            return_dict_in_generate=True,
+        )
+        seq = out.sequences
+        new = seq[0, full.shape[1]:]
+        # Do NOT advance state here — the caller snapshots and re-uses the pre-FIX state.
+        return new
+
 
 @torch.no_grad()
 def _greedy(model, tok, ids, max_new, dev):

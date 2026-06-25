@@ -2,34 +2,75 @@
 
 Same recipe that closed the arithmetic gap (derive_rl), now on code: per instance the frozen 4B emits
 SEARCH/REPLACE patches; reward = swe_reward (applies x solves x real-edit; unapplyable hunks punished).
-SFT warm-start on the gold patch (gold-diff -> SR), then GRPO refines the LoRA.
+SFT warm-start on staged gold (DIAGNOSE-context + gold SR target), then GRPO refines the LoRA.
+
+Architecture (NO prompt-engineering; no re-pasted megabyte prompts):
+  1. Context (issue + source) is PREFILLED ONCE into a shared KV prefix (PrefixSession).
+  2. DIAGNOSE runs as a terse continuation on that prefix — its tokens stay in the KV cache
+     (latent state-carry; they are NOT re-serialized or re-fed as text).
+  3. FIX runs as a second continuation on [context + DIAGNOSE cache] — sees the diagnosis
+     latently via the KV cache, not via a re-pasted string.
+  4. OperatorInjector (op-signed graph grounding) is active during every forward pass when
+     --graph is set — injects task evidence via activation steering, not via prompt text.
+  5. GRPO gradient is applied ONLY to FIX tokens (the emission leaf). DIAGNOSE tokens are
+     latent state; they are cached greedy and not differentiated (no gradient through the
+     reasoning prefix — keeps VRAM sane and isolates the policy to the code-emission step).
 
 Two reward/eval modes are supported:
   - proxy    : cheap in-loop reward via gold-overlap (default; the practical A40 mode)
   - verifier : exact pass/fail via the real SWE verifier (Docker or hosted sb-cli)
 
-That lets the same loop run in the realistic split-box setup:
-  * A40 training box:       keep --reward-mode proxy, optionally do no exact eval here
-  * Docker / sb-cli box:    run exact held-out eval (--verify-every / final verify)
-  * unified GPU+verifier:   use --reward-mode verifier if you truly want the apex in-loop reward
-  * split boxes:            emit held predictions during training, then score them with swe_verify elsewhere
-
   selftest (no model):  python -m v5.runtime.swe_rl --selftest
   proxy train (A40):    V5_LM_TRUST_REMOTE_CODE=1 python -m v5.runtime.swe_rl --sft-steps 120 --steps 120 --k 6
+  staged train:         V5_LM_TRUST_REMOTE_CODE=1 python -m v5.runtime.swe_rl --staged --sft-steps 120 --steps 120 --k 6
   exact eval/reward:    ... --reward-mode verifier --verify-backend docker
 """
 from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 from pathlib import Path
+from contextlib import nullcontext
 
 from v5.graph_grower.swe_verify import write_predictions
 from v5.runtime.derive_rl import advantages       # reuse the proven GRPO advantage
 from v5.runtime.swe_exact_verify import SWEExactVerifier
 from v5.runtime.search_replace import SR_SYS, apply_sr, parse_sr
 from v5.runtime.swe_reward import is_real_edit, solves_goldoverlap, swe_reward
+
+
+# ── Staged KV rollout constants ───────────────────────────────────────────────
+# Minimal single-line instructions — NOT megabyte re-pasted prompts.
+# Context (issue + source) is prefilled ONCE; these are the glue tokens between stages.
+_DIAG_SYS = (
+    "You are a terse debugging assistant. Use only the retrieved source. "
+    "Output only FILE/FOCUS/WHY/CHANGE with no fences."
+)
+_DIAG_INSTR = (
+    "STEP 1 — DIAGNOSE. Output ONLY:\n"
+    "FILE: <path from source>\nFOCUS: <exact function name>\n"
+    "WHY: <one-sentence root cause>\nCHANGE: <one-sentence edit intent>"
+)
+_FIX_GLUE = (
+    "<|im_end|>\n<|im_start|>user\n"
+    "/no_think\nSTEP 2 — FIX. Output ONLY a search/replace block. "
+    "No prose, no thinking:\npath/from/source.py\n"
+    "<<<<<<< SEARCH\n<exact existing code>\n=======\n<replacement>\n>>>>>>> REPLACE"
+    "<|im_end|>\n<|im_start|>assistant\n"
+)
+
+
+def _stub_graph(node_ids, id2text, ntypes):
+    class _StubNode:
+        __slots__ = ("text", "node_type", "metadata", "confidence")
+        def __init__(self, text, ntype):
+            self.text = text; self.node_type = ntype; self.metadata = {}; self.confidence = 0.5
+    class _G:
+        nodes = {nid: _StubNode(id2text.get(nid, ""), ntypes.get(nid, "fact")) for nid in node_ids}
+        edges = []
+    return _G()
 
 
 def _trim_common_context(search: list[str], replace: list[str], keep: int = 1) -> tuple[list[str], list[str]]:
@@ -43,11 +84,11 @@ def _trim_common_context(search: list[str], replace: list[str], keep: int = 1) -
     s = 0
     while s < len(search) - p and s < len(replace) - p and search[-1 - s] == replace[-1 - s]:
         s += 1
-    lead = max(0, p - keep)                                   # keep `keep` context lines before the change
+    lead = max(0, p - keep)
     tail_s = len(search) - max(0, s - keep)
     tail_r = len(replace) - max(0, s - keep)
     ns, nr = search[lead:tail_s], replace[lead:tail_r]
-    if not ns and not nr:                                    # pure no-op hunk -> leave as-is (shouldn't happen)
+    if not ns and not nr:
         return search, replace
     return ns, nr
 
@@ -88,8 +129,10 @@ def gold_to_sr(diff: str, minimal: bool = True) -> list[dict]:
 
 
 def sr_to_text(blocks: list[dict]) -> str:
-    return "\n\n".join(f"{b['file']}\n<<<<<<< SEARCH\n{b['search']}\n=======\n{b['replace']}\n>>>>>>> REPLACE"
-                       for b in blocks)
+    return "\n\n".join(
+        f"{b['file']}\n<<<<<<< SEARCH\n{b['search']}\n=======\n{b['replace']}\n>>>>>>> REPLACE"
+        for b in blocks
+    )
 
 
 def _restore_repo(repo_dir: str) -> None:
@@ -100,21 +143,14 @@ def materialize_patch(task: dict, blocks: list[dict]) -> tuple[int, str]:
     """Apply SR blocks to the checked-out repo, capture the git diff, then restore the checkout."""
     dest = task["dest"]
     blocks = [b for b in blocks if (b.get("file") or "").strip() and (b.get("search") or "").strip()]
-    if not blocks:                                           # no usable block (e.g. model omitted the file line)
-        return 0, ""                                        # -> unapplyable, NOT a crash (apply_sr would read the repo dir)
+    if not blocks:
+        return 0, ""
     _restore_repo(dest)
     try:
         applied, patch = apply_sr(dest, blocks)
     finally:
         _restore_repo(dest)
     return applied, patch
-
-
-def _verify_blocks_exact(task: dict, blocks: list[dict], verifier: SWEExactVerifier) -> bool:
-    applied, patch = materialize_patch(task, blocks)
-    if applied <= 0 or not patch.strip():
-        return False
-    return verifier.verify_patch(task, patch, tag="reward")
 
 
 def _file_text_cached(task: dict, rel: str) -> str:
@@ -127,9 +163,7 @@ def _file_text_cached(task: dict, rel: str) -> str:
 
 
 def _applyable_inmem(task: dict, blocks: list[dict]) -> int:
-    """Same applyability check as apply_sr (b['search'] in file text), but in-memory + cached -> NO git
-    subprocess per rollout. The proxy reward only needs applied>0 (it scores via gold-overlap, not the
-    diff), so this is the fast in-loop path; verifier/emit paths still materialize the real git diff."""
+    """Applyability check in-memory (no git subprocess -> fast in-loop for proxy reward)."""
     applied = 0
     for b in blocks:
         f, s = (b.get("file") or "").strip(), (b.get("search") or "")
@@ -140,9 +174,7 @@ def _applyable_inmem(task: dict, blocks: list[dict]) -> int:
 
 def _score_task_blocks(task: dict, blocks: list[dict], reward_mode: str = "proxy",
                        verifier: SWEExactVerifier | None = None):
-    """Score a parsed SR patch against the REAL repo. PROXY mode checks applyability IN-MEMORY (cached
-    file text, no git subprocess -> fast in-loop); VERIFIER mode materializes the git diff + runs tests.
-    """
+    """Score a parsed SR patch. PROXY mode is in-memory fast; VERIFIER mode runs real tests."""
     if reward_mode == "verifier":
         applied, patch = materialize_patch(task, blocks)
         grounded_ok = applied > 0 and bool(patch.strip())
@@ -151,13 +183,12 @@ def _score_task_blocks(task: dict, blocks: list[dict], reward_mode: str = "proxy
         grounded_ok = applied > 0
         patch = ""
     if not grounded_ok:
-        return -1.0, {"grounded": False, "why": "patch did not apply to the checked-out repo",
+        return -1.0, {"grounded": False, "why": "patch did not apply",
                       "verdict": "PUNISH (unapplyable)"}
     real = is_real_edit(blocks)
     if not real:
         return 0.0, {"grounded": True, "real_edit": False,
-                     "why": "patch applied but SEARCH == REPLACE / no semantic edit emitted",
-                     "verdict": "zero (applies but a NO-OP / identical branches)"}
+                     "why": "no-op patch", "verdict": "zero (NO-OP)"}
     if reward_mode == "verifier":
         if verifier is None:
             raise ValueError("reward_mode='verifier' requires an exact verifier")
@@ -166,10 +197,8 @@ def _score_task_blocks(task: dict, blocks: list[dict], reward_mode: str = "proxy
         solved = solves_goldoverlap(blocks, task["gold"])
     if solved:
         return 1.5, {"grounded": True, "real_edit": True, "solved": True,
-                     "why": "applied to repo and solved",
                      "verdict": "REWARD (applies + solves + real edit)"}
     return 0.1, {"grounded": True, "real_edit": True, "solved": False,
-                 "why": "applied to repo but does not match the solve target",
                  "verdict": "small (applies + real edit, does not solve)"}
 
 
@@ -199,30 +228,37 @@ def load_swe_tasks(n, traces_p, nodes_p, dataset, repo_root, src_bodies, src_lin
         gold_sr = gold_to_sr(inst.get("patch", ""))
         if not src.strip() or not gold_sr:
             continue
-        gold_sr_lines = sum(len((b.get("search", "") or "").splitlines()) + len((b.get("replace", "") or "").splitlines())
-                            for b in gold_sr)
-        tasks.append({"iid": iid, "issue": t["issue"], "src": src, "gold": inst.get("patch", ""),
-                      "gold_sr_text": sr_to_text(gold_sr), "dest": str(dest),
-                      "n_gold_blocks": len(gold_sr), "gold_sr_lines": gold_sr_lines})
+        gold_sr_lines = sum(
+            len((b.get("search", "") or "").splitlines()) + len((b.get("replace", "") or "").splitlines())
+            for b in gold_sr
+        )
+        tasks.append({
+            "iid": iid, "issue": t["issue"], "src": src, "gold": inst.get("patch", ""),
+            "gold_sr_text": sr_to_text(gold_sr), "dest": str(dest),
+            "n_gold_blocks": len(gold_sr), "gold_sr_lines": gold_sr_lines,
+            "node_ids": support[:24], "texts": {s: meta[s]["text"] for s in support[:24]},
+            "node_types": {s: "fact" for s in support[:24]},
+        })
     return tasks
 
 
 def _selftest():
     print("swe_rl --selftest: gold-diff -> SR roundtrip + reward + GRPO advantage (no model).\n")
-    SRC = ("class A:\n    def deconstruct(self):\n        return handle_mask(self.mask)\n    def other(self):\n        pass\n")
-    GOLD = ("--- a/x.py\n+++ b/x.py\n@@ -2,2 +2,3 @@\n     def deconstruct(self):\n"
-            "-        return handle_mask(self.mask)\n"
-            "+        if self.mask is None: return deepcopy(operand.mask)\n"
-            "+        return handle_mask(self.mask, operand.mask)\n")
+    SRC = "class A:\n    def deconstruct(self):\n        return handle_mask(self.mask)\n    def other(self):\n        pass\n"
+    GOLD = (
+        "--- a/x.py\n+++ b/x.py\n@@ -2,2 +2,3 @@\n     def deconstruct(self):\n"
+        "-        return handle_mask(self.mask)\n"
+        "+        if self.mask is None: return deepcopy(operand.mask)\n"
+        "+        return handle_mask(self.mask, operand.mask)\n"
+    )
     blocks = gold_to_sr(GOLD)
     print(f"  gold_to_sr -> {len(blocks)} block(s); file={blocks[0]['file'] if blocks else None}")
     text = sr_to_text(blocks)
-    from v5.runtime.search_replace import parse_sr
     reparsed = parse_sr(text)
     roundtrip = len(reparsed) == len(blocks) and reparsed[0].get("search", "").strip() in SRC
     r, b = swe_reward(blocks, SRC, gold_patch=GOLD)
     advs = advantages([1.5, 1.5, -1.0, 0.0])
-    ok = (len(blocks) == 1 and roundtrip and r > 1.0 and abs(sum(advs)) < 1e-6)
+    ok = len(blocks) == 1 and roundtrip and r > 1.0 and abs(sum(advs)) < 1e-6
     print(f"  roundtrip (gold SR re-parses + SEARCH in source): {roundtrip}")
     print(f"  reward on the gold patch: {r:+.2f}  {b['verdict']}")
     print(f"  GRPO advantages([1.5,1.5,-1,0]) = {[round(x,2) for x in advs]} (centered={abs(sum(advs))<1e-6})")
@@ -230,20 +266,75 @@ def _selftest():
     return ok
 
 
-def train(model_name, tasks, steps, K, lr, r_lora, seed, layers, eval_every, ent_coef, temperature,
-          sft_steps, max_new, reward_mode: str = "proxy", verifier: SWEExactVerifier | None = None,
-          verify_every: int = 0, verify_gold_sanity: int = 0,
-          emit_preds_dir: str = "", emit_preds_every: int = 0, use_exemplar: bool = False,
-          eff_coef: float = 0.0):
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGED ROLLOUT HELPERS
+# Context (issue + source) prefilled ONCE into KV cache via PrefixSession.
+# DIAGNOSE runs greedy as a latent continuation — tokens stay in the KV.
+# FIX runs K sampled continuations on [context + DIAGNOSE] — no re-paste.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_ctx_ids(tok, dev, issue: str, src: str):
+    """Tokenize the heavy [issue + source + DIAGNOSE instruction] prefix.
+    This is prefilled ONCE per rollout; all subsequent stages attend it via cache."""
+    import torch
+    ctx = (
+        f"ISSUE:\n{issue[:1400]}\n\n"
+        f"SOURCE (the bug is in here):\n{src}\n\n"
+        f"{_DIAG_INSTR}"
+    )
+    msgs = [{"role": "system", "content": _DIAG_SYS}, {"role": "user", "content": ctx}]
+    kw = dict(add_generation_prompt=True, return_tensors="pt", return_dict=True)
+    try:
+        enc = tok.apply_chat_template(msgs, enable_thinking=False, **kw)
+    except TypeError:
+        enc = tok.apply_chat_template(msgs, **kw)
+    return enc["input_ids"].to(dev)
+
+
+def _glue_ids(tok, dev):
+    """Token IDs for the FIX-stage glue turn (the only instruction sent after DIAGNOSE).
+    Short on purpose — no re-pasted source/issue, just the format instruction."""
+    import torch
+    return tok(_FIX_GLUE, return_tensors="pt", add_special_tokens=False).input_ids.to(dev)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN TRAIN FUNCTION
+# ─────────────────────────────────────────────────────────────────────────────
+
+def train(
+    model_name, tasks, steps, K, lr, r_lora, seed, layers, eval_every, ent_coef, temperature,
+    sft_steps, max_new,
+    reward_mode: str = "proxy", verifier: SWEExactVerifier | None = None,
+    verify_every: int = 0, verify_gold_sanity: int = 0,
+    emit_preds_dir: str = "", emit_preds_every: int = 0,
+    use_exemplar: bool = False, eff_coef: float = 0.0,
+    graph: bool = False, adapter_ckpt: str = "", gnn_ckpt: str = "",
+    train_gnn: bool = False, op_layer: int = 26, op_alpha: float = 4.0,
+    staged: bool = False, diag_max_new: int = 200,
+):
+    """Train the SWE RL model.
+
+    staged=True  (--staged flag):
+      Context prefilled ONCE into KV cache. DIAGNOSE runs greedy as latent continuation
+      (tokens in cache, not text-serialized). FIX runs K sampled continuations on [ctx+DIAGNOSE].
+      GRPO gradient applied ONLY to FIX tokens. OperatorInjector active at every fwd pass.
+      SFT warm-start: [ctx | gold_diag | fix_glue | gold_sr], loss on gold_sr tokens only.
+
+    staged=False (default, --no-staged):
+      Original one-shot GRPO path. Kept for A/B baseline comparison.
+    """
     import random, torch, torch.nn as nn
     from transformers import AutoTokenizer
     from peft import LoraConfig, get_peft_model
     try:
         from peft import prepare_model_for_kbit_training
-    except ImportError:  # older PEFTs
+    except ImportError:
         prepare_model_for_kbit_training = None
     from v5.lm_loader import load_frozen_lm, resolve_dtype, resolve_quant
     from v5.runtime.swe_slot import fix_user
+    if staged:
+        from v5.runtime.prefix_session import PrefixSession
 
     trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
     base = load_frozen_lm(model_name)
@@ -253,40 +344,109 @@ def train(model_name, tasks, steps, K, lr, r_lora, seed, layers, eval_every, ent
     dtype = resolve_dtype(dev)
     if qmode in ("4bit", "8bit") and prepare_model_for_kbit_training is not None:
         base = prepare_model_for_kbit_training(base)
-    leaf = sorted({n.split(".")[-1] for n, m in base.named_modules()
-                   if isinstance(m, nn.Linear) and ".layers." in n and not any(x in n.lower() for x in ("lm_head", "embed"))})
-    cfg = LoraConfig(r=r_lora, lora_alpha=2 * r_lora, lora_dropout=0.0, task_type="CAUSAL_LM",
-                     target_modules=leaf, layers_to_transform=layers)
+    leaf = sorted({
+        n.split(".")[-1] for n, m in base.named_modules()
+        if isinstance(m, nn.Linear) and ".layers." in n
+        and not any(x in n.lower() for x in ("lm_head", "embed"))
+    })
+    cfg = LoraConfig(
+        r=r_lora, lora_alpha=2 * r_lora, lora_dropout=0.0,
+        task_type="CAUSAL_LM", target_modules=leaf, layers_to_transform=layers,
+    )
     model = get_peft_model(base, cfg); model.train()
     if hasattr(model, "config") and hasattr(model.config, "use_cache"):
         model.config.use_cache = False
-    if hasattr(model, "gradient_checkpointing_enable"):
+    # Gradient checkpointing is incompatible with manual KV-cache threading in staged mode.
+    if not graph and not staged and hasattr(model, "gradient_checkpointing_enable"):
         try:
             model.gradient_checkpointing_enable()
         except Exception:
             pass
     trainable = [p for p in model.parameters() if p.requires_grad]
+
+    # ── Graph cross-attention + OperatorInjector ──────────────────────────────
+    # These inject task evidence via activation steering (cross-attention + op-signed vectors),
+    # NOT via prompt text. Active during every forward pass (rollout + grad step).
+    _make_fwd_ctx = lambda: nullcontext()
+    _prep = lambda t: None
+    if graph:
+        from contextlib import ExitStack
+        from v5.adapter import GraphAttentionInjector
+        from v5.cross_attention import V5AttentionAdapter
+        from v5.gnn_encoder import RGCNEncoder
+        from v5.goal_encoder import GoalEncoder
+        from v5.operator_injector import OperatorInjector, SIGN as OP_SIGN
+        from v5.operator_schema import op_kind_for
+        from v5.training.providers import RealEmbedder
+
+        lm_dim = base.config.hidden_size
+        embedder = RealEmbedder(torch.device("cpu"))
+        gnn = RGCNEncoder().to(dev)
+        if gnn_ckpt:
+            gnn.load_state_dict(torch.load(gnn_ckpt, map_location=dev))
+        gnn.train() if train_gnn else gnn.eval()
+        for p in gnn.parameters(): p.requires_grad_(train_gnn)
+        goal_enc = GoalEncoder().to(dev).eval()
+        adapter = V5AttentionAdapter(r_plan=3, r_evidence=4, lm_hidden_dim=lm_dim).to(dev)
+        if adapter_ckpt:
+            adapter.load_state_dict(torch.load(adapter_ckpt, map_location=dev))
+        adapter.train()
+        injector = GraphAttentionInjector(adapter, gnn, goal_enc, device=dev)
+        injector.inject_all_positions = True; injector.train_gnn = train_gnn
+        inj_base = model.get_base_model() if hasattr(model, "get_base_model") else model
+        op_injector = OperatorInjector(inj_base, tok, layer=op_layer, alpha=op_alpha)
+        _op_v: torch.Tensor | None = None
+
+        def _prep(t):
+            injector.prepare_session(
+                _stub_graph(t["node_ids"], t["texts"], t.get("node_types", {})),
+                t["node_ids"], embedder.embed_nodes(t["texts"]),
+                {"task_family": "code_fix", "required_slots": []},
+            )
+            nodes = [(t["texts"][nid], op_kind_for(t.get("node_types", {}).get(nid, "fact")))
+                     for nid in t["node_ids"]]
+            nonlocal _op_v; _op_v = op_injector.combine(nodes, t["issue"], normalize=True)
+
+        def _make_fwd_ctx():
+            stack = ExitStack()
+            stack.enter_context(injector.inject(model))
+            if _op_v is not None:
+                stack.enter_context(op_injector.inject(_op_v))
+            return stack
+
+        trainable += [p for p in adapter.parameters() if p.requires_grad]
+        if train_gnn:
+            trainable += [p for p in gnn.parameters() if p.requires_grad]
+        print(f"graph adapter: trainable {sum(p.numel() for p in adapter.parameters() if p.requires_grad):,}"
+              f" | train_gnn={train_gnn}", flush=True)
+        print(f"operator injector: L{op_injector.L} alpha={op_injector.alpha} | nodes={OP_SIGN}", flush=True)
+
     opt = torch.optim.AdamW(trainable, lr=lr)
     print(f"LoRA r={r_lora} layers {layers} | trainable {sum(p.numel() for p in trainable):,} | tasks {len(tasks)}", flush=True)
-    print(f"base load: quant={qmode} dtype={dtype} device={dev} | K={K} max_new={max_new}", flush=True)
+    print(f"base: quant={qmode} dtype={dtype} device={dev} | K={K} max_new={max_new}", flush=True)
+    print(f"staged={staged} | KV-prefix latent state-carry={'ON — DIAGNOSE->FIX via shared KV' if staged else 'OFF — one-shot baseline'}", flush=True)
     if qmode == "none":
-        print("WARN: V5_LM_QUANT is unset -> full-precision base load. For the 4B on rented GPUs, prefer V5_LM_QUANT=4bit.", flush=True)
+        print("WARN: V5_LM_QUANT unset -> full-precision. Prefer V5_LM_QUANT=4bit on rented GPUs.", flush=True)
     if reward_mode == "verifier":
-        print("reward_mode=verifier -> exact SWE tests are inside the rollout reward; this is the apex path and will be slow.", flush=True)
+        print("reward_mode=verifier -> exact SWE tests in rollout reward (slow but accurate).", flush=True)
+
     rng = random.Random(seed)
     n_held = max(4, len(tasks) // 5)
     held, train_tasks = tasks[:n_held], tasks[n_held:]
-    train_tasks_easy = sorted(train_tasks, key=lambda t: (t.get("n_gold_blocks", 99), t.get("gold_sr_lines", 9999), len(t["issue"])))
+    train_tasks_easy = sorted(
+        train_tasks,
+        key=lambda t: (t.get("n_gold_blocks", 99), t.get("gold_sr_lines", 9999), len(t["issue"]))
+    )
 
-    # retrieve-or-derive policy: each task's RETRIEVED plan = the nearest OTHER task's gold patch (a
-    # resolved similar fix). Injected into the rollout prompt so the model learns to REUSE/adapt it.
+    # retrieve-or-derive exemplar: inject each task's nearest OTHER resolved gold patch so the
+    # model learns to REUSE/adapt a retrieved plan (the binding, rung-2/3).
     _ex_map: dict = {}
     if use_exemplar:
         import numpy as _np
-        from v5.training.providers import RealEmbedder
+        from v5.training.providers import RealEmbedder as _RE
         def _unit_np(v):
             a = _np.asarray(v, dtype=_np.float32); return a / (_np.linalg.norm(a) + 1e-9)
-        _emb = RealEmbedder(torch.device("cpu"))             # CPU: don't fight the trained 4B for VRAM
+        _emb = _RE(torch.device("cpu"))
         _ids = [p["iid"] for p in tasks]
         _ev = _emb.embed_nodes({p["iid"]: p["issue"] for p in tasks})
         _mat = _np.stack([_unit_np(_ev[i]) for i in _ids])
@@ -296,11 +456,12 @@ def train(model_name, tasks, steps, K, lr, r_lora, seed, layers, eval_every, ent
             for j in _np.argsort(-(_mat @ qv)):
                 if _ids[j] != p["iid"]:
                     _ex_map[p["iid"]] = _gold[_ids[j]]; break
-        print(f"[use-exemplar] nearest-exemplar map built for {len(_ex_map)} tasks", flush=True)
+        print(f"[use-exemplar] map built for {len(_ex_map)} tasks", flush=True)
 
     def _ex(t):
         return _ex_map.get(t["iid"], "")
 
+    # ── One-shot helpers (used when staged=False OR during eval) ─────────────
     def encode(system, user):
         m = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         kw = dict(add_generation_prompt=True, return_tensors="pt", return_dict=True)
@@ -311,24 +472,97 @@ def train(model_name, tasks, steps, K, lr, r_lora, seed, layers, eval_every, ent
         return enc["input_ids"].to(dev)
 
     def gen_ids(pids, sample):
-        with torch.no_grad():
-            return model.generate(pids, do_sample=sample, temperature=temperature if sample else None,
-                                  top_p=0.95 if sample else None, max_new_tokens=max_new,
-                                  pad_token_id=tok.eos_token_id, use_cache=True)
+        with torch.no_grad(), _make_fwd_ctx():
+            return model.generate(
+                pids, do_sample=sample,
+                temperature=temperature if sample else None,
+                top_p=0.95 if sample else None,
+                max_new_tokens=max_new,
+                pad_token_id=tok.eos_token_id, use_cache=True,
+            )
 
-    def seq_logprob(pids, comp):
+    def seq_logprob_oneshot(pids, comp):
+        """Log-prob of comp given pids (one-shot path)."""
         full = torch.cat([pids, comp], dim=1)
-        logp = torch.log_softmax(model(full, use_cache=False).logits[:, :-1].float(), dim=-1)
+        with _make_fwd_ctx():
+            logp = torch.log_softmax(model(full, use_cache=False).logits[:, :-1].float(), dim=-1)
         start = pids.shape[1] - 1
         span = logp[:, start:start + comp.shape[1]]
         sel = span.gather(-1, comp.unsqueeze(-1)).squeeze(-1).sum(-1)
         ent = -(span.exp() * span).sum(-1).mean()
         return sel, ent
 
+    # ── Staged helpers ────────────────────────────────────────────────────────
+    @torch.no_grad()
+    def _staged_rollout(t):
+        """Run one staged rollout for task t. Returns (fix_comps, rewards, diag_full_ids, glue).
+
+        1. Build ctx_ids (heavy context): prefilled ONCE.
+        2. DIAGNOSE greedy as latent continuation — extends the KV cache.
+        3. K FIX samples as independent sampled continuations on [ctx + DIAGNOSE].
+        No text is re-serialized between stages — latent state via KV.
+        """
+        ctx_ids = _build_ctx_ids(tok, dev, t["issue"], t["src"])
+        fix_glue = _glue_ids(tok, dev)
+
+        # Prime: prefill ctx minus the last token (the last token kicks the first gen).
+        sess = PrefixSession(model, tok, dev)
+        with _make_fwd_ctx():
+            sess.prime(ctx_ids[:, :-1])
+        kick = ctx_ids[:, -1:]
+
+        # DIAGNOSE greedy — its tokens extend the KV prefix.
+        with _make_fwd_ctx():
+            _diag_new = sess.gen(kick, diag_max_new, tok.eos_token_id)
+
+        # Snapshot the post-DIAGNOSE KV state (shared across all K FIX samples).
+        diag_past = sess.past
+        diag_full = sess.cur_ids  # [1, L_ctx + L_diag]
+
+        fix_comps, rewards = [], []
+        for sample_i in range(K):
+            # Fresh session rooted at the post-DIAGNOSE KV — no re-prefill.
+            fsess = PrefixSession(model, tok, dev)
+            fsess.past = diag_past
+            fsess.cur_ids = diag_full
+            with _make_fwd_ctx():
+                # GENERATE WITH SAMPLING so K diverse candidates emerge for GRPO
+                fix_new = fsess.gen_sampled(fix_glue, max_new, tok.eos_token_id, temperature=temperature)
+            completion = tok.decode(fix_new, skip_special_tokens=True)
+            completion = re.sub(r"<think>.*?</think>", "", completion, flags=re.DOTALL).strip()
+            r = _score_task_blocks(t, parse_sr(completion), reward_mode=reward_mode, verifier=verifier)[0]
+            if eff_coef > 0 and r >= 1.0:
+                r += eff_coef * max(0.0, 1.0 - fix_new.shape[0] / max(1, max_new))
+            fix_comps.append(fix_new); rewards.append(r)
+
+        return fix_comps, rewards, diag_full, fix_glue
+
+    def seq_logprob_staged(diag_full, fix_glue, fix_comp):
+        """Log-prob of fix_comp given [diag_full + fix_glue] prefix.
+
+        Single forward pass over [diag_full | fix_glue | fix_comp] with use_cache=False
+        for correct gradient flow. GRPO gradient flows ONLY through fix_comp logits.
+        diag_full carries the entire context + DIAGNOSE tokens — the model attends them
+        latently (they are already part of the sequence, NOT re-pasted text).
+        """
+        glue2 = fix_glue if fix_glue.dim() == 2 else fix_glue.unsqueeze(0)
+        comp2 = fix_comp.unsqueeze(0) if fix_comp.dim() == 1 else fix_comp
+        full = torch.cat([diag_full, glue2, comp2], dim=1)
+        with _make_fwd_ctx():
+            logp = torch.log_softmax(model(full, use_cache=False).logits[:, :-1].float(), dim=-1)
+        fix_start = diag_full.shape[1] + glue2.shape[1] - 1
+        span = logp[:, fix_start:fix_start + comp2.shape[1]]
+        sel = span.gather(-1, comp2.unsqueeze(-1)).squeeze(-1).sum(-1)
+        ent = -(span.exp() * span).sum(-1).mean()
+        return sel, ent
+
+    # ── Eval / emit helpers ───────────────────────────────────────────────────
     @torch.no_grad()
     def evaluate(ts):
+        """Held-out evaluation. Uses one-shot (consistent across staged/non-staged runs)."""
         model.eval(); rs, app, solv = [], 0, 0
         for t in ts:
+            if graph: _prep(t)
             pids = encode(SR_SYS, fix_user(t["issue"], t["src"], exemplar=_ex(t)))
             out = gen_ids(pids, sample=False)
             r, b = score(tok.decode(out[0, pids.shape[1]:], skip_special_tokens=True), t,
@@ -339,28 +573,25 @@ def train(model_name, tasks, steps, K, lr, r_lora, seed, layers, eval_every, ent
 
     @torch.no_grad()
     def evaluate_exact(ts, tag):
-        if verifier is None:
-            return None
+        if verifier is None: return None
         model.eval()
-        task_patches: list[tuple[dict, str]] = []
-        applyable = 0
+        task_patches: list[tuple[dict, str]] = []; applyable = 0
         for t in ts:
+            if graph: _prep(t)
             pids = encode(SR_SYS, fix_user(t["issue"], t["src"], exemplar=_ex(t)))
             out = gen_ids(pids, sample=False)
             completion = tok.decode(out[0, pids.shape[1]:], skip_special_tokens=True)
             blocks = parse_sr(completion)
             applied, patch = materialize_patch(t, blocks)
             if applied > 0 and patch.strip():
-                task_patches.append((t, patch))
-                applyable += 1
+                task_patches.append((t, patch)); applyable += 1
         res = verifier.verify_task_batch_unique(task_patches, tag=tag)
         model.train()
         resolved = sum(1 for t in ts if res.get(t["iid"], False))
         return resolved / len(ts), applyable / len(ts)
 
     def run_gold_sanity(ts, n):
-        if verifier is None or n <= 0:
-            return
+        if verifier is None or n <= 0: return
         ok, total = verifier.run_gold_sanity(ts, n, tag="gold_sanity")
         print(f"[gold-sanity] resolved {ok}/{total} gold patches", flush=True)
         if ok != total:
@@ -368,20 +599,17 @@ def train(model_name, tasks, steps, K, lr, r_lora, seed, layers, eval_every, ent
 
     @torch.no_grad()
     def emit_predictions(ts, tag):
-        if not emit_preds_dir:
-            return None
-        model.eval()
-        task_patches: list[tuple[dict, str]] = []
+        if not emit_preds_dir: return None
+        model.eval(); task_patches: list[tuple[dict, str]] = []
         for t in ts:
+            if graph: _prep(t)
             pids = encode(SR_SYS, fix_user(t["issue"], t["src"], exemplar=_ex(t)))
             out = gen_ids(pids, sample=False)
             completion = tok.decode(out[0, pids.shape[1]:], skip_special_tokens=True)
             blocks = parse_sr(completion)
             applied, patch = materialize_patch(t, blocks)
-            if applied > 0 and patch.strip():
-                task_patches.append((t, patch))
-        out_dir = Path(emit_preds_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
+            if applied > 0 and patch.strip(): task_patches.append((t, patch))
+        out_dir = Path(emit_preds_dir); out_dir.mkdir(parents=True, exist_ok=True)
         pred_path = out_dir / f"{tag}.jsonl"
         n = write_predictions({task["iid"]: patch for task, patch in task_patches}, str(pred_path), model_name="swe_rl")
         model.train()
@@ -399,22 +627,58 @@ def train(model_name, tasks, steps, K, lr, r_lora, seed, layers, eval_every, ent
             vr, vp = exact0
             print(f"[verify @0] held exact_resolve={vr:.0%} patch_emission={vp:.0%}", flush=True)
 
-    if sft_steps > 0:                                      # SFT warm-start on the gold patch (gold SR)
+    # ── SFT warm-start ─────────────────────────────────────────────────────────
+    # staged SFT: [ctx | gold_diag_tokens | fix_glue | gold_sr_tokens]
+    #   loss only on gold_sr_tokens — teaches staged format + code emission format.
+    # one-shot SFT: [prompt_ids | gold_sr_tokens] — original path.
+    if sft_steps > 0:
         ce = torch.nn.CrossEntropyLoss()
+        sft_cap = max(max_new, 640)
+
+        def _gold_diag_text(t: dict) -> str:
+            """Minimal synthesized DIAGNOSE text from gold patch metadata."""
+            sr = gold_to_sr(t["gold"])
+            file = sr[0]["file"] if sr else "module.py"
+            return (f"FILE: {file}\nFOCUS: (see patch)\n"
+                    "WHY: fix the bug described in the issue\n"
+                    "CHANGE: apply the minimal change from the gold patch")
+
         for s in range(1, sft_steps + 1):
             t = rng.choice(train_tasks)
-            pids = encode(SR_SYS, fix_user(t["issue"], t["src"], exemplar=_ex(t)))
-            sft_cap = max(max_new, 640)                      # teach the FULL minimal gold target, not the small gen window
-            gids = tok(t["gold_sr_text"], return_tensors="pt", add_special_tokens=False).input_ids.to(dev)[:, :sft_cap]
-            full = torch.cat([pids, gids], dim=1)
-            logits = model(full, use_cache=False).logits
-            st = pids.shape[1]
-            loss = ce(logits[:, st - 1:st - 1 + gids.shape[1]].reshape(-1, logits.shape[-1]).float(), gids.reshape(-1))
+            if graph: _prep(t)
+            if staged:
+                ctx_ids = _build_ctx_ids(tok, dev, t["issue"], t["src"])
+                gold_diag_ids = tok(
+                    _gold_diag_text(t), return_tensors="pt", add_special_tokens=False
+                ).input_ids.to(dev)
+                fix_glue = _glue_ids(tok, dev)
+                gold_fix_ids = tok(
+                    t["gold_sr_text"], return_tensors="pt", add_special_tokens=False
+                ).input_ids.to(dev)[:, :sft_cap]
+                full = torch.cat([ctx_ids, gold_diag_ids, fix_glue, gold_fix_ids], dim=1)
+                fix_start = ctx_ids.shape[1] + gold_diag_ids.shape[1] + fix_glue.shape[1]
+                with _make_fwd_ctx():
+                    logits = model(full, use_cache=False).logits
+                loss = ce(
+                    logits[:, fix_start - 1:fix_start - 1 + gold_fix_ids.shape[1]].reshape(-1, logits.shape[-1]).float(),
+                    gold_fix_ids.reshape(-1),
+                )
+            else:
+                pids = encode(SR_SYS, fix_user(t["issue"], t["src"], exemplar=_ex(t)))
+                gids = tok(t["gold_sr_text"], return_tensors="pt", add_special_tokens=False).input_ids.to(dev)[:, :sft_cap]
+                full = torch.cat([pids, gids], dim=1)
+                with _make_fwd_ctx():
+                    logits = model(full, use_cache=False).logits
+                st = pids.shape[1]
+                loss = ce(logits[:, st - 1:st - 1 + gids.shape[1]].reshape(-1, logits.shape[-1]).float(), gids.reshape(-1))
+
             loss.backward(); torch.nn.utils.clip_grad_norm_(trainable, 1.0); opt.step(); opt.zero_grad()
             if s <= 3 or s % 25 == 0:
                 print(f"[sft {s:3}] {t['iid']:26} ce_loss={float(loss.detach()):.3f}", flush=True)
+
         sm, sa, ss = evaluate(held)
-        print(f"[eval after SFT] held mean_reward={sm:+.3f} applyable={sa:.0%} gold-solve={ss:.0%} (base {bm:+.3f}/{ba:.0%}/{bs:.0%})\n", flush=True)
+        print(f"[eval after SFT] held mean_reward={sm:+.3f} applyable={sa:.0%} gold-solve={ss:.0%} "
+              f"(base {bm:+.3f}/{ba:.0%}/{bs:.0%})\n", flush=True)
         if verifier is not None:
             exact_sft = evaluate_exact(held, "verify_after_sft")
             if exact_sft is not None:
@@ -423,47 +687,79 @@ def train(model_name, tasks, steps, K, lr, r_lora, seed, layers, eval_every, ent
         if emit_preds_dir:
             emit_predictions(held, "held_after_sft")
 
+    # ── GRPO loop ─────────────────────────────────────────────────────────────
     zero_var = 0
     for step in range(1, steps + 1):
-        # Curriculum: start with the easiest gold patches (few blocks / short SR), then widen to all tasks.
         widen = min(1.0, step / max(1, int(0.4 * steps)))
         pool_frac = 0.25 + 0.75 * widen
         pool_n = max(1, int(len(train_tasks_easy) * pool_frac))
         t = rng.choice(train_tasks_easy[:pool_n])
-        pids = encode(SR_SYS, fix_user(t["issue"], t["src"], exemplar=_ex(t)))
-        comps, rewards = [], []
-        rollout_modes = [False] + [True] * max(0, K - 1)   # anchor each GRPO group with one greedy decode
-        for sample in rollout_modes:
-            out = gen_ids(pids, sample=sample)
-            comp = out[:, pids.shape[1]:]
-            completion = tok.decode(comp[0], skip_special_tokens=True)
-            comps.append(comp)
-            r = score(completion, t, reward_mode=reward_mode, verifier=verifier)[0]
-            if eff_coef > 0 and r >= 1.0:                  # EFFICIENCY: among WINS only (anti-hack: can't game
-                r += eff_coef * max(0.0, 1.0 - comp.shape[1] / max(1, max_new))   # short+wrong), prefer the cheaper fix
-            rewards.append(r)
-        mean_r = sum(rewards) / K
-        r_std = (sum((r - mean_r) ** 2 for r in rewards) / K) ** 0.5
-        if r_std < 1e-9:
-            zero_var += 1
+        if graph: _prep(t)
+
+        if staged:
+            # ── STAGED GRPO ──────────────────────────────────────────────────
+            # Context prefilled ONCE. DIAGNOSE greedy (latent state in KV).
+            # K FIX samples as continuations. Gradient on FIX tokens only.
+            fix_comps, rewards, diag_full, fix_glue = _staged_rollout(t)
+            mean_r = sum(rewards) / K
+            r_std = (sum((r - mean_r) ** 2 for r in rewards) / K) ** 0.5
+            if r_std < 1e-9:
+                zero_var += 1
+                if step % 10 == 0:
+                    print(f"[step {step:3}] {t['iid']:24} mean_r={mean_r:+.2f} r_std=0 SKIP", flush=True)
+                continue
+            advs = advantages(rewards)
+            opt.zero_grad(set_to_none=True)
+            loss_sum = ent_sum = 0.0
+            for fix_comp, adv in zip(fix_comps, advs):
+                lp, ent = seq_logprob_staged(diag_full, fix_glue, fix_comp)
+                sample_loss = (-adv * lp - ent_coef * ent) / K
+                loss_sum += float(sample_loss.detach()); ent_sum += float(ent.detach())
+                sample_loss.backward()
+            gnorm = torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+            opt.step(); opt.zero_grad(set_to_none=True)
             if step % 10 == 0:
-                print(f"[step {step:3}] {t['iid']:24} mean_r={mean_r:+.2f} r_std=0 SKIP", flush=True)
-            continue
-        advs = advantages(rewards)
-        opt.zero_grad(set_to_none=True)
-        loss_sum = 0.0
-        ent_sum = 0.0
-        for comp, adv in zip(comps, advs):
-            lp, ent = seq_logprob(pids, comp)
-            sample_loss = (-adv * lp - ent_coef * ent) / K
-            loss_sum += float(sample_loss.detach())
-            ent_sum += float(ent.detach())
-            sample_loss.backward()
-        gnorm = torch.nn.utils.clip_grad_norm_(trainable, 1.0)
-        opt.step()
-        opt.zero_grad(set_to_none=True)
-        if step % 10 == 0:
-            print(f"[step {step:3}] {t['iid']:24} pool={pool_n}/{len(train_tasks_easy)} mean_r={mean_r:+.2f} r_std={r_std:.2f} ent={ent_sum/K:.2f} loss={loss_sum:+.3f} gnorm={float(gnorm):.3f} rewards={[round(r,1) for r in rewards]}", flush=True)
+                print(f"[step {step:3}] {t['iid']:24} pool={pool_n}/{len(train_tasks_easy)} "
+                      f"mean_r={mean_r:+.2f} r_std={r_std:.2f} ent={ent_sum/K:.2f} "
+                      f"loss={loss_sum:+.3f} gnorm={float(gnorm):.3f} rewards={[round(r,1) for r in rewards]}",
+                      flush=True)
+        else:
+            # ── ONE-SHOT GRPO (A/B baseline) ─────────────────────────────────
+            pids = encode(SR_SYS, fix_user(t["issue"], t["src"], exemplar=_ex(t)))
+            comps, rewards = [], []
+            rollout_modes = [False] + [True] * max(0, K - 1)
+            for sample in rollout_modes:
+                out = gen_ids(pids, sample=sample)
+                comp = out[:, pids.shape[1]:]
+                completion = tok.decode(comp[0], skip_special_tokens=True)
+                comps.append(comp)
+                r = score(completion, t, reward_mode=reward_mode, verifier=verifier)[0]
+                if eff_coef > 0 and r >= 1.0:
+                    r += eff_coef * max(0.0, 1.0 - comp.shape[1] / max(1, max_new))
+                rewards.append(r)
+            mean_r = sum(rewards) / K
+            r_std = (sum((r - mean_r) ** 2 for r in rewards) / K) ** 0.5
+            if r_std < 1e-9:
+                zero_var += 1
+                if step % 10 == 0:
+                    print(f"[step {step:3}] {t['iid']:24} mean_r={mean_r:+.2f} r_std=0 SKIP", flush=True)
+                continue
+            advs = advantages(rewards)
+            opt.zero_grad(set_to_none=True)
+            loss_sum = ent_sum = 0.0
+            for comp, adv in zip(comps, advs):
+                lp, ent = seq_logprob_oneshot(pids, comp)
+                sample_loss = (-adv * lp - ent_coef * ent) / K
+                loss_sum += float(sample_loss.detach()); ent_sum += float(ent.detach())
+                sample_loss.backward()
+            gnorm = torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+            opt.step(); opt.zero_grad(set_to_none=True)
+            if step % 10 == 0:
+                print(f"[step {step:3}] {t['iid']:24} pool={pool_n}/{len(train_tasks_easy)} "
+                      f"mean_r={mean_r:+.2f} r_std={r_std:.2f} ent={ent_sum/K:.2f} "
+                      f"loss={loss_sum:+.3f} gnorm={float(gnorm):.3f} rewards={[round(r,1) for r in rewards]}",
+                      flush=True)
+
         if step % eval_every == 0:
             m, ap, sv = evaluate(held)
             print(f"[eval @{step}] held mean_reward={m:+.3f} applyable={ap:.0%} gold-solve={sv:.0%}", flush=True)
@@ -476,7 +772,8 @@ def train(model_name, tasks, steps, K, lr, r_lora, seed, layers, eval_every, ent
             emit_predictions(held, f"held_step_{step:04d}")
 
     m, ap, sv = evaluate(held)
-    print(f"\n=== SWE-RL DONE === held mean_reward {bm:+.3f}->{m:+.3f} | applyable {ba:.0%}->{ap:.0%} | gold-solve {bs:.0%}->{sv:.0%}")
+    print(f"\n=== SWE-RL DONE === held mean_reward {bm:+.3f}->{m:+.3f} | "
+          f"applyable {ba:.0%}->{ap:.0%} | gold-solve {bs:.0%}->{sv:.0%}")
     if verifier is not None:
         exact_final = evaluate_exact(held, "verify_final")
         if exact_final is not None:
@@ -487,7 +784,8 @@ def train(model_name, tasks, steps, K, lr, r_lora, seed, layers, eval_every, ent
     if emit_preds_dir:
         emit_predictions(held, "held_final")
     print(f"  zero-variance groups {zero_var}/{steps}.")
-    model.save_pretrained("artifacts/swe_lora"); print("  LoRA saved -> artifacts/swe_lora")
+    model.save_pretrained("artifacts/swe_lora")
+    print("  LoRA saved -> artifacts/swe_lora")
 
 
 def main():
@@ -510,49 +808,61 @@ def main():
     ap.add_argument("--eval-every", type=int, default=30)
     ap.add_argument("--ent-coef", type=float, default=0.005)
     ap.add_argument("--temperature", type=float, default=0.7,
-                    help="lower for SWE: exact-char SEARCH is fragile, high temp -> unapplyable rollouts -> -1/SKIP")
+                    help="lower for SWE: high temp -> unapplyable SEARCH -> -1/SKIP")
     ap.add_argument("--sft-steps", type=int, default=120)
     ap.add_argument("--max-new", type=int, default=512,
-                    help="must exceed the gold patch length or generation truncates -> unapplyable")
+                    help="must exceed gold patch length or generation truncates -> unapplyable")
+    ap.add_argument("--diag-max-new", type=int, default=200,
+                    help="(staged) max tokens for DIAGNOSE stage; kept short to save VRAM")
+    ap.add_argument("--staged", action="store_true", default=False,
+                    help="enable staged KV rollout: DIAGNOSE->FIX on shared KV prefix. "
+                         "Default OFF (one-shot). Use --staged to enable.")
     ap.add_argument("--reward-mode", choices=["proxy", "verifier"], default="proxy",
-                    help="proxy = gold-overlap reward; verifier = exact SWE pass/fail reward")
+                    help="proxy = gold-overlap (fast, in-loop); verifier = exact SWE pass/fail")
     ap.add_argument("--verify-every", type=int, default=0,
-                    help="run exact held-out SWE verification every N GRPO steps (0 = off)")
+                    help="exact held-out verify every N GRPO steps (0=off)")
     ap.add_argument("--verify-backend", choices=["docker", "sbcli"], default="docker")
     ap.add_argument("--verify-out-dir", default="artifacts/graph_growth/swe_verify")
     ap.add_argument("--verify-max-workers", type=int, default=4)
     ap.add_argument("--verify-timeout", type=int, default=1800)
     ap.add_argument("--verify-poll-secs", type=int, default=20)
-    ap.add_argument("--verify-gold-sanity", type=int, default=5,
-                    help="when exact verify is active, require this many gold patches to resolve first")
-    ap.add_argument("--emit-preds-dir", default="",
-                    help="optional dir to write held-out prediction jsonl files for a separate swe_verify box")
-    ap.add_argument("--emit-preds-every", type=int, default=0,
-                    help="emit held prediction jsonl every N GRPO steps (0 = off); final emit happens if dir is set")
-    ap.add_argument("--use-exemplar", action="store_true",
-                    help="retrieve-or-derive: inject each task's nearest OTHER resolved task (gold patch) into the "
-                         "rollout prompt -> train the model to REUSE/adapt a retrieved plan (the binding, rung-2/3).")
+    ap.add_argument("--verify-gold-sanity", type=int, default=5)
+    ap.add_argument("--emit-preds-dir", default="")
+    ap.add_argument("--emit-preds-every", type=int, default=0)
+    ap.add_argument("--use-exemplar", action="store_true")
     ap.add_argument("--eff-coef", type=float, default=0.0,
-                    help="EFFICIENCY reward: among WINS (reward>=1), add eff_coef*(1-len/max_new) -> prefer the "
-                         "cheaper/shorter fix (reuse over re-derive). Gated by solving = anti-hack. 0 = off.")
+                    help="efficiency bonus among wins: +eff_coef*(1-len/max_new). Anti-hack: gated by solve.")
+    ap.add_argument("--graph", action="store_true",
+                    help="enable graph cross-attention + OperatorInjector (activation steering, not prompt)")
+    ap.add_argument("--adapter-ckpt", default="")
+    ap.add_argument("--gnn-ckpt", default="")
+    ap.add_argument("--train-gnn", action="store_true")
+    ap.add_argument("--op-layer", type=int, default=26)
+    ap.add_argument("--op-alpha", type=float, default=4.0)
     a = ap.parse_args()
     if a.selftest:
-        import sys
-        sys.exit(0 if _selftest() else 1)
+        import sys; sys.exit(0 if _selftest() else 1)
     tasks = load_swe_tasks(a.n_tasks, a.traces, a.nodes, a.dataset, a.repo_root, a.src_bodies, a.src_lines)
     print(f"loaded {len(tasks)} SWE tasks", flush=True)
     if len(tasks) < 8:
-        raise SystemExit("too few SWE tasks loaded (need traces + nodes + checkouts)")
+        raise SystemExit("too few SWE tasks (need traces + nodes + checkouts)")
     need_verifier = (a.reward_mode == "verifier") or (a.verify_every > 0)
-    verifier = SWEExactVerifier(a.dataset, "test", a.verify_backend, a.verify_out_dir,
-                                max_workers=a.verify_max_workers, timeout=a.verify_timeout,
-                                poll_secs=a.verify_poll_secs, model_name="swe_rl") if need_verifier else None
-    train(a.model, tasks, a.steps, a.k, a.lr, a.r_lora, a.seed, a.layers, a.eval_every,
-          a.ent_coef, a.temperature, a.sft_steps, a.max_new,
-          reward_mode=a.reward_mode, verifier=verifier,
-          verify_every=a.verify_every, verify_gold_sanity=a.verify_gold_sanity,
-          emit_preds_dir=a.emit_preds_dir, emit_preds_every=a.emit_preds_every, use_exemplar=a.use_exemplar,
-          eff_coef=a.eff_coef)
+    verifier = SWEExactVerifier(
+        a.dataset, "test", a.verify_backend, a.verify_out_dir,
+        max_workers=a.verify_max_workers, timeout=a.verify_timeout,
+        poll_secs=a.verify_poll_secs, model_name="swe_rl",
+    ) if need_verifier else None
+    train(
+        a.model, tasks, a.steps, a.k, a.lr, a.r_lora, a.seed, a.layers, a.eval_every,
+        a.ent_coef, a.temperature, a.sft_steps, a.max_new,
+        reward_mode=a.reward_mode, verifier=verifier,
+        verify_every=a.verify_every, verify_gold_sanity=a.verify_gold_sanity,
+        emit_preds_dir=a.emit_preds_dir, emit_preds_every=a.emit_preds_every,
+        use_exemplar=a.use_exemplar, eff_coef=a.eff_coef,
+        graph=a.graph, adapter_ckpt=a.adapter_ckpt, gnn_ckpt=a.gnn_ckpt, train_gnn=a.train_gnn,
+        op_layer=a.op_layer, op_alpha=a.op_alpha,
+        staged=a.staged, diag_max_new=a.diag_max_new,
+    )
 
 
 if __name__ == "__main__":
