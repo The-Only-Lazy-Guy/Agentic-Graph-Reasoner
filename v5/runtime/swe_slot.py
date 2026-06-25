@@ -720,8 +720,11 @@ def _patch(blocks, dest):                     # applyable -> git diff (the swebe
     return p
 
 
-def fix_user(issue, src, diagnosis="", plan="", hints=None, test_failure=""):
+def fix_user(issue, src, diagnosis="", plan="", hints=None, test_failure="", exemplar=""):
     s = f"ISSUE:\n{issue[:1400]}\n\nRELEVANT SOURCE (the bug is in here):\n{src}\n\n"
+    if exemplar:                                              # binding probe: a retrieved RESOLVED similar fix
+        s += ("A SIMILAR bug was already FIXED with this diff — REUSE/ADAPT its APPROACH to THIS bug (the files "
+              "and lines differ; adapt the strategy, do not copy literally):\n" + exemplar[:1500] + "\n\n")
     s += _strategy_hint_block(hints or [], title="RELATED STRATEGY HINTS", max_items=2)
     if diagnosis and not plan:
         s += f"ROOT-CAUSE DIAGNOSIS (use it, do not invent a different bug):\n{diagnosis}\n\n"
@@ -953,24 +956,19 @@ def kv_solve(model, tok, dev, issue, gate_src, dest, verifier, task, a, vsecs=No
            "STEP 1 — DIAGNOSE. Output ONLY:\nFILE: <path from the source>\n"
            "FOCUS: <exact function/class name from the source>\nWHY: <one-sentence root cause>")
     chat = ChatKV(model, tok, dev, sysmsg, ctx)
-    diag = chat.step("", 200)
-    plan_raw = chat.step(
-        "STEP 2 — PLAN (use the diagnosis above; do NOT repeat it). Output ONLY:\n"
-        "FILE: <path>\nSEARCH:\n<the exact existing code copied verbatim from the source>\n"
-        "CHANGE:\n<the exact replacement line(s)>", 240)
-    plan = _repair_plan_to_src(plan_raw, gate_src, diag)[0]
-    trace = {"diagnoses": [diag], "plans": [plan], "fix_attempts": [], "retrievals": [], "kv": True}
+    diag = chat.step("", 200)                               # DIAGNOSE — thinking ON (reasoning)
+    plan = ""                                               # DIRECT: skip the fragile separate plan stage
+    trace = {"diagnoses": [diag], "plans": [], "fix_attempts": [], "retrievals": [], "kv": True}
     test_failure = ""; patch = ""; blocks = []; g = ""
     for attempt in range(max(1, a.test_feedback_retries if a.test_feedback else 1)):
         if not test_failure:
-            fix_instr = ("STEP 3 — FIX (realize the PLAN above). Output ONLY search/replace blocks, NO prose:\n"
-                         "path/from/source.py\n<<<<<<< SEARCH\n<exact existing code>\n=======\n<replacement>\n"
-                         ">>>>>>> REPLACE\nSEARCH must copy the source character-for-character.")
+            fix_instr = ("/no_think\nNow FIX, using the diagnosis above. Output ONLY a search/replace block, "
+                         "NO prose, NO thinking:\npath/from/source.py\n<<<<<<< SEARCH\n"
+                         "<exact existing code, copied character-for-character>\n=======\n<replacement>\n>>>>>>> REPLACE")
         else:
-            fix_instr = ("STEP 3 (RETRY) — the previous patch APPLIED but FAILED the tests:\n"
-                         f"{test_failure[:1200]}\nDiagnose why from that and CHANGE the fix; do not resubmit the "
-                         "same edit. Output ONLY the search/replace block(s).")
-        g = chat.step(fix_instr, a.max_new)
+            fix_instr = ("/no_think\nThe previous patch APPLIED but FAILED the tests:\n"
+                         f"{test_failure[:1000]}\nChange the fix accordingly. Output ONLY the search/replace block(s).")
+        g = chat.step(fix_instr, a.max_new)                 # /no_think -> clean SR block, no truncation
         blocks = parse_sr(g)
         if not blocks:                                     # FIX often continues the PLAN FILE/SEARCH/CHANGE
             ms = re.search(r"(?ms)^[ \t]*SEARCH:[ \t]*\n(.*?)\n[ \t]*CHANGE:", g)   # format (cached) -> SR block.
@@ -982,12 +980,11 @@ def kv_solve(model, tok, dev, issue, gate_src, dest, verifier, task, a, vsecs=No
         if a.sr_snap:
             blocks = _repair_sr_to_src(blocks, str(dest))
         patch = _patch(blocks, str(dest))
-        trace["fix_attempts"].append({"applyable": bool(patch),
-                                      "anchored": _blocks_match_plan(blocks, plan),
+        trace["fix_attempts"].append({"applyable": bool(patch), "anchored": False,
                                       "diag_used": diag[:160], "n_blocks": len(blocks or []),
                                       "files": [b.get("file", "") for b in (blocks or [])],
                                       "raw": g[:1200]})
-        ready = bool(a.test_feedback and verifier is not None and patch and _blocks_match_plan(blocks, plan))
+        ready = bool(a.test_feedback and verifier is not None and patch)   # DIRECT: applyable is enough
         if not ready:
             break
         _vt = time.time()
@@ -1397,6 +1394,34 @@ def _full_files_src(dest: Path, support: list[str], meta: dict) -> str:
     return "\n\n".join(parts)
 
 
+def _focus_only_src(dest: Path, support: list[str], meta: dict) -> str:
+    """BOUNDED context (reasoning-as-graph bet): ONLY the support functions' bodies, not the whole
+    file — so the per-step context stays small (fixes both the KV-chain OOM and the 787s re-prompt).
+    Falls back to the full file for any support function the AST can't locate."""
+    from v5.runtime.sr_withcode import _file_text
+    from v5.graph_grower.swe_probe import _symbol_name
+    by_file: dict[str, set] = {}
+    for sid in support:
+        m = meta.get(sid, {}) or {}
+        f = m.get("file"); nm = _symbol_name(m.get("text", "") or "")
+        if f and nm:
+            by_file.setdefault(f, set()).add(nm)
+    parts: list[str] = []
+    for f, names in by_file.items():
+        txt = _file_text(dest, f)
+        if not txt:
+            continue
+        lines = txt.splitlines()
+        got: set = set()
+        for nm, cls, s, e, calls in _ast_funcs(txt):
+            if nm in names:
+                parts.append(f"# {_canon_path(f)} :: {nm}\n" + "\n".join(lines[max(0, s - 1):e]))
+                got.add(nm)
+        if names - got:                                     # AST miss -> include the file (rare)
+            parts.append(f"# {_canon_path(f)} (full, AST-miss)\n{txt}")
+    return "\n\n".join(parts)
+
+
 def _ast_funcs(src_text: str):
     """[(name, class, start, end, calls_set)] for every function in the source (real AST)."""
     import ast
@@ -1558,6 +1583,19 @@ def main():
                          "back into the next FIX attempt instead of declaring success on syntax-match alone")
     ap.add_argument("--test-feedback-retries", type=int, default=2,
                     help="max FIX attempts per instance when --test-feedback is on (1 = no retry, just score)")
+    ap.add_argument("--focus-only", action="store_true",
+                    help="BOUNDED context: feed ONLY the support functions' bodies (not whole files) as the "
+                         "source -> small per-step context (reasoning-as-graph bet: fixes OOM + the 787s). "
+                         "Pairs with --prefix-kv. Validates: fits 6GB + resolves over bounded context.")
+    ap.add_argument("--exemplar", action="store_true",
+                    help="BINDING PROBE: retrieve the nearest RESOLVED exemplar (similar bug's gold diff, "
+                         "self-excluded) and inject it into the one-shot FIX prompt to ADAPT. Run vs cold + Docker "
+                         "resolve: does a retrieved good plan -> reuse -> resolve (the trainable reuse policy)?")
+    ap.add_argument("--exemplars", default="data/swe/exemplars.jsonl",
+                    help="resolved-bug exemplars (instance_id, issue, diff) for --exemplar retrieval")
+    ap.add_argument("--oneshot-only", action="store_true",
+                    help="run ONLY the one-shot baseline (skip the slot/kv solve) — validate the clean DIRECT "
+                         "leaf (one-shot + think + snap) fast, without the slot churn.")
     ap.add_argument("--prefix-kv", action="store_true",
                     help="Phase-A gen-minimize: prime [issue+source] ONCE into a shared KV cache and run "
                          "DIAGNOSE->PLAN->FIX as terse chained turns (no re-encoding context/prior stages). "
@@ -1710,6 +1748,25 @@ def main():
         if ok != total:
             raise SystemExit("gold-sanity failed; refusing to trust --test-feedback on a broken harness/env")
 
+    _ex_nearest = None
+    if a.exemplar:                                            # binding probe: nearest RESOLVED exemplar retrieval
+        import numpy as _np, torch as _torch
+        _eval_repos = {insts[i].get("repo", "") for i in ids}    # only same-repo exemplars (fast + relevant)
+        _exs = [json.loads(l) for l in Path(a.exemplars).read_text(encoding="utf-8").splitlines() if l.strip()]
+        _exs = [e for e in _exs if e.get("repo", "") in _eval_repos and (e.get("issue") or "").strip()]
+        _ex_ids = [e["instance_id"] for e in _exs]
+        _ex_diff = {e["instance_id"]: e.get("diff", "") for e in _exs}
+        _emb_x = RealEmbedder(_torch.device("cpu"))           # CPU: don't fight the 4B for VRAM (was OOM)
+        _ev = _emb_x.embed_nodes({e["instance_id"]: e.get("issue", "") for e in _exs})
+        _ex_mat = _np.stack([_np.asarray(_unit(_ev[i]), dtype=_np.float32) for i in _ex_ids])
+        def _ex_nearest(iid_, issue_):
+            qv = _np.asarray(_unit(_emb_x.embed_nodes({"q": issue_})["q"]), dtype=_np.float32)
+            for j in _np.argsort(-(_ex_mat @ qv)):
+                if _ex_ids[j] != iid_:
+                    return _ex_ids[j], _ex_diff[_ex_ids[j]]
+            return "", ""
+        print(f"[exemplar] loaded {len(_exs)} resolved exemplars for the binding probe", flush=True)
+
     dump = open(outputs["dump"], "w", encoding="utf-8")
     oneshot_app = slot_app = scored = 0
     oneshot_preds, slot_preds = {}, {}
@@ -1751,15 +1808,27 @@ def main():
         task = {"iid": iid, "gold": inst.get("patch", "")}
         eval_tasks.append(task)
 
+        if a.focus_only:                                    # BOUNDED context: support functions only (one-shot + solve)
+            _fsrc = _focus_only_src(dest, support, meta)
+            if _fsrc.strip():
+                src = _fsrc
+
+        ex_diff = ""
+        if a.exemplar and _ex_nearest is not None:           # binding probe: nearest resolved exemplar to ADAPT
+            _exid, ex_diff = _ex_nearest(iid, issue)
+
         # ONE-SHOT baseline (single SR emit)
         g1 = gen(
             SR_SYS,
-            fix_user(issue, src, hints=strategy_sources),
+            fix_user(issue, src, hints=strategy_sources, exemplar=ex_diff),
             a.max_new,
             inject=should_inject("oneshot"),
             constrain_symbols=(support_symbols if a.fix_constrain else None),
         )
-        b1 = parse_sr(g1); app1 = bool(b1) and not _unmatched(b1, str(dest))
+        b1 = parse_sr(g1)
+        if a.sr_snap:
+            b1 = _repair_sr_to_src(b1, str(dest))            # snap one-shot SEARCH to source (was missing -> the DIRECT leaf)
+        app1 = bool(b1) and not _unmatched(b1, str(dest))
         oneshot_app += app1
         p1 = _patch(b1, str(dest))
         if p1.strip():
@@ -1828,8 +1897,14 @@ def main():
             return best if best[0] else (patch, blocks, g)     # @k: prefer an applyable candidate
         log = []
         gate_src = _full_files_src(dest, support, meta)
+        if a.focus_only:                                    # bound the context to the support functions only
+            _fsrc = _focus_only_src(dest, support, meta)
+            if _fsrc.strip():
+                gate_src = _fsrc
         _t0 = time.time()
-        if a.prefix_kv:
+        if a.oneshot_only:                                  # validate the DIRECT leaf (one-shot+snap) without slot churn
+            p2, trace, fp, steps = "", {"diagnoses": [], "plans": [], "fix_attempts": [], "retrievals": []}, False, 0
+        elif a.prefix_kv:
             p2, trace = kv_solve(model, tok, dev, issue, gate_src, dest, verifier, task, a, vsecs=_vsecs)
             fp = False; steps = len(trace.get("fix_attempts", []))
         else:
