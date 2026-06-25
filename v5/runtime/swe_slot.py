@@ -940,6 +940,67 @@ def slot_solve(issue, src, diagnose_fn, plan_fn, fix_fn, max_steps=8, log=None, 
     return pool.slots["FIX"].value, trace, ok, steps
 
 
+def kv_solve(model, tok, dev, issue, gate_src, dest, verifier, task, a, vsecs=None):
+    """Phase-A latent solve (gen-minimize): prime [issue + source] ONCE into a shared KV cache, then
+    chain DIAGNOSE -> PLAN -> FIX as TERSE turns that build on the cache — the heavy context and prior
+    stages are never re-encoded (the latent state-carry). Linear (backtrack deferred). Reuses the same
+    parse/repair/snap/patch/verify as slot_solve. Returns (patch, trace)."""
+    from v5.runtime.prefix_session import ChatKV
+    from v5.runtime.search_replace import parse_sr
+    sysmsg = ("You are a precise Python debugging assistant. Use only the shown source. Work step by "
+              "step; be terse; never repeat an earlier step.")
+    ctx = (f"ISSUE:\n{issue[:1400]}\n\nSOURCE (the bug is in here):\n{gate_src}\n\n"
+           "STEP 1 — DIAGNOSE. Output ONLY:\nFILE: <path from the source>\n"
+           "FOCUS: <exact function/class name from the source>\nWHY: <one-sentence root cause>")
+    chat = ChatKV(model, tok, dev, sysmsg, ctx)
+    diag = chat.step("", 200)
+    plan_raw = chat.step(
+        "STEP 2 — PLAN (use the diagnosis above; do NOT repeat it). Output ONLY:\n"
+        "FILE: <path>\nSEARCH:\n<the exact existing code copied verbatim from the source>\n"
+        "CHANGE:\n<the exact replacement line(s)>", 240)
+    plan = _repair_plan_to_src(plan_raw, gate_src, diag)[0]
+    trace = {"diagnoses": [diag], "plans": [plan], "fix_attempts": [], "retrievals": [], "kv": True}
+    test_failure = ""; patch = ""; blocks = []; g = ""
+    for attempt in range(max(1, a.test_feedback_retries if a.test_feedback else 1)):
+        if not test_failure:
+            fix_instr = ("STEP 3 — FIX (realize the PLAN above). Output ONLY search/replace blocks, NO prose:\n"
+                         "path/from/source.py\n<<<<<<< SEARCH\n<exact existing code>\n=======\n<replacement>\n"
+                         ">>>>>>> REPLACE\nSEARCH must copy the source character-for-character.")
+        else:
+            fix_instr = ("STEP 3 (RETRY) — the previous patch APPLIED but FAILED the tests:\n"
+                         f"{test_failure[:1200]}\nDiagnose why from that and CHANGE the fix; do not resubmit the "
+                         "same edit. Output ONLY the search/replace block(s).")
+        g = chat.step(fix_instr, a.max_new)
+        blocks = parse_sr(g)
+        if not blocks:                                     # FIX often continues the PLAN FILE/SEARCH/CHANGE
+            ms = re.search(r"(?ms)^[ \t]*SEARCH:[ \t]*\n(.*?)\n[ \t]*CHANGE:", g)   # format (cached) -> SR block.
+            mc = re.search(r"(?ms)^[ \t]*CHANGE:[ \t]*\n(.*)\Z", g)                 # keep indentation (no strip)
+            mf = re.search(r"(?mi)^[ \t]*FILE:[ \t]*(.+)$", g)
+            if ms and mc and mf:                            # --sr-snap then snaps SEARCH to exact source + re-indents
+                blocks = [{"file": mf.group(1).strip(), "search": ms.group(1).rstrip(),
+                           "replace": mc.group(1).rstrip()}]
+        if a.sr_snap:
+            blocks = _repair_sr_to_src(blocks, str(dest))
+        patch = _patch(blocks, str(dest))
+        trace["fix_attempts"].append({"applyable": bool(patch),
+                                      "anchored": _blocks_match_plan(blocks, plan),
+                                      "diag_used": diag[:160], "n_blocks": len(blocks or []),
+                                      "files": [b.get("file", "") for b in (blocks or [])],
+                                      "raw": g[:1200]})
+        ready = bool(a.test_feedback and verifier is not None and patch and _blocks_match_plan(blocks, plan))
+        if not ready:
+            break
+        _vt = time.time()
+        resolved, feedback = verifier.verify_patch_feedback(task, patch, tag=f"kv_{task.get('iid','')}")
+        if vsecs is not None:
+            vsecs[0] += time.time() - _vt
+        trace["fix_attempts"][-1]["resolved"] = resolved
+        if resolved:
+            break
+        test_failure = feedback
+    return patch, trace
+
+
 def _parse_instance_ids(text: str) -> list[str]:
     if not (text or "").strip():
         return []
@@ -1497,6 +1558,14 @@ def main():
                          "back into the next FIX attempt instead of declaring success on syntax-match alone")
     ap.add_argument("--test-feedback-retries", type=int, default=2,
                     help="max FIX attempts per instance when --test-feedback is on (1 = no retry, just score)")
+    ap.add_argument("--prefix-kv", action="store_true",
+                    help="Phase-A gen-minimize: prime [issue+source] ONCE into a shared KV cache and run "
+                         "DIAGNOSE->PLAN->FIX as terse chained turns (no re-encoding context/prior stages). "
+                         "Linear (no backtrack). A/B vs the default slot_solve on apply/resolve/TIME.")
+    ap.add_argument("--fix-samples", type=int, default=1,
+                    help="pass@k: generate K INDEPENDENT sampled FIX candidates, verify each (needs a verifier), "
+                         "keep the first that RESOLVES (else the first applyable). Set SWE_TEMP>0 so samples "
+                         "differ; exploits the 'explore past the wrong first guess' effect. K=1 = today's behavior.")
     ap.add_argument("--session-out-dir", default="",
                     help="optional directory to write a per-run session bundle (predictions + dump + summary)")
     ap.add_argument("--session-name", default="",
@@ -1583,6 +1652,9 @@ def main():
         tok = AutoTokenizer.from_pretrained(a.model, trust_remote_code=trust)
         dev = next(model.parameters()).device
 
+    _think = bool(os.environ.get("SWE_THINK"))           # reasoning-depth probe: enable <think> + capture
+    _think_cap = os.environ.get("SWE_THINK", "")
+    _temp = float(os.environ.get("SWE_TEMP", "0") or 0)  # >0 = sample (probe greedy-loop vs reasoning-limit)
     def gen(system, user, ntok, *, inject=False, constrain_symbols=None):
         if inject and inj_runtime is not None:
             return inj_runtime.generate(system, user, ntok, constrain_symbols=constrain_symbols)
@@ -1592,22 +1664,26 @@ def main():
         msgs = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         kw = dict(add_generation_prompt=True, return_tensors="pt", return_dict=True)
         try:
-            enc = tok.apply_chat_template(msgs, enable_thinking=False, **kw).to(dev)
+            enc = tok.apply_chat_template(msgs, enable_thinking=_think, **kw).to(dev)
         except TypeError:
             enc = tok.apply_chat_template(msgs, **kw).to(dev)
         procs = None
         if constrain_symbols:
             plen = enc["input_ids"].shape[1]
             procs = LogitsProcessorList([make_inpatch_processor(tok, constrain_symbols, plen)])
+        _samp = {"do_sample": True, "temperature": _temp, "top_p": 0.95} if _temp > 0 else {"do_sample": False}
         with torch.no_grad():
             out = model.generate(
                 **enc,
-                max_new_tokens=ntok,
-                do_sample=False,
+                max_new_tokens=ntok + (2200 if _think else 0),   # room for the reasoning chain
+                **_samp,
                 logits_processor=procs,
                 pad_token_id=tok.eos_token_id,
             )
         t = tok.decode(out[0, enc["input_ids"].shape[1]:], skip_special_tokens=True)
+        if _think and _think_cap not in ("1", "true", "yes"):
+            with open(_think_cap, "a", encoding="utf-8") as _f:
+                _f.write(f"\n\n######## STAGE sys={system[:40]!r} ########\n{t}\n")
         return re.sub(r"<think>.*?</think>", "", t, flags=re.DOTALL).strip()
 
     def should_inject(stage: str) -> bool:
@@ -1712,10 +1788,15 @@ def main():
             )
             return _repair_plan_to_src(raw, src, diagnosis)[0]
         tf_log = []
+        _vsecs = [0.0]                                       # Docker-verify wall (to split gen vs verify)
         def fix_fn(issue, src, diagnosis, plan):
             test_failure = ""
-            rounds = a.test_feedback_retries if a.test_feedback else 1
-            for tf_attempt in range(max(1, rounds)):
+            K = max(1, a.fix_samples)                          # pass@k: K independent sampled candidates
+            rounds = max(K, a.test_feedback_retries if a.test_feedback else 1)
+            multi = K > 1 or a.test_feedback                   # K==1 + no tf -> preserve single-shot return
+            best = ("", [], "")                                # first APPLYABLE candidate (fallback if none resolve)
+            patch = ""; blocks = []; g = ""
+            for attempt in range(rounds):
                 g = gen(
                     SR_SYS,
                     fix_user(issue, src, diagnosis, plan, hints=strategy_sources, test_failure=test_failure),
@@ -1727,24 +1808,34 @@ def main():
                 if a.sr_snap:
                     blocks = _repair_sr_to_src(blocks, str(dest))   # goal-#1 (B): verbatim-anchor snap
                 patch = _patch(blocks, str(dest))              # "" unless applyable
-                ready = bool(a.test_feedback and verifier is not None and patch
-                            and _blocks_match_plan(blocks, plan))
-                if not ready:
-                    if a.test_feedback:
-                        tf_log.append({"attempt": tf_attempt, "ran_tests": False, "resolved": False,
-                                      "reason": "not applyable/anchored yet", "raw": g[:1200]})
-                    return patch, blocks, g
-                resolved, feedback = verifier.verify_patch_feedback(task, patch, tag=f"tf_{iid}")
-                tf_log.append({"attempt": tf_attempt, "ran_tests": True, "resolved": resolved,
-                              "feedback": feedback[:1500], "raw": g[:1200]})
-                if resolved:
-                    return patch, blocks, g
-                test_failure = feedback
-            return patch, blocks, g                             # retries exhausted; return last attempt
+                if patch and not best[0]:
+                    best = (patch, blocks, g)                  # remember first applyable as the @k fallback
+                ready = bool(verifier is not None and patch and _blocks_match_plan(blocks, plan))
+                if ready:
+                    _vt = time.time()
+                    resolved, feedback = verifier.verify_patch_feedback(task, patch, tag=f"tf_{iid}")
+                    _vsecs[0] += time.time() - _vt
+                    tf_log.append({"attempt": attempt, "ran_tests": True, "resolved": resolved,
+                                  "feedback": feedback[:1500], "raw": g[:1200]})
+                    if resolved:
+                        return patch, blocks, g                # a resolving sample -> done (best@k hit)
+                    test_failure = feedback if a.test_feedback else ""   # pass@k stays INDEPENDENT; tf chains
+                elif a.test_feedback or K > 1:
+                    tf_log.append({"attempt": attempt, "ran_tests": False, "resolved": False,
+                                  "reason": "not applyable/anchored", "raw": g[:1200]})
+                if not multi:
+                    return patch, blocks, g                    # original single-shot behavior preserved
+            return best if best[0] else (patch, blocks, g)     # @k: prefer an applyable candidate
         log = []
         gate_src = _full_files_src(dest, support, meta)
-        p2, trace, fp, steps = slot_solve(issue, {"full": src, "sources": support_sources, "gate": gate_src}, diagnose_fn, plan_fn, fix_fn,
-                                          max_steps=a.max_steps, log=log, capture_evidence=a.audit_support_text)
+        _t0 = time.time()
+        if a.prefix_kv:
+            p2, trace = kv_solve(model, tok, dev, issue, gate_src, dest, verifier, task, a, vsecs=_vsecs)
+            fp = False; steps = len(trace.get("fix_attempts", []))
+        else:
+            p2, trace, fp, steps = slot_solve(issue, {"full": src, "sources": support_sources, "gate": gate_src}, diagnose_fn, plan_fn, fix_fn,
+                                              max_steps=a.max_steps, log=log, capture_evidence=a.audit_support_text)
+        _wall = time.time() - _t0; _gen = _wall - _vsecs[0]
         app2 = bool(p2.strip())
         slot_app += app2
         if app2:
@@ -1753,7 +1844,8 @@ def main():
 
         print(f"  [{k+1}/{len(ids)}] {iid:28} oneshot_app={app1} slot_app={app2} "
               f"slot_steps={steps} diag_attempts={len(trace['diagnoses'])} "
-              f"plan_attempts={len(trace['plans'])} fixpoint={fp}", flush=True)
+              f"plan_attempts={len(trace['plans'])} fixpoint={fp} "
+              f"| TIME slot={_wall:.1f}s gen={_gen:.1f}s verify={_vsecs[0]:.1f}s", flush=True)
         dump.write(f"\n===== {iid} =====\nISSUE: {issue[:200]}\n\n"
                    f"SUPPORT IDS: {support}\n"
                    f"SUPPORT SOURCES: {_support_digest(support_sources) if a.audit_support_text else [s['id'] for s in support_sources]}\n\n"
