@@ -494,7 +494,7 @@ def train(
 
     # ── Staged helpers ────────────────────────────────────────────────────────
     @torch.no_grad()
-    def _staged_rollout(t):
+    def _staged_rollout(t, k_override=None, greedy=False):
         """Run one staged rollout for task t. Returns (fix_comps, rewards, diag_full_ids, glue).
 
         1. Build ctx_ids (heavy context): prefilled ONCE.
@@ -520,14 +520,18 @@ def train(
         diag_full = sess.cur_ids  # [1, L_ctx + L_diag]
 
         fix_comps, rewards = [], []
-        for sample_i in range(K):
+        k_eval = k_override if k_override is not None else K
+        for sample_i in range(k_eval):
             # Fresh session rooted at the post-DIAGNOSE KV — no re-prefill.
             fsess = PrefixSession(model, tok, dev)
             fsess.past = diag_past
             fsess.cur_ids = diag_full
             with _make_fwd_ctx():
                 # GENERATE WITH SAMPLING so K diverse candidates emerge for GRPO
-                fix_new = fsess.gen_sampled(fix_glue, max_new, tok.eos_token_id, temperature=temperature)
+                if greedy:
+                    fix_new = fsess.gen(fix_glue, max_new, tok.eos_token_id)
+                else:
+                    fix_new = fsess.gen_sampled(fix_glue, max_new, tok.eos_token_id, temperature=temperature)
             completion = tok.decode(fix_new, skip_special_tokens=True)
             completion = re.sub(r"<think>.*?</think>", "", completion, flags=re.DOTALL).strip()
             r = _score_task_blocks(t, parse_sr(completion), reward_mode=reward_mode, verifier=verifier)[0]
@@ -559,14 +563,18 @@ def train(
     # ── Eval / emit helpers ───────────────────────────────────────────────────
     @torch.no_grad()
     def evaluate(ts):
-        """Held-out evaluation. Uses one-shot (consistent across staged/non-staged runs)."""
+        """Held-out evaluation."""
         model.eval(); rs, app, solv = [], 0, 0
         for t in ts:
             if graph: _prep(t)
-            pids = encode(SR_SYS, fix_user(t["issue"], t["src"], exemplar=_ex(t)))
-            out = gen_ids(pids, sample=False)
-            r, b = score(tok.decode(out[0, pids.shape[1]:], skip_special_tokens=True), t,
-                         reward_mode=reward_mode, verifier=verifier)
+            if staged:
+                fix_comps, _, _, _ = _staged_rollout(t, k_override=1, greedy=True)
+                completion = tok.decode(fix_comps[0], skip_special_tokens=True)
+            else:
+                pids = encode(SR_SYS, fix_user(t["issue"], t["src"], exemplar=_ex(t)))
+                out = gen_ids(pids, sample=False)
+                completion = tok.decode(out[0, pids.shape[1]:], skip_special_tokens=True)
+            r, b = score(completion, t, reward_mode=reward_mode, verifier=verifier)
             rs.append(r); app += int(b.get("grounded", False)); solv += int(b.get("solved", False))
         model.train()
         return sum(rs) / len(ts), app / len(ts), solv / len(ts)
@@ -578,9 +586,13 @@ def train(
         task_patches: list[tuple[dict, str]] = []; applyable = 0
         for t in ts:
             if graph: _prep(t)
-            pids = encode(SR_SYS, fix_user(t["issue"], t["src"], exemplar=_ex(t)))
-            out = gen_ids(pids, sample=False)
-            completion = tok.decode(out[0, pids.shape[1]:], skip_special_tokens=True)
+            if staged:
+                fix_comps, _, _, _ = _staged_rollout(t, k_override=1, greedy=True)
+                completion = tok.decode(fix_comps[0], skip_special_tokens=True)
+            else:
+                pids = encode(SR_SYS, fix_user(t["issue"], t["src"], exemplar=_ex(t)))
+                out = gen_ids(pids, sample=False)
+                completion = tok.decode(out[0, pids.shape[1]:], skip_special_tokens=True)
             blocks = parse_sr(completion)
             applied, patch = materialize_patch(t, blocks)
             if applied > 0 and patch.strip():
@@ -603,9 +615,13 @@ def train(
         model.eval(); task_patches: list[tuple[dict, str]] = []
         for t in ts:
             if graph: _prep(t)
-            pids = encode(SR_SYS, fix_user(t["issue"], t["src"], exemplar=_ex(t)))
-            out = gen_ids(pids, sample=False)
-            completion = tok.decode(out[0, pids.shape[1]:], skip_special_tokens=True)
+            if staged:
+                fix_comps, _, _, _ = _staged_rollout(t, k_override=1, greedy=True)
+                completion = tok.decode(fix_comps[0], skip_special_tokens=True)
+            else:
+                pids = encode(SR_SYS, fix_user(t["issue"], t["src"], exemplar=_ex(t)))
+                out = gen_ids(pids, sample=False)
+                completion = tok.decode(out[0, pids.shape[1]:], skip_special_tokens=True)
             blocks = parse_sr(completion)
             applied, patch = materialize_patch(t, blocks)
             if applied > 0 and patch.strip(): task_patches.append((t, patch))
@@ -656,13 +672,20 @@ def train(
                     t["gold_sr_text"], return_tensors="pt", add_special_tokens=False
                 ).input_ids.to(dev)[:, :sft_cap]
                 full = torch.cat([ctx_ids, gold_diag_ids, fix_glue, gold_fix_ids], dim=1)
+                diag_start = ctx_ids.shape[1]
                 fix_start = ctx_ids.shape[1] + gold_diag_ids.shape[1] + fix_glue.shape[1]
                 with _make_fwd_ctx():
                     logits = model(full, use_cache=False).logits
-                loss = ce(
+                
+                loss_diag = ce(
+                    logits[:, diag_start - 1:diag_start - 1 + gold_diag_ids.shape[1]].reshape(-1, logits.shape[-1]).float(),
+                    gold_diag_ids.reshape(-1),
+                )
+                loss_fix = ce(
                     logits[:, fix_start - 1:fix_start - 1 + gold_fix_ids.shape[1]].reshape(-1, logits.shape[-1]).float(),
                     gold_fix_ids.reshape(-1),
                 )
+                loss = loss_diag + loss_fix
             else:
                 pids = encode(SR_SYS, fix_user(t["issue"], t["src"], exemplar=_ex(t)))
                 gids = tok(t["gold_sr_text"], return_tensors="pt", add_special_tokens=False).input_ids.to(dev)[:, :sft_cap]
