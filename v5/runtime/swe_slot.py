@@ -1593,6 +1593,9 @@ def main():
                          "resolve: does a retrieved good plan -> reuse -> resolve (the trainable reuse policy)?")
     ap.add_argument("--exemplars", default="data/swe/exemplars.jsonl",
                     help="resolved-bug exemplars (instance_id, issue, diff) for --exemplar retrieval")
+    ap.add_argument("--exemplar-rank", type=int, default=0,
+                    help="use the (R+1)-th nearest exemplar (default 0=nearest). Sweep 0,1,2 + union "
+                         "resolves = best-of-K retrieval HEADROOM + outcome labels for a trained retriever.")
     ap.add_argument("--oneshot-only", action="store_true",
                     help="run ONLY the one-shot baseline (skip the slot/kv solve) — validate the clean DIRECT "
                          "leaf (one-shot + think + snap) fast, without the slot churn.")
@@ -1759,11 +1762,16 @@ def main():
         _emb_x = RealEmbedder(_torch.device("cpu"))           # CPU: don't fight the 4B for VRAM (was OOM)
         _ev = _emb_x.embed_nodes({e["instance_id"]: e.get("issue", "") for e in _exs})
         _ex_mat = _np.stack([_np.asarray(_unit(_ev[i]), dtype=_np.float32) for i in _ex_ids])
-        def _ex_nearest(iid_, issue_):
+        def _ex_nearest(iid_, issue_, rank=0):
+            # rank=0 -> nearest OTHER exemplar (default); rank=R -> the (R+1)-th nearest. Sweep R (0,1,2)
+            # + union resolves = best-of-K retrieval HEADROOM + (task,exemplar,resolved) outcome labels.
             qv = _np.asarray(_unit(_emb_x.embed_nodes({"q": issue_})["q"]), dtype=_np.float32)
+            seen = 0
             for j in _np.argsort(-(_ex_mat @ qv)):
                 if _ex_ids[j] != iid_:
-                    return _ex_ids[j], _ex_diff[_ex_ids[j]]
+                    if seen == rank:
+                        return _ex_ids[j], _ex_diff[_ex_ids[j]]
+                    seen += 1
             return "", ""
         print(f"[exemplar] loaded {len(_exs)} resolved exemplars for the binding probe", flush=True)
 
@@ -1815,7 +1823,8 @@ def main():
 
         ex_diff = ""
         if a.exemplar and _ex_nearest is not None:           # binding probe: nearest resolved exemplar to ADAPT
-            _exid, ex_diff = _ex_nearest(iid, issue)
+            _exid, ex_diff = _ex_nearest(iid, issue, rank=a.exemplar_rank)
+            print(f"    [exemplar] {iid} rank={a.exemplar_rank} -> {_exid}", flush=True)  # label: (task,exemplar)
 
         # ONE-SHOT baseline (single SR emit)
         g1 = gen(
