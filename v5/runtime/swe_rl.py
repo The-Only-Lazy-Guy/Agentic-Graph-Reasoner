@@ -312,6 +312,7 @@ def train(
     graph: bool = False, adapter_ckpt: str = "", gnn_ckpt: str = "",
     train_gnn: bool = False, op_layer: int = 26, op_alpha: float = 4.0,
     staged: bool = False, diag_max_new: int = 200,
+    distill: bool = False, distill_steps: int = 0, gap_coef: float = 0.0,
 ):
     """Train the SWE RL model.
 
@@ -369,6 +370,10 @@ def train(
     # NOT via prompt text. Active during every forward pass (rollout + grad step).
     _make_fwd_ctx = lambda: nullcontext()
     _prep = lambda t: None
+    if distill and graph:
+        print("[distill] --graph ignored: distill uses the clean op-only latent channel "
+              "(no random cross-attn adapter to confound the kill-test).", flush=True)
+        graph = False
     if graph:
         from contextlib import ExitStack
         from v5.adapter import GraphAttentionInjector
@@ -420,6 +425,30 @@ def train(
         print(f"graph adapter: trainable {sum(p.numel() for p in adapter.parameters() if p.requires_grad):,}"
               f" | train_gnn={train_gnn}", flush=True)
         print(f"operator injector: L{op_injector.L} alpha={op_injector.alpha} | nodes={OP_SIGN}", flush=True)
+
+    # ── Distillation latent channel (LGGN step 1) ─────────────────────────────
+    # Clean latent edge-operator: OperatorInjector delta ONLY (no random cross-attn adapter to
+    # confound). _op_v = op-signed ASSERT of the support nodes (content from node texts) added
+    # to the residual at layer L (h <- h + delta). The frozen LM + LoRA learn to DECODE the gold
+    # answer from [plain prompt + delta] to MATCH the text-grounded teacher -> "pay attention to
+    # the injected context". Skipped if --graph already set up the (heavier) injector path.
+    _opv = {"v": None}
+    if distill and not graph:
+        from v5.operator_injector import OperatorInjector, SIGN as OP_SIGN
+        from v5.operator_schema import op_kind_for
+        inj_base = model.get_base_model() if hasattr(model, "get_base_model") else model
+        op_injector = OperatorInjector(inj_base, tok, layer=op_layer, alpha=op_alpha)
+
+        def _prep(t):
+            nodes = [(t["texts"][nid], op_kind_for(t.get("node_types", {}).get(nid, "fact")))
+                     for nid in t["node_ids"]]
+            _opv["v"] = op_injector.combine(nodes, t["issue"], normalize=True)
+
+        def _make_fwd_ctx():
+            return op_injector.inject(_opv["v"]) if _opv["v"] is not None else nullcontext()
+
+        print(f"[distill] latent channel = OperatorInjector delta | L{op_injector.L} "
+              f"alpha={op_injector.alpha} (op-only, no cross-attn adapter)", flush=True)
 
     opt = torch.optim.AdamW(trainable, lr=lr)
     print(f"LoRA r={r_lora} layers {layers} | trainable {sum(p.numel() for p in trainable):,} | tasks {len(tasks)}", flush=True)
@@ -688,7 +717,7 @@ def train(
                 loss = loss_diag + loss_fix
             else:
                 pids = encode(SR_SYS, fix_user(t["issue"], t["src"], exemplar=_ex(t)))
-                gids = tok(t["gold_sr_text"], return_tensors="pt", add_special_tokens=False).input_ids.to(dev)[:, :sft_cap]
+                gids = tok(t["gold_sr_text"], return_tensors="pt", add_special_tokens=False).input_ids.to(dev)[:, :_cap]
                 full = torch.cat([pids, gids], dim=1)
                 with _make_fwd_ctx():
                     logits = model(full, use_cache=False).logits
@@ -709,6 +738,113 @@ def train(
                 print(f"[verify after SFT] held exact_resolve={vr:.0%} patch_emission={vp:.0%}\n", flush=True)
         if emit_preds_dir:
             emit_predictions(held, "held_after_sft")
+
+    # ── Distillation loop (LGGN step 1: text-grounding -> latent-delta grounding) ──
+    # Teacher = model WITH plan in prompt TEXT (the path proven to work), no injection.
+    # Student = model with plan as latent delta injection ONLY, NO text. KL pulls student->teacher
+    # on the gold answer tokens, so the only way to match is to ROUTE the injection into the
+    # answer = the model learns to attend to the injected context. The text crutch is removed
+    # (exemplar="") so the latent must carry the signal.
+    if distill:
+        _cap = max(max_new, 256)   # gold-answer token cap for KL (easy-task golds fit; bounds backward mem)
+
+        def _gold_lp(logits, st, gtok):
+            n = gtok.shape[0]
+            lp = torch.log_softmax(logits[:, st - 1:st - 1 + n].float(), dim=-1)  # [1,n,V]
+            return lp, lp[0].gather(-1, gtok.unsqueeze(-1)).squeeze(-1).sum()
+
+        def _distill_step(t):
+            gids = tok(t["gold_sr_text"], return_tensors="pt",
+                       add_special_tokens=False).input_ids.to(dev)[:, :_cap]
+            if gids.shape[1] == 0:
+                return None
+            gtok = gids[0]
+            # TEACHER: plan in TEXT, no injection, no grad -> the distillation target
+            pidsT = encode(SR_SYS, fix_user(t["issue"], t["src"], exemplar=_ex(t)))
+            with torch.no_grad():
+                logT = model(torch.cat([pidsT, gids], 1), use_cache=False).logits
+            lpT, goldT = _gold_lp(logT, pidsT.shape[1], gtok)
+            lpT = lpT.detach(); pT = lpT.exp()
+            # STUDENT: NO text plan, WITH latent delta injection, grad flows
+            pidsS = encode(SR_SYS, fix_user(t["issue"], t["src"], exemplar=""))
+            _prep(t)
+            fullS = torch.cat([pidsS, gids], 1); sS = pidsS.shape[1]
+            with _make_fwd_ctx():
+                logS = model(fullS, use_cache=False).logits
+            lpS, goldS_on = _gold_lp(logS, sS, gtok)
+            kl = (pT * (lpT - lpS)).sum(-1).mean()
+            # ABLATION: same student prompt, injection OFF, no grad (does delta help recover gold?)
+            with torch.no_grad():
+                logOff = model(fullS, use_cache=False).logits
+                _, goldS_off = _gold_lp(logOff, sS, gtok)
+            loss = kl
+            if gap_coef > 0:   # optional: explicitly reward injection recovering the gold answer
+                loss = kl - gap_coef * (goldS_on - goldS_off.detach())
+            return loss, dict(kl=float(kl.detach()), goldT=float(goldT),
+                              on=float(goldS_on.detach()), off=float(goldS_off),
+                              gap=float((goldS_on - goldS_off).detach()))
+
+        @torch.no_grad()
+        def _kill_test(ts, sweep=(0.0,)):
+            """does the latent carry signal AND is it the RIGHT content? mean gold-logprob over held.
+            sweep = effective-alpha fractions of op_alpha to try (vector scales linearly with alpha, so
+            we scale the precomputed v instead of recombining). 0.0 = OFF baseline. Also reports random-
+            delta at the strongest scale (content vs perturbation). Calibrates a non-destructive alpha."""
+            sweep = tuple(dict.fromkeys((0.0,) + tuple(sweep)))   # always include OFF, dedup
+            acc = {f: 0.0 for f in sweep}; rnd = 0.0; n = 0
+            for t in ts:
+                gids = tok(t["gold_sr_text"], return_tensors="pt",
+                           add_special_tokens=False).input_ids.to(dev)[:, :_cap]
+                if gids.shape[1] == 0:
+                    continue
+                gtok = gids[0]
+                pidsS = encode(SR_SYS, fix_user(t["issue"], t["src"], exemplar=""))
+                fullS = torch.cat([pidsS, gids], 1); sS = pidsS.shape[1]
+                _prep(t)
+                base_v = _opv["v"]
+                for f in sweep:
+                    ctx = op_injector.inject(base_v * f) if f != 0.0 else nullcontext()
+                    with ctx:
+                        _, g = _gold_lp(model(fullS, use_cache=False).logits, sS, gtok)
+                    acc[f] += float(g)
+                fmax = max(sweep)
+                rv = torch.randn_like(base_v); rv = rv / (rv.norm() + 1e-6) * (base_v * fmax).norm()
+                with op_injector.inject(rv):
+                    _, g_rnd = _gold_lp(model(fullS, use_cache=False).logits, sS, gtok)
+                rnd += float(g_rnd); n += 1
+            if n:
+                off = acc[0.0] / n
+                parts = " ".join(f"a{op_alpha*f:g}={acc[f]/n:+.1f}" for f in sweep if f != 0.0)
+                fmax = max(sweep)
+                v2 = "CONTENT" if acc[fmax] / n > rnd / n else "perturbation-only"
+                print(f"[kill-test] gold_lp OFF={off:+.1f} | {parts} | rand(a{op_alpha*fmax:g})={rnd/n:+.1f} "
+                      f"| strongest>rand:{v2}", flush=True)
+            return None
+
+        print("[distill] kill-test BEFORE training (untrained latent baseline + alpha sweep):", flush=True)
+        _kill_test(held, sweep=(0.25, 0.5, 1.0, 2.0, 4.0))
+        ds = distill_steps if distill_steps > 0 else steps
+        for step in range(1, ds + 1):
+            t = rng.choice(train_tasks_easy)
+            out = _distill_step(t)
+            if out is None:
+                continue
+            loss, m = out
+            if step == 1:
+                assert loss.requires_grad, "DISTILL LOSS DETACHED — gradient will not flow"
+            opt.zero_grad(set_to_none=True); loss.backward()
+            gn = torch.nn.utils.clip_grad_norm_(trainable, 1.0); opt.step()
+            if step <= 3 or step % 10 == 0:
+                print(f"[distill {step:3}] {t['iid']:24} kl={m['kl']:.3f} goldT={m['goldT']:.1f} "
+                      f"on={m['on']:.1f} off={m['off']:.1f} gap={m['gap']:+.1f} gnorm={float(gn):.3f}",
+                      flush=True)
+            if step % eval_every == 0:
+                _kill_test(held, sweep=(1.0,))
+        print("[distill] kill-test AFTER training:", flush=True)
+        _kill_test(held, sweep=(1.0,))
+        if emit_preds_dir:
+            emit_predictions(held, "held_after_distill")
+        return
 
     # ── GRPO loop ─────────────────────────────────────────────────────────────
     zero_var = 0
@@ -862,6 +998,14 @@ def main():
     ap.add_argument("--train-gnn", action="store_true")
     ap.add_argument("--op-layer", type=int, default=26)
     ap.add_argument("--op-alpha", type=float, default=4.0)
+    ap.add_argument("--distill", action="store_true",
+                    help="LGGN step 1: context-distill text-grounding -> latent-delta grounding. Teacher=plan-in-text, "
+                         "student=plan-as-latent-injection (no text); KL trains the model to ATTEND the injection. "
+                         "Runs after SFT, skips GRPO. Includes the real-delta-vs-random-delta kill-test.")
+    ap.add_argument("--distill-steps", type=int, default=0,
+                    help="number of distillation steps (0 -> use --steps).")
+    ap.add_argument("--gap-coef", type=float, default=0.0,
+                    help="optional reliance term: loss -= gap_coef*(gold_lp_on - gold_lp_off). 0 = pure KL.")
     a = ap.parse_args()
     if a.selftest:
         import sys; sys.exit(0 if _selftest() else 1)
@@ -885,6 +1029,7 @@ def main():
         graph=a.graph, adapter_ckpt=a.adapter_ckpt, gnn_ckpt=a.gnn_ckpt, train_gnn=a.train_gnn,
         op_layer=a.op_layer, op_alpha=a.op_alpha,
         staged=a.staged, diag_max_new=a.diag_max_new,
+        distill=a.distill, distill_steps=a.distill_steps, gap_coef=a.gap_coef,
     )
 
 
