@@ -313,6 +313,7 @@ def train(
     train_gnn: bool = False, op_layer: int = 26, op_alpha: float = 4.0,
     staged: bool = False, diag_max_new: int = 200,
     distill: bool = False, distill_steps: int = 0, gap_coef: float = 0.0, op_mean: bool = True,
+    rep_penalty: float = 1.15,
 ):
     """Train the SWE RL model.
 
@@ -507,7 +508,8 @@ def train(
                 temperature=temperature if sample else None,
                 top_p=0.95 if sample else None,
                 max_new_tokens=max_new,
-                pad_token_id=tok.eos_token_id, use_cache=True,
+                repetition_penalty=rep_penalty,   # curb greedy degeneration (django-11133 dup-loop);
+                pad_token_id=tok.eos_token_id, use_cache=True,   # penalty-only, no no_repeat_ngram (code repeats short n-grams)
             )
 
     def seq_logprob_oneshot(pids, comp):
@@ -1006,6 +1008,8 @@ def main():
                     help="number of distillation steps (0 -> use --steps).")
     ap.add_argument("--gap-coef", type=float, default=0.0,
                     help="optional reliance term: loss -= gap_coef*(gold_lp_on - gold_lp_off). 0 = pure KL.")
+    ap.add_argument("--rep-penalty", type=float, default=1.15,
+                    help="generation repetition_penalty (curbs greedy dup-loops). 1.0 = off.")
     ap.add_argument("--op-sum", action="store_true",
                     help="revert to SUMMING op-delta over nodes (uncalibrated, magnitude scales w/ node count). "
                          "Default = MEAN (node-count-invariant alpha; the calibrated distill default).")
@@ -1033,6 +1037,7 @@ def main():
         op_layer=a.op_layer, op_alpha=a.op_alpha,
         staged=a.staged, diag_max_new=a.diag_max_new,
         distill=a.distill, distill_steps=a.distill_steps, gap_coef=a.gap_coef, op_mean=not a.op_sum,
+        rep_penalty=a.rep_penalty,
     )
 
 
