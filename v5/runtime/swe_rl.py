@@ -717,7 +717,7 @@ def train(
                 loss = loss_diag + loss_fix
             else:
                 pids = encode(SR_SYS, fix_user(t["issue"], t["src"], exemplar=_ex(t)))
-                gids = tok(t["gold_sr_text"], return_tensors="pt", add_special_tokens=False).input_ids.to(dev)[:, :_cap]
+                gids = tok(t["gold_sr_text"], return_tensors="pt", add_special_tokens=False).input_ids.to(dev)[:, :sft_cap]
                 full = torch.cat([pids, gids], dim=1)
                 with _make_fwd_ctx():
                     logits = model(full, use_cache=False).logits
