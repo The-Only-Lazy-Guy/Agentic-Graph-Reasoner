@@ -312,7 +312,7 @@ def train(
     graph: bool = False, adapter_ckpt: str = "", gnn_ckpt: str = "",
     train_gnn: bool = False, op_layer: int = 26, op_alpha: float = 4.0,
     staged: bool = False, diag_max_new: int = 200,
-    distill: bool = False, distill_steps: int = 0, gap_coef: float = 0.0,
+    distill: bool = False, distill_steps: int = 0, gap_coef: float = 0.0, op_mean: bool = True,
 ):
     """Train the SWE RL model.
 
@@ -442,7 +442,7 @@ def train(
         def _prep(t):
             nodes = [(t["texts"][nid], op_kind_for(t.get("node_types", {}).get(nid, "fact")))
                      for nid in t["node_ids"]]
-            _opv["v"] = op_injector.combine(nodes, t["issue"], normalize=True)
+            _opv["v"] = op_injector.combine(nodes, t["issue"], normalize=True, mean=op_mean)
 
         def _make_fwd_ctx():
             return op_injector.inject(_opv["v"]) if _opv["v"] is not None else nullcontext()
@@ -1006,6 +1006,9 @@ def main():
                     help="number of distillation steps (0 -> use --steps).")
     ap.add_argument("--gap-coef", type=float, default=0.0,
                     help="optional reliance term: loss -= gap_coef*(gold_lp_on - gold_lp_off). 0 = pure KL.")
+    ap.add_argument("--op-sum", action="store_true",
+                    help="revert to SUMMING op-delta over nodes (uncalibrated, magnitude scales w/ node count). "
+                         "Default = MEAN (node-count-invariant alpha; the calibrated distill default).")
     a = ap.parse_args()
     if a.selftest:
         import sys; sys.exit(0 if _selftest() else 1)
@@ -1029,7 +1032,7 @@ def main():
         graph=a.graph, adapter_ckpt=a.adapter_ckpt, gnn_ckpt=a.gnn_ckpt, train_gnn=a.train_gnn,
         op_layer=a.op_layer, op_alpha=a.op_alpha,
         staged=a.staged, diag_max_new=a.diag_max_new,
-        distill=a.distill, distill_steps=a.distill_steps, gap_coef=a.gap_coef,
+        distill=a.distill, distill_steps=a.distill_steps, gap_coef=a.gap_coef, op_mean=not a.op_sum,
     )
 
 

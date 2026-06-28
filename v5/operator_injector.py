@@ -71,15 +71,22 @@ class OperatorInjector:
         """the node's in-context grounding shift at the query's answer position."""
         return self._hlast(f"{node_text}\n{query}") - self._hlast(query)
 
-    def combine(self, nodes: List[Tuple[str, str]], query: str, normalize: bool = False) -> torch.Tensor:
+    def combine(self, nodes: List[Tuple[str, str]], query: str, normalize: bool = False,
+                mean: bool = False) -> torch.Tensor:
         """nodes = [(text, op_kind)] -> op-signed steering vector at layer L.
 
         normalize=True unit-scales each node's grounding shift before applying alpha, so the steering
         DEGREE is length-invariant (long grown nodes else over-steer a big model — alpha 4 on 4B/L26
         gave +-12 logit swings). With normalize, alpha is the steering magnitude in shift-norm units.
+
+        mean=True AVERAGES the op-signed shifts over the contributing nodes instead of summing, so the
+        steering magnitude is NODE-COUNT-invariant (else a 24-support task steers ~24x harder than a
+        1-support task at the same alpha -> alpha is uncalibrated across tasks; the distill kill-test
+        showed held tasks 24x more destructive purely from node count).
         """
         base = self._hlast(query)
         v = torch.zeros_like(base)
+        n_contrib = 0
         for text, op in nodes:
             s = SIGN.get(op, 0.0)
             if s != 0.0:
@@ -87,6 +94,9 @@ class OperatorInjector:
                 if normalize:                       # length- AND model-invariant: unit shift * ||base||
                     shift = shift / (shift.norm() + 1e-6) * base.norm()   # alpha now = fraction of residual
                 v = v + s * self.alpha * shift
+                n_contrib += 1
+        if mean and n_contrib > 0:                  # node-count-invariant magnitude (calibrated alpha)
+            v = v / n_contrib
         return v
 
     @contextlib.contextmanager
