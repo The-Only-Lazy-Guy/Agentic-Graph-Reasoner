@@ -302,6 +302,38 @@ def _glue_ids(tok, dev):
 # MAIN TRAIN FUNCTION
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _save_train_plots(metrics: dict, out_dir: str) -> None:
+    """Dump training dynamics: metrics.json (always) + PNG plots (if matplotlib). Called at every eval
+    so the plots update live during the run. Robust — never crashes training if matplotlib is absent."""
+    import json as _json
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    Path(out_dir, "metrics.json").write_text(_json.dumps(metrics, indent=1), encoding="utf-8")
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception:
+        return
+    panels = [k for k in ("sft", "grpo", "eval") if metrics.get(k)]
+    if not panels:
+        return
+    fig, axes = plt.subplots(1, len(panels), figsize=(5.5 * len(panels), 4), squeeze=False)
+    for ax, k in zip(axes[0], panels):
+        rows = metrics[k]
+        xs = [r.get("step", i) for i, r in enumerate(rows)]
+        if k == "sft":
+            ax.plot(xs, [r["ce_loss"] for r in rows], lw=1); ax.set_title("SFT ce_loss"); ax.set_xlabel("step")
+        elif k == "grpo":
+            ax.plot(xs, [r["mean_r"] for r in rows], label="mean_r", lw=1)
+            ax.plot(xs, [r.get("gnorm", 0) for r in rows], label="gnorm", lw=1, alpha=.6)
+            ax.set_title("GRPO"); ax.set_xlabel("step"); ax.legend(fontsize=7)
+        elif k == "eval":
+            ax.plot(xs, [r["applyable"] for r in rows], "-o", label="applyable", ms=3)
+            ax.plot(xs, [r["solve"] for r in rows], "-o", label="gold-solve", ms=3)
+            ax.set_title("held eval"); ax.set_xlabel("step"); ax.set_ylim(0, 1); ax.legend(fontsize=7)
+    fig.tight_layout(); fig.savefig(Path(out_dir, "training_dynamics.png"), dpi=110); plt.close(fig)
+
+
 def train(
     model_name, tasks, steps, K, lr, r_lora, seed, layers, eval_every, ent_coef, temperature,
     sft_steps, max_new,
@@ -313,7 +345,7 @@ def train(
     train_gnn: bool = False, op_layer: int = 26, op_alpha: float = 4.0,
     staged: bool = False, diag_max_new: int = 200,
     distill: bool = False, distill_steps: int = 0, gap_coef: float = 0.0, op_mean: bool = True,
-    rep_penalty: float = 1.15, realizer: bool = False,
+    rep_penalty: float = 1.15, realizer: bool = False, plots_dir: str = "artifacts/train_plots",
 ):
     """Train the SWE RL model.
 
@@ -452,6 +484,7 @@ def train(
               f"alpha={op_injector.alpha} (op-only, no cross-attn adapter)", flush=True)
 
     opt = torch.optim.AdamW(trainable, lr=lr)
+    _metrics = {"sft": [], "grpo": [], "eval": []}     # training dynamics -> plots_dir (live)
     print(f"LoRA r={r_lora} layers {layers} | trainable {sum(p.numel() for p in trainable):,} | tasks {len(tasks)}", flush=True)
     print(f"base: quant={qmode} dtype={dtype} device={dev} | K={K} max_new={max_new}", flush=True)
     print(f"staged={staged} | KV-prefix latent state-carry={'ON — DIAGNOSE->FIX via shared KV' if staged else 'OFF — one-shot baseline'}", flush=True)
@@ -689,6 +722,8 @@ def train(
 
     bm, ba, bs = evaluate(held)
     print(f"[eval @0] held mean_reward={bm:+.3f} applyable={ba:.0%} gold-solve={bs:.0%}", flush=True)
+    _metrics["eval"].append({"step": 0, "reward": bm, "applyable": ba, "solve": bs})
+    _save_train_plots(_metrics, plots_dir)
     if verifier is not None:
         exact0 = evaluate_exact(held, "verify_0")
         if exact0 is not None:
@@ -748,12 +783,15 @@ def train(
                 loss = ce(logits[:, st - 1:st - 1 + gids.shape[1]].reshape(-1, logits.shape[-1]).float(), gids.reshape(-1))
 
             loss.backward(); torch.nn.utils.clip_grad_norm_(trainable, 1.0); opt.step(); opt.zero_grad()
+            _metrics["sft"].append({"step": s, "ce_loss": float(loss.detach())})
             if s <= 3 or s % 25 == 0:
                 print(f"[sft {s:3}] {t['iid']:26} ce_loss={float(loss.detach()):.3f}", flush=True)
 
         sm, sa, ss = evaluate(held)
         print(f"[eval after SFT] held mean_reward={sm:+.3f} applyable={sa:.0%} gold-solve={ss:.0%} "
               f"(base {bm:+.3f}/{ba:.0%}/{bs:.0%})\n", flush=True)
+        _metrics["eval"].append({"step": sft_steps, "reward": sm, "applyable": sa, "solve": ss})
+        _save_train_plots(_metrics, plots_dir)
         if verifier is not None:
             exact_sft = evaluate_exact(held, "verify_after_sft")
             if exact_sft is not None:
@@ -900,6 +938,7 @@ def train(
                 sample_loss.backward()
             gnorm = torch.nn.utils.clip_grad_norm_(trainable, 1.0)
             opt.step(); opt.zero_grad(set_to_none=True)
+            _metrics["grpo"].append({"step": step, "mean_r": mean_r, "gnorm": float(gnorm), "loss": loss_sum, "r_std": r_std})
             if step % 10 == 0:
                 print(f"[step {step:3}] {t['iid']:24} pool={pool_n}/{len(train_tasks_easy)} "
                       f"mean_r={mean_r:+.2f} r_std={r_std:.2f} ent={ent_sum/K:.2f} "
@@ -936,6 +975,7 @@ def train(
                 sample_loss.backward()
             gnorm = torch.nn.utils.clip_grad_norm_(trainable, 1.0)
             opt.step(); opt.zero_grad(set_to_none=True)
+            _metrics["grpo"].append({"step": step, "mean_r": mean_r, "gnorm": float(gnorm), "loss": loss_sum, "r_std": r_std})
             if step % 10 == 0:
                 print(f"[step {step:3}] {t['iid']:24} pool={pool_n}/{len(train_tasks_easy)} "
                       f"mean_r={mean_r:+.2f} r_std={r_std:.2f} ent={ent_sum/K:.2f} "
@@ -945,6 +985,8 @@ def train(
         if step % eval_every == 0:
             m, ap, sv = evaluate(held)
             print(f"[eval @{step}] held mean_reward={m:+.3f} applyable={ap:.0%} gold-solve={sv:.0%}", flush=True)
+            _metrics["eval"].append({"step": sft_steps + step, "reward": m, "applyable": ap, "solve": sv})
+            _save_train_plots(_metrics, plots_dir)
         if verifier is not None and verify_every > 0 and step % verify_every == 0:
             exact = evaluate_exact(held, f"verify_{step}")
             if exact is not None:
@@ -954,8 +996,11 @@ def train(
             emit_predictions(held, f"held_step_{step:04d}")
 
     m, ap, sv = evaluate(held)
+    _metrics["eval"].append({"step": sft_steps + steps, "reward": m, "applyable": ap, "solve": sv})
+    _save_train_plots(_metrics, plots_dir)
     print(f"\n=== SWE-RL DONE === held mean_reward {bm:+.3f}->{m:+.3f} | "
           f"applyable {ba:.0%}->{ap:.0%} | gold-solve {bs:.0%}->{sv:.0%}")
+    print(f"[plots] training dynamics -> {plots_dir}/training_dynamics.png + metrics.json", flush=True)
     if verifier is not None:
         exact_final = evaluate_exact(held, "verify_final")
         if exact_final is not None:
@@ -1033,6 +1078,8 @@ def main():
                     help="REALIZER training: prompt = fix_user(plan = operators MINED from the gold patch "
                          "via lggn.label_gold) -> gold SR. Trains the LoRA to realize an operator trajectory "
                          "as code (decoder-as-compiler) + bootstraps operator discovery. Replaces the exemplar.")
+    ap.add_argument("--plots-dir", default="artifacts/train_plots",
+                    help="save training-dynamics plots (training_dynamics.png) + metrics.json here, live per eval.")
     ap.add_argument("--rep-penalty", type=float, default=1.15,
                     help="generation repetition_penalty (curbs greedy dup-loops). 1.0 = off.")
     ap.add_argument("--op-sum", action="store_true",
@@ -1062,7 +1109,7 @@ def main():
         op_layer=a.op_layer, op_alpha=a.op_alpha,
         staged=a.staged, diag_max_new=a.diag_max_new,
         distill=a.distill, distill_steps=a.distill_steps, gap_coef=a.gap_coef, op_mean=not a.op_sum,
-        rep_penalty=a.rep_penalty, realizer=a.realizer,
+        rep_penalty=a.rep_penalty, realizer=a.realizer, plots_dir=a.plots_dir,
     )
 
 
