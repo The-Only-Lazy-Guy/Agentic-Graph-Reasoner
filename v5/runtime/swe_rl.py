@@ -313,7 +313,7 @@ def train(
     train_gnn: bool = False, op_layer: int = 26, op_alpha: float = 4.0,
     staged: bool = False, diag_max_new: int = 200,
     distill: bool = False, distill_steps: int = 0, gap_coef: float = 0.0, op_mean: bool = True,
-    rep_penalty: float = 1.15,
+    rep_penalty: float = 1.15, realizer: bool = False,
 ):
     """Train the SWE RL model.
 
@@ -491,6 +491,27 @@ def train(
     def _ex(t):
         return _ex_map.get(t["iid"], "")
 
+    # ── REALIZER training: prompt = fix_user(plan = operators MINED from the gold patch) -> gold SR.
+    # Teaches the LoRA to REALIZE an operator trajectory as correct code (the decoder-as-compiler) and
+    # bootstraps operator discovery (label_gold). At inference the same plan comes from traversal.
+    _op_vocab = {}
+    _rplan_cache: dict = {}
+    if realizer:
+        from v5.runtime.lggn import label_gold, render_op_program, seed_library
+        _op_vocab = {o.name: o for o in seed_library().ops}
+        _n_mined = 0
+        for _t in tasks:
+            _ops = label_gold(_t.get("gold", "") or "")
+            _traj = [_op_vocab[o] for o in _ops if o in _op_vocab]
+            _rplan_cache[_t["iid"]] = render_op_program(_traj) if _traj else "(no operator matched — derive the minimal fix)"
+            _n_mined += bool(_traj)
+        print(f"[realizer] operator-plan SFT: {_n_mined}/{len(tasks)} tasks got a mined operator trajectory", flush=True)
+
+    def _fix(t):
+        if realizer:
+            return fix_user(t["issue"], t["src"], plan=_rplan_cache.get(t["iid"], ""))
+        return fix_user(t["issue"], t["src"], exemplar=_ex(t))
+
     # ── One-shot helpers (used when staged=False OR during eval) ─────────────
     def encode(system, user):
         m = [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -602,7 +623,7 @@ def train(
                 fix_comps, _, _, _ = _staged_rollout(t, k_override=1, greedy=True)
                 completion = tok.decode(fix_comps[0], skip_special_tokens=True)
             else:
-                pids = encode(SR_SYS, fix_user(t["issue"], t["src"], exemplar=_ex(t)))
+                pids = encode(SR_SYS, _fix(t))
                 out = gen_ids(pids, sample=False)
                 completion = tok.decode(out[0, pids.shape[1]:], skip_special_tokens=True)
             r, b = score(completion, t, reward_mode=reward_mode, verifier=verifier)
@@ -621,7 +642,7 @@ def train(
                 fix_comps, _, _, _ = _staged_rollout(t, k_override=1, greedy=True)
                 completion = tok.decode(fix_comps[0], skip_special_tokens=True)
             else:
-                pids = encode(SR_SYS, fix_user(t["issue"], t["src"], exemplar=_ex(t)))
+                pids = encode(SR_SYS, _fix(t))
                 out = gen_ids(pids, sample=False)
                 completion = tok.decode(out[0, pids.shape[1]:], skip_special_tokens=True)
             blocks = parse_sr(completion)
@@ -650,7 +671,7 @@ def train(
                 fix_comps, _, _, _ = _staged_rollout(t, k_override=1, greedy=True)
                 completion = tok.decode(fix_comps[0], skip_special_tokens=True)
             else:
-                pids = encode(SR_SYS, fix_user(t["issue"], t["src"], exemplar=_ex(t)))
+                pids = encode(SR_SYS, _fix(t))
                 out = gen_ids(pids, sample=False)
                 completion = tok.decode(out[0, pids.shape[1]:], skip_special_tokens=True)
             blocks = parse_sr(completion)
@@ -718,7 +739,7 @@ def train(
                 )
                 loss = loss_diag + loss_fix
             else:
-                pids = encode(SR_SYS, fix_user(t["issue"], t["src"], exemplar=_ex(t)))
+                pids = encode(SR_SYS, _fix(t))
                 gids = tok(t["gold_sr_text"], return_tensors="pt", add_special_tokens=False).input_ids.to(dev)[:, :sft_cap]
                 full = torch.cat([pids, gids], dim=1)
                 with _make_fwd_ctx():
@@ -762,7 +783,7 @@ def train(
                 return None
             gtok = gids[0]
             # TEACHER: plan in TEXT, no injection, no grad -> the distillation target
-            pidsT = encode(SR_SYS, fix_user(t["issue"], t["src"], exemplar=_ex(t)))
+            pidsT = encode(SR_SYS, _fix(t))
             with torch.no_grad():
                 logT = model(torch.cat([pidsT, gids], 1), use_cache=False).logits
             lpT, goldT = _gold_lp(logT, pidsT.shape[1], gtok)
@@ -886,7 +907,7 @@ def train(
                       flush=True)
         else:
             # ── ONE-SHOT GRPO (A/B baseline) ─────────────────────────────────
-            pids = encode(SR_SYS, fix_user(t["issue"], t["src"], exemplar=_ex(t)))
+            pids = encode(SR_SYS, _fix(t))
             comps, rewards = [], []
             rollout_modes = [False] + [True] * max(0, K - 1)
             for sample in rollout_modes:
@@ -1008,6 +1029,10 @@ def main():
                     help="number of distillation steps (0 -> use --steps).")
     ap.add_argument("--gap-coef", type=float, default=0.0,
                     help="optional reliance term: loss -= gap_coef*(gold_lp_on - gold_lp_off). 0 = pure KL.")
+    ap.add_argument("--realizer", action="store_true",
+                    help="REALIZER training: prompt = fix_user(plan = operators MINED from the gold patch "
+                         "via lggn.label_gold) -> gold SR. Trains the LoRA to realize an operator trajectory "
+                         "as code (decoder-as-compiler) + bootstraps operator discovery. Replaces the exemplar.")
     ap.add_argument("--rep-penalty", type=float, default=1.15,
                     help="generation repetition_penalty (curbs greedy dup-loops). 1.0 = off.")
     ap.add_argument("--op-sum", action="store_true",
@@ -1037,7 +1062,7 @@ def main():
         op_layer=a.op_layer, op_alpha=a.op_alpha,
         staged=a.staged, diag_max_new=a.diag_max_new,
         distill=a.distill, distill_steps=a.distill_steps, gap_coef=a.gap_coef, op_mean=not a.op_sum,
-        rep_penalty=a.rep_penalty,
+        rep_penalty=a.rep_penalty, realizer=a.realizer,
     )
 
 

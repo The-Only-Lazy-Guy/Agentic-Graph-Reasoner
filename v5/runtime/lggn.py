@@ -152,6 +152,59 @@ def render_realize_prompt(goal: str, site: str, traj: list[Operator]) -> str:
             f"GOAL: {goal}\nSITE: {site}\nREPAIR PROGRAM:\n{steps}\n")
 
 
+def label_gold(gold_diff: str) -> list[str]:
+    """Operator-MINING bootstrap (V5, heuristic first cut): map a gold unified diff -> the seed
+    operator name(s) it realizes, by pattern over its +/- lines. Noisy by design — used to build
+    realizer-SFT supervision (operator-plan -> gold) at scale, and as the seed for learned discovery.
+    Returns op names in a stable order (a trajectory)."""
+    add = [l[1:] for l in gold_diff.splitlines() if l.startswith("+") and not l.startswith("+++")]
+    rem = [l[1:] for l in gold_diff.splitlines() if l.startswith("-") and not l.startswith("---")]
+    A = "\n".join(add)
+    ops: list[str] = []
+    def has(rx, s=A):
+        return re.search(rx, s, re.M) is not None              # MULTILINE: ^ matches each diff line
+    if any(re.match(r"\s*(from\s+\S+\s+import\s|import\s+\S)", l) for l in add):
+        ops.append("AddImport")
+    if has(r"isinstance\s*\("):
+        ops.append("GuardType")
+    if has(r"\[\s*:\s*\]\s*=") or (has(r"\.(replace|strip|lower|upper)\s*\(") and has(r"=\s*\w+\.(replace|strip)")):
+        ops.append("FixInPlaceMutation")
+    if has(r"transaction\.atomic"):
+        ops.append("WrapTransaction")
+    if has(r"^\s*except\s+\w") or has(r"except\s+\("):
+        ops.append("AddExceptHandler")
+    if has(r"(is\s+None|if\s+not\s+\w)") and has(r"^\s*(if|return)"):
+        ops.append("AddNoneGuard")
+    if has(r"(\.size\s*==\s*0|len\s*\([^)]*\)\s*==\s*0|0\s+in\s+\w+\.shape)") and has(r"return"):
+        ops.append("AddEmptyInputGuard")
+    # TightenConditional: a removed condition line reappears with an added `and`/`or` clause
+    for r in rem:
+        rc = r.strip()
+        if rc.startswith(("if ", "elif ", "while ")) or " = " in rc and ("and" in rc or "or" in rc):
+            for a in add:
+                if a.strip().startswith(rc.split(" and ")[0].split(" or ")[0][:20]) and \
+                        (a.count(" and ") > rc.count(" and ") or a.count(" or ") > rc.count(" or ")):
+                    ops.append("TightenConditional"); break
+    # UseRealValue: a constant assignment becomes a variable assignment
+    for r in rem:
+        m = re.search(r"=\s*(\d+|None|True|False|'[^']*'|\"[^\"]*\")\s*$", r.strip())
+        if m:
+            for a in add:
+                if a.strip().split("=")[0] == r.strip().split("=")[0] and not re.search(
+                        r"=\s*(\d+|None|True|False)\s*$", a.strip()):
+                    ops.append("UseRealValue"); break
+    # FixFormatString: a quoted string literal changed (both - and + carry quotes, no structural code)
+    if any("'" in r or '"' in r for r in rem) and any("'" in a or '"' in a for a in add) and \
+            not ops:
+        ops.append("FixFormatString")
+    # dedup preserving order
+    seen = set(); out = []
+    for o in ops:
+        if o not in seen:
+            seen.add(o); out.append(o)
+    return out
+
+
 def render_op_program(traj: list[Operator]) -> str:
     """Operator trajectory -> free-text EDIT PLAN for a realizer that already adds SR-format boilerplate
     (e.g. swe_slot.fix_user(plan=...)). The decoder REALIZES these typed transforms, not infers them."""
@@ -281,6 +334,19 @@ def _selftest() -> bool:
     print(f"  solve(novel): {r2['status']} mode={r2.get('mode')} writeback={r2.get('writeback')} | lib {len(seed_library().ops)}->{len(lib2.ops)}")
     assert r1["status"] == "solved" and r1["mode"] == "realize", "known repair solved via REUSE"
     assert r2["status"] == "solved" and r2["mode"] == "derive" and len(lib2.ops) == 12, "novel repair DERIVED + minted a new operator"
+
+    # 5) gold->operator mining (V5 bootstrap): patterns map to the right seed ops
+    g_mem = "+        if isinstance(value, memoryview):\n+            return bytes(value)"
+    g_txn = ("--- a/x.py\n+++ b/x.py\n+from django.db import transaction\n"
+             "+        with transaction.atomic():\n+        except IntegrityError:")
+    g_const = "-        cright[-1:, -1:] = 1\n+        cright[-1:, -1:] = right"
+    print(f"  label_gold(memoryview) -> {label_gold(g_mem)}")
+    print(f"  label_gold(txn+except+import) -> {label_gold(g_txn)}")
+    print(f"  label_gold(const->var) -> {label_gold(g_const)}")
+    assert "GuardType" in label_gold(g_mem), "memoryview isinstance -> GuardType"
+    lt = label_gold(g_txn)
+    assert {"AddImport", "WrapTransaction", "AddExceptHandler"} <= set(lt), "txn diff -> 3-op trajectory"
+    assert "UseRealValue" in label_gold(g_const), "const->var -> UseRealValue"
 
     print("\n  LGGN SELFTEST -> PASS")
     return True
