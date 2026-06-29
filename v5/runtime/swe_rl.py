@@ -346,6 +346,7 @@ def train(
     staged: bool = False, diag_max_new: int = 200,
     distill: bool = False, distill_steps: int = 0, gap_coef: float = 0.0, op_mean: bool = True,
     rep_penalty: float = 1.15, realizer: bool = False, plots_dir: str = "artifacts/train_plots",
+    fable_corpus: str = "", fable_frac: float = 0.5,
 ):
     """Train the SWE RL model.
 
@@ -738,6 +739,26 @@ def train(
         ce = torch.nn.CrossEntropyLoss()
         sft_cap = max(max_new, 640)
 
+        # Fable-5 (intent->edit) corpus mixed into realizer SFT: broadens leaf code-realization beyond
+        # the ~80 SWE tasks (fixes the small-data overfit). Pure text SFT (no repo/verifier).
+        _fable = []
+        if fable_corpus and Path(fable_corpus).is_file():
+            import json as _json
+            _fable = [_json.loads(l) for l in Path(fable_corpus).read_text(encoding="utf-8").splitlines() if l.strip()]
+            print(f"[realizer] fable corpus: {len(_fable)} (intent->edit) examples | mix_frac={fable_frac}", flush=True)
+        _REAL_SYS = "You are a code realizer. Given a GOAL and PLAN, output ONLY the code/edit that realizes it."
+
+        def _fable_sft_step(rec):
+            prompt = f"GOAL: {(rec.get('goal') or '')[:1200]}\nPLAN: {(rec.get('intent') or '')[:1200]}\nWrite the code:"
+            pids = encode(_REAL_SYS, prompt)
+            tgt = tok(rec.get("edit", "") or "", return_tensors="pt", add_special_tokens=False).input_ids.to(dev)[:, :sft_cap]
+            if tgt.shape[1] == 0:
+                return None
+            full = torch.cat([pids, tgt], dim=1); st = pids.shape[1]
+            with _make_fwd_ctx():
+                logits = model(full, use_cache=False).logits
+            return ce(logits[:, st - 1:st - 1 + tgt.shape[1]].reshape(-1, logits.shape[-1]).float(), tgt.reshape(-1))
+
         def _gold_diag_text(t: dict) -> str:
             """Minimal synthesized DIAGNOSE text from gold patch metadata."""
             sr = gold_to_sr(t["gold"])
@@ -747,6 +768,14 @@ def train(
                     "CHANGE: apply the minimal change from the gold patch")
 
         for s in range(1, sft_steps + 1):
+            if _fable and rng.random() < fable_frac:        # mix a Fable (intent->edit) realizer step
+                loss = _fable_sft_step(rng.choice(_fable))
+                if loss is not None:
+                    loss.backward(); torch.nn.utils.clip_grad_norm_(trainable, 1.0); opt.step(); opt.zero_grad()
+                    _metrics["sft"].append({"step": s, "ce_loss": float(loss.detach()), "src": "fable"})
+                    if s <= 3 or s % 25 == 0:
+                        print(f"[sft {s:3}] FABLE                      ce_loss={float(loss.detach()):.3f}", flush=True)
+                continue
             t = rng.choice(train_tasks)
             if graph: _prep(t)
             if staged:
@@ -1078,6 +1107,11 @@ def main():
                     help="REALIZER training: prompt = fix_user(plan = operators MINED from the gold patch "
                          "via lggn.label_gold) -> gold SR. Trains the LoRA to realize an operator trajectory "
                          "as code (decoder-as-compiler) + bootstraps operator discovery. Replaces the exemplar.")
+    ap.add_argument("--fable-corpus", default="",
+                    help="Fable-5 realizer corpus jsonl (from ingest_fable5) — mixed into SFT as "
+                         "(intent->edit) text steps to broaden leaf code-realization (fixes small-data overfit).")
+    ap.add_argument("--fable-frac", type=float, default=0.5,
+                    help="fraction of SFT steps drawn from the Fable corpus (rest = SWE operator-plan->gold).")
     ap.add_argument("--plots-dir", default="artifacts/train_plots",
                     help="save training-dynamics plots (training_dynamics.png) + metrics.json here, live per eval.")
     ap.add_argument("--rep-penalty", type=float, default=1.15,
@@ -1110,6 +1144,7 @@ def main():
         staged=a.staged, diag_max_new=a.diag_max_new,
         distill=a.distill, distill_steps=a.distill_steps, gap_coef=a.gap_coef, op_mean=not a.op_sum,
         rep_penalty=a.rep_penalty, realizer=a.realizer, plots_dir=a.plots_dir,
+        fable_corpus=a.fable_corpus, fable_frac=a.fable_frac,
     )
 
 
