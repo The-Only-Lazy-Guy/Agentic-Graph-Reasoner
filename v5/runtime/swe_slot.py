@@ -720,6 +720,25 @@ def _patch(blocks, dest):                     # applyable -> git diff (the swebe
     return p
 
 
+def _multileaf_patch(dest, per_leaf_blocks):
+    """LGGN multi-leaf realize: apply each leaf's blocks SEQUENTIALLY and KEEP between (each leaf
+    applies against the live, previous-leaf-modified tree), then capture the CUMULATIVE git diff and
+    restore. This is the real decomposition — a multi-part fix that a single multi-block emission
+    can't apply atomically (one mismatched block -> whole patch non-applyable) succeeds as N small
+    separately-applied leaves. Returns the cumulative diff (or '')."""
+    from v5.runtime.search_replace import apply_sr
+    applied_any = False
+    try:
+        for blocks in per_leaf_blocks:
+            if bool(blocks) and not _unmatched(blocks, dest):
+                n, _ = apply_sr(dest, blocks)
+                applied_any = applied_any or n > 0
+        out = subprocess.run(["git", "-C", dest, "diff"], capture_output=True, text=True).stdout if applied_any else ""
+    finally:
+        subprocess.run(["git", "-C", dest, "checkout", "--", "."], capture_output=True)
+    return out
+
+
 def fix_user(issue, src, diagnosis="", plan="", hints=None, test_failure="", exemplar=""):
     s = f"ISSUE:\n{issue[:1400]}\n\nRELEVANT SOURCE (the bug is in here):\n{src}\n\n"
     if exemplar:                                              # binding probe: a retrieved RESOLVED similar fix
@@ -1602,6 +1621,10 @@ def main():
                          "realizer (operator transform) vs decode-from-evidence (exemplar). See LGGN_DESIGN.md.")
     ap.add_argument("--oracle-ops", default="data/swe/oracle_ops.jsonl",
                     help="instance_id -> seed-operator-name map for the --lggn-realize arm.")
+    ap.add_argument("--lggn-multileaf", action="store_true",
+                    help="for multi-op trajectories, decode+apply each operator as a SEPARATE leaf "
+                         "(apply-between, cumulative diff) instead of one multi-block prompt — the real "
+                         "decomposition test (V2). Fixes multi-block non-applyability.")
     ap.add_argument("--oneshot-only", action="store_true",
                     help="run ONLY the one-shot baseline (skip the slot/kv solve) — validate the clean DIRECT "
                          "leaf (one-shot + think + snap) fast, without the slot churn.")
@@ -1868,7 +1891,21 @@ def main():
         # LGGN REALIZE arm (A/B vs the exemplar oneshot above): realize the oracle operator trajectory
         if _lggn_ops is not None and iid in _lggn_ops:
             _traj = [_lggn_vocab[_n] for _n in _lggn_ops[iid] if _n in _lggn_vocab]
-            if _traj:
+            if _traj and a.lggn_multileaf and len(_traj) > 1:    # MULTI-LEAF: one decode+apply per operator
+                _per_leaf = []
+                for _o in _traj:
+                    _gL = gen(SR_SYS, fix_user(issue, src, plan=_lggn_render([_o])), a.max_new, inject=False)
+                    _bL = parse_sr(_gL)
+                    if a.sr_snap:
+                        _bL = _repair_sr_to_src(_bL, str(dest))
+                    _per_leaf.append(_bL)
+                pR = _multileaf_patch(str(dest), _per_leaf)
+                print(f"    [lggn-realize] {iid} MULTILEAF {[o.name for o in _traj]} "
+                      f"leaves_applyable={[bool(b) and not _unmatched(b, str(dest)) for b in _per_leaf]} "
+                      f"cumulative={bool(pR.strip())}", flush=True)
+                if pR.strip():
+                    realize_preds[iid] = pR
+            elif _traj:                                          # single-prompt realize (trajectory as one plan)
                 gR = gen(SR_SYS, fix_user(issue, src, plan=_lggn_render(_traj)), a.max_new, inject=False)
                 bR = parse_sr(gR)
                 if a.sr_snap:
