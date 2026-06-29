@@ -152,6 +152,14 @@ def render_realize_prompt(goal: str, site: str, traj: list[Operator]) -> str:
             f"GOAL: {goal}\nSITE: {site}\nREPAIR PROGRAM:\n{steps}\n")
 
 
+def render_op_program(traj: list[Operator]) -> str:
+    """Operator trajectory -> free-text EDIT PLAN for a realizer that already adds SR-format boilerplate
+    (e.g. swe_slot.fix_user(plan=...)). The decoder REALIZES these typed transforms, not infers them."""
+    return ("Apply this repair as a sequence of typed transforms (realize each as code):\n" +
+            "\n".join(f"  {i+1}. {o.name} ({o.input_type} -> {o.output_type}): {o.realize_hint}"
+                      for i, o in enumerate(traj)))
+
+
 def render_derive_prompt(goal: str, site: str) -> str:
     return ("No known repair operator matched. Diagnose and fix. Emit ONLY the search/replace "
             f"block(s).\nGOAL: {goal}\nSITE: {site}\n")

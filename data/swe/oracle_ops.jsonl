@@ -1,0 +1,7 @@
+{"instance_id": "astropy__astropy-6938", "op": "FixInPlaceMutation"}
+{"instance_id": "django__django-11039", "op": "TightenConditional"}
+{"instance_id": "django__django-11049", "op": "FixFormatString"}
+{"instance_id": "astropy__astropy-7746", "op": "AddEmptyInputGuard"}
+{"instance_id": "django__django-11133", "op": "GuardType"}
+{"instance_id": "astropy__astropy-12907", "op": "FixInPlaceMutation"}
+{"instance_id": "django__django-11283", "op": "WrapTransaction"}

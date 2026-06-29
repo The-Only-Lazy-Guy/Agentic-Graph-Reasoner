@@ -1596,6 +1596,12 @@ def main():
     ap.add_argument("--exemplar-rank", type=int, default=0,
                     help="use the (R+1)-th nearest exemplar (default 0=nearest). Sweep 0,1,2 + union "
                          "resolves = best-of-K retrieval HEADROOM + outcome labels for a trained retriever.")
+    ap.add_argument("--lggn-realize", action="store_true",
+                    help="LGGN A/B: additionally REALIZE an oracle operator trajectory (fix_user plan=) "
+                         "per instance, emit -> artifacts/swe_lggn_realize_preds.jsonl. Tests decoder-as-"
+                         "realizer (operator transform) vs decode-from-evidence (exemplar). See LGGN_DESIGN.md.")
+    ap.add_argument("--oracle-ops", default="data/swe/oracle_ops.jsonl",
+                    help="instance_id -> seed-operator-name map for the --lggn-realize arm.")
     ap.add_argument("--oneshot-only", action="store_true",
                     help="run ONLY the one-shot baseline (skip the slot/kv solve) — validate the clean DIRECT "
                          "leaf (one-shot + think + snap) fast, without the slot churn.")
@@ -1775,9 +1781,23 @@ def main():
             return "", ""
         print(f"[exemplar] loaded {len(_exs)} resolved exemplars for the binding probe", flush=True)
 
+    # LGGN A/B: REALIZE an operator trajectory (oracle op) vs DECODE-from-evidence (exemplar). The
+    # decoder gets the typed transform as an authoritative EDIT PLAN (fix_user plan=) to realize.
+    _lggn_ops = None; _lggn_vocab = {}; _lggn_render = None
+    if getattr(a, "lggn_realize", False):
+        from v5.runtime.lggn import seed_library, render_op_program
+        _lggn_vocab = {o.name: o for o in seed_library().ops}
+        _lggn_render = render_op_program
+        _lggn_ops = {}
+        for _l in Path(a.oracle_ops).read_text(encoding="utf-8").splitlines():
+            if _l.strip():
+                _d = json.loads(_l); _lggn_ops[_d["instance_id"]] = _d["op"]
+        print(f"[lggn-realize] {len(_lggn_ops)} oracle ops | vocab={list(_lggn_vocab)}", flush=True)
+
     dump = open(outputs["dump"], "w", encoding="utf-8")
     oneshot_app = slot_app = scored = 0
     oneshot_preds, slot_preds = {}, {}
+    realize_preds = {}                                            # LGGN realize arm (operator-trajectory)
     eval_tasks, oneshot_eval, slot_eval = [], [], []
     for k, iid in enumerate(ids):
         t = traces[iid]; inst = insts[iid]
@@ -1843,6 +1863,20 @@ def main():
         if p1.strip():
             oneshot_preds[iid] = p1
             oneshot_eval.append((task, p1))
+
+        # LGGN REALIZE arm (A/B vs the exemplar oneshot above): realize the oracle operator trajectory
+        if _lggn_ops is not None and iid in _lggn_ops:
+            _op = _lggn_vocab.get(_lggn_ops[iid])
+            if _op is not None:
+                gR = gen(SR_SYS, fix_user(issue, src, plan=_lggn_render([_op])), a.max_new, inject=False)
+                bR = parse_sr(gR)
+                if a.sr_snap:
+                    bR = _repair_sr_to_src(bR, str(dest))
+                pR = _patch(bR, str(dest))
+                print(f"    [lggn-realize] {iid} op={_lggn_ops[iid]} "
+                      f"applyable={bool(bR) and not _unmatched(bR, str(dest))}", flush=True)
+                if pR.strip():
+                    realize_preds[iid] = pR
 
         # SLOT path THROUGH THE ENGINE (DIAGNOSE -> PLAN -> FIX, backtrack on ungrounded plans / wrong-scope fixes)
         def diagnose_fn(issue, src, attempt):
@@ -1962,6 +1996,10 @@ def main():
     slot_path = str(outputs["slot"])
     n1 = write_predictions(oneshot_preds, oneshot_path, "v5_oneshot")
     n2 = write_predictions(slot_preds, slot_path, "v5_slot")
+    if _lggn_ops is not None:
+        nR = write_predictions(realize_preds, "artifacts/swe_lggn_realize_preds.jsonl", "v5_lggn_realize")
+        print(f"  [lggn-realize] emitted {nR} realize preds -> artifacts/swe_lggn_realize_preds.jsonl "
+              f"(A/B vs oneshot+exemplar; verify both on Docker)")
     print(f"\n=== #9 SYNTHESIS (engine-wired DIAGNOSE->PLAN->FIX vs one-shot, given support) ===")
     print(f"  applyable@1:  ONE-SHOT {oneshot_app}/{scored}  |  SLOT(engine) {slot_app}/{scored}")
     print(f"  emitted predictions: oneshot {n1} -> {oneshot_path} | slot {n2} -> {slot_path}")
