@@ -1791,8 +1791,9 @@ def main():
         _lggn_ops = {}
         for _l in Path(a.oracle_ops).read_text(encoding="utf-8").splitlines():
             if _l.strip():
-                _d = json.loads(_l); _lggn_ops[_d["instance_id"]] = _d["op"]
-        print(f"[lggn-realize] {len(_lggn_ops)} oracle ops | vocab={list(_lggn_vocab)}", flush=True)
+                _d = json.loads(_l)
+                _lggn_ops[_d["instance_id"]] = _d.get("ops") or [_d["op"]]   # trajectory (list) or single op
+        print(f"[lggn-realize] {len(_lggn_ops)} oracle trajectories | vocab={list(_lggn_vocab)}", flush=True)
 
     dump = open(outputs["dump"], "w", encoding="utf-8")
     oneshot_app = slot_app = scored = 0
@@ -1866,14 +1867,14 @@ def main():
 
         # LGGN REALIZE arm (A/B vs the exemplar oneshot above): realize the oracle operator trajectory
         if _lggn_ops is not None and iid in _lggn_ops:
-            _op = _lggn_vocab.get(_lggn_ops[iid])
-            if _op is not None:
-                gR = gen(SR_SYS, fix_user(issue, src, plan=_lggn_render([_op])), a.max_new, inject=False)
+            _traj = [_lggn_vocab[_n] for _n in _lggn_ops[iid] if _n in _lggn_vocab]
+            if _traj:
+                gR = gen(SR_SYS, fix_user(issue, src, plan=_lggn_render(_traj)), a.max_new, inject=False)
                 bR = parse_sr(gR)
                 if a.sr_snap:
                     bR = _repair_sr_to_src(bR, str(dest))
                 pR = _patch(bR, str(dest))
-                print(f"    [lggn-realize] {iid} op={_lggn_ops[iid]} "
+                print(f"    [lggn-realize] {iid} traj={[o.name for o in _traj]} "
                       f"applyable={bool(bR) and not _unmatched(bR, str(dest))}", flush=True)
                 if pR.strip():
                     realize_preds[iid] = pR

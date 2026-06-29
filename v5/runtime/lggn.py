@@ -221,6 +221,15 @@ def seed_library() -> OperatorLibrary:
         Operator("seed_widenexcept", "WidenExceptHandler", "narrow_except", "correct_except",
                  "a narrow except clause misses an exception type that is actually raised",
                  "broaden/correct the caught exception type", S),
+        Operator("seed_userealvalue", "UseRealValue", "placeholder_constant", "actual_value",
+                 "a placeholder/constant (e.g. 1, 0, None) is used where the actual passed variable should be",
+                 "replace the constant/placeholder with the real variable in scope", S),
+        Operator("seed_addimport", "AddImport", "missing_symbol", "imported_symbol",
+                 "a symbol used by the fix is not imported in the module",
+                 "add the missing import (at module top or locally) so the fix's symbol resolves", S),
+        Operator("seed_addexcept", "AddExceptHandler", "unguarded_op", "guarded_op",
+                 "an operation can raise an exception that the caller must catch/handle",
+                 "wrap the operation in try/except for the specific exception and handle it", S),
     ]
     return OperatorLibrary(ops)
 
@@ -229,7 +238,7 @@ def seed_library() -> OperatorLibrary:
 def _selftest() -> bool:
     print("lggn --selftest: operator library mechanics (retrieve-gate / strengthen / compress)\n")
     lib = seed_library()
-    assert len(lib.ops) == 8, "seed vocab size"
+    assert len(lib.ops) == 11, "seed vocab size"
     print(f"  seed library: {len(lib.ops)} operators")
 
     # 1) retrieve: a memoryview goal should surface GuardType
@@ -271,7 +280,7 @@ def _selftest() -> bool:
     print(f"  solve(reuse): {r1['status']} mode={r1.get('mode')} steps={r1.get('steps')} writeback={r1.get('writeback')}")
     print(f"  solve(novel): {r2['status']} mode={r2.get('mode')} writeback={r2.get('writeback')} | lib {len(seed_library().ops)}->{len(lib2.ops)}")
     assert r1["status"] == "solved" and r1["mode"] == "realize", "known repair solved via REUSE"
-    assert r2["status"] == "solved" and r2["mode"] == "derive" and len(lib2.ops) == 9, "novel repair DERIVED + minted a new operator"
+    assert r2["status"] == "solved" and r2["mode"] == "derive" and len(lib2.ops) == 12, "novel repair DERIVED + minted a new operator"
 
     print("\n  LGGN SELFTEST -> PASS")
     return True
