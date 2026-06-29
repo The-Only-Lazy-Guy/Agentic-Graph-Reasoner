@@ -322,7 +322,19 @@ def _save_train_plots(metrics: dict, out_dir: str) -> None:
         rows = metrics[k]
         xs = [r.get("step", i) for i, r in enumerate(rows)]
         if k == "sft":
-            ax.plot(xs, [r["ce_loss"] for r in rows], lw=1); ax.set_title("SFT ce_loss"); ax.set_xlabel("step")
+            for src, col in (("swe", "C0"), ("fable", "C1")):       # split streams: SWE vs Fable
+                sub = [(r.get("step", i), r["ce_loss"]) for i, r in enumerate(rows) if r.get("src", "swe") == src]
+                if not sub:
+                    continue
+                sx = [a for a, _ in sub]; sy = [b for _, b in sub]
+                ax.scatter(sx, sy, s=5, alpha=.25, color=col)
+                if len(sy) >= 6:                                     # rolling-mean trend
+                    w = max(3, min(15, len(sy) // 4))
+                    sm = [sum(sy[max(0, j - w):j + 1]) / len(sy[max(0, j - w):j + 1]) for j in range(len(sy))]
+                    ax.plot(sx, sm, color=col, lw=1.8, label=f"{src} (avg)")
+                else:
+                    ax.plot(sx, sy, color=col, lw=1.2, label=src)
+            ax.set_title("SFT ce_loss (by source)"); ax.set_xlabel("step"); ax.legend(fontsize=7)
         elif k == "grpo":
             ax.plot(xs, [r["mean_r"] for r in rows], label="mean_r", lw=1)
             ax.plot(xs, [r.get("gnorm", 0) for r in rows], label="gnorm", lw=1, alpha=.6)
