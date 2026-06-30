@@ -74,6 +74,19 @@ An operator node is a typed **program**:
 
 Then traversal is **execute → execute → execute** — a planning system (STRIPS/PDDL-style operators with preconditions + effects), not move → move. Neurosymbolic planning with an LLM realizer.
 
+### T.8 Operator assignment & library GROWTH (open-vocabulary, soft, residual-driven)
+Hard `edit → nearest centroid → operator` is **bootstrap only** — it forces novelty into existing atoms (loses discovery) and locks early clustering errors permanently. The principled form is **dictionary learning / sparse coding** over the operator library:
+- An edit = a **sparse combination** of operators **+ a residual**: `e ≈ Σ wᵢ·centroidᵢ + r`.
+- **Reuse** if the edit is within `τ` of the operator manifold (residual small). **Grow** if not: a large residual `r` *is a candidate new operator atom* `D` (e.g. `e ≈ 0.6·A + 0.4·D`, `D` minted from the residual). So **Fable actually grows the library** instead of collapsing into the SWE-seeded vocab. [VISION; current `chunk_embedding` = the bootstrap hard-assign.]
+- **Preserve uncertainty** — don't collapse `{A:0.62, B:0.59}` to argmax; store the **soft distribution** as a *candidate* and let later **trajectory optimization** (write-back, which operators actually recur across solved trajectories) resolve it. Early-clustering errors stay reversible. This is the operator-level retrieve-or-derive (`lggn.py` `OperatorLibrary` already has the conf/match/mint gates — wire the soft+residual path through it).
+
+### T.9 Training data is POMDP-shaped (preserve observations, don't flatten)
+The runtime is a **POMDP** (§2: traverse → decode → **OBSERVE** → update → write-back). The training data must match it. Fable carries what SWE golds largely don't: **temporal structure** — `Op → Observation → Revision → Op`, not just `Op → Op`. **Preserve it:**
+```
+Goal → Op₁ → Obs₁ → Op₂ → Obs₂ → …        (NOT flattened to Goal → [Op₁,Op₂,…])
+```
+The planner trains as a **policy `π(Δ_t | h_t, obs_{<t})`** where the observation **enters the latent state** (`h_{t+1}=F(h_t, Δ_t, m_t, obs_t)`, T.3) — a failed/observed result is a real INVALIDATE+re-plan signal, the gold supervision for the debug loop. Flattening discards exactly the signal the planner most needs. **[MEASURED 2026-06-30, n=300 cached sessions: Fable is edit-SPARSE — median 0 edits/session, mean 1.0, only 2% multi-edit; ~0.5 edits/session full-set. So the POMDP `Op→Obs→Op` data is a ~2% MINORITY (the heavy sessions), NOT the bulk. Fable's main value = ~2539 `goal→single-op` pairs (data scale for the goal→operator curve); the multi-step/POMDP signal is a smaller SECONDARY feed. Don't over-build the POMDP planner around thin data — mine the heavy sessions for it separately.]**
+
 ---
 
 ## 1. The two graphs
