@@ -92,6 +92,18 @@ The planner trains as a **policy `π(Δ_t | h_t, obs_{<t})`** where the observat
 
 **Fable-feed RESULT (2026-06-30, 2539 records, grown vocab 40 = 24 SWE-seed + 16 Fable-minted, 2421/2539 edits novel):** goal→operator — **Fable-held 70%** (majority 12%, 5.8×) vs **SWE-held 28%** (majority 5%). Fable is the traverse's STRONG domain (intent-stated → operator far more predictable than SWE symptom-issues), vindicating the agentic-coder framing. **But NO cross-domain transfer:** SWE+Fable→SWE-held = 17% < SWE-only 28% (mixing HURTS, same lesson as the realizer Fable-mix) → **specialize per domain, don't blend.** T.8 `grow_library` confirmed (Fable mints its own 16 feature-building operators). Caveat: 70% partly the "easy" regime (intent states the op); the valuable multi-step regime is Fable-edit-sparse.
 
+**POMDP policy ablation (2026-06-30, `pomdp_policy.py`, mined 37 trajectories, grouped 5-fold CV) — the architecture ASSEMBLED, next-op prediction:**
+| feature | raw (n=1202) | op-changes (n=374) |
+|---|---|---|
+| goal-only | 28% | 20% |
+| **topology (prev-op)** | **49%** | 37% |
+| goal+prev | 45% | 40% |
+| goal+prev+**OBS** | 44% | 41% |
+
+- **Topology is the engine** (best single predictor); **goal** adds a little (op-changes 37→40); **OBS adds ~0%** (T.9 observation-feedback UNSUPPORTED here).
+- **Why:** Fable is greenfield *build* (success-heavy) — failure-obs = only **2%** of transitions, and failures *don't even redirect* (15% op-change after failure vs 31% baseline). The observe→revise loop is **absent in greenfield data** → it needs **failure-rich** data (SWE-agent runs w/ test feedback), not Fable. *Not a refutation of T.9 — a data-domain mismatch (build ≠ debug).*
+- So the validated planner = **topology-driven, goal-conditioned operator planning**; the observation-feedback (debug) loop stays designed-but-untested pending failure-rich trajectories.
+
 ---
 
 ## 1. The two graphs
