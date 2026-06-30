@@ -301,3 +301,59 @@ NOT the wall: localization (file-level works), emission (80% applyable), retriev
 3. **The 4B leaf is the resolve ceiling on hard cases.** To raise *absolute* resolve, a stronger LEAF model is the lever — the graph/LGGN earns its place as the reasoning/decomposition/efficiency substrate, NOT as a manufacturer of leaf-correctness the 4B lacks.
 4. **Untested rungs:** V3 (rich debugging loop observe→INVALIDATE→re-traverse), V4 (operator SELECTION, drop oracle), V5 (operator DISCOVERY — the paper), V6 (write-back compounding + poison gate), V7 (topology kill-test), V8 (latent efficiency).
 5. **Publishability hinges on V5/V6/V7** (discovery / compounding / topology) passing with controls. V1/V2 are validated necessary engineering, not the novelty.
+
+-------
+
+# Repository map (every important file + status)
+
+## Core LGGN pipeline (built this arc)
+| File | Lines | Role | Key API / flags | Status |
+|---|---|---|---|---|
+| `LGGN_DESIGN.md` | 303 | canonical design + Theory (§T) + this map | — | living |
+| `v5/runtime/lggn.py` | 370 | **operator LIBRARY** | `Operator`, `OperatorLibrary` (retrieve/strengthen/weaken/`compress_trajectory`; conf+val+match gating = poison gate), 11-op seed vocab, `label_gold` (regex miner, SUPERSEDED), `render_op_program`, `solve()` retrieve-or-derive loop | built + selftest |
+| `v5/runtime/operator_discovery.py` | 407 | **self-supervised DISCOVERY (V5)** | `signature()`, `discover()` (signature clusters), **`discover_embedding()`/`chunk_embedding()` = CANONICAL** (semantic fix-embedding clusters + centroids), `visualize()` (operator-space graph), `visualize_embedding()` (latent-traversal 2D PCA); CLI `--discover [--embedding --k]` | built + selftest |
+| `v5/runtime/traverse.py` | 274 | **the REASONER (planner)** | `build_corpus_swe[_emb]`, `TraversePlanner` (GRU goal->operator), `train_traverse` (held traj-acc vs majority), `coarse_bucket`; CLI `--train/--curve/--emb-ops/--selftest` | **VALIDATED 40% vs 12%** |
+| `v5/runtime/swe_rl.py` | 1180 | **the TRAINER** (SFT->GRPO->distill, LoRA) | `--realizer` (operator-plan->gold SFT), `--discovered-ops`, `--fable-corpus/--fable-frac`, `--distill`, `--plots-dir` (`_save_train_plots`), `--rep-penalty`, `--eff-coef`, `--use-exemplar`, `--staged`, `--graph` | built; realizer proxy-up resolve-flat |
+| `v5/runtime/swe_slot.py` | 2121 | **the INFERENCE ENGINE** | oneshot/slot/kv solve; `--exemplar`(+`--exemplar-rank`), `--lggn-realize`(+`--lggn-multileaf`), `--test-feedback`, `--exact-verify`; `fix_user(plan=)`, `_multileaf_patch`, `_repair_sr_to_src` | built |
+| `v5/training/ingest_fable5.py` | 226 | **Fable-5 ingestion** | per-session event streams -> (intent,edit) records; `--probe/--ingest/--selftest` | built (4781->2539 recs) |
+| `v5/graph_grower/swe_verify.py` | 323 | **Docker SWE verifier** | gold-sanity gate, resolve; `--predictions --backend docker` | reused |
+
+## Data / artifacts
+- `data/swe/discovered_ops_emb.jsonl` - **CANONICAL operators** (24 semantic clusters + centroids).
+- `data/swe/discovered_ops.jsonl` - signature ops (SUPERSEDED by embedding).
+- `data/swe/oracle_ops.jsonl` - 7 hand-labeled ops (the A/B upper-bound set).
+- `artifacts/train_plots/` - `training_dynamics.png` (SFT/GRPO/eval, split by source), `operator_space.png` (op transition graph), `operator_embedding.png` (latent-traversal 2D PCA), `metrics.json`.
+
+## Supporting (reused, pre-existing — relevant to Theory §T)
+- `v5/training/providers.py` (90) - `RealEmbedder` (mpnet, the goal/fix encoder), `FrozenQwenHInitProvider` (4B-hidden encoder, used in the separability probe).
+- `v5/operator_injector.py` (171) - operator algebra (ASSERT/INVALIDATE/GATE/SLOT = signed latent Delta).
+- `v5/subgraph.py` (210) - `build_active_subgraph`, `GraphMemoryKV` (the **latent-memory machinery for T.3**, `m_t=CrossAttn(h_t,G)`).
+- `v5/adapter.py`, `v5/cross_attention.py`, `v5/gnn_encoder.py`, `v5/runtime/prefix_session.py` - cross-attn / GNN / KV-prefix (T.3 components; untrained cross-attn measured to hurt at decode -> train + at planner state).
+- `v5/graph_grower/swe_load.py` (183) - `load_instances`, `checkout_repo`. `v5/lm_loader.py` (97) - `load_frozen_lm` (4-bit).
+
+# Full progress log (chronological, with results)
+
+1. **Pivot to LGGN** (from the single-vector distill floor, which grounded relevance = the no-headroom axis). Design: graph = growing operator library; LLM realizes; learning = operator discovery.
+2. **Operator library skeleton** (`lggn.py`) - selftest PASS (poison gate, retrieve-or-derive, mint-on-novel).
+3. **V1 decoder-as-realizer** (`swe_slot --lggn-realize`): A/B realize vs exemplar = **4/7 tie**, but manual read = decoder FAITHFULLY realizes a handed operator (mechanism PASS). Tie confounded by 1 mislabel + multi-part.
+4. **V2 decomposition** (`--lggn-multileaf`): apply-between FIXED applyability on 11283; resolve still 0 (leaf capacity + under-specified ops). Mechanism PASS.
+5. **Self-supervised discovery** (`operator_discovery`, signature): 56 ops, 79% coverage (vs regex 59%). + dual visualizations.
+6. **Realizer training** (`swe_rl --realizer --discovered-ops`): proxy lifted (applyable 20->33%, gold-solve 7->13%) but **Docker resolve 1/5 = ~20% ceiling** (4B leaf-bound).
+7. **Fable**: ingested (4781 sessions -> 2539 recs). Mixed into realizer -> **HURT held 27->20%** (format clash). CORRECTION (user): Fable -> TRAVERSE (reasoning), not realizer.
+8. **Traverse built** (`traverse.py`, HRM-templated, frozen-embed + GRU; trains WITHOUT the 4B). On SWE signature-ops: **flat ~chance** (issue 4%, issue+code 2%, coarse 20% vs 10%; learning curve FLAT). Diagnosed "hard objective."
+9. **Encoder probe**: 4B hidden states ALL layers ALSO gap~0 -> NOT the encoder.
+10. **USER INSIGHT "the graph poisons it"** -> MI test: **AMI(goal, fix-EMBEDDING clusters) = +0.3 vs shuffled ~0** -> structure EXISTS; signature-ops were goal-blind carving. Goal->embedding-op: **LogReg/kNN 42-43%**; end-to-end GRU traverse **40% vs 12% (3.4x)** -> **the reasoner LEARNS.**
+11. **Canonical embedding discovery** + **learning curve SCALES** (33->48% with data, vs flat signatures) -> Fable scale justified.
+12. **Theory §T** (5 gaps integrated) + **KEYSTONE compositionality test RUN -> SUPPORTED** (n=110: own-displacement-sum 0.906 vs random 0.259, gap +0.648, 100%). Manifold is locally compositional.
+
+## Current verdicts
+- **Reasoner (traverse):** LEARNS (40%, scales) - VALIDATED. The architecture's reasoning claim is alive.
+- **Compositionality (the "why"):** intra-task VALIDATED; cross-task = next test.
+- **Realizer resolve:** ~20% on 4-bit 4B - leaf-capacity wall (separate; needs a stronger leaf, not graph tricks).
+- **Operators:** semantic embedding clusters, canonical, 100% coverage.
+- **Open builds:** latent-memory cross-attn into planner (T.3, trained), policy beam/RL (T.5), goal regions (T.6), node-programs failure_modes (T.7), V6 compounding, V7 topology kill-test, Fable->trajectory feed.
+
+## Next (recommended order)
+1. **Cross-task compositionality** probe (`centroid_A+centroid_B ~= unseen fix using both`) - airtight the keystone.
+2. **Fable -> trajectory feed** + re-curve (scale the reasoner on the agentic-coder domain).
+3. **V7 topology kill-test** (graph vs flat policy) + **real latent-path viz** (planner h_t).
