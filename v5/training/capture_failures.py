@@ -17,6 +17,19 @@ import json
 from pathlib import Path
 
 
+def _noop_patch(iid: str) -> str:
+    """A NON-EMPTY patch that creates a fresh file -> always applies cleanly, behavior-neutral, so the
+    FAIL_TO_PASS tests still fail on the (otherwise unpatched) code. (Empty patches are dropped by the
+    swebench harness.)"""
+    fn = f"_noop_probe_{iid.replace('/', '_')}.txt"
+    return (f"diff --git a/{fn} b/{fn}\n"
+            f"new file mode 100644\n"
+            f"--- /dev/null\n"
+            f"+++ b/{fn}\n"
+            f"@@ -0,0 +1 @@\n"
+            f"+noop\n")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Capture SWE FAIL_TO_PASS failures (the debug observation).")
     ap.add_argument("--dataset", default="lite")
@@ -34,8 +47,8 @@ def main():
     out_dir = "artifacts/graph_growth/swe_capture"
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     preds_path = f"{out_dir}/_capture_{a.run_id}.jsonl"
-    V.write_predictions({iid: "" for iid in ids}, preds_path)        # empty -> harness runs tests on unpatched
-    print(f"[capture] running harness on {len(ids)} UNPATCHED instances (FAIL_TO_PASS should fail)...", flush=True)
+    V.write_predictions({iid: _noop_patch(iid) for iid in ids}, preds_path)   # no-op -> tests run on unpatched code
+    print(f"[capture] running harness on {len(ids)} ~UNPATCHED instances (no-op patch; FAIL_TO_PASS should fail)...", flush=True)
     try:
         V._verify(preds_path, a.dataset, a.run_id, a.backend, ids, a.max_workers, out_dir, a.split)
     except Exception as e:                                           # noqa: BLE001 -- report still written per-instance
