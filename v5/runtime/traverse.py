@@ -198,6 +198,63 @@ def real_embed_fn():
     return f, 768
 
 
+# ── real latent-path viz: the planner's h_t through operator space ───────────
+def viz_latent_path(model, goals_emb, op_names, out="artifacts/train_plots/latent_path.png",
+                    max_steps=5, n_show=24):
+    """Capture the planner's hidden state h_t at each decode step and plot the ACTUAL reasoning path
+    through operator space. Landmarks = operator READOUT directions (head.weight rows — the direction in
+    hidden space that selects each operator); the h_t trajectory drifts from the goal-init toward the
+    operator it picks. This is the real latent traversal (not the operator-embedding proxy) — the
+    observability proof (LGGN_DESIGN §4b / §T)."""
+    import torch
+    import numpy as np
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    model.eval()
+    land = model.head.weight.detach().numpy()[:model.n_ops]      # [n_ops, d] operator readout directions
+    paths = []
+    with torch.no_grad():
+        for k in range(min(n_show, goals_emb.shape[0])):
+            h = torch.tanh(model.g_proj(goals_emb[k:k + 1])).unsqueeze(0)   # [1,1,d] goal-init state
+            ids, states = [model.bos], [h[0, 0].numpy()]
+            for _ in range(max_steps):
+                o, h = model.gru(model.op_emb(torch.tensor([[ids[-1]]])), h)
+                states.append(h[0, 0].numpy())
+                nxt = int(model.head(o[0, -1]).argmax())
+                if nxt == model.n_ops:
+                    break
+                ids.append(nxt)
+            paths.append((np.array(states), ids[1:]))
+    norm = lambda X: X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-9)      # selection is directional
+    landn = norm(land)
+    pathsn = [(norm(st), ops) for st, ops in paths]
+    allh = np.vstack([landn] + [p[0] for p in pathsn])
+    mu = allh.mean(0)
+    Vt = np.linalg.svd(allh - mu, full_matrices=False)[2]
+    proj = lambda X: (X - mu) @ Vt[:2].T
+    L = proj(landn)
+    opcol = plt.cm.tab20(np.linspace(0, 1, model.n_ops))                         # one color per operator
+    plt.figure(figsize=(12, 8))
+    for i, nm in enumerate(op_names):                                            # operator landmarks
+        plt.scatter(L[i, 0], L[i, 1], color=opcol[i], s=240, marker="s", zorder=2, edgecolors="k", alpha=0.85)
+        plt.annotate(nm[:16], L[i], fontsize=8, zorder=6)
+    for st, ops in pathsn:                                                       # goal-init -> chosen op
+        S = proj(st)
+        c = opcol[ops[-1]] if ops else "gray"
+        plt.scatter(S[0, 0], S[0, 1], marker="*", s=150, color=c, zorder=5, edgecolors="k")  # goal-init h_0
+        if ops:                                                                  # line to the chosen operator
+            plt.plot([S[0, 0], L[ops[-1], 0]], [S[0, 1], L[ops[-1], 1]], "-", color=c, lw=0.9, alpha=0.5, zorder=3)
+        for j in range(1, len(S) - 1):                                           # extra hops only if multi-op
+            plt.annotate("", S[j + 1], S[j], arrowprops=dict(arrowstyle="->", color=c, alpha=0.8))
+    plt.title("Traverse latent goal->operator organization (h_0, unit-normalized)\n"
+              "(square = operator - star = goal, colored+linked to its CHOSEN op = the 'regions' of T.6)")
+    from pathlib import Path as _P
+    _P(out).parent.mkdir(parents=True, exist_ok=True)
+    plt.tight_layout(); plt.savefig(out, dpi=130); plt.close()
+    return out
+
+
 # ── selftest: learnable goal->operator mapping (no LM) ───────────────────────
 def _selftest() -> bool:
     print("traverse --selftest: planner learns goal->operator trajectory (synthetic, no LM)\n")
@@ -234,12 +291,22 @@ def main():
     ap.add_argument("--split", default="test")
     ap.add_argument("--ops", default="data/swe/discovered_ops.jsonl")
     ap.add_argument("--epochs", type=int, default=80)
+    ap.add_argument("--viz-latent", action="store_true", help="plot the planner h_t path through operator space")
     ap.add_argument("--emb-ops", type=int, default=0, help="use K EMBEDDING operators (semantic fix-clusters) instead of signature ops")
     ap.add_argument("--curve", action="store_true", help="learning curve: held coarse-op acc vs train size")
     ap.add_argument("--coarse", action="store_true", help="collapse fine ops -> ~9 semantic buckets (granularity test)")
     a = ap.parse_args()
     if a.selftest:
         raise SystemExit(0 if _selftest() else 1)
+    if a.viz_latent:                               # real latent-path viz: train emb-ops, plot h_t paths
+        embed_fn, d = real_embed_fn()
+        K = a.emb_ops or 12
+        print(f"[traverse] viz-latent: train {K} embedding-ops, capture planner h_t paths")
+        corpus, op_names = build_corpus_swe_emb(a.dataset, a.split, K, embed_fn)
+        model, m = train_traverse(corpus, op_names, embed_fn, epochs=a.epochs, d_goal=d)
+        out = viz_latent_path(model, embed_fn([g for g, _ in corpus[:24]]), op_names)
+        print(f"\n  latent-path viz -> {out}  (held first-op {m['first_op_acc']:.0%})")
+        return
     if a.train or a.curve:
         embed_fn, d = real_embed_fn()
         if a.emb_ops:                              # EMBEDDING operators (semantic fix-clusters) — the fix
