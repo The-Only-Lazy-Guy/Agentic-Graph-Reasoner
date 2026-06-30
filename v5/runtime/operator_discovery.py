@@ -189,6 +189,80 @@ def visualize(ops: list[dict], golds: list[str], out: str, model_trajs: list[lis
     ax.axis("off"); fig.tight_layout(); fig.savefig(out, dpi=120); plt.close(fig)
 
 
+def _embed_ops(ops: list[dict]):
+    """Embed each operator -> matrix. RealEmbedder on (name+precondition+example) if available; else a
+    structural signature multi-hot (offline fallback). Returns (numpy NxD, used_embedder:bool)."""
+    import numpy as np
+    try:
+        import torch
+        from v5.training.providers import RealEmbedder
+        emb = RealEmbedder(torch.device("cpu"))
+        texts = {o["name"]: f"{o['name']} {o.get('precondition','')} {o.get('realize_hint','')}"[:400] for o in ops}
+        v = emb.embed_nodes(texts)
+        return np.stack([np.asarray(v[o["name"]], dtype=float) for o in ops]), True
+    except Exception:
+        vocab = sorted({t for o in ops for t in o.get("_sig", [])})
+        vi = {t: i for i, t in enumerate(vocab)}
+        M = np.zeros((len(ops), max(1, len(vocab))))
+        for r, o in enumerate(ops):
+            for t in o.get("_sig", []):
+                M[r, vi[t]] = 1.0
+        return M, False
+
+
+def _pca2(M):
+    import numpy as np
+    X = M - M.mean(0, keepdims=True)
+    _, _, Vt = np.linalg.svd(X, full_matrices=False)
+    return X @ Vt[:min(2, Vt.shape[0])].T
+
+
+def visualize_embedding(ops: list[dict], golds: list[str], out: str, max_traj: int = 14,
+                        model_states=None) -> None:
+    """LATENT-TRAVERSAL view: operators as points in 2D (PCA of their embeddings), gold trajectories as
+    arrow-paths through the space (navigation). When the latent traverse exists, pass `model_states` =
+    list of per-step h_t vectors to plot the model's ACTUAL latent path instead of operator embeddings."""
+    import numpy as np
+    if len(ops) < 2:
+        return
+    M, used = _embed_ops(ops)
+    P = _pca2(M)
+    pos = {o["name"]: (float(P[i, 0]), float(P[i, 1]) if P.shape[1] > 1 else 0.0) for i, o in enumerate(ops)}
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    Path(Path(out).with_suffix(".json")).write_text(
+        json.dumps({o["name"]: pos[o["name"]] for o in ops}, indent=1), encoding="utf-8")
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception:
+        return
+    freq = {o["name"]: o.get("validation_count", 1) for o in ops}
+    fmx = max(freq.values()) if freq else 1
+    fig, ax = plt.subplots(figsize=(13, 11))
+    for nm, (x, y) in pos.items():
+        ax.scatter([x], [y], s=60 + 700 * freq[nm] / fmx, color="C0", alpha=0.55, zorder=2)
+        ax.text(x, y, nm, fontsize=5.5, ha="center", va="center", zorder=3)
+    # gold trajectories (multi-op) as colored arrow-paths through op-embedding space
+    drawn = 0
+    cmap = plt.get_cmap("tab20")
+    for g in golds:
+        tr = [t for t in chunk(g, ops) if t in pos]
+        if len(tr) < 2:
+            continue
+        col = cmap(drawn % 20)
+        for a, b in zip(tr, tr[1:]):
+            (x0, y0), (x1, y1) = pos[a], pos[b]
+            ax.annotate("", xy=(x1, y1), xytext=(x0, y0),
+                        arrowprops=dict(arrowstyle="->", color=col, lw=1.6, alpha=0.8), zorder=4)
+        drawn += 1
+        if drawn >= max_traj:
+            break
+    src = "RealEmbedder" if used else "signature-features"
+    ax.set_title(f"LGGN latent-traversal view — operators in 2D ({src} PCA), gold trajectories = arrow-paths")
+    ax.axis("off"); fig.tight_layout(); fig.savefig(out, dpi=120); plt.close(fig)
+
+
 def save(ops: list[dict], path: str) -> None:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     Path(path).write_text("\n".join(json.dumps(o) for o in ops), encoding="utf-8")
@@ -248,7 +322,9 @@ def main():
         for o in ops[:15]:
             print(f"  {o['name']:30} freq={o['validation_count']:3} | {o['precondition'][:50]}")
         visualize(ops, golds, "artifacts/train_plots/operator_space.png")
-        print("operator-space graph -> artifacts/train_plots/operator_space.png (+ .json)")
+        visualize_embedding(ops, golds, "artifacts/train_plots/operator_embedding.png")
+        print("operator-space graph  -> artifacts/train_plots/operator_space.png (+ .json)")
+        print("latent-traversal view -> artifacts/train_plots/operator_embedding.png (+ .json)")
         return
     ap.print_help()
 
