@@ -96,8 +96,9 @@ def _make_planner(n_ops: int, d_goal: int, d: int = 256):
 
 
 # ── train + eval ────────────────────────────────────────────────────────────
-def train_traverse(corpus, op_names, embed_fn, epochs=60, lr=2e-3, d_goal=768, seed=0, log=print):
-    """corpus: [(goal, [op_names])]. embed_fn: list[str]->[N,d_goal] tensor. Returns (model, metrics)."""
+def train_traverse(corpus, op_names, embed_fn, epochs=60, lr=2e-3, d_goal=768, seed=0, log=print, train_cap=0):
+    """corpus: [(goal, [op_names])]. embed_fn: list[str]->[N,d_goal] tensor. Returns (model, metrics).
+    train_cap>0 caps the TRAIN size (held fixed) -> learning-curve (data-limited vs fundamental)."""
     import torch
     rng = random.Random(seed)
     torch.manual_seed(seed)
@@ -109,6 +110,8 @@ def train_traverse(corpus, op_names, embed_fn, epochs=60, lr=2e-3, d_goal=768, s
     rng.shuffle(data)
     n_held = max(8, len(data) // 5)
     held, train = data[:n_held], data[n_held:]
+    if train_cap:
+        train = train[:train_cap]
     log(f"[traverse] corpus {len(data)} (train {len(train)} / held {len(held)}) | {n_ops} operators")
 
     G = embed_fn([g for g, _ in train])                    # [Ntr, d_goal] (frozen)
@@ -206,17 +209,26 @@ def main():
     ap.add_argument("--split", default="test")
     ap.add_argument("--ops", default="data/swe/discovered_ops.jsonl")
     ap.add_argument("--epochs", type=int, default=80)
+    ap.add_argument("--curve", action="store_true", help="learning curve: held coarse-op acc vs train size")
     ap.add_argument("--coarse", action="store_true", help="collapse fine ops -> ~9 semantic buckets (granularity test)")
     a = ap.parse_args()
     if a.selftest:
         raise SystemExit(0 if _selftest() else 1)
-    if a.train:
+    if a.train or a.curve:
         ops = load_ops(a.ops)
-        COARSE[0] = a.coarse
-        op_names = sorted({coarse_bucket(o["name"]) for o in ops}) if a.coarse else [o["name"] for o in ops]
-        print(f"[traverse] operator vocab: {len(op_names)} {'COARSE buckets' if a.coarse else 'fine ops'}")
+        COARSE[0] = a.coarse or a.curve            # curve uses coarse buckets (the learnable granularity)
+        op_names = sorted({coarse_bucket(o["name"]) for o in ops}) if COARSE[0] else [o["name"] for o in ops]
+        print(f"[traverse] operator vocab: {len(op_names)} {'COARSE buckets' if COARSE[0] else 'fine ops'}")
         corpus = build_corpus_swe(a.dataset, a.split, ops)
         embed_fn, d = real_embed_fn()
+        if a.curve:                                # learning curve: held fixed, vary train size
+            print("\n=== LEARNING CURVE (coarse ops; data-limited vs fundamental) ===")
+            for cap in (50, 100, 0):
+                _, mc = train_traverse(corpus, op_names, embed_fn, epochs=a.epochs, d_goal=d,
+                                       train_cap=cap, log=lambda *x: None)
+                sz = cap if cap else "all"
+                print(f"  train={sz:>4}: held first-op {mc['first_op_acc']:.0%} | majority {mc['majority_baseline']:.0%} | op_f1 {mc['op_f1']:.2f}")
+            return
         _, m = train_traverse(corpus, op_names, embed_fn, epochs=a.epochs, d_goal=d)
         print("\n=== TRAVERSE held trajectory-prediction ===")
         for k, v in m.items():
