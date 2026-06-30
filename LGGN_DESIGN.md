@@ -60,7 +60,7 @@ The planner is an explicit **policy** over operators (+STOP), conditioned on the
 - **v1 [BUILT]:** learned **softmax** policy (the GRU head), greedy/sampled decode.
 - **v2 [VISION]:** **best-first / beam** over the operator-graph **transitions** (the co-occurrence structure = a learned search prior).
 - **v3 [VISION]:** **RL (RLVR)** — reward = resolve; the discrete operator action-space makes RL tractable.
-- The graph **topology is the policy prior** → **V7 kill-test:** does it beat a flat (graph-less) policy?
+- The graph **topology is the policy prior** → **V7 kill-test:** does it beat a flat (graph-less) policy? **[PRECURSOR RUN 2026-06-30, `topology_test.py`]** SWE multi-hunk *co-occurrence* (n_seq=110, held trans=32, 24 ops): next-op ACC learned **44%** vs random **3%** vs marginal **16%** (PPL 13.7/42.5/20.9), gap +28% → **topology LOAD-BEARING** (operators don't co-occur randomly; edges carry info). Caveats: small n=32; *co-occurrence* not temporal order. Definitive test = mined `Op→Obs→Op` trajectories (`--traj`), pending mining.
 
 ### T.6 Goal **regions**, not goal nodes
 The planner seeks a **region**, not a node — a neighborhood in the operator manifold (`Programming → Concurrency → Transactions → atomic-fix`). This yields **hierarchy / subgoals / abstraction without inventing every subgoal**: the manifold's natural **coarse→fine** structure *is* the region hierarchy (we already have it — `coarse_bucket` → fine embedding-cluster = a 2-level hierarchy). The traverse **descends**: pick the region (coarse), refine to the operator (fine). [coarse/fine BUILT; the descent policy VISION.]
