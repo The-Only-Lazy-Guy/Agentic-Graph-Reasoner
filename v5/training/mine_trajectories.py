@@ -19,9 +19,27 @@ import glob
 import json
 from pathlib import Path
 
+import ast
+
 from v5.training.ingest_fable5 import _read_events, _parts, _is_edit, _edit_payload, _goal
 
 _OBS_TYPES = ("tool_result", "function_call_output", "toolresult", "tool_output")
+
+
+def _args(p: dict) -> dict:
+    """arguments as a dict, parsing JSON or Python-repr strings (toolCall format uses single-quote repr)."""
+    a = p.get("arguments") or p.get("input") or {}
+    if isinstance(a, dict):
+        return a
+    if isinstance(a, str):
+        for parse in (json.loads, ast.literal_eval):
+            try:
+                v = parse(a)
+                if isinstance(v, dict):
+                    return v
+            except Exception:
+                pass
+    return {}
 
 
 def _is_obs(part: dict, role: str) -> bool:
@@ -45,7 +63,7 @@ def session_trajectory(events: list, sid: str = "") -> dict:
         role = ((ev.get("message") or {}).get("role") or ev.get("role") or "").lower()
         for p in _parts(ev):
             if _is_edit(p):
-                args = p.get("arguments") if isinstance(p.get("arguments"), dict) else {}
+                args = _args(p)
                 steps.append({"edit": _edit_payload(p),
                               "file": args.get("file_path") or args.get("path") or "",
                               "obs": ""})

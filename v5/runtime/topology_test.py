@@ -49,37 +49,84 @@ def _shuffled_T(seqs, n, seed=0):
     return build_T([[p, q] for p, q in zip(prevs, nexts)], n) if prevs else build_T([], n)
 
 
-def killtest(seqs, n, seed=0, log=print):
-    """seqs: list of operator-id sequences (len>=2). Returns metrics dict."""
+def collapse(seqs):
+    """Run-length-encode: drop consecutive repeats so every transition is a real op-CHANGE. Agentic
+    sessions repeat the same operator (self-loops ~64%); raw transitions are dominated by 'keep doing
+    the same thing' -> collapse to test whether the operator-CHANGE order is structured."""
+    out = []
+    for s in seqs:
+        o = []
+        for x in s:
+            if not o or o[-1] != x:
+                o.append(x)
+        out.append(o)
+    return out
+
+
+def _eval(train, held, n, seed=0):
+    """Transition prediction on `held` given `train`. Reports self-rate + learned-on-CROSS (the real
+    op-change structure, separate from the trivial self-loop diagonal)."""
     import numpy as np
+    T = build_T(train, n); Tr = _shuffled_T(train, n, seed); mg = marginal(train, n)
+    pairs = [(a, b) for s in held for a, b in zip(s, s[1:])]
+    if not pairs:
+        return None
+    acc = lambda row: float(np.mean([int(np.argmax(row(a)) == b) for a, b in pairs]))
+    cross = [(a, b) for a, b in pairs if a != b]
+    return {
+        "n_held_trans": len(pairs), "n_cross": len(cross), "n_ops": n,
+        "acc_learned": acc(lambda a: T[a]), "acc_random": acc(lambda a: Tr[a]), "acc_marginal": acc(lambda a: mg),
+        "self_rate": 1.0 - len(cross) / len(pairs),
+        "acc_learned_cross": float(np.mean([int(np.argmax(T[a]) == b) for a, b in cross])) if cross else 0.0,
+    }
+
+
+def killtest(seqs, n, seed=0, log=print):
+    """Single 80/20 split over sequences. (For small data prefer killtest_cv.)"""
     rng = random.Random(seed)
     seqs = [s for s in seqs if len(s) >= 2]
     rng.shuffle(seqs)
     nh = max(5, len(seqs) // 5)
-    held, train = seqs[:nh], seqs[nh:]
-    T = build_T(train, n); Tr = _shuffled_T(train, n, seed); mg = marginal(train, n)
-    pairs = [(a, b) for s in held for a, b in zip(s, s[1:])]
-    if not pairs:
-        log("[topo] no held transitions"); return {}
-    def acc(pred_row): return np.mean([int(np.argmax(pred_row(a)) == b) for a, b in pairs])
-    def ppl(pred_row): return float(np.exp(-np.mean([np.log(pred_row(a)[b] + 1e-12) for a, b in pairs])))
-    m = {
-        "n_seq": len(seqs), "n_held_trans": len(pairs), "n_ops": n,
-        "acc_learned": acc(lambda a: T[a]), "acc_random": acc(lambda a: Tr[a]), "acc_marginal": acc(lambda a: mg),
-        "ppl_learned": ppl(lambda a: T[a]), "ppl_random": ppl(lambda a: Tr[a]), "ppl_marginal": ppl(lambda a: mg),
-    }
+    m = _eval(seqs[nh:], seqs[:nh], n, seed)
+    if m:
+        m["n_seq"] = len(seqs)
+    return m or {}
+
+
+def killtest_cv(seqs, n, folds=5, seed=0):
+    """k-fold CV over SEQUENCES (no transition leakage) — robust on small data. Averages each metric."""
+    import numpy as np
+    seqs = [s for s in seqs if len(s) >= 2]
+    rng = random.Random(seed); idx = list(range(len(seqs))); rng.shuffle(idx)
+    rows = []
+    for f in range(folds):
+        hi = set(idx[f::folds])
+        r = _eval([seqs[i] for i in range(len(seqs)) if i not in hi], [seqs[i] for i in hi], n, seed=f)
+        if r:
+            rows.append(r)
+    if not rows:
+        return {}
+    keys = ["acc_learned", "acc_random", "acc_marginal", "acc_learned_cross", "self_rate"]
+    m = {k: float(np.mean([r[k] for r in rows])) for k in keys}
+    m["acc_learned_std"] = float(np.std([r["acc_learned"] for r in rows]))
+    m["n_held_trans"] = sum(r["n_held_trans"] for r in rows)
+    m["n_cross"] = sum(r["n_cross"] for r in rows); m["n_seq"] = len(seqs); m["n_ops"] = n; m["folds"] = len(rows)
     return m
 
 
 def _report(m):
     if not m:
-        return
-    print(f"\n=== TOPOLOGY KILL-TEST (n_seq={m['n_seq']}, held transitions={m['n_held_trans']}, ops={m['n_ops']}) ===")
-    print(f"  next-op ACC : learned {m['acc_learned']:.0%} | random {m['acc_random']:.0%} | marginal {m['acc_marginal']:.0%}")
-    print(f"  next-op PPL : learned {m['ppl_learned']:.2f} | random {m['ppl_random']:.2f} | marginal {m['ppl_marginal']:.2f}  (lower=better)")
-    gap = m["acc_learned"] - max(m["acc_random"], m["acc_marginal"])
-    print(f"  gap (learned - best baseline) = {gap:+.0%}")
-    print(f"  VERDICT: {'TOPOLOGY LOAD-BEARING (edges carry info -> the graph reasons)' if gap > 0.08 else 'topology DECORATIVE (learned ~= random/marginal -> drop the graph claim)'}")
+        print("[topo] no transitions"); return
+    std = f"+-{m['acc_learned_std']:.0%}" if "acc_learned_std" in m else ""
+    cv = f", {m['folds']}-fold CV" if "folds" in m else ""
+    print(f"\n=== TOPOLOGY KILL-TEST (n_seq={m['n_seq']}, held trans={m['n_held_trans']}, ops={m['n_ops']}{cv}) ===")
+    print(f"  next-op ACC : learned {m['acc_learned']:.0%}{std} | random {m['acc_random']:.0%} | marginal {m['acc_marginal']:.0%}")
+    print(f"  self-loops  : {m['self_rate']:.0%} of transitions | learned on CROSS (op-change): {m['acc_learned_cross']:.0%} (n_cross={m['n_cross']})")
+    # the HONEST signal = learned-on-cross vs the cross-chance baseline (1/n_ops) and vs random topology
+    cross_chance = 1.0 / max(2, m["n_ops"])
+    verdict = m["acc_learned_cross"] > max(m["acc_random"], cross_chance) + 0.08
+    print(f"  VERDICT (op-CHANGE structure, the real test): "
+          f"{'LOAD-BEARING — edges carry sequencing info beyond self-loops' if verdict else 'DECORATIVE beyond self-loops'}")
 
 
 # ── data loaders ─────────────────────────────────────────────────────────────
@@ -146,17 +193,21 @@ def main():
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--swe", action="store_true", help="SWE multi-hunk co-occurrence (available now)")
     ap.add_argument("--traj", help="mined trajectories jsonl (temporal; after mining)")
+    ap.add_argument("--collapse", action="store_true", help="RLE: test op-CHANGES only (drop self-loops)")
+    ap.add_argument("--cv", type=int, default=0, help="k-fold CV over sequences (robust on small data)")
     a = ap.parse_args()
     if a.selftest:
         raise SystemExit(0 if _selftest() else 1)
     if a.swe:
         seqs, n = swe_cooccurrence_seqs()
-        _report(killtest(seqs, n))
     elif a.traj:
         seqs, n = traj_seqs(a.traj)
-        _report(killtest(seqs, n))
     else:
-        ap.print_help()
+        ap.print_help(); return
+    if a.collapse:
+        seqs = [s for s in collapse(seqs) if len(s) >= 2]
+        print(f"[topo] collapsed to op-CHANGES: {len(seqs)} sequences with >=2 distinct successive ops")
+    _report(killtest_cv(seqs, n, folds=a.cv) if a.cv else killtest(seqs, n))
 
 
 if __name__ == "__main__":
