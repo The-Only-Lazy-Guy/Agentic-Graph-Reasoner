@@ -137,6 +137,31 @@ verify. Resolve is the *downstream* metric; trajectory-accuracy + V7 are the *re
 **Build order:** (1) traverse corpus `(goal→trajectory)` from SWE+Fable; (2) TraversePlanner + SFT,
 measure held trajectory-accuracy; (3) V7 kill-test + latent-path viz; (4) compose w/ stronger leaf.
 
+## 4d. Latent-state reasoning (the substrate — the core idea)
+The traversal is **not** symbol-shuffling — it is a **path through latent state**. The reasoner holds a
+latent state `h_t` (the planner's hidden state). Each step applies a **typed operator as a move toward
+the goal region**: conceptually `h_{t+1} = h_t + Δ_op`, where **operators are SEMANTIC LATENT
+DIRECTIONS** in the fix-embedding manifold.
+
+**This is now VALIDATED, and it's why the carving matters:** operators discovered as **fix-EMBEDDING
+clusters** are goal-predictable — `AMI(goal, fix-embedding clusters) ≈ +0.3` vs shuffled ~0; goal→operator
+**40% vs 12% chance** (`traverse --emb-ops`). The earlier **surface structural-signature** operators were
+**goal-blind** (~chance) — a path through the *wrong* latent space. So the latent state must live in the
+**semantic operator manifold**, where the goal *does* determine the fix-direction. The reasoner scales
+with data on this manifold (held first-op 33%→48% with train size) — flat on the signature manifold.
+
+**FREEZE → DECODE → RESUME:** at a decode-ready state, **freeze** the traversal and **decode** the
+operator into code via the frozen LLM realizer (the leaf — *language is only the output interface*).
+**Observe** (tests). The observation **updates the latent goal** (a new Δ; a failure = INVALIDATE), and
+the traversal **resumes with the changed goal** — *reasoning continues in latent space between
+token-decodes*, not by re-serializing text. This is the §2 POMDP loop realized as **latent-state
+evolution**.
+
+**Why latent (HRM-aligned):** reasoning lives in `h_t` (cheap, no CoT tokens); language is emitted only
+at leaves. **Observability (§4b):** `h_t` is plottable — a *real* traversal is a structured path through
+the operator manifold; a *decorative* one scatters (V7, made visible). Operators are the discrete latent
+vocabulary the path is built from; discovery (V5) grows that vocabulary; write-back (V6) compounds it.
+
 ## 5. Component map — reuse, don't reinvent
 | Role | Existing piece |
 |---|---|

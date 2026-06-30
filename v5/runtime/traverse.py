@@ -252,7 +252,8 @@ def main():
             print(f"[traverse] operator vocab: {len(op_names)} {'COARSE buckets' if COARSE[0] else 'fine ops'}")
             corpus = build_corpus_swe(a.dataset, a.split, ops)
         if a.curve:                                # learning curve: held fixed, vary train size
-            print("\n=== LEARNING CURVE (coarse ops; data-limited vs fundamental) ===")
+            vocab = f"{a.emb_ops} embedding-ops" if a.emb_ops else "coarse ops"
+            print(f"\n=== LEARNING CURVE ({vocab}; does the reasoner scale with data?) ===")
             for cap in (50, 100, 0):
                 _, mc = train_traverse(corpus, op_names, embed_fn, epochs=a.epochs, d_goal=d,
                                        train_cap=cap, log=lambda *x: None)
