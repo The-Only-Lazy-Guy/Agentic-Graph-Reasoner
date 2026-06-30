@@ -19,6 +19,63 @@ Conclusion: grounding the *inputs* can't fix weak *reasoning*. So move the reaso
 
 ---
 
+## T. Theory — the latent-memory model (why latent operator-traversal should generalize)
+*Tags: [VALIDATED] measured · [BUILT] code exists · [HYPOTHESIS] testable claim · [VISION] not yet built.*
+
+### T.0 Lifetime table (the clarifier — read this first)
+| Component | Lifetime | Role |
+|---|---|---|
+| **Latent state `h_t`** | one reasoning **episode** | transient working reasoning |
+| **Session graph** | one **task** | task-local goals / evidence / artifacts |
+| **Persistent Latent Memory** (the graph) | **across tasks** | permanent, growing knowledge |
+| **Parameters** (LLM + planner) | **fixed after training** | frozen substrate |
+
+**The latent state is transient; the graph is permanent.** Reasoning happens in `h_t`; knowledge accrues in the graph. This one distinction frames the whole architecture.
+
+### T.1 Terminology — *Persistent Latent Memory*, not "operator graph"
+The graph is a **Persistent Latent Memory.** **Operators are only its first node type.** It is meant to also hold ideas, proofs, constraints, goals, observations, and programs — each as a node with an **embedding** (its location in the latent manifold), so memory is *latent* and content-addressable. [BUILT: operator nodes. VISION: the richer node types.]
+
+### T.2 Keystone hypothesis — local compositionality of the operator manifold
+> **Hypothesis (compositionality).** The semantic operator manifold is *locally compositional*: learned repair operators correspond to approximately **stable directions (displacements)** in latent space, and composing operators corresponds to **composing their latent displacements** (`Δ_A + Δ_B`). Reasoning is a **trajectory through a continuous manifold guided by discrete operator selections.**
+
+This is *why* latent operator-traversal should **generalize** (compose known operators for unseen tasks) and *why the graph is more than retrieval* (the directions **compute**). [HYPOTHESIS]
+- **Evidence (partial)** [VALIDATED]: fix-embeddings cluster into stable operators (§4d); the goal predicts the operator (AMI ≈ 0.3; 40% vs 12% chance) → the directions are real and goal-aligned.
+- **Falsification test (must-run, concrete):** on multi-hunk golds, embed `Δ(fix₁)`, `Δ(fix₂)`, and `Δ(fix₁∘fix₂)`. If `Δ(fix₁)+Δ(fix₂) ≈ Δ(fix₁∘fix₂)` (cosine, vs a random-pair baseline) → the manifold **composes**; if not → the model **reuses but doesn't compose**, and the keystone is false. *This single experiment supports or kills the central claim.*
+
+### T.3 Latent memory IN the loop (not preprocessing retrieval)
+Memory must **modify the latent state**, not merely precede it:
+```
+m_t = CrossAttention(h_t, G)          # consult the Persistent Latent Memory
+h_{t+1} = F(h_t, Δ_t, m_t)            # memory enters the latent computation every step
+```
+The graph becomes part of the latent computation; retrieval stops being a preprocessing step. [BUILT: `GraphMemoryKV`, `cross_attention.py`, `adapter.py` — the machinery exists.]
+**Honest reconciliation (empirical):** we measured that **untrained** cross-attn injection **hurt** — but at the **decode leaf** (the realizer). The fix: `m_t` cross-attention must be (a) **trained**, (b) applied to the **planner state `h_t`** (the traverse), **not** the realizer decode. Your formulation targets the planner — exactly right; our failed attempt was untrained + at the wrong site. Reconciled.
+
+### T.4 Capacity scaling — `capacity ≈ parameters + persistent graph`
+Parametric capacity is **fixed** after training. The graph adds **non-parametric capacity that grows with experience** — every solved task mints operators/observations. So capability rises with **tasks seen**, not only parameters: a different scaling law (LLM-capacity = params; LGGN-capacity = params + memory). [HYPOTHESIS]
+- **Test = V6 (write-back compounding):** does solving task A measurably help a later similar B? If yes, the added graph-capacity is real and the scaling law holds.
+
+### T.5 Traversal policy `π(Δ | h_t, G)`
+The planner is an explicit **policy** over operators (+STOP), conditioned on the latent state **and** memory:
+- **v1 [BUILT]:** learned **softmax** policy (the GRU head), greedy/sampled decode.
+- **v2 [VISION]:** **best-first / beam** over the operator-graph **transitions** (the co-occurrence structure = a learned search prior).
+- **v3 [VISION]:** **RL (RLVR)** — reward = resolve; the discrete operator action-space makes RL tractable.
+- The graph **topology is the policy prior** → **V7 kill-test:** does it beat a flat (graph-less) policy?
+
+### T.6 Goal **regions**, not goal nodes
+The planner seeks a **region**, not a node — a neighborhood in the operator manifold (`Programming → Concurrency → Transactions → atomic-fix`). This yields **hierarchy / subgoals / abstraction without inventing every subgoal**: the manifold's natural **coarse→fine** structure *is* the region hierarchy (we already have it — `coarse_bucket` → fine embedding-cluster = a 2-level hierarchy). The traverse **descends**: pick the region (coarse), refine to the operator (fine). [coarse/fine BUILT; the descent policy VISION.]
+
+### T.7 Nodes are **programs** (executable), not labels
+An operator node is a typed **program**:
+- `precondition` — when it applies (soft, embedding-matched) [BUILT]
+- `execution` — `realize_hint` → the frozen LLM realizes it as code [BUILT]
+- `expected_effect` — **the cluster centroid IS the fix-direction in embedding space** (we already have this — the operator's centroid is its expected latent effect) [VALIDATED]
+- `failure_modes` — observed failures → INVALIDATE, from write-back [VISION]
+
+Then traversal is **execute → execute → execute** — a planning system (STRIPS/PDDL-style operators with preconditions + effects), not move → move. Neurosymbolic planning with an LLM realizer.
+
+---
+
 ## 1. The two graphs
 
 **Persistent Operator Graph (long-term memory, grows across tasks).** Nodes are **operators** (typed transforms), plus code-knowledge nodes (`symbol`/`module`, with `calls`/`same_class`/`contains` edges) used for localization/preconditions. **No artifacts stored** — patches are outputs, never persisted; only their *compressed trajectory* (→ operator) persists. Keeps the graph knowledge-only and bounded.
