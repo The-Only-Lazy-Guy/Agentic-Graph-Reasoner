@@ -87,6 +87,8 @@ Goal → Op₁ → Obs₁ → Op₂ → Obs₂ → …        (NOT flattened to 
 ```
 The planner trains as a **policy `π(Δ_t | h_t, obs_{<t})`** where the observation **enters the latent state** (`h_{t+1}=F(h_t, Δ_t, m_t, obs_t)`, T.3) — a failed/observed result is a real INVALIDATE+re-plan signal, the gold supervision for the debug loop. Flattening discards exactly the signal the planner most needs. **[MEASURED 2026-06-30, n=300 cached sessions: Fable is edit-SPARSE — median 0 edits/session, mean 1.0, only 2% multi-edit; ~0.5 edits/session full-set. So the POMDP `Op→Obs→Op` data is a ~2% MINORITY (the heavy sessions), NOT the bulk. Fable's main value = ~2539 `goal→single-op` pairs (data scale for the goal→operator curve); the multi-step/POMDP signal is a smaller SECONDARY feed. Don't over-build the POMDP planner around thin data — mine the heavy sessions for it separately.]**
 
+**Fable-feed RESULT (2026-06-30, 2539 records, grown vocab 40 = 24 SWE-seed + 16 Fable-minted, 2421/2539 edits novel):** goal→operator — **Fable-held 70%** (majority 12%, 5.8×) vs **SWE-held 28%** (majority 5%). Fable is the traverse's STRONG domain (intent-stated → operator far more predictable than SWE symptom-issues), vindicating the agentic-coder framing. **But NO cross-domain transfer:** SWE+Fable→SWE-held = 17% < SWE-only 28% (mixing HURTS, same lesson as the realizer Fable-mix) → **specialize per domain, don't blend.** T.8 `grow_library` confirmed (Fable mints its own 16 feature-building operators). Caveat: 70% partly the "easy" regime (intent states the op); the valuable multi-step regime is Fable-edit-sparse.
+
 ---
 
 ## 1. The two graphs
