@@ -319,6 +319,52 @@ def chunk_embedding(diff: str, ops: list[dict], embed_fn) -> list[str]:
     return [max(cents, key=lambda nc: float(v @ (nc[1] / (np.linalg.norm(nc[1]) + 1e-9))))[0]]
 
 
+def soft_assign(edit_emb, ops: list[dict], tau: float = 0.45, topk: int = 3) -> dict:
+    """OPEN-VOCAB soft assignment (T.8): edit -> soft affinities over the operator dictionary + residual
+    + novelty flag. Does NOT collapse to argmax — preserves {A:.62, B:.59} uncertainty (later trajectory
+    optimization resolves it) and flags novel edits (residual>tau) for minting a NEW operator atom.
+    `chunk_embedding` = the hard-argmax bootstrap special case of this."""
+    import numpy as np
+    v = np.asarray(edit_emb, dtype=float); v = v / (np.linalg.norm(v) + 1e-9)
+    sims = []
+    for o in ops:
+        c = o.get("_centroid")
+        if c:
+            c = np.asarray(c); sims.append((o["name"], float(v @ (c / (np.linalg.norm(c) + 1e-9)))))
+    sims.sort(key=lambda x: -x[1])
+    best = sims[0][1] if sims else 0.0
+    return {"soft": dict(sims[:topk]), "residual": 1.0 - best,
+            "novel": (1.0 - best) > tau, "best": sims[0][0] if sims else None}
+
+
+def grow_library(seed_ops: list[dict], edit_embs, tau: float = 0.45, k_new: int = 12):
+    """T.8 GROWTH: keep seed operators; edits too far from the manifold (residual>tau) are pooled and
+    clustered into NEW operator atoms — so a new corpus (e.g. Fable feature-building) GROWS the library
+    instead of collapsing into the seed (SWE) vocab. Returns (extended_ops, n_novel)."""
+    import numpy as np
+    from sklearn.cluster import KMeans
+    X = np.asarray(edit_embs, dtype=float)
+    Xn = X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-9)
+    C = np.asarray([o["_centroid"] for o in seed_ops if o.get("_centroid")], dtype=float)
+    Cn = C / (np.linalg.norm(C, axis=1, keepdims=True) + 1e-9)
+    best = (Xn @ Cn.T).max(axis=1)
+    novel = np.where((1.0 - best) > tau)[0]
+    new_ops = []
+    if len(novel) >= 2 * max(2, k_new // 4):
+        kk = min(k_new, max(2, len(novel) // 4))
+        lab = KMeans(kk, n_init=10, random_state=0).fit(Xn[novel]).labels_
+        for c in range(kk):
+            mem = novel[lab == c]
+            if len(mem):
+                new_ops.append({
+                    "op_id": f"grow_{c}", "name": f"Grow{c:02d}_minted", "input_type": "code",
+                    "output_type": "code", "precondition": "minted from out-of-manifold residual cluster",
+                    "realize_hint": "minted operator (new transform family, not in seed vocab)",
+                    "confidence": 0.4, "source": "grown", "age": 0, "validation_count": int(len(mem)),
+                    "_centroid": [float(x) for x in X[mem].mean(axis=0)]})
+    return seed_ops + new_ops, int(len(novel))
+
+
 def save(ops: list[dict], path: str) -> None:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     Path(path).write_text("\n".join(json.dumps(o) for o in ops), encoding="utf-8")
