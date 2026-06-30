@@ -90,6 +90,13 @@ Decoder = frozen 4B + LoRA (realizer). The **traversal + operator selection + go
 
 ---
 
+## 4b. Observability — the traversal must be plottable (or it isn't real)
+A genuine latent traversal is **visualizable**, and the plot doubles as the V7 kill-test:
+- **Operator-space graph** (`operator_discovery.visualize`, built): discovered operators = nodes (size ∝ freq), edges = consecutive-operator transitions across the corpus's gold trajectories → `artifacts/train_plots/operator_space.png`. This is the graph the traverse moves over, emerged self-supervised from data.
+- **Model traversal overlay** (hook ready, `model_trajs=`): the traverse's actual chosen op-sequences drawn in red. **A LEARNED traverse hugs the high-frequency gold edges; a decorative one scatters** — V7 made visual.
+- **Latent path** (when the latent traverse exists): `h_t` states in 2D (PCA) with `Δ_t` operator-moves as arrows — the literal "navigation in latent space."
+If the traversal can't be plotted as a structured path, it isn't traversing — it's noise. Observability is a requirement, not a nicety.
+
 ## 5. Component map — reuse, don't reinvent
 | Role | Existing piece |
 |---|---|

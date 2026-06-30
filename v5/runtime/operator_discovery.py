@@ -139,6 +139,56 @@ def chunk(diff: str, ops: list[dict]) -> list[str]:
     return traj
 
 
+def visualize(ops: list[dict], golds: list[str], out: str, model_trajs: list[list[str]] | None = None) -> None:
+    """Plot the operator-space the traversal moves over: discovered operators = nodes (size ∝ freq),
+    edges = consecutive-operator TRANSITIONS across the corpus's gold trajectories (width ∝ count).
+    This is the graph reasoning traverses. If `model_trajs` (the model's actual chosen op-sequences) is
+    given, overlay them in red — a LEARNED traverse hugs the thick gold edges, a decorative one
+    scatters (the V7 kill-test, made visible). metrics + PNG; robust if matplotlib absent."""
+    import math
+    from collections import Counter
+    names = [o["name"] for o in ops]
+    idx = {n: i for i, n in enumerate(names)}
+    freq = {o["name"]: o.get("validation_count", 1) for o in ops}
+    trans = Counter()
+    for g in golds:
+        tr = [t for t in chunk(g, ops) if t in idx]
+        for a, b in zip(tr, tr[1:]):
+            trans[(a, b)] += 1
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    Path(Path(out).with_suffix(".json")).write_text(
+        json.dumps({"nodes": names, "freq": freq, "transitions": {f"{a}->{b}": c for (a, b), c in trans.items()}}, indent=1),
+        encoding="utf-8")
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception:
+        return
+    n = len(names)
+    pos = {nm: (math.cos(2 * math.pi * i / n), math.sin(2 * math.pi * i / n)) for i, nm in enumerate(names)}
+    fig, ax = plt.subplots(figsize=(13, 13))
+    mx = max(trans.values()) if trans else 1
+    for (a, b), c in trans.items():
+        (x0, y0), (x1, y1) = pos[a], pos[b]
+        ax.plot([x0, x1], [y0, y1], color="0.6", lw=0.3 + 3 * c / mx, alpha=0.5, zorder=1)
+    fmx = max(freq.values()) if freq else 1
+    for nm in names:
+        x, y = pos[nm]
+        ax.scatter([x], [y], s=80 + 800 * freq[nm] / fmx, color="C0", alpha=0.8, zorder=2)
+        ax.text(x * 1.08, y * 1.08, nm, fontsize=6, ha="center", va="center", zorder=3)
+    if model_trajs:
+        for tr in model_trajs:
+            tr = [t for t in tr if t in pos]
+            for a, b in zip(tr, tr[1:]):
+                (x0, y0), (x1, y1) = pos[a], pos[b]
+                ax.annotate("", xy=(x1, y1), xytext=(x0, y0),
+                            arrowprops=dict(arrowstyle="->", color="red", lw=1.5, alpha=0.7), zorder=4)
+    ax.set_title(f"LGGN operator-space ({n} ops) — gold transitions (grey) "
+                 + ("+ model traversal (red)" if model_trajs else ""))
+    ax.axis("off"); fig.tight_layout(); fig.savefig(out, dpi=120); plt.close(fig)
+
+
 def save(ops: list[dict], path: str) -> None:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     Path(path).write_text("\n".join(json.dumps(o) for o in ops), encoding="utf-8")
@@ -197,6 +247,8 @@ def main():
         print("top operators:")
         for o in ops[:15]:
             print(f"  {o['name']:30} freq={o['validation_count']:3} | {o['precondition'][:50]}")
+        visualize(ops, golds, "artifacts/train_plots/operator_space.png")
+        print("operator-space graph -> artifacts/train_plots/operator_space.png (+ .json)")
         return
     ap.print_help()
 
