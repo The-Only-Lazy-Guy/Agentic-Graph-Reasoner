@@ -358,7 +358,7 @@ def train(
     staged: bool = False, diag_max_new: int = 200,
     distill: bool = False, distill_steps: int = 0, gap_coef: float = 0.0, op_mean: bool = True,
     rep_penalty: float = 1.15, realizer: bool = False, plots_dir: str = "artifacts/train_plots",
-    fable_corpus: str = "", fable_frac: float = 0.5,
+    fable_corpus: str = "", fable_frac: float = 0.5, discovered_ops: str = "",
 ):
     """Train the SWE RL model.
 
@@ -544,14 +544,27 @@ def train(
     _rplan_cache: dict = {}
     if realizer:
         from v5.runtime.lggn import label_gold, render_op_program, seed_library
-        _op_vocab = {o.name: o for o in seed_library().ops}
         _n_mined = 0
-        for _t in tasks:
-            _ops = label_gold(_t.get("gold", "") or "")
-            _traj = [_op_vocab[o] for o in _ops if o in _op_vocab]
-            _rplan_cache[_t["iid"]] = render_op_program(_traj) if _traj else "(no operator matched — derive the minimal fix)"
-            _n_mined += bool(_traj)
-        print(f"[realizer] operator-plan SFT: {_n_mined}/{len(tasks)} tasks got a mined operator trajectory", flush=True)
+        if discovered_ops and Path(discovered_ops).is_file():     # SELF-SUPERVISED operators (V5, 79% cov)
+            import json as _json
+            from v5.runtime.operator_discovery import chunk as _disc_chunk
+            _disc = [_json.loads(l) for l in Path(discovered_ops).read_text(encoding="utf-8").splitlines() if l.strip()]
+            _hint = {o["name"]: o.get("realize_hint", o["name"]) for o in _disc}
+            for _t in tasks:
+                _names = [n for n in _disc_chunk(_t.get("gold", "") or "", _disc) if n != "novel"]
+                _rplan_cache[_t["iid"]] = ("\n".join(f"{i+1}. {_hint.get(n, n)}" for i, n in enumerate(_names))
+                                          if _names else "(no operator matched — derive the minimal fix)")
+                _n_mined += bool(_names)
+            print(f"[realizer] DISCOVERED-op plan SFT: {_n_mined}/{len(tasks)} tasks chunked "
+                  f"({len(_disc)} self-supervised operators)", flush=True)
+        else:                                                     # fallback: regex seed-op mining
+            _op_vocab = {o.name: o for o in seed_library().ops}
+            for _t in tasks:
+                _ops = label_gold(_t.get("gold", "") or "")
+                _traj = [_op_vocab[o] for o in _ops if o in _op_vocab]
+                _rplan_cache[_t["iid"]] = render_op_program(_traj) if _traj else "(no operator matched — derive the minimal fix)"
+                _n_mined += bool(_traj)
+            print(f"[realizer] regex operator-plan SFT: {_n_mined}/{len(tasks)} tasks got a mined trajectory", flush=True)
 
     def _fix(t):
         if realizer:
@@ -1119,6 +1132,9 @@ def main():
                     help="REALIZER training: prompt = fix_user(plan = operators MINED from the gold patch "
                          "via lggn.label_gold) -> gold SR. Trains the LoRA to realize an operator trajectory "
                          "as code (decoder-as-compiler) + bootstraps operator discovery. Replaces the exemplar.")
+    ap.add_argument("--discovered-ops", default="",
+                    help="self-supervised operator library (operator_discovery --discover) for realizer "
+                         "plan labels — replaces the regex label_gold (79% vs 59% coverage). Empty = regex.")
     ap.add_argument("--fable-corpus", default="",
                     help="Fable-5 realizer corpus jsonl (from ingest_fable5) — mixed into SFT as "
                          "(intent->edit) text steps to broaden leaf code-realization (fixes small-data overfit).")
@@ -1156,7 +1172,7 @@ def main():
         staged=a.staged, diag_max_new=a.diag_max_new,
         distill=a.distill, distill_steps=a.distill_steps, gap_coef=a.gap_coef, op_mean=not a.op_sum,
         rep_penalty=a.rep_penalty, realizer=a.realizer, plots_dir=a.plots_dir,
-        fable_corpus=a.fable_corpus, fable_frac=a.fable_frac,
+        fable_corpus=a.fable_corpus, fable_frac=a.fable_frac, discovered_ops=a.discovered_ops,
     )
 
 
