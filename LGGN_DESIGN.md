@@ -97,6 +97,46 @@ A genuine latent traversal is **visualizable**, and the plot doubles as the V7 k
 - **Latent path** (when the latent traverse exists): `h_t` states in 2D (PCA) with `Δ_t` operator-moves as arrows — the literal "navigation in latent space."
 If the traversal can't be plotted as a structured path, it isn't traversing — it's noise. Observability is a requirement, not a nicety.
 
+## 4c. The TRAVERSE (HRM-templated planner) — spec
+The reasoner: `goal → operator trajectory`. The frozen LLM realizes each operator; the verifier grades.
+Cousin of HRM (latent hierarchical reasoning, no CoT) — but over a **frozen LLM** + a **growing,
+inspectable operator library**, for open-ended coding. HRM's gains were traced to its refinement loop,
+not its hierarchy → we **kill-test the structure** (V7), which HRM didn't.
+
+**Architecture (v1, feedforward-autoregressive):**
+- **Goal encoder (frozen):** RealEmbedder(issue + localized support) → `g` (768-d). No training cost.
+- **Operator decoder (learnable, small):** autoregressive over the **discovered operator vocab** (~56
+  ops + BOS/STOP), conditioned on `g`. At step t: `(g, op_1..op_{t-1}) → softmax(op_t)`. Tiny output
+  space → small, fast, HRM-like efficient. Operators are *discrete latent tokens* (reasoning in
+  operator-space, not text-token space).
+
+**Training — SFT on `(goal → operator trajectory)`:**
+- corpus = **SWE** chunked golds (verifiable, mostly short) **+ Fable** chunked sessions (long
+  multi-edit = the multi-step decomposition SWE lacks). Operators abstract format → SWE+Fable unify
+  with NO format clash (the reason Fable belongs HERE, not the realizer — proven by the realizer
+  negative, held 27→20). Self-supervised labels via `operator_discovery.chunk`.
+
+**Metrics (decoupled from the 4B resolve wall):**
+- **trajectory-prediction accuracy on HELD goals** (op-level P/R, exact-traj match) — does the reasoner
+  *generalize* to unseen tasks? This validates the reasoning claim independent of leaf capacity.
+
+**V7 topology kill-test (the HRM differentiator):** learned operator-transition structure (graph /
+co-occurrence prior over ops) vs **random** vs **none**. If learned beats random → the graph *reasons*;
+if it ties → decorative (the exact ablation HRM skipped).
+
+**v2 (ablation, only if v1 generalizes):** add HRM-style latent H/L recurrence (K refinement passes
+before readout). Ablate K=1 (feedforward) vs K>1 — *does recurrence help?* (HRM's contested claim.)
+
+**Observability:** capture the decoder hidden state at each emitted op → PCA → the **real latent-path
+viz** (`operator_discovery.visualize_embedding(model_states=...)`). The model's actual `h_t` path,
+not the operator-embedding proxy.
+
+**Compose (end-to-end, needs a non-4B leaf to be unconfounded):** traverse → realizer (stronger leaf) →
+verify. Resolve is the *downstream* metric; trajectory-accuracy + V7 are the *reasoning* metrics.
+
+**Build order:** (1) traverse corpus `(goal→trajectory)` from SWE+Fable; (2) TraversePlanner + SFT,
+measure held trajectory-accuracy; (3) V7 kill-test + latent-path viz; (4) compose w/ stronger leaf.
+
 ## 5. Component map — reuse, don't reinvent
 | Role | Existing piece |
 |---|---|
