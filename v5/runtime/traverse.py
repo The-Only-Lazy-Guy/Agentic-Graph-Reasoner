@@ -42,6 +42,31 @@ def build_corpus_swe(dataset: str, split: str, ops: list[dict], with_code: bool 
 COARSE = [False]   # module flag toggled by --coarse
 
 
+def build_corpus_swe_emb(dataset: str, split: str, K: int, embed_fn):
+    """EMBEDDING operators: cluster gold FIXES (semantic) -> K operators; goal -> fix-cluster. Fixes the
+    goal-blind structural-signature carving (AMI(goal,fix-emb)~0.3 vs ~0 for signatures). Returns
+    (corpus, op_names)."""
+    import numpy as np
+    from sklearn.cluster import KMeans
+    from v5.graph_grower.swe_load import load_instances
+    from v5.runtime.operator_discovery import extract_hunks
+    rows = []
+    for i in load_instances(name=dataset, split=split, limit=0):
+        p = i.get("patch", "") or ""
+        hs = extract_hunks(p)
+        if not hs:
+            continue
+        code = "\n".join(l for _f, rem, _a in hs for l in rem)[:1200]
+        issue = (i.get("problem_statement") or i.get("issue") or "")[:1000]
+        fix = ("\n".join("- " + l for _f, rem, _a in hs for l in rem[:6]) + "\n" +
+               "\n".join("+ " + l for _f, _r, add in hs for l in add[:8]))[:1500]
+        rows.append((f"{issue}\nCODE AT FIX SITE:\n{code}", fix))
+    Xf = np.asarray(embed_fn([f for _g, f in rows]))
+    labels = KMeans(K, n_init=10, random_state=0).fit_predict(Xf)
+    corpus = [(g, [f"EMB_{int(c)}"]) for (g, _f), c in zip(rows, labels)]
+    return corpus, [f"EMB_{i}" for i in range(K)]
+
+
 def coarse_bucket(name: str) -> str:
     """Collapse a fine structural-signature op -> a coarse SEMANTIC bucket (~9 classes). Tests whether
     operator GRANULARITY is why goal->operator doesn't generalize (surface signatures hard to predict;
@@ -209,18 +234,23 @@ def main():
     ap.add_argument("--split", default="test")
     ap.add_argument("--ops", default="data/swe/discovered_ops.jsonl")
     ap.add_argument("--epochs", type=int, default=80)
+    ap.add_argument("--emb-ops", type=int, default=0, help="use K EMBEDDING operators (semantic fix-clusters) instead of signature ops")
     ap.add_argument("--curve", action="store_true", help="learning curve: held coarse-op acc vs train size")
     ap.add_argument("--coarse", action="store_true", help="collapse fine ops -> ~9 semantic buckets (granularity test)")
     a = ap.parse_args()
     if a.selftest:
         raise SystemExit(0 if _selftest() else 1)
     if a.train or a.curve:
-        ops = load_ops(a.ops)
-        COARSE[0] = a.coarse or a.curve            # curve uses coarse buckets (the learnable granularity)
-        op_names = sorted({coarse_bucket(o["name"]) for o in ops}) if COARSE[0] else [o["name"] for o in ops]
-        print(f"[traverse] operator vocab: {len(op_names)} {'COARSE buckets' if COARSE[0] else 'fine ops'}")
-        corpus = build_corpus_swe(a.dataset, a.split, ops)
         embed_fn, d = real_embed_fn()
+        if a.emb_ops:                              # EMBEDDING operators (semantic fix-clusters) — the fix
+            print(f"[traverse] operator vocab: {a.emb_ops} EMBEDDING clusters (semantic fix-clusters)")
+            corpus, op_names = build_corpus_swe_emb(a.dataset, a.split, a.emb_ops, embed_fn)
+        else:
+            ops = load_ops(a.ops)
+            COARSE[0] = a.coarse or a.curve        # curve uses coarse buckets (the learnable granularity)
+            op_names = sorted({coarse_bucket(o["name"]) for o in ops}) if COARSE[0] else [o["name"] for o in ops]
+            print(f"[traverse] operator vocab: {len(op_names)} {'COARSE buckets' if COARSE[0] else 'fine ops'}")
+            corpus = build_corpus_swe(a.dataset, a.split, ops)
         if a.curve:                                # learning curve: held fixed, vary train size
             print("\n=== LEARNING CURVE (coarse ops; data-limited vs fundamental) ===")
             for cap in (50, 100, 0):
