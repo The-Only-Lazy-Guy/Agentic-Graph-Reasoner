@@ -104,6 +104,8 @@ The planner trains as a **policy `π(Δ_t | h_t, obs_{<t})`** where the observat
 - **Why:** Fable is greenfield *build* (success-heavy) — failure-obs = only **2%** of transitions, and failures *don't even redirect* (15% op-change after failure vs 31% baseline). The observe→revise loop is **absent in greenfield data** → it needs **failure-rich** data (SWE-agent runs w/ test feedback), not Fable. *Not a refutation of T.9 — a data-domain mismatch (build ≠ debug).*
 - So the validated planner = **topology-driven, goal-conditioned operator planning**; the observation-feedback (debug) loop stays designed-but-untested pending failure-rich trajectories.
 
+**Fork A — obs-feedback ON FAILURE-RICH DATA (2026-07-01, `capture_failures.py` + `obs_signal_test.py`):** captured real FAIL_TO_PASS failures on 40 SWE-Lite instances (harness on unpatched repos, no-op patch; 38/38 this run). Does the test-failure help predict the gold operator? **issue+failure 40% vs issue-only 25% (+15pp), failure-only 30% (n=33, majority 24%) → T.9 SUPPORTED on debug data.** The observation carries fix-operator signal where FAILURES exist — the exact opposite of Fable greenfield (obs=0%), confirming the **domain-mismatch**: the POMDP observe→revise loop works on **bug-fixing** (the architecture's target), not greenfield build. `failure-only > issue-only` = the test-failure localizes the operator better than the issue text. Caveat: n=33, wide bands (±14-19%) → suggestive + domain-contrast decisive, but scale to n~100 (capture is now durable/resumable) to tighten.
+
 ---
 
 ## 1. The two graphs
