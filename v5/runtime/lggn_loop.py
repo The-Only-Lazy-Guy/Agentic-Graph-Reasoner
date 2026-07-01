@@ -67,20 +67,31 @@ def make_rank(embed_fn, ops):
     return rank
 
 
+DEBUG = [False]
+
+
 def make_realize(gen_fn):
     from v5.runtime.swe_slot import fix_user, _repair_sr_to_src, _patch
     from v5.runtime.search_replace import parse_sr
 
     def realize(task, plan, feedback):
         dest = task["_dest"]
-        src, _f = _src_window(dest, task["patch"])
+        src, f = _src_window(dest, task["patch"])
         prompt = fix_user(task.get("problem_statement", ""), src,
                           plan=f"{plan['name']}: {plan.get('realize_hint', '')}", test_failure=feedback)
-        blocks = parse_sr(gen_fn(prompt))
-        if not blocks:
-            return ""
-        blocks = _repair_sr_to_src(blocks, dest)
-        return _patch(blocks, dest)
+        raw = gen_fn(prompt)
+        blocks = parse_sr(raw)
+        patch = ""
+        if blocks:
+            blocks = _repair_sr_to_src(blocks, dest)
+            patch = _patch(blocks, dest)
+        if DEBUG[0]:
+            print(f"    [realize op={plan['name']}] file={f} src_len={len(src)} raw_len={len(raw)} "
+                  f"blocks={len(blocks or [])} patch_len={len(patch)}")
+            print(f"      RAW[:260]={raw[:260]!r}")
+            if patch:
+                print(f"      PATCH[:260]={patch[:260]!r}")
+        return patch
     return realize
 
 
@@ -95,6 +106,8 @@ def make_proxy_verify():
         gold = "\n".join(l for _f, _r, a in extract_hunks(task["patch"]) for l in a)
         emit = "\n".join(l[1:] for l in (patch or "").splitlines() if l.startswith("+") and not l.startswith("+++"))
         rec, _ = _fidelity(emit, gold)
+        if DEBUG[0]:
+            print(f"    [proxy] recall={rec:.2f} emit[:120]={emit[:120]!r} gold[:120]={gold[:120]!r}")
         return (rec >= 0.7, "the previous patch did NOT pass the tests; try a different fix approach")
     return verify
 
@@ -164,11 +177,13 @@ def main():
     ap.add_argument("--iters", type=int, default=4)
     ap.add_argument("--backend", default="docker")
     ap.add_argument("--ops", default="data/swe/discovered_ops_emb.jsonl")
+    ap.add_argument("--debug", action="store_true", help="dump realize+verify chain for diagnosis")
     ap.add_argument("--proxy-verify", action="store_true", help="gold-match instead of Docker (GPU-only box, tests the mechanism)")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
         raise SystemExit(0 if _selftest() else 1)
+    DEBUG[0] = a.debug
     from v5.graph_grower.swe_load import load_instances
     from v5.runtime.solution_ladder import real_gen_fn
     import torch
