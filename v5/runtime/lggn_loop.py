@@ -85,16 +85,19 @@ def make_realize(gen_fn):
                   "<<<<<<< SEARCH\n<exact existing code>\n=======\n<fixed code>\n>>>>>>> REPLACE")
         raw = gen_fn(prompt)
         blocks = parse_sr(raw)
+        for b in blocks:                                           # my prompt omits the path -> set oracle file
+            b["file"] = f
         patch = ""
         if blocks:
             blocks = _repair_sr_to_src(blocks, dest)
             patch = _patch(blocks, dest)
         if DEBUG[0]:
+            sr = blocks[0]["search"][:120] if blocks else ""
             print(f"    [realize op={plan['name']}] file={f} src_len={len(src)} raw_len={len(raw)} "
                   f"blocks={len(blocks or [])} patch_len={len(patch)}")
-            print(f"      RAW[:260]={raw[:260]!r}")
+            print(f"      SEARCH[:120]={sr!r}")
             if patch:
-                print(f"      PATCH[:260]={patch[:260]!r}")
+                print(f"      PATCH[:200]={patch[:200]!r}")
         return patch
     return realize
 
