@@ -79,8 +79,10 @@ def make_realize(gen_fn):
         src, f = _src_window(dest, task["patch"], span=220)         # wide window so SEARCH matches real code
         fb = (f"\n\nThe PREVIOUS attempt FAILED the tests:\n{feedback[:400]}\nTry a DIFFERENT fix.\n"
               if feedback else "")
+        hint = plan.get("realize_hint", "")                        # the graph's SPECIFIC fix pattern (write-back payload)
         prompt = (f"Fix this bug.\n\nIssue:\n{task.get('problem_statement', '')[:700]}\n\n"
-                  f"File {f}:\n{src[:3500]}\n{fb}\nRepair operator to apply: {plan['name']}\n\n"
+                  f"File {f}:\n{src[:3500]}\n{fb}\n"
+                  f"A known repair pattern from memory (adapt it to this code):\n{hint[:450]}\n\n"
                   "Output ONLY a search/replace block. SEARCH must be EXACT existing code copied from the file:\n"
                   "<<<<<<< SEARCH\n<exact existing code>\n=======\n<fixed code>\n>>>>>>> REPLACE")
         raw = gen_fn(prompt)
