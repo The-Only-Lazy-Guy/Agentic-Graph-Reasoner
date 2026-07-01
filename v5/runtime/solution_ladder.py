@@ -117,10 +117,11 @@ def real_gen_fn(model_name):
     def gen(prompt):
         msgs = [{"role": "system", "content": "You are a precise code-fixing assistant. Output only a search/replace block."},
                 {"role": "user", "content": prompt}]
-        ids = tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt").to(dev)
-        out = model.generate(ids, max_new_tokens=256, do_sample=False, temperature=None, top_p=None,
-                             pad_token_id=tok.eos_token_id)
-        return tok.decode(out[0, ids.shape[1]:], skip_special_tokens=True)
+        enc = tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt",
+                                      return_dict=True).to(dev)
+        n_in = enc["input_ids"].shape[1]
+        out = model.generate(**enc, max_new_tokens=256, do_sample=False, pad_token_id=tok.eos_token_id)
+        return tok.decode(out[0, n_in:], skip_special_tokens=True)
     return gen
 
 
