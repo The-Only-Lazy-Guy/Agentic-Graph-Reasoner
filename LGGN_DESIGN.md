@@ -24,6 +24,7 @@ This doc is the canonical design. It supersedes the single-vector "floor" (`swe_
 | **Solution ladder** (4B, n=30, `solution_ladder.py`) | emit given issue **14%** / +operator-plan **10%** / **+EXACT gold 83%** | the wall is **DERIVATION**, not emission or the plan |
 | **Latent traversal = COMPOSITION** (`latent_compose.py`, train-only basis, no leakage) | direct 0.42 vs **operator-compose 0.54** (+0.12) | **the LGGN core is REAL** — composing operators reaches the fix far better than direct |
 | Operator SELECTION (RL, `rl_refiner.py`) | reward flat 0.07 | discrete pick is the WRONG mechanism (composition ≠ selection) |
+| **Composition-DECODE** (4B, n=20, `composition_decode.py`) | issue-only **0.144** vs top1 0.115 vs topK 0.115 | the frozen LLM **can't cash in** the composition — delivered patterns *mislead* it → **decode is the frozen-LLM wall** |
 
 **Honest negatives the kill-tests caught** (right-for-the-right-reason): signature operators were goal-blind (~chance → embedding ops fixed it); raw topology 65% was a self-loop artifact (op-change is the real 38%); Fable-greenfield obs=0% (no failures → domain-mismatch, rescued on SWE debug); retrieval has no resolve headroom (best-of-3=top-1).
 
