@@ -122,12 +122,15 @@ def real_gen_fn(model_name):
 
     @torch.no_grad()
     def gen(prompt):
-        msgs = [{"role": "system", "content": "You are a precise code-fixing assistant. Output only a search/replace block."},
-                {"role": "user", "content": "/no_think\n" + prompt}]      # suppress <think> pollution
-        enc = tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt",
-                                      return_dict=True).to(dev)
+        msgs = [{"role": "system", "content": "You are a precise code-fixing assistant. Output only a search/replace block, no reasoning."},
+                {"role": "user", "content": prompt}]
+        kw = dict(add_generation_prompt=True, return_tensors="pt", return_dict=True)
+        try:
+            enc = tok.apply_chat_template(msgs, enable_thinking=False, **kw).to(dev)   # the real thinking switch
+        except TypeError:
+            enc = tok.apply_chat_template(msgs, **kw).to(dev)
         n_in = enc["input_ids"].shape[1]
-        out = model.generate(**enc, max_new_tokens=256, do_sample=False, pad_token_id=tok.eos_token_id)
+        out = model.generate(**enc, max_new_tokens=512, do_sample=False, pad_token_id=tok.eos_token_id)
         return tok.decode(out[0, n_in:], skip_special_tokens=True)
     return gen
 
