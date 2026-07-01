@@ -71,14 +71,18 @@ DEBUG = [False]
 
 
 def make_realize(gen_fn):
-    from v5.runtime.swe_slot import fix_user, _repair_sr_to_src, _patch
+    from v5.runtime.swe_slot import _repair_sr_to_src, _patch      # NOT fix_user (its prompt -> <search> tags)
     from v5.runtime.search_replace import parse_sr
 
     def realize(task, plan, feedback):
         dest = task["_dest"]
-        src, f = _src_window(dest, task["patch"])
-        prompt = fix_user(task.get("problem_statement", ""), src,
-                          plan=f"{plan['name']}: {plan.get('realize_hint', '')}", test_failure=feedback)
+        src, f = _src_window(dest, task["patch"], span=220)         # wide window so SEARCH matches real code
+        fb = (f"\n\nThe PREVIOUS attempt FAILED the tests:\n{feedback[:400]}\nTry a DIFFERENT fix.\n"
+              if feedback else "")
+        prompt = (f"Fix this bug.\n\nIssue:\n{task.get('problem_statement', '')[:700]}\n\n"
+                  f"File {f}:\n{src[:3500]}\n{fb}\nRepair operator to apply: {plan['name']}\n\n"
+                  "Output ONLY a search/replace block. SEARCH must be EXACT existing code copied from the file:\n"
+                  "<<<<<<< SEARCH\n<exact existing code>\n=======\n<fixed code>\n>>>>>>> REPLACE")
         raw = gen_fn(prompt)
         blocks = parse_sr(raw)
         patch = ""
