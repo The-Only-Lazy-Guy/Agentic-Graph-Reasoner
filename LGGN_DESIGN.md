@@ -9,6 +9,23 @@ This doc is the canonical design. It supersedes the single-vector "floor" (`swe_
 
 ---
 
+## Results scorecard (all measured, 2026-06-30 / 07-01)
+| Claim | Result | Status |
+|---|---|---|
+| Reasoner learns (goal→operator, semantic ops) | **40% SWE / 70% Fable** vs ~chance | VALIDATED |
+| Scales with data | held first-op **33→48%** with train size | VALIDATED |
+| Compositional manifold — intra-task (fix = Σ own parts) | **0.91** vs 0.26 random, 100% of golds | VALIDATED |
+| Compositional manifold — cross-task (fix = Σ library ops) | **0.58** vs 0.38 random, 98% | VALIDATED |
+| Topology load-bearing (op-change next-op, CV) | **38%** vs 6% random vs 3% marginal | VALIDATED (self-loops factored out) |
+| Open-vocabulary growth (T.8) | Fable mints **+16** ops, 2421 novel edits | VALIDATED |
+| POMDP obs-feedback on DEBUG data (issue+failure→op) | **+15pp** (40% vs 25%), failure-only>issue-only | SUPPORTED (n=33; scale to tighten) |
+| Encoder is not the wall | 4B-hidden ≈ mpnet, gap≈0 all layers | ruled out |
+| Realizer resolve (4B leaf) | **~20%** (6 ways) | OPEN — leaf wall, needs stronger leaf |
+
+**Honest negatives the kill-tests caught** (right-for-the-right-reason): signature operators were goal-blind (~chance → embedding ops fixed it); raw topology 65% was a self-loop artifact (op-change is the real 38%); Fable-greenfield obs=0% (no failures → domain-mismatch, rescued on SWE debug); retrieval has no resolve headroom (best-of-3=top-1).
+
+**One-line thesis status:** the reasoning substrate — a compositional, growing, topology-load-bearing operator library the frozen LLM realizes — is **validated end-to-end**; the *deployed resolve* number is bounded by the **4B leaf**, untested with a capable leaf (the one remaining big experiment).
+
 ## 0. Why this shape (what the SWE experiments forced)
 Measured, on SWE-bench Lite, 4-bit Qwen3.5-4B:
 - File-level localization works; **emission applies ~80%**; **resolve ceiling ~20%** with exemplar grounding.
