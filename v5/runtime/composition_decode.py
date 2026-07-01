@@ -85,6 +85,7 @@ def run(rows, gen_fn, n_ops=24, K=3, epochs=300, log=print):
     rng = np.random.RandomState(0); idx = rng.permutation(len(rows))
     nh = len(idx) // 3
     test = [rows[i] for i in idx[:nh]]; train = [rows[i] for i in idx[nh:]]
+    n_ops = min(n_ops, max(2, len(train) // 2))                      # basis can't exceed train size
     composer, _cen, reps = _train_composer(train, n_ops, epochs)
     log(f"  composer trained on {len(train)}; testing on {len(test)} (K={K})")
     arms = {"issue_only": [], "top1": [], "topK": []}
