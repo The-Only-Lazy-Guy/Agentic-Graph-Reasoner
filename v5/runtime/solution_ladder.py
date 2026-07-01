@@ -29,7 +29,8 @@ def _norm_lines(s: str) -> list[str]:
 
 
 def _emitted_replace(text: str) -> str:
-    m = _SR.search(text or "")
+    text = re.sub(r"<think>.*?</think>", "", text or "", flags=re.S)   # Qwen thinking models pollute the block
+    m = _SR.search(text)
     return m.group(2) if m else ""
 
 
@@ -54,7 +55,7 @@ def _prompts(issue, removed, added, op_name, op_hint):
     }
 
 
-def run_ladder(instances, ops, gen_fn, log=print):
+def run_ladder(instances, ops, gen_fn, log=print, dump=""):
     from v5.runtime.operator_discovery import extract_hunks, chunk_embedding, _fix_text
     import numpy as np
     embed = None
@@ -68,7 +69,7 @@ def run_ladder(instances, ops, gen_fn, log=print):
             return [d[str(j)] for j in range(len(ts))]
     name2op = {o["name"]: o for o in ops}
     rungs = ["a_issue", "b_plan", "c_gold"]
-    rec = {r: [] for r in rungs}; exact = {r: [] for r in rungs}; n = 0
+    rec = {r: [] for r in rungs}; exact = {r: [] for r in rungs}; n = 0; samples = []
     for i in instances:
         hs = extract_hunks(i.get("patch", "") or "")
         if not hs:
@@ -83,10 +84,16 @@ def run_ladder(instances, ops, gen_fn, log=print):
         n += 1
         for r in rungs:
             g = gen_fn(pr[r])
-            f, ex = _fidelity(_emitted_replace(g), added)
+            er = _emitted_replace(g)
+            f, ex = _fidelity(er, added)
             rec[r].append(f); exact[r].append(int(ex))
+            if dump and n <= 6:
+                samples.append(f"===== {i['instance_id']} [{r}] recall={f:.0%} =====\n"
+                               f"GOLD ADDED:\n{added[:250]}\n\nEMITTED REPLACE:\n{er[:250]}\n\nRAW GEN:\n{g[:400]}\n")
         if n % 5 == 0:
             log(f"  ...{n} instances")
+    if dump and samples:
+        Path(dump).write_text("\n".join(samples), encoding="utf-8"); log(f"  raw samples -> {dump}")
     out = {r: (float(np.mean(rec[r])) if rec[r] else 0.0, float(np.mean(exact[r])) if exact[r] else 0.0) for r in rungs}
     return out, n
 
@@ -116,7 +123,7 @@ def real_gen_fn(model_name):
     @torch.no_grad()
     def gen(prompt):
         msgs = [{"role": "system", "content": "You are a precise code-fixing assistant. Output only a search/replace block."},
-                {"role": "user", "content": prompt}]
+                {"role": "user", "content": "/no_think\n" + prompt}]      # suppress <think> pollution
         enc = tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt",
                                       return_dict=True).to(dev)
         n_in = enc["input_ids"].shape[1]
@@ -148,6 +155,7 @@ def main():
     ap.add_argument("--split", default="test")
     ap.add_argument("--n", type=int, default=30)
     ap.add_argument("--ops", default="data/swe/discovered_ops_emb.jsonl")
+    ap.add_argument("--dump", default="artifacts/ladder_dump.txt", help="raw generations for the first 6 instances")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
@@ -156,7 +164,7 @@ def main():
     ops = [json.loads(l) for l in Path(a.ops).read_text(encoding="utf-8").splitlines() if l.strip()]
     insts = list(load_instances(name=a.dataset, split=a.split, limit=a.n))
     print(f"[ladder] {len(insts)} instances, model={a.model}")
-    _report(*run_ladder(insts, ops, real_gen_fn(a.model)))
+    _report(*run_ladder(insts, ops, real_gen_fn(a.model), dump=a.dump))
 
 
 if __name__ == "__main__":
