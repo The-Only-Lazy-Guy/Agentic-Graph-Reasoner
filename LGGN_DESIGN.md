@@ -20,11 +20,12 @@ This doc is the canonical design. It supersedes the single-vector "floor" (`swe_
 | Open-vocabulary growth (T.8) | Fable mints **+16** ops, 2421 novel edits | VALIDATED |
 | POMDP obs-feedback on DEBUG data (issue+failure→op) | **+15pp** (40% vs 25%), failure-only>issue-only | SUPPORTED (n=33; scale to tighten) |
 | Encoder is not the wall | 4B-hidden ≈ mpnet, gap≈0 all layers | ruled out |
-| Realizer resolve (4B leaf) | **~20%** (6 ways) | OPEN — leaf wall, needs stronger leaf |
+| Realizer resolve (4B leaf) | **~20%** (6 ways) | OPEN — leaf wall |
+| **Solution ladder** (4B, n=30, `solution_ladder.py`) | emit given issue **14%** / +operator-plan **10%** / **+EXACT gold 83%** | the wall is **DERIVATION**, not emission or the plan |
 
 **Honest negatives the kill-tests caught** (right-for-the-right-reason): signature operators were goal-blind (~chance → embedding ops fixed it); raw topology 65% was a self-loop artifact (op-change is the real 38%); Fable-greenfield obs=0% (no failures → domain-mismatch, rescued on SWE debug); retrieval has no resolve headroom (best-of-3=top-1).
 
-**One-line thesis status:** the reasoning substrate — a compositional, growing, topology-load-bearing operator library the frozen LLM realizes — is **validated end-to-end**; the *deployed resolve* number is bounded by the **4B leaf**, untested with a capable leaf (the one remaining big experiment).
+**One-line thesis status:** the reasoning substrate — a compositional, growing, topology-load-bearing operator library the frozen LLM realizes — is **validated end-to-end as science**; but the **solution ladder characterized the resolve wall as DERIVATION** (the 4B emits a *handed* fix at 83% and copies fine, but derives the correct fix from the issue only 14%, and **generic operator-plans don't help (−4%)**). So the substrate is the **wrong granularity for resolve**: resolve needs *specific fix content* (derivation), operators deliver *generic structure*. The graph can't retrieve the novel exact fix (no retrieval headroom) nor make the 4B derive it. **Resolve levers now:** deliver near-exact content (not generic ops), or improve 4B derivation directly (SFT/RL), or a stronger leaf — *not* more operator-planning.
 
 ## 0. Why this shape (what the SWE experiments forced)
 Measured, on SWE-bench Lite, 4-bit Qwen3.5-4B:
