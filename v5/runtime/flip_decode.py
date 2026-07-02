@@ -50,8 +50,14 @@ def _sr_block(removed: str, added: str) -> str:
     return f"<<<<<<< SEARCH\n{removed}\n=======\n{added}\n>>>>>>> REPLACE"
 
 
-def _prompt_latent(code: str) -> str:
-    """Cells 3/4/5 prompt: buggy-code CANVAS only, NO issue. The latent carries the fix."""
+def _prompt_latent(code: str, canvas: bool = True) -> str:
+    """Latent-only prompt (NO issue). canvas=True: buggy code shown as the SEARCH anchor -> the REPLACE
+    must come from the latent, BUT the code can leak fixes derivable from the buggy lines (the decoder
+    then ignores the latent). canvas=False: NO code at all -> the latent is the ONLY source of the fix =
+    the honest channel-readability ceiling."""
+    if not canvas:
+        return ("A repair is encoded in the context vector prepended to this prompt.\n"
+                "Emit ONLY the fixed code lines it encodes, nothing else.")
     return (f"Buggy code:\n{code[:900]}\n\n"
             "Emit ONLY a search/replace block. SEARCH = exact buggy code above; REPLACE = the fix:\n"
             "<<<<<<< SEARCH\n<exact buggy code>\n=======\n<fixed code>\n>>>>>>> REPLACE")
@@ -61,7 +67,7 @@ class _LatentDecoder:
     """Frozen base LM + LoRA + a learned projection v(d_emb) -> [n_soft, d_model] soft prefix.
     Trained to emit the gold SR block from the latent ONLY (buggy code is the text canvas)."""
 
-    def __init__(self, model_name, n_soft=8, d_emb=768, lr=2e-4):
+    def __init__(self, model_name, n_soft=8, d_emb=768, lr=2e-4, canvas=True):
         import os, torch, torch.nn as nn
         from transformers import AutoTokenizer
         from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
@@ -78,6 +84,7 @@ class _LatentDecoder:
         self.dev = next(self.model.parameters()).device
         self.d_model = self.model.get_input_embeddings().weight.shape[1]
         self.n_soft = n_soft
+        self.canvas = canvas
         cdt = next(p for p in self.model.parameters() if p.is_floating_point()).dtype
         self.proj = nn.Sequential(nn.Linear(d_emb, self.d_model), nn.Tanh(),
                                   nn.Linear(self.d_model, n_soft * self.d_model)).to(self.dev, cdt)
@@ -120,8 +127,8 @@ class _LatentDecoder:
         n = len(rows)
         for s in range(steps):
             r = rows[s % n]
-            inp, attn, labels = self._embeds(_prompt_latent(r["code"]), r["fe"],
-                                             target=_sr_block(r["code"], r["added"]))
+            target = _sr_block(r["code"], r["added"]) if self.canvas else r["added"]
+            inp, attn, labels = self._embeds(_prompt_latent(r["code"], self.canvas), r["fe"], target=target)
             out = self.model(inputs_embeds=inp, attention_mask=attn, labels=labels)
             out.loss.backward()
             self.opt.step(); self.opt.zero_grad()
@@ -132,7 +139,7 @@ class _LatentDecoder:
         t = self._torch
         self.model.eval()
         with t.no_grad():
-            inp, attn, _ = self._embeds(_prompt_latent(code), v, target=None)
+            inp, attn, _ = self._embeds(_prompt_latent(code, self.canvas), v, target=None)
             out = self.model.generate(inputs_embeds=inp, attention_mask=attn, max_new_tokens=max_new,
                                       do_sample=False, pad_token_id=self.tok.eos_token_id)
         return self.tok.decode(out[0], skip_special_tokens=True)
@@ -165,8 +172,9 @@ def _bootstrap_ci(xs, iters=2000, lo=5, hi=95, seed=0):
     return float(np.percentile(bs, lo)), float(np.percentile(bs, hi))
 
 
-def run(rows, dec, n_ops=24, K=3, train_steps=600, epochs=300, log=print):
+def run(rows, dec, n_ops=24, K=3, train_steps=600, epochs=300, dump="", log=print):
     import numpy as np, torch
+    from pathlib import Path
     from v5.runtime.composition_decode import _train_composer
     from v5.runtime.solution_ladder import _emitted_replace, _fidelity
     rng = np.random.RandomState(0); idx = rng.permutation(len(rows))
@@ -174,42 +182,61 @@ def run(rows, dec, n_ops=24, K=3, train_steps=600, epochs=300, log=print):
     test = [rows[i] for i in idx[:nh]]; train = [rows[i] for i in idx[nh:]]
     n_ops = min(n_ops, max(2, len(train) // 2))
     composer, centroids, _reps = _train_composer(train, n_ops, epochs)     # TRAIN-only basis + composer
-    log(f"  training latent decoder on {len(train)} (v=gold-fix-emb -> gold SR), {train_steps} steps")
+    log(f"  training latent decoder on {len(train)} (canvas={dec.canvas}), {train_steps} steps")
     dec.train(train, train_steps, log=log)
-    log(f"  eval on {len(test)} held (cells 3/4/5)")
-    cells = {"c3_exact_latent": [], "c4_oracle_composed": [], "c5_predicted_composed": []}
+    log(f"  eval on {len(test)} held (cells 3/4/5 + zero/random-latent ablation)")
+    extract = _emitted_replace if dec.canvas else (lambda s: s)            # pure-latent: gen IS the fix
+    keys = ("c3_exact", "c4_oracle", "c5_predicted", "z_zero_latent", "z_rand_latent")
+    cells = {k: [] for k in keys}; d = centroids.shape[1]; samples = []
     with torch.no_grad():
-        for t in test:
+        for j, t in enumerate(test):
             w = torch.softmax(composer(torch.tensor(t["g"], dtype=torch.float32)), -1).numpy()
-            v_pred = w @ centroids
-            v_oracle = _oracle_weights(t["fe"], centroids)
-            for cell, v in (("c3_exact_latent", t["fe"]),
-                            ("c4_oracle_composed", v_oracle),
-                            ("c5_predicted_composed", v_pred)):
-                rec, _ = _fidelity(_emitted_replace(dec.gen(t["code"], v)), t["added"])
+            arms = (("c3_exact", t["fe"]), ("c4_oracle", _oracle_weights(t["fe"], centroids)),
+                    ("c5_predicted", w @ centroids), ("z_zero_latent", np.zeros(d)),
+                    ("z_rand_latent", np.random.RandomState(j).randn(d)))
+            for cell, v in arms:
+                g = dec.gen(t["code"], np.asarray(v, dtype=float))
+                rec, _ = _fidelity(extract(g), t["added"])
                 cells[cell].append(rec)
+                if dump and j < 4 and cell in ("c3_exact", "z_zero_latent"):
+                    samples.append(f"===== held[{j}] [{cell}] recall={rec:.0%} =====\n"
+                                   f"GOLD ADDED:\n{t['added'][:200]}\n\nRAW GEN:\n{g[:300]}\n")
+    if dump and samples:
+        Path(dump).write_text("\n".join(samples), encoding="utf-8"); log(f"  raw samples -> {dump}")
     out = {c: (float(np.mean(v)) if v else 0.0, _bootstrap_ci(v)) for c, v in cells.items()}
     return out, len(test)
 
 
 def _report(out, n):
-    c3, c4, c5 = (out[k] for k in ("c3_exact_latent", "c4_oracle_composed", "c5_predicted_composed"))
+    c3, c4, c5 = (out[k] for k in ("c3_exact", "c4_oracle", "c5_predicted"))
+    z0, zr = out["z_zero_latent"], out["z_rand_latent"]
     print(f"\n=== FLIP DECODE (n={n}) — trained decoder reads the LATENT ===")
     print(f"  PRIOR (frozen+text, not re-run):  exact {B1_FROZEN_TEXT_EXACT:.3f}   composed {B2_FROZEN_TEXT_COMPOSED:.3f}")
-    for k, lab in (("c3_exact_latent", "3) exact-latent   (channel ceiling)"),
-                   ("c4_oracle_composed", "4) oracle-composed (basis ceiling) "),
-                   ("c5_predicted_composed", "5) predicted-comp (deploy)        ")):
+    for k, lab in (("c3_exact", "3) exact-latent   (channel ceiling)"),
+                   ("c4_oracle", "4) oracle-composed (basis ceiling) "),
+                   ("c5_predicted", "5) predicted-comp (deploy)        "),
+                   ("z_zero_latent", "-) ZERO latent    (ablation)      "),
+                   ("z_rand_latent", "-) RANDOM latent  (ablation)      ")):
         m, (lo, hi) = out[k]
         print(f"  {lab}: recall {m:.3f}  [90% CI {lo:.3f}-{hi:.3f}]")
-    print(f"\n  pre-registered gates:")
-    print(f"    channel OK   (c3 >= {THR_CHANNEL:.2f}) : {'PASS' if c3[0] >= THR_CHANNEL else 'FAIL'}")
+    # GATE 0: is the latent even load-bearing? exact must beat the no-info ablations, or nothing below is meaningful.
+    ablate = max(z0[0], zr[0]); latent_gap = c3[0] - ablate
+    load_bearing = latent_gap > 0.05
+    print(f"\n  GATE 0 latent load-bearing: c3 - max(zero,random) = {latent_gap:+.3f} -> "
+          f"{'latent MATTERS' if load_bearing else 'LATENT IGNORED'}")
     frac = c4[0] / c3[0] if c3[0] > 0 else 0.0
-    print(f"    basis carries (c4 >= {THR_BASIS_FRAC:.2f}*c3={THR_BASIS_FRAC*c3[0]:.3f}) : {'PASS' if frac >= THR_BASIS_FRAC else 'FAIL'} (c4/c3={frac:.2f})")
     flip = c5[0] >= THR_FLIP and c5[1][0] > B2_FROZEN_TEXT_COMPOSED
-    print(f"    FLIP         (c5 >= {THR_FLIP:.3f} & CI>B2) : {'PASS' if flip else 'FAIL'}")
+    print(f"  gates: channel(c3>={THR_CHANNEL:.2f})={'PASS' if c3[0] >= THR_CHANNEL else 'FAIL'}  "
+          f"basis(c4>={THR_BASIS_FRAC:.2f}*c3)={'PASS' if frac >= THR_BASIS_FRAC else 'FAIL'}(c4/c3={frac:.2f})  "
+          f"FLIP(c5>={THR_FLIP:.3f}&CI>B2)={'PASS' if flip else 'FAIL'}")
     print(f"\n  verdict: ", end="")
-    if c3[0] < THR_CHANNEL:
-        print("c3 LOW -> latent channel / embedding-space unreadable (mpnet non-invertible?). Fix substrate, conclude nothing about operators.")
+    if not load_bearing:
+        print("LATENT IGNORED (c3 == ablations) -> the decoder fits from the PROMPT, not the latent. "
+              "NOT an mpnet verdict. Re-run with --pure-latent (drops the code canvas so the latent is the "
+              "only fix source) to test channel-readability honestly.")
+    elif c3[0] < THR_CHANNEL:
+        print("latent matters but c3 LOW -> embedding space lossy (mpnet hard to invert to exact code). "
+              "Consider a code-reconstructable latent (decoder hidden / code-AE) instead of mpnet.")
     elif frac < THR_BASIS_FRAC:
         print("c3 high, c4 LOW -> operator basis too GENERIC. Lever = carry residual (T.8) + write-back, NOT the injector.")
     elif not flip:
@@ -232,6 +259,7 @@ def _selftest() -> bool:
              "g": book[i], "fe": book[i]} for i in range(N)]
 
     class Mock:                                              # decodes a latent by nearest codebook entry
+        canvas = True
         def train(self, rows, steps, log=print): pass
         def gen(self, code, v):
             j = int(np.argmin(((book - np.asarray(v)) ** 2).sum(1)))
@@ -239,8 +267,9 @@ def _selftest() -> bool:
 
     # patch composer path: reuse run() but with a trivial 2-op basis; check c3 (exact) is near-perfect
     out, n = run(rows, Mock(), n_ops=4, K=1, train_steps=1, epochs=50, log=lambda *a: None)
-    c3 = out["c3_exact_latent"][0]
-    print(f"  c3(exact-latent)={c3:.2f}  c4={out['c4_oracle_composed'][0]:.2f}  c5={out['c5_predicted_composed'][0]:.2f}")
+    c3 = out["c3_exact"][0]
+    print(f"  c3(exact-latent)={c3:.2f}  c4={out['c4_oracle'][0]:.2f}  c5={out['c5_predicted'][0]:.2f}  "
+          f"zero={out['z_zero_latent'][0]:.2f}  rand={out['z_rand_latent'][0]:.2f}")
     # sanity: a random latent should NOT recover the code
     rec_rand, _ = _fidelity(_emitted_replace(Mock().gen("x=1", rng.randn(d))), "x = 999")
     assert c3 > 0.9, "exact-latent must be recoverable through an invertible channel"
@@ -258,15 +287,18 @@ def main():
     ap.add_argument("--k", type=int, default=3)
     ap.add_argument("--n-soft", type=int, default=8)
     ap.add_argument("--train-steps", type=int, default=600)
+    ap.add_argument("--pure-latent", action="store_true",
+                    help="drop the buggy-code canvas -> the latent is the ONLY fix source (honest channel test)")
+    ap.add_argument("--dump", default="artifacts/flip_dump.txt", help="raw generations for the first held instances")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
         raise SystemExit(0 if _selftest() else 1)
     from v5.runtime.composition_decode import _load
     rows = _load(a.dataset, a.split, a.n)
-    print(f"[flip-decode] {len(rows)} instances, model={a.model}")
-    dec = _LatentDecoder(a.model, n_soft=a.n_soft)
-    _report(*run(rows, dec, K=a.k, train_steps=a.train_steps))
+    print(f"[flip-decode] {len(rows)} instances, model={a.model}, canvas={not a.pure_latent}")
+    dec = _LatentDecoder(a.model, n_soft=a.n_soft, canvas=not a.pure_latent)
+    _report(*run(rows, dec, K=a.k, train_steps=a.train_steps, dump=a.dump))
 
 
 if __name__ == "__main__":
