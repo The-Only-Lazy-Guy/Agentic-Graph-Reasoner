@@ -95,11 +95,12 @@ class _LatentDecoder:
         t = self._torch
         msgs = [{"role": "system", "content": "You are a precise code-fixing assistant. Output only a search/replace block."},
                 {"role": "user", "content": prompt}]
+        kw = dict(add_generation_prompt=True, return_tensors="pt", return_dict=True)
         try:
-            pids = self.tok.apply_chat_template(msgs, add_generation_prompt=True, enable_thinking=False, return_tensors="pt")
+            enc = self.tok.apply_chat_template(msgs, enable_thinking=False, **kw)   # transformers 5.x -> BatchEncoding
         except TypeError:
-            pids = self.tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt")
-        pids = pids.to(self.dev)
+            enc = self.tok.apply_chat_template(msgs, **kw)
+        pids = enc["input_ids"].to(self.dev)
         emb = self.model.get_input_embeddings()
         soft = self._soft(v).unsqueeze(0)                    # [1, n_soft, d_model]
         parts = [soft, emb(pids)]
