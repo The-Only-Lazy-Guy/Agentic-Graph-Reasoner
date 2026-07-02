@@ -383,8 +383,47 @@ class _Decoder:
 
 # ── experiment ──────────────────────────────────────────────────────────────────
 
+def _sensitivity_sweep(dec, texts, gold_f, h_K, tr, he, n_points=7, log=print):
+    """After training a ceiling decoder with gold_f, eval with interpolated latents.
+
+    h_alpha = alpha * gold_f + (1-alpha) * h_K for alpha in [1.0 ... 0.0].
+    Measures: cos(h_alpha, gold_f) and decoder recall at each alpha.
+    This reveals the decoder's sensitivity to latent error — where the cliff is.
+
+    Also includes a random-z point to establish the noise floor.
+    """
+    import numpy as np
+    alphas = np.linspace(1.0, 0.0, n_points)
+    log(f"\n  --- sensitivity sweep: ceiling decoder, {n_points} alpha points ---")
+    log(f"  {'alpha':>6}  {'cos(h_a,f)':>10}  {'recall':>7}")
+
+    curve = []
+    for alpha in alphas:
+        h_alpha = alpha * gold_f + (1.0 - alpha) * h_K
+        cos_vals = torch.nn.functional.cosine_similarity(
+            torch.tensor(h_alpha[he]), torch.tensor(gold_f[he]))
+        mean_cos = float(cos_vals.mean())
+        mean_rec, _ = dec.eval_on(texts, h_alpha, he, log=lambda *a: None)
+        log(f"  {alpha:6.2f}  {mean_cos:10.3f}  {mean_rec:7.3f}")
+        curve.append((float(alpha), mean_cos, mean_rec))
+
+    # random baseline: same norm as gold_f, random direction
+    rng = np.random.RandomState(42)
+    h_rand = rng.randn(*gold_f.shape).astype("float32")
+    h_rand *= np.linalg.norm(gold_f, axis=-1, keepdims=True) / \
+              np.linalg.norm(h_rand, axis=-1, keepdims=True)
+    cos_rand = float(torch.nn.functional.cosine_similarity(
+        torch.tensor(h_rand[he]), torch.tensor(gold_f[he])).mean())
+    rec_rand, _ = dec.eval_on(texts, h_rand, he, log=lambda *a: None)
+    log(f"  {'rand':>6}  {cos_rand:10.3f}  {rec_rand:7.3f}")
+    curve.append(("rand", cos_rand, rec_rand))
+
+    return curve
+
+
 def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
-        refiner_epochs=400, decoder_epochs=2, bottleneck=64, seed=0, log=print):
+        refiner_epochs=400, decoder_epochs=2, bottleneck=64, seed=0,
+        sensitivity=False, log=print):
     import numpy as np
 
     rng = np.random.RandomState(seed); idx = rng.permutation(len(g))
@@ -403,7 +442,7 @@ def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
         ("latent",   h_K,   True),    # LoRA + FiLM(h_K)
         ("ceiling",  f,     True),    # LoRA + FiLM(gold_f)
     ]
-    results = {}; per_inst = {}
+    results = {}; per_inst = {}; sens_curve = None
     for arm_name, latents, use_film in arms:
         log(f"  [2/3] decoder arm '{arm_name}' (film={use_film}, bn={bottleneck})...")
         dec = _Decoder(model_name, d_latent=d, use_film=use_film, bottleneck=bottleneck)
@@ -411,6 +450,8 @@ def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
         mean_rec, recs = dec.eval_on(texts, latents, he, log=log)
         results[arm_name] = mean_rec; per_inst[arm_name] = recs
         log(f"    {arm_name}: held recall = {mean_rec:.3f}")
+        if arm_name == "ceiling" and sensitivity:
+            sens_curve = _sensitivity_sweep(dec, texts, f, h_K, tr, he, log=log)
         dec.cleanup()
 
     # phase 3: write-back trajectory
@@ -421,10 +462,10 @@ def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
     if wb.get("op_usage"):
         log(f"    dominant ops: {wb['op_usage']}")
 
-    return results, len(he), cos_he, wb
+    return results, len(he), cos_he, wb, sens_curve
 
 
-def _report(results, n_held, cos_refiner, wb):
+def _report(results, n_held, cos_refiner, wb, sens_curve=None):
     print(f"\n=== LGGN DECODE v2 (FiLM, held n={n_held}) — refiner h_K -> actual patches ===")
     print(f"  refiner cos(h_K, gold_f) = {cos_refiner:.3f}")
     print(f"  [v1 soft-prefix FAILED: baseline 0.136 > latent 0.098 > ceiling 0.113]")
@@ -444,7 +485,14 @@ def _report(results, n_held, cos_refiner, wb):
     if wb.get("n_success", 0) > 0:
         print(f"\n  write-back: {wb['n_success']}/{n_held} decodes above threshold")
         print(f"  dominant ops: {wb.get('op_usage', {})}")
-        print(f"  (wire to lggn.py OperatorLibrary.add_or_strengthen for actual graph edits)")
+    if sens_curve:
+        print(f"\n  --- sensitivity curve (ceiling decoder, gold->h_K interpolation) ---")
+        print(f"  {'alpha':>6}  {'cos':>6}  {'recall':>7}  {'vs baseline':>11}")
+        for row in sens_curve:
+            a, c, r = row
+            delta = r - bl
+            a_str = f"{a:.2f}" if isinstance(a, float) else str(a)
+            print(f"  {a_str:>6}  {c:6.3f}  {r:7.3f}  {delta:+11.3f}")
 
 
 # ── selftest ────────────────────────────────────────────────────────────────────
@@ -546,20 +594,23 @@ def main():
     ap.add_argument("--refiner-epochs", type=int, default=400)
     ap.add_argument("--decoder-epochs", type=int, default=2)
     ap.add_argument("--bottleneck", type=int, default=64, help="BehaviorEncoder output dim")
+    ap.add_argument("--sensitivity", action="store_true",
+                    help="run gold->h_K interpolation sweep after ceiling arm")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
         raise SystemExit(0 if _selftest() else 1)
     print(f"[lggn-decode v2 FiLM] model={a.model} dataset={a.dataset} n={a.n} "
-          f"r={a.r} K={a.K} bottleneck={a.bottleneck}")
+          f"r={a.r} K={a.K} bottleneck={a.bottleneck} epochs={a.decoder_epochs} "
+          f"sensitivity={a.sensitivity}")
     g, f, ctx, cmask, texts = _load_paired(a.model, a.dataset, a.split, a.n)
     print(f"  {len(g)} instances, d={g.shape[1]}")
-    results, n_held, cos_ref, wb = run(
+    results, n_held, cos_ref, wb, sens = run(
         g, f, ctx, cmask, texts, a.model,
         n_op=a.n_op, K=a.K, r=a.r,
         refiner_epochs=a.refiner_epochs, decoder_epochs=a.decoder_epochs,
-        bottleneck=a.bottleneck)
-    _report(results, n_held, cos_ref, wb)
+        bottleneck=a.bottleneck, sensitivity=a.sensitivity)
+    _report(results, n_held, cos_ref, wb, sens)
 
 
 if __name__ == "__main__":
