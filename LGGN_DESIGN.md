@@ -27,14 +27,201 @@ This doc is the canonical design. It supersedes the single-vector "floor" (`swe_
 | **Composition-DECODE** (4B, n=20, `composition_decode.py`) | issue-only **0.144** vs top1 0.115 vs topK 0.115 | the frozen LLM **can't cash in** the composition — delivered patterns *mislead* it → **decode is the frozen-LLM wall** |
 | **LGGN refiner** (`lggn_refine.py`, r=512, Qwen3.5-4B, 5-seed CI) | recurrence **+0.084±0.011** · constraints **+0.112±0.012** · graph **+0.028±0.008** · learnedness **+0.128±0.009** · vs-noniter **+0.309±0.013** — ALL PASS | **all 4 LGGN pillars load-bearing at r=512.** Graph was FLAT at r=256 (capacity-starved); rescued by wider projection. The discrete operator basis IS better than free MLP when both have enough capacity |
 | LGGN extended (r=512, 5-seed) | topology **-0.003±0.003** · hybrid **-0.015±0.007** vs nograph · compounding **+0.001±0.010** | topology/hybrid/compounding ALL FLAT. Graph value = per-step learned directions, NOT sequencing/prior/scaling |
+| **Decode v1 — soft prefix** (`lggn_decode.py` v1, LoRA + soft prefix from h_K, 4-bit Qwen3.5-4B) | baseline **0.136** · latent **0.098** · ceiling **0.113** — ALL prefix arms WORSE than baseline. Training loss identical (~0.35) across all arms | **INJECTION MECHANISM BROKEN.** LoRA ignores prefix tokens, learns text→text shortcut. The prefix is a weak injection point diluted by self-attention over 200+ text tokens. Soft prefix = prompt engineering in disguise — the latent changes the INPUT, not the COMPUTATION. Escalate to FiLM. |
 
 **Honest negatives the kill-tests caught** (right-for-the-right-reason): signature operators were goal-blind (~chance → embedding ops fixed it); raw topology 65% was a self-loop artifact (op-change is the real 38%); Fable-greenfield obs=0% (no failures → domain-mismatch, rescued on SWE debug); retrieval has no resolve headroom (best-of-3=top-1).
 
-**One-line thesis status:** the LGGN reasoning substrate is **validated** — `lggn_refine` at r=512 (5-seed CI) proves all four pillars load-bearing: recurrence, constraints, graph-as-discrete-basis, and operator learnedness. The graph's value is **per-step learned directions** (operators as displacement vectors in Qwen space); its OTHER claimed levers (topology prior, hybrid graph+MLP, cross-task compounding) are all flat. The graph is a **learned dictionary of fix-directions**, not a planning/sequencing substrate. **The wall is DECODE** — the frozen 4B can't cash in the latent composition (`composition_decode`: issue-only 0.144 > topK 0.115). **Next frontier: train a decoder** (SFT on latent→patch) to bridge latent reach → actual code, and **write-back** (model feeds successful trajectories back into the graph as new/strengthened operators — the compounding mechanism that makes the library grow with experience).
+**One-line thesis status:** the LGGN reasoning substrate is **validated** — `lggn_refine` at r=512 (5-seed CI) proves all four pillars load-bearing: recurrence, constraints, graph-as-discrete-basis, and operator learnedness. The graph's value is **per-step learned directions** (operators as displacement vectors in Qwen space); its OTHER claimed levers (topology prior, hybrid graph+MLP, cross-task compounding) are all flat. The graph is a **learned dictionary of fix-directions**, not a planning/sequencing substrate. **The wall is DECODE** — the frozen 4B can't cash in the latent composition, AND soft-prefix injection FAILED (baseline 0.136 > latent 0.098 > ceiling 0.113 — LoRA ignores prefix tokens). **Pivoting to FiLM** (Feature-wise Linear Modulation): the latent modulates the COMPUTATION at every layer (`h' = γ(z)⊙h + β(z)`), not the input. The architectural insight: **the graph becomes a library of model BEHAVIORS (computational modulations), not embedding directions.** Each operator is a way to rewire the model; composition = stacking rewirings. A BehaviorEncoder maps h_K into a compact behavior space where graph ops, composition, write-back, and retrieval all operate; a FiLM renderer expands behavior embeddings into per-layer (γ, β). **Next:** FiLM gate test (ceiling > baseline?), then ops-in-behavior-space + behavioral write-back.
 
 **CORRECTION (2026-07-01) — resolve is UNBUILT, not closed.** The HRM lens exposed the gap: HRM iterates *against the puzzle state*; we only ever ran a one-shot operator picker + frozen executor. `iterative_refine.py` probe: iteration on a *static goal-embedding* is FLAT (K=1..8 ≈ 0.39) — a fixed input has no constraints to propagate.
 
 **UPDATE (2026-07-02) — the TRAINED REFINER is now VALIDATED.** `lggn_refine.py` builds exactly the missing piece: a trained refiner that iterates h_t against code-token hidden states (the constraint environment), selecting graph operators each step. At r=512, all 4 pillars PASS (5-seed CI). The refiner reaches cos=0.593 with the gold fix in Qwen space — the *reasoning* works. **What remains:** (1) a **trained decoder** that turns h_K into the actual patch (the decode wall — frozen 4B can't cash in the composition), (2) the **loop assembled** (traverse→realize→verify→refine), (3) **write-back** — successful trajectories feed back into the graph as new/strengthened operators (the growth mechanism). The r=256→512 flip taught us the policy projection was capacity-starved; the graph earns its place when given enough room. Extended tests (topology/hybrid/compounding all flat) tell us: don't complicate the op selection — the value is in the learned directions themselves.
+
+---
+
+## THE DECODE PIVOT: From Embedding Directions to Behavioral Modulation (2026-07-02)
+
+### What failed and why
+
+**Soft-prefix injection (lggn_decode v1):** projected h_K into 4 soft tokens prepended to the input sequence. Result: baseline 0.136, latent 0.098, ceiling 0.113. All prefix arms WORSE than baseline. Training loss identical (~0.35) across all three arms — the LoRA adapter learned text→text and completely ignored the prefix tokens. The prefix is diluted by self-attention over 200+ text tokens. Even the CEILING (gold fix embedding projected into prefix tokens) couldn't beat baseline — the injection mechanism itself is broken, not the latent quality.
+
+**Root cause:** soft prefix is prompt engineering in disguise. It adds information to the INPUT, but the model is free to ignore it (and does). The LoRA learns a text→text shortcut that's strictly better than reading noisy prefix tokens. This is the same failure mode as composition_decode (ops delivered as TEXT hurt: 0.115 < 0.144 issue-only).
+
+**The lesson:** the latent must change the COMPUTATION, not the input. The model must be UNABLE to ignore the conditioning.
+
+### Architecture ranking (from user research)
+
+Six injection mechanisms evaluated for LGGN:
+
+| Mechanism | How it works | Can model ignore it? | Bandwidth | Rating |
+|---|---|---|---|---|
+| **FiLM / AdaLN** | h' = γ(z)⊙h + β(z) at every layer | **NO** — modulates every activation | Medium (per-channel scale+shift) | ★★★★★ |
+| **Hypernetwork → LoRA** | z generates LoRA adapter weights | **NO** — changes the weights | High (full weight modification) | ★★★★★ |
+| Cross-attention (T.3 style) | attention over latent tokens | Partially — heads can attend elsewhere | High (content-based) | ★★★★ |
+| Hidden-state replacement | replace activations at a target layer | NO — but distributional mismatch risk | Highest (direct replacement) | ★★★ |
+| Soft prefix (v1, FAILED) | project z into input tokens | **YES** — diluted by self-attention | Low | ★★ (PROVEN BROKEN) |
+| KV-cache injection | inject z into attention KV cache | Partially | Medium | ★★★ |
+
+**Chosen: FiLM first** (simplest ★★★★★, proven in DiT/SD3), with hypernetwork as the escalation path.
+
+### The conceptual shift
+
+Before (soft prefix / composition_decode):
+```
+latent vector → add to input → model reads it (maybe) → text
+```
+The model is asked to DECODE a latent. It can and does ignore it.
+
+After (FiLM):
+```
+latent vector → behavior encoder → FiLM renderer → modulate every layer → model computes differently → text
+```
+The model is asked to COMPUTE differently. It cannot ignore it — every layer's activations are scaled and shifted.
+
+**The graph becomes a library of model BEHAVIORS, not embedding directions.**
+
+Before: a node = a point in representation space (a direction in Qwen hidden space).
+After: a node = a computational modification (a set of per-layer modulations that change how the model processes information).
+
+This is a richer abstraction. An embedding direction says "the fix is OVER THERE." A behavioral modulation says "THINK THIS WAY to find the fix."
+
+### The architecture (3 layers, not 2)
+
+```
+h_K (refiner output, d=2560 in Qwen hidden space)
+ │
+ ▼
+BehaviorEncoder (learned projection, d=2560 → b=64-128)
+ │
+ ▼
+behavior embedding (compact, ~64-128d)     ← THE GRAPH LIVES HERE
+ │                                           operators defined here
+ ▼                                           composition happens here
+FiLM Renderer (per-layer expansion)          write-back stores points here
+ │                                           retrieval searches here
+ ▼
+γ₁β₁ ... γ₃₆β₃₆ (per-layer scale+shift)
+ │
+ ▼
+Qwen hidden states modulated at every layer
+```
+
+**Why three layers, not two:** the graph should not manipulate raw FiLM parameters (36 layers × 2 × 2560 = ~184K values). That's like a scene graph manipulating pixels. The BehaviorEncoder compresses h_K into a compact behavior space where graph operations (composition, retrieval, write-back) are tractable. The FiLM Renderer is just that — a renderer. Analogous to graphics: scene graph → renderer → pixels.
+
+**Parameter count:**
+- BehaviorEncoder: Linear(2560→64) + GELU ≈ 164K params
+- FiLM Renderer: 36 × Linear(64→5120) ≈ 12M params
+- LoRA (q/k/v/o, r=16): ~9M params
+- Total trainable: ~21M — fits in 6GB VRAM alongside 4-bit Qwen3.5-4B
+
+**Initialization:** FiLM initialized to identity (γ=1, β=0). At init, the model behaves exactly as if FiLM weren't there. Training teaches the FiLM to deviate from identity in ways that help decode.
+
+### FiLM × LGGN synergy map (6 interaction points)
+
+FiLM turns a latent vector into a behavioral modification of the LLM. Every place LGGN produces a latent, FiLM can consume it. Every place the LLM runs, FiLM can steer it.
+
+**1. Decode (the gate test)**
+- h_K → BehaviorEncoder → FiLM → Qwen generates patch
+- If ceiling > baseline → FiLM injection works
+- If latent > baseline → h_K helps decode (the bridge works)
+- This must pass before anything below matters.
+
+**2. Conditioned representation extraction (feedback loop)**
+- Currently: frozen Qwen produces g, f, ctx as fixed hidden states
+- With FiLM: Qwen + FiLM(previous h_K) extracts conditioned representations
+- The model "thinks differently" when reading code based on what the refiner discovered
+- refine → FiLM → re-extract → refine → ... converges when the behavior stabilizes
+- This is iterative fixed-point inference / belief propagation on the graph
+
+**3. Model-internal verification (soft gate before Docker)**
+- Generate patch with FiLM(h_K)
+- Re-encode patched code through Qwen + FiLM(h_K)
+- Check multiple signals: representation similarity, model confidence, edit consistency
+- Passes soft gate → spend Docker. Fails → update h_K → re-generate.
+- Docker remains the external oracle. Internal verify is a cost filter, not a replacement.
+- CAUTION: high cosine(goal) ≠ patch is correct. Combine signals; don't trust cosine alone.
+
+**4. Operators in behavior space (redefines what a graph operator IS)**
+- Currently: KMeans on (f-g) displacements in Qwen embedding space → static ops as vectors
+- With FiLM: operators are directions in the BEHAVIOR manifold, not the embedding manifold
+- Each op = a direction in behavior space → a set of (Δγ, Δβ) changes → a way to rewire computation
+- Composing ops = composing behavioral changes. "Apply GuardType then FixMutation" = stack their modulations
+- Discovery pipeline: successful patches → extract learned FiLM states → compute Δγ,Δβ from identity → PCA/autoencoder → compressed behavior vectors → cluster → operator nodes in the graph
+- The graph never touches raw FiLM params — it operates in the compressed behavior manifold
+
+**5. Behavioral write-back (procedural memory — the most novel piece)**
+- After a successful decode: extract the learned FiLM state (γ,β per layer)
+- Compress: FiLM state → BehaviorEncoder (reverse direction) or a separate compressor → behavior vector
+- Store that behavior vector as a new graph node
+- Future similar instances: retrieve the behavior vector → FiLM Renderer → reinstall the computational state
+- The graph stores and retrieves previously-successful WAYS OF THINKING, not facts or embeddings
+- This is **procedural memory**: "when I saw this kind of bug, thinking THIS WAY worked" — stored as a literal computational configuration, not a text description
+- Closest analogy: motor memory in neuroscience. The brain doesn't remember "how to ride a bike" as a fact; it stores the motor program. FiLM write-back stores the computational program.
+
+**6. Hierarchical conditioning (bandwidth scaling, later)**
+- Single FiLM = one global z for all layers → uniform modulation
+- Layer-grouped FiLM: different z per group (early layers = syntax, mid = semantics, late = generation)
+- The refiner produces K×G latents (K steps × G groups) instead of one h_K
+- More bandwidth, more targeted control — but more parameters to generate
+
+### Dependency order
+
+```
+(1) Decode gate test              ← must pass first; if fails, escalate to hypernetwork
+    ↓
+(4) Ops in behavior space         ← redefines what "graph operator" means
+(5) Behavioral write-back         ← graph stores computational states
+    ↓
+(2) Conditioned extraction        ← feedback loop (iterative fixed-point)
+(3) Model-internal verify         ← drops Docker from inner loop (soft gate)
+    ↓
+(6) Hierarchical conditioning     ← bandwidth scaling
+```
+
+### Relationship to the hypernetwork / ΔW idea
+
+FiLM applies h' = γ⊙h + β — this is **activation modulation**, not literal weight change. But the EFFECT resembles a lightweight weight edit: it changes the computation performed at each layer. The distinction matters:
+
+- FiLM: modulates activations. Same model weights, different behavior per input. Cheap, reversible, per-instance.
+- Hypernetwork → LoRA: generates actual weight updates (ΔW). The model's weights literally change. More powerful, more expensive.
+- The ΔW idea (graph predicts weight updates): the graph communicates by rewiring the model. Each operator generates a small ΔW. Composition = accumulating ΔW. This IS the hypernetwork path.
+
+**FiLM is the gate test for the principle** (latent modulates computation). If FiLM works, the ΔW path is the upgrade (higher bandwidth, literal weight change). If FiLM fails, the principle itself might not hold for this domain.
+
+### The fixed-point iteration (the real endgame)
+
+The feedback loop (synergy point 2) deserves emphasis:
+
+```
+initial code representation
+    ↓
+graph reasoning (refiner)
+    ↓
+behavior embedding
+    ↓
+FiLM modulation
+    ↓
+new code representation (model reads code differently)
+    ↓
+graph reasoning (refiner, on new reprs)
+    ↓
+new behavior embedding
+    ↓
+FiLM modulation
+    ↓
+... converges
+```
+
+This is not a single retrieval pass. The graph operates inside an **iterative dynamical system**. It resembles:
+- **Belief propagation** — messages iterate until beliefs converge
+- **Fixed-point inference** — the system converges to a self-consistent state
+- **Recurrent reasoning** — each pass refines the previous
+
+The convergence condition: when successive behavior embeddings stop changing (||b_{t+1} - b_t|| < ε). The fixed point is a self-consistent state where the model's way of reading the code and the refiner's reasoning are in agreement.
+
+This is architecturally distinct from HRM (which iterates h_t against fixed context). Here, the CONTEXT itself changes because FiLM modifies how the model processes it. The refiner and the model co-evolve.
+
+---
 
 ## 0. Why this shape (what the SWE experiments forced)
 Measured, on SWE-bench Lite, 4-bit Qwen3.5-4B:
@@ -375,7 +562,7 @@ NOT the wall: localization (file-level works), emission (80% applyable), retriev
 | `v5/runtime/swe_rl.py` | 1180 | **the TRAINER** (SFT->GRPO->distill, LoRA) | `--realizer` (operator-plan->gold SFT), `--discovered-ops`, `--fable-corpus/--fable-frac`, `--distill`, `--plots-dir` (`_save_train_plots`), `--rep-penalty`, `--eff-coef`, `--use-exemplar`, `--staged`, `--graph` | built; realizer proxy-up resolve-flat |
 | `v5/runtime/swe_slot.py` | 2121 | **the INFERENCE ENGINE** | oneshot/slot/kv solve; `--exemplar`(+`--exemplar-rank`), `--lggn-realize`(+`--lggn-multileaf`), `--test-feedback`, `--exact-verify`; `fix_user(plan=)`, `_multileaf_patch`, `_repair_sr_to_src` | built |
 | `v5/training/ingest_fable5.py` | 226 | **Fable-5 ingestion** | per-session event streams -> (intent,edit) records; `--probe/--ingest/--selftest` | built (4781->2539 recs) |
-| `v5/runtime/lggn_decode.py` | 260 | **decode bridge** | `_Decoder` (LoRA+soft-prefix from h_K), `_extract_trajectory`, `_write_back_report`; arms: baseline/latent/ceiling | built + selftest |
+| `v5/runtime/lggn_decode.py` | ~300 | **decode bridge v2 (FiLM)** | `_FiLMConditioner` (h'=γ(z)⊙h+β(z), identity-init, per-layer hooks), `_Decoder` (LoRA + FiLM + BehaviorEncoder), `_extract_trajectory`, `_write_back_report`; arms: baseline (LoRA only) / latent (LoRA+FiLM(h_K)) / ceiling (LoRA+FiLM(gold_f)). v1 (soft prefix) FAILED — replaced. | building |
 | `v5/graph_grower/swe_verify.py` | 323 | **Docker SWE verifier** | gold-sanity gate, resolve; `--predictions --backend docker` | reused |
 
 ## Data / artifacts
@@ -409,19 +596,27 @@ NOT the wall: localization (file-level works), emission (80% applyable), retriev
 14. **r=256 result (5-seed):** HRM validated (recurrence+constraints+learnedness PASS), but graph-as-discrete-basis FLAT (-0.008±0.019). Free MLP matched discrete ops. Diagnosed: policy projection capacity-starved at r=256.
 15. **r=512 result (5-seed) — THE FLIP:** graph pillar RESCUED (+0.028±0.008 PASS). All 4 pillars load-bearing. The discrete operator basis IS better than free MLP when the projection has enough room. Extended: topology -0.003 (flat), hybrid -0.015 (interferes), compounding +0.001 (saturates). Graph value = learned directions, not sequencing/prior/scaling.
 16. **Next wall identified: DECODE.** The refiner reaches cos=0.593 with gold fix in Qwen space. The frozen LLM can't turn that into a patch (`composition_decode` confirmed). Need a trained decoder + write-back (model feeds discoveries into the graph).
+17. **Decode v1 — soft prefix FAILED.** (`lggn_decode.py` v1, LoRA + soft prefix from h_K, 4-bit Qwen3.5-4B on molab.) baseline=0.136, latent=0.098, ceiling=0.113. ALL prefix arms WORSE than baseline. Training loss identical (~0.35) across all arms — LoRA ignores prefix tokens, learns text→text shortcut. Even the ceiling (gold_f projected into prefix tokens) couldn't beat baseline. Root cause: soft prefix adds information to the INPUT; the model is free to ignore it. Same failure mode as composition_decode (ops-as-text hurt). The latent must change the COMPUTATION, not the input.
+18. **Architecture pivot: FiLM + Behavioral Memory.** Evaluated 6 injection mechanisms. FiLM (h' = γ(z)⊙h + β(z) at every transformer layer) chosen: model CANNOT ignore it (every layer modulated), proven in DiT/SD3, ~12M extra params. Key conceptual shift: the graph becomes a library of model BEHAVIORS (computational modulations), not embedding directions. Each operator = a way to rewire the model. BehaviorEncoder maps h_K to compact behavior space (64-128d) where graph ops, composition, write-back, retrieval all operate. FiLM Renderer expands to per-layer (γ,β). 6 synergy points identified: (1) decode gate test, (2) conditioned repr extraction (feedback loop → fixed-point inference), (3) model-internal verify (soft gate before Docker), (4) ops in behavior space, (5) behavioral write-back (procedural memory — stores successful computational states), (6) hierarchical conditioning.
 
 ## Current verdicts (updated 2026-07-02)
 - **LGGN refiner:** ALL 4 PILLARS PASS at r=512 (recurrence, constraints, graph, learnedness). The reasoning substrate is validated.
 - **Graph value:** per-step learned directions (discrete ops > free MLP at r=512). NOT topology, NOT hybrid prior, NOT compounding. The graph is a learned dictionary, not a planner.
 - **Reasoner (traverse):** LEARNS (40%, scales) — VALIDATED.
 - **Compositionality:** intra-task (0.91) + cross-task (0.58) — VALIDATED.
-- **Decode:** THE WALL. Frozen 4B can't cash in the latent composition. Train a decoder or SFT.
-- **Write-back:** UNBUILT. Model must feed successful trajectories back into the graph (new/strengthened ops). The growth mechanism.
-- **Open builds:** decode bridge (the wall), write-back/graph edits (V6), loop assembly (traverse→realize→verify→refine), Fable→trajectory feed.
+- **Decode v1 (soft prefix):** FAILED. LoRA ignores prefix tokens. Baseline 0.136 > latent 0.098 > ceiling 0.113. Injection mechanism broken — the latent changes the input, not the computation.
+- **Decode v2 (FiLM):** BUILDING. h' = γ(z)⊙h + β(z) at every layer. Model cannot ignore conditioning. Gate test: ceiling > baseline? If yes, the principle holds (latent modulates computation → better patches).
+- **Architectural pivot:** the graph is being redefined as a library of model BEHAVIORS (computational modulations), not embedding directions. BehaviorEncoder → FiLM Renderer. Operators in behavior space. Behavioral write-back = procedural memory.
+- **Write-back:** UNBUILT but re-scoped. Now stores behavioral configurations (FiLM states), not just embedding directions. Procedural memory, not semantic memory.
+- **Open builds:** FiLM gate test (immediate), ops-in-behavior-space, behavioral write-back (V6), conditioned extraction (feedback loop), loop assembly (traverse→realize→verify→refine).
 
 ## Next (recommended order, updated 2026-07-02)
-1. **Decode bridge** — train a small head (or SFT the 4B) to turn the refiner's h_K into an actual patch. The latent reaches cos=0.593; the frozen 4B can't decode it (0.144 > 0.115 with ops = ops HURT). This is the wall.
-2. **Write-back / graph edits** — after a successful resolve, compress the trajectory into new/strengthened operators and write them back into the graph. The model puts what it learned INTO the graph. This is the compounding mechanism (V6): the library grows with experience, the refiner's basis improves, future tasks benefit. The flat compounding result at r=512 was within-distribution (random split); write-back tests cross-DOMAIN transfer (Django ops help Flask?).
-3. **Assemble the loop** — traverse→realize→verify→refine (the full POMDP). `lggn.solve()` stub → real pipeline. Each stage now has a validated component; the integration is the engineering.
-4. ~~Cross-task compositionality probe~~ — already validated (0.58 vs 0.38, 98%).
-5. ~~V7 topology kill-test~~ — **answered by lggn_refine extended**: topology flat at r=512. The graph's edges carry sequencing info (38% op-change prediction) but that info doesn't help the refiner. Value is in the operator directions, not their ordering.
+1. **FiLM gate test** — `lggn_decode.py` v2: LoRA + FiLM(h_K) at every transformer layer. 3 arms: baseline (LoRA only), latent (LoRA + FiLM(h_K)), ceiling (LoRA + FiLM(gold_f)). Gate: ceiling > baseline → FiLM injection works, the principle holds. Run on molab. If fails → escalate to hypernetwork (z generates LoRA weights = actual ΔW).
+2. **Operators in behavior space** — redefine graph operators as directions in the compact behavior manifold (BehaviorEncoder output space, ~64-128d), not Qwen embedding space. Discovery: successful patches → extract FiLM states → compress → cluster → operator nodes. Composition = composing behavioral changes.
+3. **Behavioral write-back** — after successful decode, compress the learned FiLM configuration into a behavior vector → store as a graph node. Future similar instances retrieve the behavior vector → FiLM Renderer → reinstall the computational state. Procedural memory: the graph stores "ways of thinking that worked," not facts.
+4. **Conditioned extraction (feedback loop)** — Qwen + FiLM(h_K) re-extracts representations → refiner runs on new reprs → new h_K → new FiLM → ... converges to a fixed point. Iterative belief propagation.
+5. **Model-internal verify (soft gate)** — multiple signals (repr similarity, confidence, edit consistency) → gate before Docker. Not a replacement for Docker — a cost filter.
+6. **Assemble the loop** — traverse→realize→verify→refine (the full POMDP). Each stage now has a validated component. Docker for final gate only; internal verify for the inner loop.
+7. ~~Cross-task compositionality probe~~ — already validated (0.58 vs 0.38, 98%).
+8. ~~V7 topology kill-test~~ — **answered by lggn_refine extended**: topology flat at r=512. The graph's edges carry sequencing info (38% op-change prediction) but that info doesn't help the refiner. Value is in the operator directions, not their ordering.
+9. ~~Decode v1 (soft prefix)~~ — **FAILED** (baseline 0.136 > latent 0.098 > ceiling 0.113). LoRA ignores prefix tokens. Replaced by FiLM (step 1 above).

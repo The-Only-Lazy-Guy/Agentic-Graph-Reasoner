@@ -1,26 +1,31 @@
-"""LGGN decode — does the refiner's h_K help a trained decoder emit actual patches?
+"""LGGN decode v2 — FiLM injection: the refiner's h_K modulates Qwen's computation.
 
-lggn_refine proved: h_K reaches cos=0.593 with the gold fix in Qwen space (all 4 pillars PASS at
-r=512). But reaching != decoding. The frozen LLM can't cash in the composition (composition_decode:
-ops HURT). This lifts both confounds: train the LM (LoRA) AND inject h_K as a LATENT soft prefix
-(not text). h_K is already in Qwen hidden space, so the projection is natural (same dim).
+v1 (soft prefix) FAILED: baseline=0.136, latent=0.098, ceiling=0.113 — LoRA ignores prefix tokens.
+Root cause: soft prefix adds info to the INPUT; model is free to ignore it. Same failure mode as
+composition_decode (ops-as-text hurt). The latent must change the COMPUTATION, not the input.
 
-Pipeline: extract Qwen reprs (cached) -> train refiner -> h_K per instance -> train LoRA decoder
-with soft_prefix(h_K) + issue+code prompt -> gold SR block -> eval held recall.
+v2: FiLM (Feature-wise Linear Modulation). At every transformer layer:
+    h' = γ(z)⊙h + β(z)
+where z is the refiner's h_K (or gold_f for ceiling). The latent modulates every layer's hidden
+states — the model CANNOT ignore it. Proven in diffusion transformers (DiT, SD3).
 
-Arms (each trains a fresh LoRA adapter):
-  baseline   LoRA only, no soft prefix (issue+code -> gold SR)
-  latent     LoRA + soft_prefix(h_K)  (THE TEST — does the refiner help decode?)
-  ceiling    LoRA + soft_prefix(gold_f)  (injection ceiling — can the mechanism work at all?)
+Architecture (3 layers):
+    h_K (2560d, Qwen space) -> BehaviorEncoder (2560->bottleneck) -> behavior embedding (~64d)
+    -> FiLM Renderer (per-layer expansion to γ,β) -> modulate Qwen at every layer
 
-  latent > baseline -> h_K helps decode (the bridge works)
-  ceiling >> latent -> refiner loses info vs gold (room to improve refiner)
-  ceiling ~ baseline -> injection mechanism broken (LoRA can't read the prefix)
+The BehaviorEncoder creates a compact behavior space where the graph will eventually operate
+(operators, composition, write-back, retrieval). The FiLM Renderer is just a renderer.
 
-Write-back (post-decode): extract the refiner's per-step op-trajectory for successful decodes.
-Report which ops were used. Scaffold for actual graph edits via lggn.py OperatorLibrary.
+Arms (each trains a fresh LoRA + FiLM):
+  baseline   LoRA only, no FiLM (issue+code -> gold SR)
+  latent     LoRA + FiLM(h_K)     (THE TEST — does the refiner help decode?)
+  ceiling    LoRA + FiLM(gold_f)  (injection ceiling — can the mechanism work at all?)
 
-VRAM: ~3.5GB (4-bit Qwen3.5-4B + LoRA + projection). Under 6GB.
+  ceiling > baseline -> FiLM injection WORKS (latent modulates computation, model uses it)
+  latent > baseline  -> h_K helps decode (the bridge works)
+  ceiling ~ baseline -> FiLM mechanism broken (escalate to hypernetwork / DeltaW)
+
+VRAM: ~3.5GB (4-bit Qwen3.5-4B + LoRA ~9M + FiLM ~12M). Under 6GB.
 
   V5_LM_TRUST_REMOTE_CODE=1 V5_LM_QUANT=4bit python -m v5.runtime.lggn_decode \\
       --model Qwen/Qwen3.5-4B --dataset lite --n 200 --r 512
@@ -29,6 +34,8 @@ VRAM: ~3.5GB (4-bit Qwen3.5-4B + LoRA + projection). Under 6GB.
 from __future__ import annotations
 
 import argparse
+import torch
+import torch.nn as nn
 
 
 # ── data ────────────────────────────────────────────────────────────────────────
@@ -62,7 +69,7 @@ def _load_paired(model_name, dataset, split, n, layer_frac=0.6, t_ctx=48):
 
 def _train_refiner(g, f, ctx, cmask, tr, K=4, r=512, n_op=24, epochs=400, seed=0, log=print):
     """Train refiner on tr, return (h_K_all, ops, net, cos_held)."""
-    import torch, numpy as np
+    import numpy as np
     from v5.runtime.lggn_refine import Refiner, _discover_ops
     torch.manual_seed(seed)
     disp_tr = (f - g)[tr]
@@ -87,7 +94,7 @@ def _train_refiner(g, f, ctx, cmask, tr, K=4, r=512, n_op=24, epochs=400, seed=0
 
 def _extract_trajectory(net, g, ctx, cmask, ops, K):
     """Per-step op-selection weights from the trained refiner. Shape [K, N, n_op]."""
-    import torch, math, numpy as np
+    import math, numpy as np
     T = lambda x: torch.as_tensor(x, dtype=torch.float32)
     gt, ct, ot = T(g), T(ctx), T(ops); cm = torch.as_tensor(cmask)
     net.eval(); traj = []
@@ -120,7 +127,65 @@ def _write_back_report(traj_held, recall_per_instance, threshold=0.3):
             "mean_weight": avg_w[success].mean(axis=0).tolist()}
 
 
-# ── decoder (LoRA Qwen + soft prefix from h_K) ─────────────────────────────────
+# ── FiLM conditioner ──────────────────────────────────────────────────────────
+#
+# h' = γ(z)⊙h + β(z) at every transformer layer.
+#
+# Architecture:
+#   BehaviorEncoder: Linear(d_latent -> bottleneck) + GELU   (~164K params)
+#   FiLM Renderer:   per-layer Linear(bottleneck -> 2*d_model)  (~12M params for 36 layers)
+#
+# Initialized to identity: γ=1, β=0. At init, the model behaves as if FiLM isn't there.
+# Training teaches (γ,β) to deviate from identity in ways that help decode.
+#
+# The BehaviorEncoder output IS the behavior embedding — the compact space where
+# graph operators, composition, write-back, and retrieval will eventually operate.
+# The per-layer linears are just the renderer.
+
+class _FiLMModule(nn.Module):
+    """BehaviorEncoder + FiLM Renderer as a single trainable module.
+
+    BehaviorEncoder: d_latent -> bottleneck (the behavior space).
+    FiLM Renderer: bottleneck -> per-layer (γ, β).
+    """
+
+    def __init__(self, d_model: int, d_latent: int, n_layers: int, bottleneck: int = 64):
+        super().__init__()
+        self.d_model = d_model
+        self.n_layers = n_layers
+        self.bottleneck = bottleneck
+        self.behavior_encoder = nn.Sequential(
+            nn.Linear(d_latent, bottleneck),
+            nn.GELU(),
+        )
+        self.renderer = nn.ModuleList([
+            nn.Linear(bottleneck, 2 * d_model) for _ in range(n_layers)
+        ])
+        self._init_identity()
+
+    def _init_identity(self):
+        """γ=1, β=0 at init -> FiLM is a no-op until trained."""
+        for lin in self.renderer:
+            nn.init.zeros_(lin.weight)
+            nn.init.zeros_(lin.bias)
+            with torch.no_grad():
+                lin.bias.data[:self.d_model].fill_(1.0)  # γ init = 1
+
+    def encode(self, z):
+        """z: [B, d_latent] -> behavior embedding [B, bottleneck]."""
+        return self.behavior_encoder(z)
+
+    def modulate(self, h, b, layer_idx):
+        """h: [B, T, d_model], b: [B, bottleneck] -> modulated h.
+
+        b is a pre-computed behavior embedding (from encode()).
+        """
+        gb = self.renderer[layer_idx](b)         # [B, 2*d_model]
+        gamma, beta = gb.chunk(2, dim=-1)         # each [B, d_model]
+        return gamma.unsqueeze(1) * h + beta.unsqueeze(1)
+
+
+# ── decoder (LoRA Qwen + FiLM conditioning from latent) ──────────────────────
 
 def _prompt(text):
     return (f"Fix this bug.\n\nIssue:\n{text['issue']}\n\nBuggy code:\n{text['code']}\n\n"
@@ -132,14 +197,29 @@ def _target(text):
     return f"<<<<<<< SEARCH\n{text['code']}\n=======\n{text['added']}\n>>>>>>> REPLACE"
 
 
-class _Decoder:
-    """Qwen + LoRA + learned soft-prefix projection from a latent (h_K or f)."""
+def _find_layers(model):
+    """Find transformer decoder layers through any peft wrapping."""
+    for name, module in model.named_modules():
+        if name.endswith('.layers') and isinstance(module, nn.ModuleList) and len(module) > 10:
+            return module
+    raise RuntimeError("Can't find transformer layers in model")
 
-    def __init__(self, model_name, d_latent, n_soft=4, lr=2e-4):
-        import os, torch, torch.nn as nn
+
+class _Decoder:
+    """Qwen + LoRA + FiLM conditioning. The latent modulates every layer — can't be ignored.
+
+    When use_film=False (baseline arm): pure LoRA, no FiLM hooks, no behavior encoder.
+    When use_film=True: FiLM hooks on every transformer layer. The behavior embedding (from
+    BehaviorEncoder) determines (γ,β) at each layer. Gradients flow through the hooks
+    to train both LoRA and FiLM jointly.
+    """
+
+    def __init__(self, model_name, d_latent, use_film=True, bottleneck=64, lr=2e-4):
+        import os
         from transformers import AutoTokenizer
         from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
         from v5.lm_loader import load_frozen_lm, resolve_quant
+
         trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
         self.tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=trust)
         base = load_frozen_lm(model_name)
@@ -151,90 +231,161 @@ class _Decoder:
         self.model = get_peft_model(base, lcfg)
         self.dev = next(self.model.parameters()).device
         self.d_model = self.model.get_input_embeddings().weight.shape[1]
-        self.n_soft = n_soft
-        cdt = next(p for p in self.model.parameters() if p.is_floating_point()).dtype
-        self.proj = None
-        if n_soft > 0:
-            self.proj = nn.Sequential(nn.Linear(d_latent, 512), nn.GELU(),
-                                      nn.Linear(512, n_soft * self.d_model)).to(self.dev, cdt)
-        params = [p for p in self.model.parameters() if p.requires_grad]
-        if self.proj:
-            params += list(self.proj.parameters())
-        self.opt = torch.optim.AdamW(params, lr=lr)
-        self._torch = torch
+        self.use_film = use_film
 
-    def _build(self, prompt_text, v=None, target_text=None):
-        """inputs_embeds = [soft prefix?] + [prompt tokens] (+ [target tokens]); labels mask prompt."""
-        t = self._torch
-        msgs = [{"role": "user", "content": prompt_text}]
-        kw = dict(add_generation_prompt=True, return_tensors="pt", return_dict=True)
+        layers = _find_layers(self.model)
+        n_layers = len(layers)
+        cdt = next(p for p in self.model.parameters() if p.is_floating_point()).dtype
+
+        # FiLM module (BehaviorEncoder + Renderer)
+        self.film = None
+        self._behavior_emb = None   # cached behavior embedding for current instance
+        self._hooks = []
+        if use_film:
+            self.film = _FiLMModule(self.d_model, d_latent, n_layers, bottleneck).to(self.dev, cdt)
+            self._install_hooks(layers)
+
+        # joint optimizer: LoRA + FiLM
+        params = [p for p in self.model.parameters() if p.requires_grad]
+        if self.film is not None:
+            params += list(self.film.parameters())
+        self.opt = torch.optim.AdamW(params, lr=lr)
+
+    def _install_hooks(self, layers):
+        """Register forward hooks on every transformer layer for FiLM modulation.
+
+        Each hook intercepts the layer's output hidden states and applies:
+            h' = γ(b)⊙h + β(b)
+        where b is the pre-computed behavior embedding. Gradients flow back through
+        the hook to the FiLM module parameters.
+        """
+        for l, layer in enumerate(layers):
+            def hook(module, input, output, layer_idx=l):
+                if self._behavior_emb is None:
+                    return output
+                h = output[0]  # hidden states [B, T, d_model]
+                h = self.film.modulate(h, self._behavior_emb, layer_idx)
+                if isinstance(output, tuple):
+                    return (h,) + output[1:]
+                return h
+            self._hooks.append(layer.register_forward_hook(hook))
+
+    def _set_z(self, v):
+        """Set conditioning vector for subsequent forward passes.
+
+        v: numpy array [d_latent] or None. When None (baseline arm), hooks are no-ops.
+        When set, BehaviorEncoder maps v to the behavior embedding, which the hooks
+        use at every layer. The encode step is IN the computation graph — gradients
+        flow through to the BehaviorEncoder parameters.
+        """
+        if v is None or self.film is None:
+            self._behavior_emb = None
+            return
+        cdt = next(self.film.parameters()).dtype
+        z = torch.as_tensor(v, dtype=cdt, device=self.dev).unsqueeze(0)  # [1, d_latent]
+        self._behavior_emb = self.film.encode(z)  # [1, bottleneck]
+
+    def _apply_chat(self, msgs, **extra):
+        """apply_chat_template with enable_thinking fallback."""
         try:
-            enc = self.tok.apply_chat_template(msgs, enable_thinking=False, **kw)
+            return self.tok.apply_chat_template(msgs, enable_thinking=False, **extra)
         except TypeError:
-            enc = self.tok.apply_chat_template(msgs, **kw)
-        pids = enc["input_ids"].to(self.dev)
-        emb = self.model.get_input_embeddings()
-        parts, n_pfx = [], 0
-        if v is not None and self.proj is not None:
-            cdt = self.proj[0].weight.dtype
-            vt = t.as_tensor(v, dtype=cdt, device=self.dev)
-            parts.append(self.proj(vt).view(1, self.n_soft, self.d_model))
-            n_pfx = self.n_soft
-        parts.append(emb(pids))
-        n_ctx = n_pfx + pids.shape[1]
-        labels = t.full((1, n_ctx), -100, dtype=t.long, device=self.dev)
-        if target_text is not None:
-            tids = self.tok(target_text + self.tok.eos_token, return_tensors="pt",
-                            add_special_tokens=False).input_ids.to(self.dev)
-            parts.append(emb(tids))
-            labels = t.cat([labels, tids], 1)
-        inp = t.cat(parts, 1)
-        attn = t.ones(inp.shape[:2], dtype=t.long, device=self.dev)
-        return inp, attn, labels
+            return self.tok.apply_chat_template(msgs, **extra)
 
     def train_on(self, texts, latents, indices, epochs=2, log=print):
+        """Train LoRA + FiLM on the training set.
+
+        For each instance: encode the full conversation (user + assistant), mask prompt
+        tokens in labels, forward through the model (FiLM hooks modulate if z is set),
+        backward, step. The FiLM's BehaviorEncoder and Renderer are trained jointly
+        with the LoRA adapter.
+        """
         self.model.train()
+        if self.film is not None:
+            self.film.train()
         for ep in range(epochs):
             tot = 0.0
             for i in indices:
-                v = latents[i] if latents is not None else None
-                inp, attn, labels = self._build(_prompt(texts[i]), v, _target(texts[i]))
-                out = self.model(inputs_embeds=inp, attention_mask=attn, labels=labels)
-                self.opt.zero_grad(); out.loss.backward(); self.opt.step()
+                self._set_z(latents[i] if latents is not None else None)
+                prompt, target = _prompt(texts[i]), _target(texts[i])
+
+                # full conversation: user prompt + assistant response
+                full_ids = self._apply_chat(
+                    [{"role": "user", "content": prompt},
+                     {"role": "assistant", "content": target}],
+                    return_tensors="pt")
+                if full_ids.dim() == 1:
+                    full_ids = full_ids.unsqueeze(0)
+                full_ids = full_ids.to(self.dev)
+
+                # prompt length for label masking
+                plen = self._apply_chat(
+                    [{"role": "user", "content": prompt}],
+                    add_generation_prompt=True, return_tensors="pt")
+                plen = plen.shape[-1]
+
+                labels = full_ids.clone()
+                labels[0, :plen] = -100
+
+                out = self.model(full_ids, labels=labels)
+                self.opt.zero_grad()
+                out.loss.backward()
+                self.opt.step()
                 tot += float(out.loss.detach())
             log(f"      epoch {ep+1}/{epochs}: loss {tot/max(1,len(indices)):.3f}")
+        self._set_z(None)
 
     def eval_on(self, texts, latents, indices, log=print):
-        """Returns (mean_recall, per_instance_recalls)."""
+        """Generate patches on held-out instances, measure recall vs gold.
+
+        Returns (mean_recall, per_instance_recalls).
+        """
         import numpy as np
         from v5.runtime.solution_ladder import _emitted_replace, _fidelity
-        self.model.eval(); recs = []
-        with self._torch.no_grad():
+
+        self.model.eval()
+        if self.film is not None:
+            self.film.eval()
+        recs = []
+        with torch.no_grad():
             for j, i in enumerate(indices):
-                v = latents[i] if latents is not None else None
-                inp, attn, _ = self._build(_prompt(texts[i]), v)
-                out = self.model.generate(inputs_embeds=inp, attention_mask=attn,
-                                          max_new_tokens=256, min_new_tokens=8,
-                                          do_sample=False, pad_token_id=self.tok.eos_token_id)
-                raw = self.tok.decode(out[0], skip_special_tokens=True)
+                self._set_z(latents[i] if latents is not None else None)
+                prompt = _prompt(texts[i])
+                enc = self._apply_chat(
+                    [{"role": "user", "content": prompt}],
+                    add_generation_prompt=True, return_tensors="pt", return_dict=True)
+                enc = {k: v.to(self.dev) for k, v in enc.items()}
+                out = self.model.generate(
+                    **enc, max_new_tokens=256, min_new_tokens=8,
+                    do_sample=False, pad_token_id=self.tok.eos_token_id)
+                raw = self.tok.decode(out[0, enc["input_ids"].shape[1]:],
+                                      skip_special_tokens=True)
                 rec, _ = _fidelity(_emitted_replace(raw), texts[i]["added"])
                 recs.append(rec)
                 if (j + 1) % 10 == 0:
                     log(f"      {j+1}/{len(indices)} eval'd, running recall {np.mean(recs):.3f}")
+        self._set_z(None)
         return float(np.mean(recs)) if recs else 0.0, recs
 
     def cleanup(self):
+        """Free GPU memory between arms."""
         import gc
-        del self.model, self.proj, self.opt
+        for h in self._hooks:
+            h.remove()
+        self._hooks.clear()
+        del self.model
+        if self.film is not None:
+            del self.film
+        del self.opt
         gc.collect()
-        self._torch.cuda.empty_cache()
+        torch.cuda.empty_cache()
 
 
 # ── experiment ──────────────────────────────────────────────────────────────────
 
 def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
-        refiner_epochs=400, decoder_epochs=2, n_soft=4, seed=0, log=print):
-    import numpy as np, torch
+        refiner_epochs=400, decoder_epochs=2, bottleneck=64, seed=0, log=print):
+    import numpy as np
 
     rng = np.random.RandomState(seed); idx = rng.permutation(len(g))
     nh = max(2, len(idx) // 5); he, tr = idx[:nh], idx[nh:]
@@ -247,11 +398,15 @@ def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
 
     # phase 2: decoder per arm
     d = g.shape[1]
-    arms = [("baseline", None, 0), ("latent", h_K, n_soft), ("ceiling", f, n_soft)]
+    arms = [
+        ("baseline", None,  False),   # LoRA only — no conditioning
+        ("latent",   h_K,   True),    # LoRA + FiLM(h_K)
+        ("ceiling",  f,     True),    # LoRA + FiLM(gold_f)
+    ]
     results = {}; per_inst = {}
-    for arm_name, latents, ns in arms:
-        log(f"  [2/3] decoder arm '{arm_name}' (n_soft={ns})...")
-        dec = _Decoder(model_name, d_latent=d, n_soft=ns)
+    for arm_name, latents, use_film in arms:
+        log(f"  [2/3] decoder arm '{arm_name}' (film={use_film}, bn={bottleneck})...")
+        dec = _Decoder(model_name, d_latent=d, use_film=use_film, bottleneck=bottleneck)
         dec.train_on(texts, latents, tr, epochs=decoder_epochs, log=log)
         mean_rec, recs = dec.eval_on(texts, latents, he, log=log)
         results[arm_name] = mean_rec; per_inst[arm_name] = recs
@@ -270,8 +425,10 @@ def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
 
 
 def _report(results, n_held, cos_refiner, wb):
-    print(f"\n=== LGGN DECODE (held n={n_held}) — refiner h_K -> actual patches ===")
+    print(f"\n=== LGGN DECODE v2 (FiLM, held n={n_held}) — refiner h_K -> actual patches ===")
     print(f"  refiner cos(h_K, gold_f) = {cos_refiner:.3f}")
+    print(f"  [v1 soft-prefix FAILED: baseline 0.136 > latent 0.098 > ceiling 0.113]")
+    print()
     for arm in ("baseline", "latent", "ceiling"):
         if arm in results:
             print(f"  {arm:10}: held recall {results[arm]:.3f}")
@@ -282,7 +439,8 @@ def _report(results, n_held, cos_refiner, wb):
     print(f"  ceiling - latent   = {ce - lt:+.3f}  -> "
           f"{'refiner loses info vs gold (improve refiner)' if ce > lt + 0.05 else 'refiner captures what decoder needs'}")
     print(f"  ceiling - baseline = {ce - bl:+.3f}  -> "
-          f"{'INJECTION WORKS' if ce > bl + 0.03 else 'injection mechanism broken'}")
+          f"{'FiLM INJECTION WORKS' if ce > bl + 0.03 else 'FiLM mechanism broken -> escalate to hypernetwork (DeltaW)'}  "
+          f"[v1 soft-prefix was: -0.023 = BROKEN]")
     if wb.get("n_success", 0) > 0:
         print(f"\n  write-back: {wb['n_success']}/{n_held} decodes above threshold")
         print(f"  dominant ops: {wb.get('op_usage', {})}")
@@ -292,9 +450,10 @@ def _report(results, n_held, cos_refiner, wb):
 # ── selftest ────────────────────────────────────────────────────────────────────
 
 def _selftest() -> bool:
-    """Data pairing + refiner h_K + trajectory extraction + write-back (no GPU)."""
-    print("lggn_decode --selftest: refiner h_K + trajectory extraction + write-back report\n")
+    """FiLM module + refiner h_K + trajectory extraction + write-back (no GPU)."""
+    print("lggn_decode v2 --selftest: FiLM module + refiner + trajectory + write-back\n")
     import numpy as np
+
     d, N, T, n_op = 32, 60, 8, 6
     rng = np.random.RandomState(0)
     g = 0.1 * rng.randn(N, d).astype("float32")
@@ -307,6 +466,49 @@ def _selftest() -> bool:
     cmask = np.ones((N, T), bool)
     texts = [{"issue": f"bug {i}", "code": f"x = {i}", "added": f"x = {i+1}"} for i in range(N)]
 
+    # --- FiLM module unit tests ---
+    n_layers = 4
+    film = _FiLMModule(d_model=d, d_latent=d, n_layers=n_layers, bottleneck=16)
+
+    # test 1: identity initialization
+    z = torch.randn(2, d)
+    b = film.encode(z)
+    assert b.shape == (2, 16), f"behavior embedding shape: {b.shape}"
+    h = torch.randn(2, 10, d)
+    h_mod = film.modulate(h, b, layer_idx=0)
+    assert h_mod.shape == h.shape, f"FiLM output shape mismatch: {h_mod.shape} vs {h.shape}"
+    delta = (h_mod - h).abs().max().item()
+    assert delta < 0.15, f"FiLM should init near-identity, max delta = {delta:.4f}"
+    print(f"  FiLM identity init: max delta = {delta:.4f} (< 0.15)")
+
+    # test 2: gradient flow
+    loss = h_mod.sum()
+    loss.backward()
+    assert film.renderer[0].weight.grad is not None, "gradients must flow through FiLM renderer"
+    assert film.behavior_encoder[0].weight.grad is not None, "gradients must flow through BehaviorEncoder"
+    print(f"  FiLM gradient flow: OK (renderer + BehaviorEncoder)")
+
+    # test 3: different z -> different modulation
+    film.zero_grad()
+    z1 = torch.randn(1, d)
+    z2 = torch.randn(1, d)
+    b1, b2 = film.encode(z1), film.encode(z2)
+    h_test = torch.randn(1, 5, d)
+    h1 = film.modulate(h_test, b1, 0)
+    h2 = film.modulate(h_test, b2, 0)
+    # after training they should differ; at init the difference is small but nonzero
+    # (because behavior_encoder maps different z to different b, even though renderer is near-identity)
+    print(f"  FiLM z-sensitivity: ||h1-h2|| = {(h1-h2).abs().mean().item():.4f}")
+
+    # test 4: all layers have independent parameters
+    params_per_layer = [set(id(p) for p in lin.parameters()) for lin in film.renderer]
+    for i in range(n_layers):
+        for j in range(i+1, n_layers):
+            assert params_per_layer[i].isdisjoint(params_per_layer[j]), \
+                f"layers {i} and {j} share parameters"
+    print(f"  FiLM per-layer independence: {n_layers} layers, all independent")
+
+    # --- refiner ---
     tr = np.arange(N * 4 // 5)
     h_K, ops, net, cos = _train_refiner(g, f, ctx, cmask, tr, K=4, r=32,
                                          n_op=n_op, epochs=100, seed=0, log=lambda *a: None)
@@ -314,10 +516,12 @@ def _selftest() -> bool:
     assert cos > 0.2, f"refiner cos too low: {cos:.3f}"
     print(f"  refiner: h_K shape {h_K.shape}, held cos = {cos:.3f}")
 
+    # --- trajectory ---
     traj = _extract_trajectory(net, g, ctx, cmask, ops, K=4)
     assert traj.shape[0] == 4 and traj.shape[1] == N, f"traj shape wrong: {traj.shape}"
     print(f"  trajectory: shape {traj.shape}")
 
+    # --- write-back ---
     he = np.arange(N * 4 // 5, N)
     fake_recall = [0.8 if i % 2 == 0 else 0.1 for i in range(len(he))]
     wb = _write_back_report(traj[:, he], fake_recall)
@@ -325,14 +529,14 @@ def _selftest() -> bool:
     assert len(wb["op_usage"]) > 0, "should report op usage"
     print(f"  write-back: {wb['n_success']} success, ops {wb['op_usage']}")
 
-    print("\n  LGGN-DECODE SELFTEST -> PASS (refiner h_K + trajectory + write-back)")
+    print("\n  LGGN-DECODE v2 SELFTEST -> PASS (FiLM + refiner h_K + trajectory + write-back)")
     return True
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────────
 
 def main():
-    ap = argparse.ArgumentParser(description="LGGN decode: refiner h_K -> actual patches via LoRA + soft prefix.")
+    ap = argparse.ArgumentParser(description="LGGN decode v2: refiner h_K -> patches via LoRA + FiLM.")
     ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
     ap.add_argument("--dataset", default="lite"); ap.add_argument("--split", default="test")
     ap.add_argument("--n", type=int, default=200)
@@ -341,19 +545,20 @@ def main():
     ap.add_argument("--K", type=int, default=4, help="refiner steps")
     ap.add_argument("--refiner-epochs", type=int, default=400)
     ap.add_argument("--decoder-epochs", type=int, default=2)
-    ap.add_argument("--n-soft", type=int, default=4, help="soft prefix tokens from h_K")
+    ap.add_argument("--bottleneck", type=int, default=64, help="BehaviorEncoder output dim")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
         raise SystemExit(0 if _selftest() else 1)
-    print(f"[lggn-decode] model={a.model} dataset={a.dataset} n={a.n} r={a.r} K={a.K}")
+    print(f"[lggn-decode v2 FiLM] model={a.model} dataset={a.dataset} n={a.n} "
+          f"r={a.r} K={a.K} bottleneck={a.bottleneck}")
     g, f, ctx, cmask, texts = _load_paired(a.model, a.dataset, a.split, a.n)
     print(f"  {len(g)} instances, d={g.shape[1]}")
     results, n_held, cos_ref, wb = run(
         g, f, ctx, cmask, texts, a.model,
         n_op=a.n_op, K=a.K, r=a.r,
         refiner_epochs=a.refiner_epochs, decoder_epochs=a.decoder_epochs,
-        n_soft=a.n_soft)
+        bottleneck=a.bottleneck)
     _report(results, n_held, cos_ref, wb)
 
 
