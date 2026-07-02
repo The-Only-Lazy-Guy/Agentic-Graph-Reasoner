@@ -286,11 +286,17 @@ class _Decoder:
         self._behavior_emb = self.film.encode(z)  # [1, bottleneck]
 
     def _apply_chat(self, msgs, **extra):
-        """apply_chat_template with enable_thinking fallback."""
+        """apply_chat_template with enable_thinking fallback.
+        Always returns a tensor [1, T] (extracts input_ids if BatchEncoding)."""
         try:
-            return self.tok.apply_chat_template(msgs, enable_thinking=False, **extra)
+            out = self.tok.apply_chat_template(msgs, enable_thinking=False, **extra)
         except TypeError:
-            return self.tok.apply_chat_template(msgs, **extra)
+            out = self.tok.apply_chat_template(msgs, **extra)
+        if hasattr(out, "input_ids"):
+            out = out["input_ids"]
+        if isinstance(out, torch.Tensor):
+            return out.unsqueeze(0) if out.dim() == 1 else out
+        return torch.tensor(out).unsqueeze(0) if not isinstance(out, torch.Tensor) else out
 
     def train_on(self, texts, latents, indices, epochs=2, log=print):
         """Train LoRA + FiLM on the training set.
@@ -313,16 +319,12 @@ class _Decoder:
                 full_ids = self._apply_chat(
                     [{"role": "user", "content": prompt},
                      {"role": "assistant", "content": target}],
-                    return_tensors="pt")
-                if full_ids.dim() == 1:
-                    full_ids = full_ids.unsqueeze(0)
-                full_ids = full_ids.to(self.dev)
+                    return_tensors="pt").to(self.dev)  # [1, T]
 
                 # prompt length for label masking
                 plen = self._apply_chat(
                     [{"role": "user", "content": prompt}],
-                    add_generation_prompt=True, return_tensors="pt")
-                plen = plen.shape[-1]
+                    add_generation_prompt=True, return_tensors="pt").shape[-1]
 
                 labels = full_ids.clone()
                 labels[0, :plen] = -100
@@ -351,14 +353,13 @@ class _Decoder:
             for j, i in enumerate(indices):
                 self._set_z(latents[i] if latents is not None else None)
                 prompt = _prompt(texts[i])
-                enc = self._apply_chat(
+                ids = self._apply_chat(
                     [{"role": "user", "content": prompt}],
-                    add_generation_prompt=True, return_tensors="pt", return_dict=True)
-                enc = {k: v.to(self.dev) for k, v in enc.items()}
+                    add_generation_prompt=True, return_tensors="pt").to(self.dev)
                 out = self.model.generate(
-                    **enc, max_new_tokens=256, min_new_tokens=8,
+                    input_ids=ids, max_new_tokens=256, min_new_tokens=8,
                     do_sample=False, pad_token_id=self.tok.eos_token_id)
-                raw = self.tok.decode(out[0, enc["input_ids"].shape[1]:],
+                raw = self.tok.decode(out[0, ids.shape[1]:],
                                       skip_special_tokens=True)
                 rec, _ = _fidelity(_emitted_replace(raw), texts[i]["added"])
                 recs.append(rec)
