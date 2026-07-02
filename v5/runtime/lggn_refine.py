@@ -164,22 +164,40 @@ def run(g, f, ctx, cmask, n_op=24, epochs=400, seed=0, ops_override=None, log=pr
     return out, len(he)
 
 
-def _report(out, n):
-    print(f"\n=== LGGN REFINE (n={n}) — latent reaches the gold fix, in Qwen space ===")
-    for k in ("raw_g", "direct", "K1_full", "K4_full", "K4_nocode", "K4_nograph", "K4_randops"):
-        print(f"  {k:12}: held cos(h_K, gold-fix) = {out[k]:.3f}")
-    rec = out["K4_full"] - out["K1_full"]
-    con = out["K4_full"] - out["K4_nocode"]
-    grp = out["K4_full"] - out["K4_nograph"]
-    lrn = out["K4_full"] - out["K4_randops"]
-    base = out["K4_full"] - out["direct"]
-    print(f"\n  recurrence  K4-K1        = {rec:+.3f}  -> {'HRM recurrence helps' if rec > 0.02 else 'recurrence flat'}")
-    print(f"  constraints K4-nocode     = {con:+.3f}  -> {'attending to CODE unflattens iteration' if con > 0.02 else 'code attention adds nothing (still flat)'}")
-    print(f"  graph       K4-nograph    = {grp:+.3f}  -> {'operators beat a free update' if grp > 0.02 else 'graph decorative (free MLP ties it)'}")
-    print(f"  learnedness K4-randops    = {lrn:+.3f}  -> {'real operator dirs matter' if lrn > 0.02 else 'random dirs tie (ops not load-bearing)'}")
-    print(f"  vs non-iter K4-direct     = {base:+.3f}")
-    ok = rec > 0.02 and con > 0.02 and grp > 0.02 and lrn > 0.02
-    print(f"\n  verdict: {'LGGN STRUCTURE is load-bearing (recurrence + constraints + graph + learned ops all pay) -> build the outer test-feedback loop' if ok else 'at least one pillar is flat -> that pillar is decorative here (honest negative); read the deltas'}")
+def _report(outs, n):
+    """outs = list of per-seed result dicts. Report means + PAIRED deltas (mean +/- std across seeds), so
+    a small delta is not over-read as a verdict (the n=29 single-seed trap)."""
+    import numpy as np
+    keys = ("raw_g", "direct", "K1_full", "K4_full", "K4_nocode", "K4_nograph", "K4_randops")
+    S = len(outs)
+    print(f"\n=== LGGN REFINE (held n~{n}, {S} seeds) — latent reaches the gold fix, in Qwen space ===")
+    for k in keys:
+        v = [o[k] for o in outs]
+        print(f"  {k:12}: cos = {np.mean(v):.3f} +/- {np.std(v):.3f}")
+    dl = {"recurrence  K4-K1     ": [o["K4_full"] - o["K1_full"] for o in outs],
+          "constraints K4-nocode ": [o["K4_full"] - o["K4_nocode"] for o in outs],
+          "graph       K4-nograph": [o["K4_full"] - o["K4_nograph"] for o in outs],
+          "learnedness K4-randops": [o["K4_full"] - o["K4_randops"] for o in outs],
+          "vs non-iter K4-direct ": [o["K4_full"] - o["direct"] for o in outs]}
+    print()
+    verd = {}
+    for name, d in dl.items():
+        m, s = float(np.mean(d)), float(np.std(d))
+        sig = m - s > 0.0                                        # ~1-sigma above zero across seeds
+        verd[name.strip().split()[0]] = sig and m > 0.02
+        tag = "PASS" if (sig and m > 0.02) else ("flat/noisy" if m > 0 else "negative")
+        print(f"  {name} = {m:+.3f} +/- {s:.3f}  -> {tag}")
+    pillars = [verd.get(p) for p in ("recurrence", "constraints", "graph", "learnedness")]
+    print(f"\n  verdict: ", end="")
+    if all(pillars):
+        print("all LGGN pillars load-bearing -> build the outer test-feedback loop.")
+    elif verd.get("recurrence") and verd.get("constraints") and verd.get("learnedness") and not verd.get("graph"):
+        print("HRM half validated (recurrence+constraints+real-directions), but the GRAPH-as-discrete-"
+              "operator-basis is flat vs a free update -> the discrete move-vocabulary is the wrong "
+              "mechanism here. Test the graph's OTHER levers (topology prior / cross-task compounding) "
+              "before keeping or dropping it.")
+    else:
+        print("mixed -> read the per-delta signs/stds; a delta within +/-1 std of 0 is not a verdict.")
 
 
 def _synth(d=32, N=600, n_op=6, T=8, chain=3, seed=0):
@@ -206,7 +224,7 @@ def _selftest() -> bool:
     print("lggn_refine --selftest: fix = g + ops revealed by ctx -> full(K>1,code,graph) must beat "
           "K1 / no-code / random-ops\n")
     g, f, ctx, cmask, ops = _synth()
-    out, n = run(g, f, ctx, cmask, ops_override=ops, epochs=400, log=lambda *a: None)
+    out, n = run(g, f, ctx, cmask, ops_override=ops, epochs=400, seed=0, log=lambda *a: None)
     print(f"  raw={out['raw_g']:.2f} direct={out['direct']:.2f} K1={out['K1_full']:.2f} "
           f"K4={out['K4_full']:.2f} nocode={out['K4_nocode']:.2f} randops={out['K4_randops']:.2f}")
     assert out["K4_full"] > out["K1_full"] + 0.03, "recurrence must help when the fix needs multiple moves"
@@ -225,6 +243,7 @@ def main():
     ap.add_argument("--n-op", type=int, default=24)
     ap.add_argument("--layer-frac", type=float, default=0.6)
     ap.add_argument("--epochs", type=int, default=400)
+    ap.add_argument("--seeds", type=int, default=5, help="train/held splits + inits averaged for CIs")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
@@ -232,7 +251,12 @@ def main():
     print(f"[lggn-refine] model={a.model} dataset={a.dataset} n={a.n}")
     g, f, ctx, cmask = _reprs(a.model, a.dataset, a.split, a.n, layer_frac=a.layer_frac)
     print(f"  {len(g)} instances, Qwen dim={g.shape[1]}")
-    _report(*run(g, f, ctx, cmask, n_op=a.n_op, epochs=a.epochs))
+    outs = []
+    for s in range(a.seeds):
+        out, nh = run(g, f, ctx, cmask, n_op=a.n_op, epochs=a.epochs, seed=s,
+                      log=(print if s == 0 else (lambda *a: None)))
+        outs.append(out)
+    _report(outs, nh)
 
 
 if __name__ == "__main__":
