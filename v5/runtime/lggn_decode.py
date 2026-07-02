@@ -239,7 +239,7 @@ class _Decoder:
 
         # FiLM module (BehaviorEncoder + Renderer)
         self.film = None
-        self._behavior_emb = None   # cached behavior embedding for current instance
+        self._z_raw = None   # raw latent vector (detached); encode runs inside each hook
         self._hooks = []
         if use_film:
             self.film = _FiLMModule(self.d_model, d_latent, n_layers, bottleneck).to(self.dev, cdt)
@@ -254,17 +254,18 @@ class _Decoder:
     def _install_hooks(self, layers):
         """Register forward hooks on every transformer layer for FiLM modulation.
 
-        Each hook intercepts the layer's output hidden states and applies:
-            h' = γ(b)⊙h + β(b)
-        where b is the pre-computed behavior embedding. Gradients flow back through
-        the hook to the FiLM module parameters.
+        Each hook computes film.encode(z_raw) -> film.modulate(h, b, layer_idx).
+        The encode is recomputed per hook call (not cached) so that gradient
+        checkpointing can replay the forward without hitting freed graph nodes.
+        Overhead is negligible: 36x a Linear(2560->64)+GELU vs transformer layers.
         """
         for l, layer in enumerate(layers):
             def hook(module, input, output, layer_idx=l):
-                if self._behavior_emb is None:
+                if self._z_raw is None:
                     return output
-                h = output[0]  # hidden states [B, T, d_model]
-                h = self.film.modulate(h, self._behavior_emb, layer_idx)
+                b = self.film.encode(self._z_raw)
+                h = output[0]
+                h = self.film.modulate(h, b, layer_idx)
                 if isinstance(output, tuple):
                     return (h,) + output[1:]
                 return h
@@ -273,17 +274,15 @@ class _Decoder:
     def _set_z(self, v):
         """Set conditioning vector for subsequent forward passes.
 
-        v: numpy array [d_latent] or None. When None (baseline arm), hooks are no-ops.
-        When set, BehaviorEncoder maps v to the behavior embedding, which the hooks
-        use at every layer. The encode step is IN the computation graph — gradients
-        flow through to the BehaviorEncoder parameters.
+        Stores the raw latent as a detached tensor. Each hook recomputes
+        film.encode(z_raw) to create a fresh computation graph, compatible
+        with gradient checkpointing (which replays forward during backward).
         """
         if v is None or self.film is None:
-            self._behavior_emb = None
+            self._z_raw = None
             return
         cdt = next(self.film.parameters()).dtype
-        z = torch.as_tensor(v, dtype=cdt, device=self.dev).unsqueeze(0)  # [1, d_latent]
-        self._behavior_emb = self.film.encode(z)  # [1, bottleneck]
+        self._z_raw = torch.as_tensor(v, dtype=cdt, device=self.dev).unsqueeze(0)
 
     def _apply_chat(self, msgs, **extra):
         """apply_chat_template with enable_thinking fallback.
