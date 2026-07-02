@@ -25,9 +25,15 @@ Ablations = the kill-test (each config trains its own refiner, no-leakage: ops +
   K4_nograph                                   GRAPH value (ops vs a free MLP update of equal capacity)
   K4_randops                                   operator LEARNEDNESS (real dirs vs random, V7-flavored)
 
+Extended tests (--extended): the graph's OTHER levers beyond per-step discrete selection:
+  K4_topo      topology prior: op→op transition bias (does sequencing structure help?)
+  K4_hybrid    graph prior + free residual (does the graph ADD value when combined with free MLP?)
+  K4_ops_half  compounding: ops from 50% train data (does more experience → better ops?)
+
 No leaf, no Docker. Real reprs need Qwen (molab); reprs are cached to artifacts/lggn_reprs_*.npz.
 
   V5_LM_TRUST_REMOTE_CODE=1 V5_LM_QUANT=4bit python -m v5.runtime.lggn_refine --model Qwen/Qwen3.5-4B --dataset lite --n 200
+  V5_LM_TRUST_REMOTE_CODE=1 V5_LM_QUANT=4bit python -m v5.runtime.lggn_refine --model Qwen/Qwen3.5-4B --dataset lite --n 200 --extended --r 512
   python -m v5.runtime.lggn_refine --selftest
 """
 from __future__ import annotations
@@ -61,7 +67,9 @@ def _reprs(model_name, dataset, split, n, layer_frac=0.6, t_ctx=48, cache="artif
         return hs.float().cpu().numpy() if seq else hs[-1].float().cpu().numpy()
 
     G, F, CTX, MASK = [], [], [], []
-    for i in load_instances(name=dataset, split=split, limit=n):
+    instances = load_instances(name=dataset, split=split, limit=n)
+    print(f"  extracting reprs from {len(instances)} raw instances (3 Qwen fwd each, layer {L})...")
+    for ii, i in enumerate(instances):
         hs = extract_hunks(i.get("patch", "") or "")
         if not hs:
             continue
@@ -76,6 +84,8 @@ def _reprs(model_name, dataset, split, n, layer_frac=0.6, t_ctx=48, cache="artif
         c = c[idx]
         pad = np.zeros((t_ctx - len(c), c.shape[1]), c.dtype)
         CTX.append(np.concatenate([c, pad], 0)); MASK.append([1] * len(idx) + [0] * (t_ctx - len(idx)))
+        if (ii + 1) % 10 == 0 or ii == len(instances) - 1:
+            print(f"    {ii+1}/{len(instances)} instances processed, {len(G)} kept", flush=True)
     g, f, ctx, cmask = (np.asarray(G), np.asarray(F), np.asarray(CTX), np.asarray(MASK, dtype=bool))
     Path(key).parent.mkdir(parents=True, exist_ok=True)
     np.savez(key, g=g, f=f, ctx=ctx, cmask=cmask); print(f"  reprs -> {key}  ({len(g)} inst, d={g.shape[1]}, L={L})")
@@ -117,10 +127,10 @@ class Refiner:
             return h
 
     @staticmethod
-    def train_eval(g, f, ctx, cmask, ops, tr, he, K, use_code, use_graph, epochs=400, seed=0, log=print):
+    def train_eval(g, f, ctx, cmask, ops, tr, he, K, use_code, use_graph, epochs=400, seed=0, r=256, log=print):
         import torch
         torch.manual_seed(seed)
-        d = g.shape[1]; net = Refiner.Net(d, n_op=ops.shape[0])
+        d = g.shape[1]; net = Refiner.Net(d, r=r, n_op=ops.shape[0])
         T = lambda x: torch.as_tensor(x, dtype=torch.float32)
         g, f, ctx, ops = T(g), T(f), T(ctx), T(ops); cm = torch.as_tensor(cmask)
         opt = torch.optim.Adam(net.parameters(), lr=1e-3, weight_decay=1e-4)
@@ -135,6 +145,78 @@ class Refiner:
             return float(Fn(h, f[he]).mean())
 
 
+    class TopologyNet(_nn.Module):
+        """Net + learned op→op transition prior. Tests: does sequencing structure help?"""
+        def __init__(s, d, r=256, n_op=24):
+            import torch.nn as nn, torch
+            super().__init__()
+            s.Wq = nn.Linear(d, r, bias=False); s.Wk = nn.Linear(d, r, bias=False)
+            s.Wo = nn.Linear(d, r, bias=False); s.Wko = nn.Linear(d, r, bias=False)
+            s.gc = nn.Parameter(torch.tensor(0.3)); s.go = nn.Parameter(torch.tensor(0.3))
+            s.trans = nn.Parameter(0.01 * torch.randn(n_op, n_op))
+            s.r = r
+
+        def forward(s, g, ctx, cmask, ops, K):
+            import torch, math
+            h = g; prev_w = None
+            for _ in range(K):
+                q = s.Wq(h); k = s.Wk(ctx)
+                sc = (q.unsqueeze(1) * k).sum(-1) / math.sqrt(s.r)
+                sc = sc.masked_fill(~cmask, -1e9)
+                a = (torch.softmax(sc, -1).unsqueeze(-1) * ctx).sum(1)
+                base = h + a
+                logit = s.Wo(base) @ s.Wko(ops).t() / math.sqrt(s.r)
+                if prev_w is not None:
+                    logit = logit + prev_w @ s.trans
+                op_w = torch.softmax(logit, -1); prev_w = op_w
+                h = h + s.gc * a + s.go * (op_w @ ops)
+            return h
+
+    class HybridNet(_nn.Module):
+        """Graph prior + free residual. Tests: does the graph ADD value when not the sole mechanism?"""
+        def __init__(s, d, r=256, n_op=24):
+            import torch.nn as nn, torch
+            super().__init__()
+            s.Wq = nn.Linear(d, r, bias=False); s.Wk = nn.Linear(d, r, bias=False)
+            s.Wo = nn.Linear(d, r, bias=False); s.Wko = nn.Linear(d, r, bias=False)
+            s.A = nn.Linear(d, r); s.B = nn.Linear(r, d)
+            s.gc = nn.Parameter(torch.tensor(0.3))
+            s.go_g = nn.Parameter(torch.tensor(0.15)); s.go_f = nn.Parameter(torch.tensor(0.15))
+            s.r = r
+
+        def forward(s, g, ctx, cmask, ops, K):
+            import torch, math
+            h = g
+            for _ in range(K):
+                q = s.Wq(h); k = s.Wk(ctx)
+                sc = (q.unsqueeze(1) * k).sum(-1) / math.sqrt(s.r)
+                sc = sc.masked_fill(~cmask, -1e9)
+                a = (torch.softmax(sc, -1).unsqueeze(-1) * ctx).sum(1)
+                base = h + a
+                delta_g = torch.softmax(s.Wo(base) @ s.Wko(ops).t() / math.sqrt(s.r), -1) @ ops
+                delta_f = s.B(torch.relu(s.A(base)))
+                h = h + s.gc * a + s.go_g * delta_g + s.go_f * delta_f
+            return h
+
+    @staticmethod
+    def _train_net(cls, g, f, ctx, cmask, ops, tr, he, K, epochs=400, seed=0, r=256):
+        """Train+eval any net with forward(g, ctx, cmask, ops, K)."""
+        import torch
+        torch.manual_seed(seed)
+        d = g.shape[1]; net = cls(d, r=r, n_op=ops.shape[0])
+        T = lambda x: torch.as_tensor(x, dtype=torch.float32)
+        gt, ft, ct, ot = T(g), T(f), T(ctx), T(ops); cm = torch.as_tensor(cmask)
+        opt = torch.optim.Adam(net.parameters(), lr=1e-3, weight_decay=1e-4)
+        Fn = torch.nn.functional.cosine_similarity
+        for _ in range(epochs):
+            net.train(); opt.zero_grad()
+            h = net(gt[tr], ct[tr], cm[tr], ot, K)
+            loss = (1 - Fn(h, ft[tr])).mean(); loss.backward(); opt.step()
+        net.eval()
+        with torch.no_grad():
+            return float(Fn(net(gt[he], ct[he], cm[he], ot, K), ft[he]).mean())
+
+
 def _discover_ops(disp_tr, n_op, seed=0):
     """Operators = displacement directions (f-g) clustered in QWEN space, TRAIN only (no leakage)."""
     import numpy as np
@@ -143,24 +225,35 @@ def _discover_ops(disp_tr, n_op, seed=0):
     return KMeans(n_op, n_init=10, random_state=seed).fit(disp_tr).cluster_centers_.astype("float32")
 
 
-def run(g, f, ctx, cmask, n_op=24, epochs=400, seed=0, ops_override=None, log=print):
+def run(g, f, ctx, cmask, n_op=24, epochs=400, seed=0, ops_override=None, r=256, extended=False, log=print):
     import numpy as np
     rng = np.random.RandomState(seed); idx = rng.permutation(len(g)); nh = max(2, len(idx) // 5)
     he, tr = idx[:nh], idx[nh:]
-    ops = ops_override.astype("float32") if ops_override is not None else _discover_ops((f - g)[tr], n_op, seed)
+    disp_tr = (f - g)[tr]
+    ops = ops_override.astype("float32") if ops_override is not None else _discover_ops(disp_tr, n_op, seed)
     rand = rng.randn(*ops.shape).astype("float32"); rand *= np.linalg.norm(ops, axis=1, keepdims=True) / (np.linalg.norm(rand, axis=1, keepdims=True) + 1e-9)
     import torch
     cos = torch.nn.functional.cosine_similarity
     raw = float(cos(torch.tensor(g[he]), torch.tensor(f[he])).mean())
-    E = lambda **kw: Refiner.train_eval(g, f, ctx, cmask, ops, tr, he, epochs=epochs, seed=seed, log=log, **kw)
-    log(f"  train {len(tr)} / held {len(he)}; ops={ops.shape[0]} (Qwen-space displacement clusters)")
+    E = lambda **kw: Refiner.train_eval(g, f, ctx, cmask, ops, tr, he, epochs=epochs, seed=seed, r=r, log=log, **kw)
+    log(f"  train {len(tr)} / held {len(he)}; ops={ops.shape[0]}; r={r}")
     out = {"raw_g": raw,
            "direct": E(K=1, use_code=False, use_graph=False),
            "K1_full": E(K=1, use_code=True, use_graph=True),
            "K4_full": E(K=4, use_code=True, use_graph=True),
            "K4_nocode": E(K=4, use_code=False, use_graph=True),
            "K4_nograph": E(K=4, use_code=True, use_graph=False),
-           "K4_randops": Refiner.train_eval(g, f, ctx, cmask, rand, tr, he, K=4, use_code=True, use_graph=True, epochs=epochs, seed=seed, log=log)}
+           "K4_randops": Refiner.train_eval(g, f, ctx, cmask, rand, tr, he, K=4, use_code=True, use_graph=True, epochs=epochs, seed=seed, r=r, log=log)}
+    if extended:
+        TN = lambda cls, o=ops: Refiner._train_net(cls, g, f, ctx, cmask, o, tr, he, K=4, epochs=epochs, seed=seed, r=r)
+        log("  [ext] topology...")
+        out["K4_topo"] = TN(Refiner.TopologyNet)
+        log("  [ext] hybrid (graph prior + free residual)...")
+        out["K4_hybrid"] = TN(Refiner.HybridNet)
+        n_half = max(2, len(disp_tr) // 2)
+        ops_half = _discover_ops(disp_tr[:n_half], n_op, seed)
+        log(f"  [ext] compounding (ops from {n_half}/{len(disp_tr)} train instances)...")
+        out["K4_ops_half"] = Refiner.train_eval(g, f, ctx, cmask, ops_half, tr, he, K=4, use_code=True, use_graph=True, epochs=epochs, seed=seed, r=r, log=log)
     return out, len(he)
 
 
@@ -168,36 +261,64 @@ def _report(outs, n):
     """outs = list of per-seed result dicts. Report means + PAIRED deltas (mean +/- std across seeds), so
     a small delta is not over-read as a verdict (the n=29 single-seed trap)."""
     import numpy as np
-    keys = ("raw_g", "direct", "K1_full", "K4_full", "K4_nocode", "K4_nograph", "K4_randops")
+    keys = ["raw_g", "direct", "K1_full", "K4_full", "K4_nocode", "K4_nograph", "K4_randops"]
+    ext_keys = ["K4_topo", "K4_hybrid", "K4_ops_half"]
+    has_ext = any(k in outs[0] for k in ext_keys)
+    if has_ext:
+        keys += [k for k in ext_keys if k in outs[0]]
     S = len(outs)
     print(f"\n=== LGGN REFINE (held n~{n}, {S} seeds) — latent reaches the gold fix, in Qwen space ===")
     for k in keys:
         v = [o[k] for o in outs]
-        print(f"  {k:12}: cos = {np.mean(v):.3f} +/- {np.std(v):.3f}")
-    dl = {"recurrence  K4-K1     ": [o["K4_full"] - o["K1_full"] for o in outs],
-          "constraints K4-nocode ": [o["K4_full"] - o["K4_nocode"] for o in outs],
-          "graph       K4-nograph": [o["K4_full"] - o["K4_nograph"] for o in outs],
-          "learnedness K4-randops": [o["K4_full"] - o["K4_randops"] for o in outs],
-          "vs non-iter K4-direct ": [o["K4_full"] - o["direct"] for o in outs]}
+        print(f"  {k:14}: cos = {np.mean(v):.3f} +/- {np.std(v):.3f}")
+    dl = {"recurrence  K4-K1       ": [o["K4_full"] - o["K1_full"] for o in outs],
+          "constraints K4-nocode   ": [o["K4_full"] - o["K4_nocode"] for o in outs],
+          "graph       K4-nograph  ": [o["K4_full"] - o["K4_nograph"] for o in outs],
+          "learnedness K4-randops  ": [o["K4_full"] - o["K4_randops"] for o in outs],
+          "vs_noniter  K4-direct   ": [o["K4_full"] - o["direct"] for o in outs]}
+    if has_ext:
+        if "K4_topo" in outs[0]:
+            dl["topology   topo-full   "] = [o["K4_topo"] - o["K4_full"] for o in outs]
+            dl["topo_vs_free topo-nogr  "] = [o["K4_topo"] - o["K4_nograph"] for o in outs]
+        if "K4_hybrid" in outs[0]:
+            dl["hybrid     hybr-nogr   "] = [o["K4_hybrid"] - o["K4_nograph"] for o in outs]
+            dl["hybr_lift  hybr-full   "] = [o["K4_hybrid"] - o["K4_full"] for o in outs]
+        if "K4_ops_half" in outs[0]:
+            dl["compound   full-half   "] = [o["K4_full"] - o["K4_ops_half"] for o in outs]
     print()
     verd = {}
     for name, d in dl.items():
         m, s = float(np.mean(d)), float(np.std(d))
-        sig = m - s > 0.0                                        # ~1-sigma above zero across seeds
+        sig = m - s > 0.0
         verd[name.strip().split()[0]] = sig and m > 0.02
         tag = "PASS" if (sig and m > 0.02) else ("flat/noisy" if m > 0 else "negative")
         print(f"  {name} = {m:+.3f} +/- {s:.3f}  -> {tag}")
-    pillars = [verd.get(p) for p in ("recurrence", "constraints", "graph", "learnedness")]
-    print(f"\n  verdict: ", end="")
-    if all(pillars):
-        print("all LGGN pillars load-bearing -> build the outer test-feedback loop.")
+    print()
+    # ── base verdict ──
+    print("  base: ", end="")
+    if all(verd.get(p) for p in ("recurrence", "constraints", "graph", "learnedness")):
+        print("all LGGN pillars load-bearing.")
     elif verd.get("recurrence") and verd.get("constraints") and verd.get("learnedness") and not verd.get("graph"):
-        print("HRM half validated (recurrence+constraints+real-directions), but the GRAPH-as-discrete-"
-              "operator-basis is flat vs a free update -> the discrete move-vocabulary is the wrong "
-              "mechanism here. Test the graph's OTHER levers (topology prior / cross-task compounding) "
-              "before keeping or dropping it.")
+        print("HRM validated (recurrence+constraints+real-dirs), graph-as-discrete-basis FLAT.")
     else:
-        print("mixed -> read the per-delta signs/stds; a delta within +/-1 std of 0 is not a verdict.")
+        print("mixed -> read per-delta signs/stds.")
+    # ── extended verdicts ──
+    if has_ext:
+        print("  extended:", end="")
+        parts = []
+        if verd.get("topology"):
+            parts.append("TOPOLOGY helps (op→op transition prior is load-bearing)")
+        elif "topology" in verd:
+            parts.append("topology flat (op→op prior doesn't help)")
+        if verd.get("hybrid"):
+            parts.append("HYBRID wins (graph adds value as prior alongside free MLP)")
+        elif "hybrid" in verd:
+            parts.append("hybrid flat (graph adds nothing even as prior)")
+        if verd.get("compound"):
+            parts.append("COMPOUNDING real (more experience → better ops)")
+        elif "compound" in verd:
+            parts.append("compounding flat (op quality doesn't scale with experience)")
+        print(" " + "; ".join(parts) if parts else " no clear signal.")
 
 
 def _synth(d=32, N=600, n_op=6, T=8, chain=3, seed=0):
@@ -244,17 +365,21 @@ def main():
     ap.add_argument("--layer-frac", type=float, default=0.6)
     ap.add_argument("--epochs", type=int, default=400)
     ap.add_argument("--seeds", type=int, default=5, help="train/held splits + inits averaged for CIs")
+    ap.add_argument("--r", type=int, default=256, help="refiner inner dim (VRAM-free, increase for expressiveness)")
+    ap.add_argument("--extended", action="store_true", help="run topology + hybrid + compounding tests")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
         raise SystemExit(0 if _selftest() else 1)
-    print(f"[lggn-refine] model={a.model} dataset={a.dataset} n={a.n}")
+    print(f"[lggn-refine] model={a.model} dataset={a.dataset} n={a.n} r={a.r}"
+          f"{' +extended' if a.extended else ''}")
     g, f, ctx, cmask = _reprs(a.model, a.dataset, a.split, a.n, layer_frac=a.layer_frac)
     print(f"  {len(g)} instances, Qwen dim={g.shape[1]}")
     outs = []
     for s in range(a.seeds):
+        print(f"\n--- seed {s+1}/{a.seeds} ---")
         out, nh = run(g, f, ctx, cmask, n_op=a.n_op, epochs=a.epochs, seed=s,
-                      log=(print if s == 0 else (lambda *a: None)))
+                      r=a.r, extended=a.extended, log=print)
         outs.append(out)
     _report(outs, nh)
 
