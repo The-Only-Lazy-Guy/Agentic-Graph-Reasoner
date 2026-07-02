@@ -1,4 +1,10 @@
-"""FLIP TEST — was the composition-decode wall the FROZEN decoder, or genuinely generic content?
+"""[PARKED — NOT LGGN] A static MPNet->MLP->8-soft-tokens->Qwen->code probe. It has NO graph, NO
+latent refinement, NO test feedback, and puts the latent in mpnet space (foreign + lossy) instead of
+Qwen's. It only answers a narrow leaf question (can a frozen/LoRA decoder invert a static embedding to
+code). The actual LGGN thesis (HRM-style latent refinement over graph operators, iterating against the
+code/tests) lives in lggn_refine.py. Kept for the honest negative + the --free-latent capacity probe.
+
+FLIP TEST — was the composition-decode wall the FROZEN decoder, or genuinely generic content?
 
 composition_decode.py delivered the composition as TEXT to a FROZEN 4B -> topK 0.115 (misled).
 solution_ladder.py handed the EXACT gold as TEXT to the same FROZEN 4B -> 0.83. Same channel, same
@@ -67,7 +73,7 @@ class _LatentDecoder:
     """Frozen base LM + LoRA + a learned projection v(d_emb) -> [n_soft, d_model] soft prefix.
     Trained to emit the gold SR block from the latent ONLY (buggy code is the text canvas)."""
 
-    def __init__(self, model_name, n_soft=8, d_emb=768, lr=2e-4, canvas=True):
+    def __init__(self, model_name, n_soft=8, d_emb=768, lr=2e-4, canvas=True, free_latent=False):
         import os, torch, torch.nn as nn
         from transformers import AutoTokenizer
         from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
@@ -85,6 +91,9 @@ class _LatentDecoder:
         self.d_model = self.model.get_input_embeddings().weight.shape[1]
         self.n_soft = n_soft
         self.canvas = canvas
+        self.d_emb = d_emb
+        self.free_latent = free_latent          # capacity probe: trainable per-example latent (mpnet removed)
+        self.free = None
         cdt = next(p for p in self.model.parameters() if p.is_floating_point()).dtype
         self.proj = nn.Sequential(nn.Linear(d_emb, self.d_model), nn.Tanh(),
                                   nn.Linear(self.d_model, n_soft * self.d_model)).to(self.dev, cdt)
@@ -122,18 +131,22 @@ class _LatentDecoder:
         return inp, attn, labels
 
     def train(self, rows, steps, log=print):
-        t = self._torch
+        t = self._torch; nn = self._nn
         self.model.train()
         n = len(rows)
+        if self.free_latent and self.free is None:                # trainable per-example latent
+            self.free = nn.Embedding(n, self.d_emb).to(self.dev, self.proj[0].weight.dtype)
+            self.opt.add_param_group({"params": self.free.parameters()})
         for s in range(steps):
-            r = rows[s % n]
+            i = s % n; r = rows[i]
+            v = self.free.weight[i] if self.free_latent else r["fe"]
             target = _sr_block(r["code"], r["added"]) if self.canvas else r["added"]
-            inp, attn, labels = self._embeds(_prompt_latent(r["code"], self.canvas), r["fe"], target=target)
+            inp, attn, labels = self._embeds(_prompt_latent(r["code"], self.canvas), v, target=target)
             out = self.model(inputs_embeds=inp, attention_mask=attn, labels=labels)
             out.loss.backward()
             self.opt.step(); self.opt.zero_grad()
             if (s + 1) % max(1, steps // 10) == 0:
-                log(f"    step {s+1}/{steps} loss {float(out.loss):.3f}")
+                log(f"    step {s+1}/{steps} loss {float(out.loss.detach()):.3f}")
 
     def gen(self, code, v, max_new=256):
         t = self._torch
@@ -141,7 +154,7 @@ class _LatentDecoder:
         with t.no_grad():
             inp, attn, _ = self._embeds(_prompt_latent(code, self.canvas), v, target=None)
             out = self.model.generate(inputs_embeds=inp, attention_mask=attn, max_new_tokens=max_new,
-                                      do_sample=False, pad_token_id=self.tok.eos_token_id)
+                                      min_new_tokens=8, do_sample=False, pad_token_id=self.tok.eos_token_id)
         return self.tok.decode(out[0], skip_special_tokens=True)
 
 
@@ -205,6 +218,30 @@ def run(rows, dec, n_ops=24, K=3, train_steps=600, epochs=300, dump="", log=prin
         Path(dump).write_text("\n".join(samples), encoding="utf-8"); log(f"  raw samples -> {dump}")
     out = {c: (float(np.mean(v)) if v else 0.0, _bootstrap_ci(v)) for c, v in cells.items()}
     return out, len(test)
+
+
+def run_capacity(rows, dec, train_steps=800, log=print):
+    """CAPACITY PROBE — can the injection carry ANY information? Replace mpnet fe with a TRAINABLE
+    per-example latent (free nn.Embedding), train + eval on TRAIN only (a free latent can't generalize;
+    this is a memorization ceiling). Disambiguates:
+      exact(free) >> zero  -> the channel WIRING works; the held failure is mpnet fe (not code-informative)
+      exact(free) ~= zero  -> the conditioning MECHANISM is too weak -> fix the architecture, not the latent."""
+    import numpy as np
+    from v5.runtime.solution_ladder import _emitted_replace, _fidelity
+    rng = np.random.RandomState(0); idx = rng.permutation(len(rows))
+    train = [rows[i] for i in idx[len(idx) // 3:]]
+    log(f"  CAPACITY PROBE: free trainable latent on {len(train)} train (canvas={dec.canvas}), {train_steps} steps")
+    dec.train(train, train_steps, log=log)
+    extract = _emitted_replace if dec.canvas else (lambda s: s)
+    d = dec.d_emb; sub = train[:min(40, len(train))]; ex, ze = [], []
+    for i, r in enumerate(sub):
+        vf = dec.free.weight[i].detach().float().cpu().numpy()
+        ex.append(_fidelity(extract(dec.gen(r["code"], vf)), r["added"])[0])
+        ze.append(_fidelity(extract(dec.gen(r["code"], np.zeros(d))), r["added"])[0])
+    mx, mz = float(np.mean(ex)), float(np.mean(ze))
+    print(f"\n=== CAPACITY PROBE (free latent, TRAIN memorization, n={len(sub)}) ===")
+    print(f"  exact(free) recall {mx:.3f}   zero-latent recall {mz:.3f}   gap {mx - mz:+.3f}")
+    print(f"  verdict: {'INJECTION CARRIES INFO (wiring OK) -> held failure is mpnet fe, move latent to a code-reconstructable space' if mx - mz > 0.10 else 'INJECTION TOO WEAK even to MEMORIZE -> fix the conditioning ARCHITECTURE (inject deeper / cross-attn, not an 8-token prefix)'}")
 
 
 def _report(out, n):
