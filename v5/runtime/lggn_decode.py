@@ -245,11 +245,13 @@ class _Decoder:
             self.film = _FiLMModule(self.d_model, d_latent, n_layers, bottleneck).to(self.dev, cdt)
             self._install_hooks(layers)
 
-        # joint optimizer: LoRA + FiLM
-        params = [p for p in self.model.parameters() if p.requires_grad]
+        # separate param groups: LoRA at full LR, FiLM at half LR for stability
+        lora_params = [p for p in self.model.parameters() if p.requires_grad]
+        param_groups = [{"params": lora_params, "lr": lr}]
         if self.film is not None:
-            params += list(self.film.parameters())
-        self.opt = torch.optim.AdamW(params, lr=lr)
+            param_groups.append({"params": list(self.film.parameters()), "lr": lr * 0.5})
+        self.opt = torch.optim.AdamW(param_groups)
+        self.max_grad_norm = 1.0
 
     def _install_hooks(self, layers):
         """Register forward hooks on every transformer layer for FiLM modulation.
@@ -297,30 +299,36 @@ class _Decoder:
             return out.unsqueeze(0) if out.dim() == 1 else out
         return torch.tensor(out).unsqueeze(0) if not isinstance(out, torch.Tensor) else out
 
-    def train_on(self, texts, latents, indices, epochs=2, log=print):
+    def train_on(self, texts, latents, indices, epochs=2, film_warmup=1, log=print):
         """Train LoRA + FiLM on the training set.
 
-        For each instance: encode the full conversation (user + assistant), mask prompt
-        tokens in labels, forward through the model (FiLM hooks modulate if z is set),
-        backward, step. The FiLM's BehaviorEncoder and Renderer are trained jointly
-        with the LoRA adapter.
+        film_warmup: freeze FiLM for this many epochs, let LoRA settle first.
+        Prevents early FiLM gradients from destabilizing LoRA when latents are noisy.
+        Gradient clipping (max_grad_norm=1.0) prevents the loss explosion seen with
+        imperfect latents at epoch 4-5.
         """
         self.model.train()
         if self.film is not None:
             self.film.train()
         for ep in range(epochs):
+            # FiLM warmup: freeze FiLM params for the first film_warmup epochs
+            if self.film is not None:
+                film_frozen = ep < film_warmup
+                for p in self.film.parameters():
+                    p.requires_grad_(not film_frozen)
+                if ep == film_warmup:
+                    log(f"      [FiLM unfrozen at epoch {ep+1}]")
+
             tot = 0.0
             for i in indices:
                 self._set_z(latents[i] if latents is not None else None)
                 prompt, target = _prompt(texts[i]), _target(texts[i])
 
-                # full conversation: user prompt + assistant response
                 full_ids = self._apply_chat(
                     [{"role": "user", "content": prompt},
                      {"role": "assistant", "content": target}],
-                    return_tensors="pt").to(self.dev)  # [1, T]
+                    return_tensors="pt").to(self.dev)
 
-                # prompt length for label masking
                 plen = self._apply_chat(
                     [{"role": "user", "content": prompt}],
                     add_generation_prompt=True, return_tensors="pt").shape[-1]
@@ -331,9 +339,17 @@ class _Decoder:
                 out = self.model(full_ids, labels=labels)
                 self.opt.zero_grad()
                 out.loss.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    [p for g in self.opt.param_groups for p in g["params"] if p.requires_grad],
+                    self.max_grad_norm)
                 self.opt.step()
                 tot += float(out.loss.detach())
             log(f"      epoch {ep+1}/{epochs}: loss {tot/max(1,len(indices)):.3f}")
+
+        # restore FiLM grad state
+        if self.film is not None:
+            for p in self.film.parameters():
+                p.requires_grad_(True)
         self._set_z(None)
 
     def eval_on(self, texts, latents, indices, log=print):
@@ -422,8 +438,8 @@ def _sensitivity_sweep(dec, texts, gold_f, h_K, tr, he, n_points=7, log=print):
 
 
 def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
-        refiner_epochs=400, decoder_epochs=2, bottleneck=64, seed=0,
-        sensitivity=False, log=print):
+        refiner_epochs=400, decoder_epochs=2, bottleneck=64, film_warmup=1,
+        seed=0, sensitivity=False, log=print):
     import numpy as np
 
     rng = np.random.RandomState(seed); idx = rng.permutation(len(g))
@@ -446,7 +462,8 @@ def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
     for arm_name, latents, use_film in arms:
         log(f"  [2/3] decoder arm '{arm_name}' (film={use_film}, bn={bottleneck})...")
         dec = _Decoder(model_name, d_latent=d, use_film=use_film, bottleneck=bottleneck)
-        dec.train_on(texts, latents, tr, epochs=decoder_epochs, log=log)
+        warmup = film_warmup if use_film else 0
+        dec.train_on(texts, latents, tr, epochs=decoder_epochs, film_warmup=warmup, log=log)
         mean_rec, recs = dec.eval_on(texts, latents, he, log=log)
         results[arm_name] = mean_rec; per_inst[arm_name] = recs
         log(f"    {arm_name}: held recall = {mean_rec:.3f}")
@@ -594,6 +611,8 @@ def main():
     ap.add_argument("--refiner-epochs", type=int, default=400)
     ap.add_argument("--decoder-epochs", type=int, default=2)
     ap.add_argument("--bottleneck", type=int, default=64, help="BehaviorEncoder output dim")
+    ap.add_argument("--film-warmup", type=int, default=1,
+                    help="freeze FiLM for N epochs while LoRA settles (stability)")
     ap.add_argument("--sensitivity", action="store_true",
                     help="run gold->h_K interpolation sweep after ceiling arm")
     ap.add_argument("--selftest", action="store_true")
@@ -601,15 +620,16 @@ def main():
     if a.selftest:
         raise SystemExit(0 if _selftest() else 1)
     print(f"[lggn-decode v2 FiLM] model={a.model} dataset={a.dataset} n={a.n} "
-          f"r={a.r} K={a.K} bottleneck={a.bottleneck} epochs={a.decoder_epochs} "
-          f"sensitivity={a.sensitivity}")
+          f"r={a.r} K={a.K} bn={a.bottleneck} epochs={a.decoder_epochs} "
+          f"warmup={a.film_warmup} sensitivity={a.sensitivity}")
     g, f, ctx, cmask, texts = _load_paired(a.model, a.dataset, a.split, a.n)
     print(f"  {len(g)} instances, d={g.shape[1]}")
     results, n_held, cos_ref, wb, sens = run(
         g, f, ctx, cmask, texts, a.model,
         n_op=a.n_op, K=a.K, r=a.r,
         refiner_epochs=a.refiner_epochs, decoder_epochs=a.decoder_epochs,
-        bottleneck=a.bottleneck, sensitivity=a.sensitivity)
+        bottleneck=a.bottleneck, film_warmup=a.film_warmup,
+        sensitivity=a.sensitivity)
     _report(results, n_held, cos_ref, wb, sens)
 
 
