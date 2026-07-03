@@ -309,6 +309,7 @@ class _Decoder:
             Analogous to classifier-free guidance in diffusion models.
         """
         import random as _rng
+        _drop_rng = _rng.Random(42)
         self.model.train()
         if self.film is not None:
             self.film.train()
@@ -322,7 +323,7 @@ class _Decoder:
 
             tot = 0.0; n_dropped = 0
             for i in indices:
-                if latents is not None and z_dropout > 0 and _rng.random() < z_dropout:
+                if latents is not None and z_dropout > 0 and _drop_rng.random() < z_dropout:
                     self._set_z(None)
                     n_dropped += 1
                 else:
