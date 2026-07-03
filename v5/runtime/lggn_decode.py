@@ -67,8 +67,17 @@ def _load_paired(model_name, dataset, split, n, layer_frac=0.6, t_ctx=48):
 
 # ── refiner (from lggn_refine, returns h_K + trajectory) ───────────────────────
 
-def _train_refiner(g, f, ctx, cmask, tr, K=4, r=512, n_op=24, epochs=400, seed=0, log=print):
-    """Train refiner on tr, return (h_K_all, ops, net, cos_held)."""
+def _train_refiner(g, f, ctx, cmask, tr, K=4, r=512, n_op=24, epochs=400, seed=0,
+                   learn_ops=False, k_warmup=0.5, contrastive=0.0, log=print):
+    """Train refiner on tr, return (h_K_all, ops, net, cos_held).
+
+    Improvements over vanilla cosine training:
+      learn_ops:    make operator basis learnable (KMeans init, then drift)
+      k_warmup:     schedule K from 1→K_max over this fraction of epochs
+                    (learn single-step fixes first, then composition)
+      contrastive:  weight for wrong-instance-gold triplet loss
+                    (push h_K away from f_wrong, not just toward f_own)
+    """
     import numpy as np
     from v5.runtime.lggn_refine import Refiner, _discover_ops
     torch.manual_seed(seed)
@@ -77,19 +86,46 @@ def _train_refiner(g, f, ctx, cmask, tr, K=4, r=512, n_op=24, epochs=400, seed=0
     net = Refiner.Net(g.shape[1], r=r, n_op=ops.shape[0])
     T = lambda x: torch.as_tensor(x, dtype=torch.float32)
     gt, ft, ct, ot = T(g), T(f), T(ctx), T(ops); cm = torch.as_tensor(cmask)
-    opt = torch.optim.Adam(net.parameters(), lr=1e-3, weight_decay=1e-4)
+
+    if learn_ops:
+        ops_param = torch.nn.Parameter(ot.clone())
+        opt = torch.optim.Adam(list(net.parameters()) + [ops_param],
+                               lr=1e-3, weight_decay=1e-4)
+    else:
+        ops_param = ot
+        opt = torch.optim.Adam(net.parameters(), lr=1e-3, weight_decay=1e-4)
+
     Fn = torch.nn.functional.cosine_similarity
-    for _ in range(epochs):
+    margin = 0.2
+    for ep in range(epochs):
+        K_cur = 1 + int((K - 1) * min(1.0, ep / max(1, epochs * k_warmup - 1)))
+
         net.train(); opt.zero_grad()
-        h = net(gt[tr], ct[tr], cm[tr], ot, K, True, True)
-        loss = (1 - Fn(h, ft[tr])).mean(); loss.backward(); opt.step()
+        h = net(gt[tr], ct[tr], cm[tr], ops_param, K_cur, True, True)
+
+        loss = (1 - Fn(h, ft[tr])).mean()
+
+        if contrastive > 0 and len(tr) > 1:
+            f_neg = torch.roll(ft[tr], 1, 0)
+            loss = loss + contrastive * torch.clamp(Fn(h, f_neg) - margin, min=0).mean()
+
+        loss.backward(); opt.step()
+
+    final_ops = ops_param.detach() if learn_ops else ot
+    ops_np = final_ops.float().numpy()
+
     net.eval()
     with torch.no_grad():
-        h_all = net(gt, ct, cm, ot, K, True, True).float().numpy()
+        h_all = net(gt, ct, cm, final_ops, K, True, True).float().numpy()
         he = np.setdiff1d(np.arange(len(g)), tr)
         cos_he = float(Fn(torch.tensor(h_all[he]), ft[he]).mean())
-    log(f"    refiner: held cos(h_K, f) = {cos_he:.3f}")
-    return h_all, ops, net, cos_he
+    extras = []
+    if learn_ops: extras.append("learn_ops")
+    if contrastive > 0: extras.append(f"contra={contrastive}")
+    if k_warmup < 1.0: extras.append(f"k_warmup={k_warmup}")
+    ex = f" ({', '.join(extras)})" if extras else ""
+    log(f"    refiner: held cos(h_K, f) = {cos_he:.3f} [K={K} r={r} ops={len(ops_np)}{ex}]")
+    return h_all, ops_np, net, cos_he
 
 
 def _extract_trajectory(net, g, ctx, cmask, ops, K):
@@ -390,6 +426,20 @@ class _Decoder:
         self._set_z(None)
         return float(np.mean(recs)) if recs else 0.0, recs
 
+    def behavior_embeddings(self, latents, indices):
+        """Extract behavior embeddings [bottleneck-d] for given instances via BehaviorEncoder."""
+        import numpy as np
+        if self.film is None or latents is None:
+            return None
+        behs = []
+        cdt = next(self.film.parameters()).dtype
+        with torch.no_grad():
+            for i in indices:
+                z = torch.as_tensor(latents[i], dtype=cdt, device=self.dev).unsqueeze(0)
+                b = self.film.encode(z).squeeze(0).float().cpu().numpy()
+                behs.append(b)
+        return np.stack(behs)
+
     def cleanup(self):
         """Free GPU memory between arms."""
         import gc
@@ -453,7 +503,8 @@ def _sensitivity_sweep(dec, texts, gold_f, h_K, tr, he, n_points=7, log=print):
 
 def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
         refiner_epochs=400, decoder_epochs=2, bottleneck=64, film_warmup=1,
-        z_dropout=0.0, seed=0, sensitivity=False, log=print):
+        z_dropout=0.0, seed=0, sensitivity=False,
+        learn_ops=False, k_warmup=0.5, contrastive=0.0, log=print):
     import numpy as np
 
     rng = np.random.RandomState(seed); idx = rng.permutation(len(g))
@@ -461,9 +512,10 @@ def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
     log(f"  train {len(tr)} / held {len(he)}")
 
     # phase 1: refiner
-    log("  [1/3] training refiner (graph+code, K={}, r={})...".format(K, r))
+    log("  [1/4] training refiner (graph+code, K={}, r={})...".format(K, r))
     h_K, ops, ref_net, cos_he = _train_refiner(
-        g, f, ctx, cmask, tr, K=K, r=r, n_op=n_op, epochs=refiner_epochs, seed=seed, log=log)
+        g, f, ctx, cmask, tr, K=K, r=r, n_op=n_op, epochs=refiner_epochs, seed=seed,
+        learn_ops=learn_ops, k_warmup=k_warmup, contrastive=contrastive, log=log)
 
     # constant-z: mean of h_K over TRAINING set, broadcast to all instances.
     # Tests: does FiLM benefit come from extra params (constant = latent) or z-content (latent > constant)?
@@ -479,8 +531,9 @@ def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
         ("ceiling",  f,         True,  0.0),        # LoRA + FiLM(gold_f) — injection ceiling
     ]
     results = {}; per_inst = {}; sens_curve = None
+    latent_behs_he = None; ops_behavior = None
     for arm_name, latents, use_film, zdrop in arms:
-        log(f"  [2/3] decoder arm '{arm_name}' (film={use_film}, bn={bottleneck}, zdrop={zdrop})...")
+        log(f"  [2/4] decoder arm '{arm_name}' (film={use_film}, bn={bottleneck}, zdrop={zdrop})...")
         dec = _Decoder(model_name, d_latent=d, use_film=use_film, bottleneck=bottleneck)
         warmup = film_warmup if use_film else 0
         dec.train_on(texts, latents, tr, epochs=decoder_epochs, film_warmup=warmup,
@@ -488,22 +541,92 @@ def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
         mean_rec, recs = dec.eval_on(texts, latents, he, log=log)
         results[arm_name] = mean_rec; per_inst[arm_name] = recs
         log(f"    {arm_name}: held recall = {mean_rec:.3f}")
+        if arm_name == "latent" and use_film:
+            latent_behs_he = dec.behavior_embeddings(latents, he)
+            ops_behavior = dec.behavior_embeddings(ops, list(range(len(ops))))
+            log(f"    extracted {len(latent_behs_he)} behavior embs (d={latent_behs_he.shape[1]})")
         if arm_name == "ceiling" and sensitivity:
             sens_curve = _sensitivity_sweep(dec, texts, f, h_K, tr, he, log=log)
         dec.cleanup()
 
     # phase 3: write-back trajectory
-    log("  [3/3] write-back trajectory extraction...")
+    log("  [3/4] write-back trajectory extraction...")
     traj = _extract_trajectory(ref_net, g, ctx, cmask, ops, K)
     wb = _write_back_report(traj[:, he], per_inst.get("latent", []))
     log(f"    write-back: {wb['n_success']} successful decodes")
     if wb.get("op_usage"):
         log(f"    dominant ops: {wb['op_usage']}")
 
-    return results, len(he), cos_he, wb, sens_curve
+    # phase 4: graph structural edits (wired to real outcomes)
+    graph_stats = None
+    if latent_behs_he is not None and ops_behavior is not None:
+        from v5.runtime.graph_edits import (
+            BehaviorGraph, GraphEditEngine, Outcome, BehaviorNode,
+            SEED_CONF, CONF_FLOOR, _unit
+        )
+        log("  [4/4] graph edits engine (wiring to real outcomes)...")
+        bg = BehaviorGraph()
+        # seed behavior_embs: use mean of VERIFIED h_K projections per dominant
+        # op (real FiLM states), fallback to centroid projection for unseen ops
+        dom_per_inst = np.argmax(traj[:, he, :].mean(axis=0), axis=1)  # [n_held]
+        verified_mask = np.array([r >= threshold for r in per_inst["latent"]])
+        beh_by_op = {}
+        for j in range(len(he)):
+            if verified_mask[j]:
+                beh_by_op.setdefault(dom_per_inst[j], []).append(latent_behs_he[j])
+        for j in range(len(ops_behavior)):
+            if j in beh_by_op:
+                e = _unit(np.mean(beh_by_op[j], axis=0))
+            else:
+                e = _unit(ops_behavior[j])
+            bg.nodes[f"seed_{j}"] = BehaviorNode(
+                op_id=f"seed_{j}", name=f"op{j}",
+                behavior_emb=e.tolist(),
+                confidence=SEED_CONF, source="seed")
+
+        engine = GraphEditEngine(bg)
+        threshold = 0.3
+        traj_he = traj[:, he, :]
+        for j, i in enumerate(he):
+            # trajectory: use top-2 distinct ops per step (captures transitions
+            # that argmax misses when the refiner soft-blends multiple ops)
+            step_weights = traj_he[:, j, :]       # [K, n_op]
+            seen_last = -1
+            op_ids = []
+            for k in range(step_weights.shape[0]):
+                ranked = np.argsort(-step_weights[k])
+                pick = ranked[0]
+                if pick == seen_last and step_weights[k, ranked[1]] > 0.15:
+                    pick = ranked[1]
+                op_ids.append(f"seed_{pick}")
+                seen_last = pick
+
+            engine.observe(Outcome(
+                iid=f"inst_{i}", ctx_emb=g[i].astype(np.float32),
+                behavior_emb=latent_behs_he[j].astype(np.float32),
+                trajectory=op_ids, verified=(per_inst["latent"][j] >= threshold)))
+
+        maint_recs = engine.maintain()
+        n_ret = sum(1 for n in bg.nodes.values()
+                    if n.retrievable and n.confidence >= CONF_FLOOR)
+        edit_counts = {}
+        for r in bg.log:
+            edit_counts[r.kind] = edit_counts.get(r.kind, 0) + 1
+        graph_stats = {
+            "n_observed": len(he), "n_nodes": len(bg.nodes),
+            "n_retrievable": n_ret,
+            "n_edges": sum(len(d) for d in bg.edges.values()),
+            "n_edits": len(bg.log), "edit_counts": edit_counts,
+            "n_maintenance": len(maint_recs),
+        }
+        log(f"    {len(he)} outcomes -> {len(bg.nodes)} nodes ({n_ret} retrievable), "
+            f"{graph_stats['n_edges']} edges, {len(bg.log)} edits")
+        log(f"    edit breakdown: {edit_counts}")
+
+    return results, len(he), cos_he, wb, sens_curve, graph_stats
 
 
-def _report(results, n_held, cos_refiner, wb, sens_curve=None):
+def _report(results, n_held, cos_refiner, wb, sens_curve=None, graph_stats=None):
     print(f"\n=== LGGN DECODE v2 (FiLM, held n={n_held}) — refiner h_K -> actual patches ===")
     print(f"  refiner cos(h_K, gold_f) = {cos_refiner:.3f}")
     print(f"  [v1 soft-prefix FAILED: baseline 0.136 > latent 0.098 > ceiling 0.113]")
@@ -538,13 +661,21 @@ def _report(results, n_held, cos_refiner, wb, sens_curve=None):
             delta = r - bl
             a_str = f"{a:.2f}" if isinstance(a, float) else str(a)
             print(f"  {a_str:>6}  {c:6.3f}  {r:7.3f}  {delta:+11.3f}")
+    if graph_stats:
+        print(f"\n  --- graph structural edits (wired to real outcomes) ---")
+        print(f"  {graph_stats['n_observed']} outcomes observed")
+        print(f"  {graph_stats['n_nodes']} nodes ({graph_stats['n_retrievable']} retrievable)")
+        print(f"  {graph_stats['n_edges']} edges, {graph_stats['n_edits']} total edits")
+        print(f"  edit breakdown: {graph_stats['edit_counts']}")
+        if graph_stats['n_maintenance']:
+            print(f"  {graph_stats['n_maintenance']} maintenance edits")
 
 
 # ── selftest ────────────────────────────────────────────────────────────────────
 
 def _selftest() -> bool:
-    """FiLM module + refiner h_K + trajectory extraction + write-back (no GPU)."""
-    print("lggn_decode v2 --selftest: FiLM module + refiner + trajectory + write-back\n")
+    """FiLM module + refiner h_K + trajectory extraction + write-back + graph wiring (no GPU)."""
+    print("lggn_decode v2 --selftest: FiLM module + refiner + trajectory + write-back + graph wiring\n")
     import numpy as np
 
     d, N, T, n_op = 32, 60, 8, 6
@@ -601,13 +732,22 @@ def _selftest() -> bool:
                 f"layers {i} and {j} share parameters"
     print(f"  FiLM per-layer independence: {n_layers} layers, all independent")
 
-    # --- refiner ---
+    # --- refiner (vanilla) ---
     tr = np.arange(N * 4 // 5)
     h_K, ops, net, cos = _train_refiner(g, f, ctx, cmask, tr, K=4, r=32,
                                          n_op=n_op, epochs=100, seed=0, log=lambda *a: None)
     assert h_K.shape == (N, d), f"h_K shape wrong: {h_K.shape}"
     assert cos > 0.2, f"refiner cos too low: {cos:.3f}"
-    print(f"  refiner: h_K shape {h_K.shape}, held cos = {cos:.3f}")
+    print(f"  refiner (vanilla): held cos = {cos:.3f}")
+
+    # --- refiner improvements: learn_ops + contrastive + k_warmup ---
+    _, ops2, _, cos2 = _train_refiner(g, f, ctx, cmask, tr, K=4, r=32,
+                                       n_op=n_op, epochs=100, seed=0,
+                                       learn_ops=True, k_warmup=0.5,
+                                       contrastive=0.1, log=lambda *a: None)
+    assert cos2 > 0.2, f"improved refiner cos too low: {cos2:.3f}"
+    print(f"  refiner (learn_ops+contra+k_sched): held cos = {cos2:.3f} "
+          f"(delta {cos2-cos:+.3f} vs vanilla)")
 
     # --- trajectory ---
     traj = _extract_trajectory(net, g, ctx, cmask, ops, K=4)
@@ -622,7 +762,49 @@ def _selftest() -> bool:
     assert len(wb["op_usage"]) > 0, "should report op usage"
     print(f"  write-back: {wb['n_success']} success, ops {wb['op_usage']}")
 
-    print("\n  LGGN-DECODE v2 SELFTEST -> PASS (FiLM + refiner h_K + trajectory + write-back)")
+    # --- graph wiring bridge ---
+    from v5.runtime.graph_edits import (
+        BehaviorGraph, GraphEditEngine, Outcome, BehaviorNode,
+        SEED_CONF, CONF_FLOOR, _unit
+    )
+    bg = BehaviorGraph()
+    with torch.no_grad():
+        ops_emb = film.encode(torch.tensor(ops, dtype=torch.float32))
+    for j in range(ops.shape[0]):
+        bg.nodes[f"seed_{j}"] = BehaviorNode(
+            op_id=f"seed_{j}", name=f"op{j}",
+            behavior_emb=_unit(ops_emb[j].numpy()).tolist(),
+            confidence=SEED_CONF, source="seed")
+
+    engine = GraphEditEngine(bg)
+    traj_he = traj[:, he, :]
+    for j, idx in enumerate(he):
+        step_w = traj_he[:, j, :]
+        seen_last = -1; op_ids = []
+        for k in range(step_w.shape[0]):
+            ranked = np.argsort(-step_w[k])
+            pick = int(ranked[0])
+            if pick == seen_last and step_w[k, ranked[1]] > 0.15:
+                pick = int(ranked[1])
+            op_ids.append(f"seed_{pick}")
+            seen_last = pick
+        with torch.no_grad():
+            beh = film.encode(torch.tensor(h_K[idx:idx+1])).squeeze(0).numpy()
+        engine.observe(Outcome(
+            iid=f"inst_{idx}", ctx_emb=g[idx].astype(np.float32),
+            behavior_emb=beh.astype(np.float32),
+            trajectory=op_ids, verified=(fake_recall[j] >= 0.3)))
+    maint = engine.maintain()
+    n_ret = sum(1 for n in bg.nodes.values()
+                if n.retrievable and n.confidence >= CONF_FLOOR)
+    assert len(bg.log) > 0, "observe() must produce edits"
+    assert n_ret > 0, "some seed ops must become retrievable via STRENGTHEN"
+    edit_kinds = sorted(set(r.kind for r in bg.log))
+    print(f"  graph wiring: {len(bg.nodes)} nodes ({n_ret} retrievable), "
+          f"{len(bg.log)} edits, {len(maint)} maintenance")
+    print(f"  edit kinds: {edit_kinds}")
+
+    print("\n  LGGN-DECODE v2 SELFTEST -> PASS (FiLM + refiner + trajectory + write-back + graph wiring)")
     return True
 
 
@@ -645,22 +827,36 @@ def main():
                     help="prob of dropping z during latent-arm training (forces z-content use)")
     ap.add_argument("--sensitivity", action="store_true",
                     help="run gold->h_K interpolation sweep after ceiling arm")
+    ap.add_argument("--learn-ops", action="store_true",
+                    help="make operator basis learnable (KMeans init, then drift)")
+    ap.add_argument("--k-warmup", type=float, default=0.5,
+                    help="fraction of refiner epochs to ramp K from 1 to max (scheduled K)")
+    ap.add_argument("--contrastive", type=float, default=0.0,
+                    help="weight for wrong-instance triplet loss (push h_K away from f_wrong)")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
         raise SystemExit(0 if _selftest() else 1)
+    extras = []
+    if a.learn_ops: extras.append("learn_ops")
+    if a.contrastive > 0: extras.append(f"contra={a.contrastive}")
+    if a.k_warmup != 1.0: extras.append(f"k_warmup={a.k_warmup}")
+    ex = f" {' '.join(extras)}" if extras else ""
     print(f"[lggn-decode v2 FiLM] model={a.model} dataset={a.dataset} n={a.n} "
-          f"r={a.r} K={a.K} bn={a.bottleneck} epochs={a.decoder_epochs} "
-          f"warmup={a.film_warmup} zdrop={a.z_dropout} sensitivity={a.sensitivity}")
+          f"r={a.r} K={a.K} ops={a.n_op} bn={a.bottleneck} "
+          f"ref_ep={a.refiner_epochs} dec_ep={a.decoder_epochs} "
+          f"warmup={a.film_warmup} zdrop={a.z_dropout} "
+          f"sensitivity={a.sensitivity}{ex}")
     g, f, ctx, cmask, texts = _load_paired(a.model, a.dataset, a.split, a.n)
     print(f"  {len(g)} instances, d={g.shape[1]}")
-    results, n_held, cos_ref, wb, sens = run(
+    results, n_held, cos_ref, wb, sens, graph_stats = run(
         g, f, ctx, cmask, texts, a.model,
         n_op=a.n_op, K=a.K, r=a.r,
         refiner_epochs=a.refiner_epochs, decoder_epochs=a.decoder_epochs,
         bottleneck=a.bottleneck, film_warmup=a.film_warmup,
-        z_dropout=a.z_dropout, sensitivity=a.sensitivity)
-    _report(results, n_held, cos_ref, wb, sens)
+        z_dropout=a.z_dropout, sensitivity=a.sensitivity,
+        learn_ops=a.learn_ops, k_warmup=a.k_warmup, contrastive=a.contrastive)
+    _report(results, n_held, cos_ref, wb, sens, graph_stats)
 
 
 if __name__ == "__main__":
