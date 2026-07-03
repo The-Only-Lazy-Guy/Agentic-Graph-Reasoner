@@ -28,11 +28,11 @@ This doc is the canonical design. It supersedes the single-vector "floor" (`swe_
 | **LGGN refiner** (`lggn_refine.py`, r=512, Qwen3.5-4B, 5-seed CI) | recurrence **+0.084±0.011** · constraints **+0.112±0.012** · graph **+0.028±0.008** · learnedness **+0.128±0.009** · vs-noniter **+0.309±0.013** — ALL PASS | **all 4 LGGN pillars load-bearing at r=512.** Graph was FLAT at r=256 (capacity-starved); rescued by wider projection. The discrete operator basis IS better than free MLP when both have enough capacity |
 | LGGN extended (r=512, 5-seed) | topology **-0.003±0.003** · hybrid **-0.015±0.007** vs nograph · compounding **+0.001±0.010** | topology/hybrid/compounding ALL FLAT. Graph value = per-step learned directions, NOT sequencing/prior/scaling |
 | **Decode v1 — soft prefix** (`lggn_decode.py` v1, LoRA + soft prefix from h_K, 4-bit Qwen3.5-4B) | baseline **0.136** · latent **0.098** · ceiling **0.113** — ALL prefix arms WORSE than baseline. Training loss identical (~0.35) across all arms | **INJECTION MECHANISM BROKEN.** LoRA ignores prefix tokens, learns text→text shortcut. The prefix is a weak injection point diluted by self-attention over 200+ text tokens. Soft prefix = prompt engineering in disguise — the latent changes the INPUT, not the COMPUTATION. Escalate to FiLM. |
-| **Decode v2 — FiLM** (`lggn_decode.py` v2, LoRA + FiLM(z) at every layer, 4-bit Qwen3.5-4B, 5 epochs, stability fixes) | baseline **0.079** · latent **0.125** (+0.046) · ceiling **0.183** (+0.104). Sensitivity: random z recall **0.187** ≈ gold **0.183** | **INJECTION WORKS, BRIDGE WORKS.** Three gates pass: FiLM modulates computation (ceiling>baseline), h_K helps (latent>baseline), training stable (monotonic loss). **BUT** random z ≈ gold at eval → FiLM responds to latent PRESENCE, not MEANING. Renderer weights learn fixed modulation; z-content secondary at eval. Next: constant-z arm + z-dropout to disentangle capacity from signal. |
+| **Decode v2 — FiLM** (`lggn_decode.py` v2, LoRA + FiLM(z), 4-bit Qwen3.5-4B, 5ep, stability fixes) | baseline **0.079** · constant **0.139** · latent **0.203** · ceiling **0.210**. Permuted gold: **0.167** | **FiLM VALIDATED.** Capacity boost: constant-baseline=+0.060. Z-content: latent-constant=+0.065 (SEMANTIC). Refiner nearly saturates: ceiling-latent=0.007. z-dropout (0.15) essential — without it latent only 0.125. Permuted (wrong-instance gold) = 0.167 < h_K 0.196 — wrong-instance MISLEADS (coherent-but-wrong worse than noise). |
 
 **Honest negatives the kill-tests caught** (right-for-the-right-reason): signature operators were goal-blind (~chance → embedding ops fixed it); raw topology 65% was a self-loop artifact (op-change is the real 38%); Fable-greenfield obs=0% (no failures → domain-mismatch, rescued on SWE debug); retrieval has no resolve headroom (best-of-3=top-1).
 
-**One-line thesis status:** the LGGN reasoning substrate is **validated** — `lggn_refine` at r=512 (5-seed CI) proves all four pillars load-bearing: recurrence, constraints, graph-as-discrete-basis, and operator learnedness. The graph's value is **per-step learned directions** (operators as displacement vectors in Qwen space); its OTHER claimed levers (topology prior, hybrid graph+MLP, cross-task compounding) are all flat. The graph is a **learned dictionary of fix-directions**, not a planning/sequencing substrate. **The wall is DECODE** — the frozen 4B can't cash in the latent composition, AND soft-prefix injection FAILED (baseline 0.136 > latent 0.098 > ceiling 0.113 — LoRA ignores prefix tokens). **Pivoting to FiLM** (Feature-wise Linear Modulation): the latent modulates the COMPUTATION at every layer (`h' = γ(z)⊙h + β(z)`), not the input. The architectural insight: **the graph becomes a library of model BEHAVIORS (computational modulations), not embedding directions.** Each operator is a way to rewire the model; composition = stacking rewirings. A BehaviorEncoder maps h_K into a compact behavior space where graph ops, composition, write-back, and retrieval all operate; a FiLM renderer expands behavior embeddings into per-layer (γ, β). **Next:** FiLM gate test (ceiling > baseline?), then ops-in-behavior-space + behavioral write-back.
+**One-line thesis status (2026-07-03):** LGGN reasoning substrate **validated** (refiner at r=512, 5-seed CI, all 4 pillars pass). FiLM decode **validated** — the graph's latent modulates the LLM's computation via FiLM, not input tokens. Decomposed: +0.060 from FiLM capacity, +0.065 from z-content (SEMANTIC, not just presence), refiner nearly saturates (ceiling-latent=0.007). z-dropout essential training technique. Permuted control confirms partial instance-specificity (wrong-instance gold misleads). **The graph is a library of model BEHAVIORS** — each operator is a computational modulation, not an embedding direction. **The wall is now GRAPH EDITS:** the read path works (refine→FiLM→decode), but the write path is shallow (counter increments). Structural graph edits (mint/strengthen/connect/merge/refine preconditions from outcomes) are the amortization mechanism that compounds the graph's value across tasks. **Next:** structural graph edit design, scale training data (agentic traces + full SWE-bench), assemble the end-to-end loop.
 
 **CORRECTION (2026-07-01) — resolve is UNBUILT, not closed.** The HRM lens exposed the gap: HRM iterates *against the puzzle state*; we only ever ran a one-shot operator picker + frozen executor. `iterative_refine.py` probe: iteration on a *static goal-embedding* is FLAT (K=1..8 ≈ 0.39) — a fixed input has no constraints to propagate.
 
@@ -224,6 +224,138 @@ This is architecturally distinct from HRM (which iterates h_t against fixed cont
 
 ---
 
+## GRAPH STRUCTURAL EDITS — the write path (2026-07-03)
+
+The read path is validated: refiner navigates operator space → FiLM modulates Qwen → decoder generates patches. The WRITE path is the amortization mechanism — how the graph improves from experience, not just grows.
+
+### The problem with shallow adding
+
+Current `OperatorLibrary.add_or_strengthen()`:
+```python
+if cosine(new_op, existing) > threshold:
+    existing.confidence += delta       # counter bump
+else:
+    library.append(new_op)             # add node
+```
+
+No edge updates. No precondition learning. No operator refinement. No merging. The graph accumulates but doesn't structurally improve. This means: solving task A teaches the graph NOTHING that helps task B. The amortization claim (T.4) requires structural edits.
+
+### Graph edit operations (10 types, all operate in behavior space)
+
+Every edit operates in the BehaviorEncoder's output space (64-128d). This is the same space where the refiner selects operators, the FiLM renderer reads, write-back stores, and retrieval searches. One space, shared by all components.
+
+**1. MINT — create operator from successful trajectory**
+- Trigger: decode succeeded (verified by Docker/tests), trajectory includes novel behavior
+- Input: the FiLM state (γ,β per layer) that produced the successful patch
+- Process: compress through BehaviorEncoder (reverse direction or dedicated compressor) → behavior vector
+- Store: new node with behavior embedding, precondition from the input instance, confidence=low, validation_count=1
+- **FiLM synergy:** BehaviorEncoder is already trained from FiLM decode — compression is free
+
+**2. STRENGTHEN — reuse success confirms an operator**
+- Trigger: existing operator retrieved, used in decode, decode VERIFIED (tests pass)
+- Process: confidence += δ_up, validation_count++, update behavior embedding as EMA toward the FiLM state that worked
+- **Synergy:** confidence gates retrieval — only validated operators are reusable. Prevents untested ops from propagating.
+
+**3. WEAKEN — reuse failure penalizes**
+- Trigger: operator retrieved and used, but decode FAILED (tests fail)
+- Process: confidence -= δ_down, store (input_features, failure_observation) as negative precondition
+- **Synergy:** failure observation from POMDP observe step → INVALIDATE in session graph → WEAKEN in persistent graph
+
+**4. CONNECT — edge formation from co-occurrence in successful trajectories**
+- Trigger: trajectory [A → B → C] verified successful
+- Process: create/strengthen edges A→B, B→C with weight proportional to trajectory success
+- **Synergy:** topology carries sequencing info (validated: 38% op-change prediction). Edges are the policy prior for the refiner's next-operator selection.
+- Gold supervision: from agentic traces (SWE-agent/OpenHands), each tool-call transition = one edge
+
+**5. MERGE — combine redundant operators**
+- Trigger: two operators have high cosine in behavior space AND similar preconditions AND both validated (validation_count > k)
+- Process: average behavior embeddings, union preconditions, sum validation counts, redirect edges
+- **Synergy:** keeps library compact. Prevents fragmentation from separate MINTs of the same underlying repair.
+
+**6. SPLIT — specialize an operator with divergent usage**
+- Trigger: operator has high variance in success rate across input types (works on type-A bugs, fails on type-B)
+- Process: cluster usage contexts by input features → create specialized sub-operators with tighter preconditions
+- **Synergy:** sharpens retrieval precision. Each sub-operator's FiLM configuration is specialized to its context.
+
+**7. RETIRE — prune dead operators**
+- Trigger: age > threshold AND validation_count < min AND confidence < floor
+- Process: mark non-retrievable (soft delete) or remove entirely
+- **Synergy:** bounded graph size. Prevents retrieval noise from stale/wrong operators.
+
+**8. REFINE_PRECONDITION — learn when an operator applies**
+- Trigger: accumulated success/failure instances for an operator
+- Process: train a lightweight classifier (or update embedding-based matcher) that predicts success given input features
+- **Synergy:** retrieval becomes selective. "GuardType" only retrieved when the input looks like a type-guard bug, not every time.
+- Gold supervision: agentic traces show which tool was selected for which problem type
+
+**9. REFINE_EMBEDDING — update operator's behavior vector from actual usage**
+- Trigger: operator used in decode, FiLM state that actually worked differs from stored behavior
+- Process: EMA update: `embedding = (1-α)*embedding + α*actual_film_state`
+- **Synergy:** operators drift toward their true behavioral configuration over usage. Initial KMeans centroids are bootstraps; usage refines them.
+
+**10. COMPOSE — amortize frequent sub-trajectories**
+- Trigger: sub-trajectory [A→B] appears in >k successful trajectories
+- Process: create composite operator AB. Behavior = sequential application of A then B's FiLM modulations. Precondition = intersection of A and B's preconditions.
+- **Synergy:** reduces trajectory length. The refiner can select AB in one step instead of A then B. Amortizes common repair patterns.
+
+### How graph edits achieve perfect amortization
+
+**Day 1:** library is empty. Every fix is DERIVE (decoder invents). Each success → MINT new operator.
+
+**Day N:** library has operators from solved tasks. New task arrives:
+1. RETRIEVE matches preconditions → candidate operators
+2. Refiner COMPOSES operators in behavior space → FiLM → decode
+3. If decode succeeds → STRENGTHEN used operators, CONNECT edges, REFINE_EMBEDDING
+4. If decode fails → WEAKEN operators, REFINE_PRECONDITION (exclude this input type)
+5. If no operators match → DERIVE (decoder invents) → MINT new operator
+
+**Day 100:** library covers most repair patterns. Novel fixes are RARE. Most tasks = retrieve + compose + realize. The decoder's burden SHRINKS. The graph's value COMPOUNDS.
+
+**The measurement (V6):** does solving task A measurably help later task B?
+- Compare: fresh library vs library-after-A on task B
+- If library-after-A wins → amortization is real → T.4 capacity scaling confirmed
+
+### Training data for graph edits
+
+| Data source | What it provides | Which edits it trains |
+|---|---|---|
+| **SWE-bench gold patches** | Fix decomposition (what operators) | MINT, REFINE_EMBEDDING |
+| **Agentic traces (SWE-agent, OpenHands)** | Sequential tool calls, failures, revisions | CONNECT, REFINE_PRECONDITION, WEAKEN |
+| **LGGN's own runs (self-play)** | End-to-end trajectories with FiLM states | ALL (the self-improving loop) |
+| **Fable trajectories** | Multi-step feature builds | CONNECT, COMPOSE (long trajectories) |
+
+Agentic traces are CRITICAL for the graph edit mechanism. SWE-bench gold patches give static decompositions; agentic traces give the SEQUENTIAL structure (what follows what, what failed, what was revised). The CONNECT and REFINE_PRECONDITION edits require this sequential signal.
+
+### Synergy summary — where graph edits meet FiLM
+
+```
+Successful decode
+    │
+    ├─ FiLM state (γ,β per layer) ──→ BehaviorEncoder ──→ behavior vector
+    │                                                           │
+    │                                                     ┌─────┴─────┐
+    │                                                     │           │
+    │                                                  MINT      REFINE_EMBEDDING
+    │                                                (new node)  (update existing)
+    │
+    ├─ Trajectory [op_A → op_B] ──→ CONNECT (A→B edge)
+    │                             ──→ COMPOSE (if frequent, create AB)
+    │
+    └─ Verification outcome ──→ STRENGTHEN / WEAKEN
+                              ──→ REFINE_PRECONDITION (success/failure context)
+
+Failed decode
+    │
+    ├─ Failure observation ──→ WEAKEN (penalize used operators)
+    │                       ──→ REFINE_PRECONDITION (add negative context)
+    │
+    └─ Session INVALIDATE ──→ re-traverse with updated goal
+```
+
+The FiLM state IS the information that flows into graph edits. A successful FiLM decode produces a compressed behavioral configuration (via BehaviorEncoder) that becomes either a new operator (MINT) or an update to an existing one (REFINE_EMBEDDING). The graph stores WHAT WORKED as a literal computational configuration — procedural memory.
+
+---
+
 ## 0. Why this shape (what the SWE experiments forced)
 Measured, on SWE-bench Lite, 4-bit Qwen3.5-4B:
 - File-level localization works; **emission applies ~80%**; **resolve ceiling ~20%** with exemplar grounding.
@@ -329,19 +461,25 @@ The planner trains as a **policy `π(Δ_t | h_t, obs_{<t})`** where the observat
 
 **Session Graph (working memory, per task, transient).** Nodes: `goal` (a (sub)goal), `evidence` (knowledge bound to this task), `observation` (test/exec result). Artifacts live here transiently and are discarded after compression.
 
-### Operator schema (every operator carries uncertainty — load-bearing, not cosmetic)
+### Operator schema (updated for FiLM/behavior space, 2026-07-03)
 ```
 op_id, name                  # e.g. GuardType, FixInPlaceMutation
 input_type, output_type      # soft types (memoryview→bytes, possibly-None→checked)
 precondition                 # when it applies (soft: NL + embedding + learned matcher)
+precondition_neg             # when it DOESN'T apply (learned from failures via REFINE_PRECONDITION)
 realize_hint                 # how the decoder emits it (compiler-mode instruction)
-embedding                    # for soft retrieval
-confidence                   # 0..1
-source                       # seed | derived:<instance_id>
+embedding                    # original discovery embedding (Qwen space, 2560d)
+behavior_embedding           # compressed FiLM configuration (behavior space, 64-128d) ← NEW
+confidence                   # 0..1 (updated by STRENGTHEN/WEAKEN)
+source                       # seed | derived:<instance_id> | mint:<trajectory_id>
 age                          # tasks since created
-validation_count             # times reuse actually resolved
+validation_count             # times reuse actually resolved (outcome-confirmed)
+failure_count                # times reuse failed ← NEW
+edges_out                    # {op_id: weight} — transition structure from CONNECT ← NEW
 ```
-**Why uncertainty is mandatory:** without it, `wrong primitive → write-back → retrieved again → reinforced` is catastrophic. Operators below a confidence/validation floor are **not retrievable for reuse** — only for re-validation. Write-back can only *strengthen* an operator after an outcome-confirmed pass.
+**Two embeddings:** `embedding` (Qwen space) = where the operator IS in the representational manifold. `behavior_embedding` (behavior space) = HOW the operator modulates the model's computation. The refiner operates on `embedding`; the FiLM renderer reads `behavior_embedding`. REFINE_EMBEDDING updates `behavior_embedding` from actual usage.
+
+**Why uncertainty is mandatory:** without it, `wrong primitive → write-back → retrieved again → reinforced` is catastrophic. Operators below a confidence/validation floor are **not retrievable for reuse** — only for re-validation. STRENGTHEN only after outcome-confirmed pass; WEAKEN on failure with negative precondition learning.
 
 ---
 
@@ -563,7 +701,7 @@ NOT the wall: localization (file-level works), emission (80% applyable), retriev
 | `v5/runtime/swe_rl.py` | 1180 | **the TRAINER** (SFT->GRPO->distill, LoRA) | `--realizer` (operator-plan->gold SFT), `--discovered-ops`, `--fable-corpus/--fable-frac`, `--distill`, `--plots-dir` (`_save_train_plots`), `--rep-penalty`, `--eff-coef`, `--use-exemplar`, `--staged`, `--graph` | built; realizer proxy-up resolve-flat |
 | `v5/runtime/swe_slot.py` | 2121 | **the INFERENCE ENGINE** | oneshot/slot/kv solve; `--exemplar`(+`--exemplar-rank`), `--lggn-realize`(+`--lggn-multileaf`), `--test-feedback`, `--exact-verify`; `fix_user(plan=)`, `_multileaf_patch`, `_repair_sr_to_src` | built |
 | `v5/training/ingest_fable5.py` | 226 | **Fable-5 ingestion** | per-session event streams -> (intent,edit) records; `--probe/--ingest/--selftest` | built (4781->2539 recs) |
-| `v5/runtime/lggn_decode.py` | ~650 | **decode bridge v2 (FiLM)** | `_FiLMModule` (BehaviorEncoder+Renderer, identity-init), `_Decoder` (LoRA + FiLM + per-layer hooks, gradient-checkpointing-safe), `_extract_trajectory`, `_write_back_report`, `_sensitivity_sweep`; 4 arms: baseline / constant (mean z) / latent / ceiling; `--z-dropout` (forces z-content dependence); `--sensitivity` (gold→h_K interpolation + random baseline). Gate test PASSED. Presence-vs-meaning diagnostic in progress. | building |
+| `v5/runtime/lggn_decode.py` | ~660 | **decode bridge v2 (FiLM)** | `_FiLMModule` (BehaviorEncoder+Renderer, identity-init), `_Decoder` (LoRA + FiLM + per-layer hooks, gradient-checkpointing-safe), `_extract_trajectory`, `_write_back_report`, `_sensitivity_sweep` (interpolation + permuted control); 4 arms: baseline / constant (mean z) / latent / ceiling; `--z-dropout` (forces z-content dependence, seeded RNG); `--sensitivity` (gold→h_K interpolation + permuted baseline). **VALIDATED:** +0.060 capacity, +0.065 z-content, permuted=0.167 confirms instance-specificity. | validated |
 | `v5/graph_grower/swe_verify.py` | 323 | **Docker SWE verifier** | gold-sanity gate, resolve; `--predictions --backend docker` | reused |
 
 ## Data / artifacts
@@ -611,28 +749,45 @@ NOT the wall: localization (file-level works), emission (80% applyable), retriev
       Training loss stable: latent 0.488→0.363→0.227→0.175→0.113 (monotonic).
     - **Sensitivity sweep (ceiling decoder, gold→h_K interpolation):** mostly monotonic from alpha=1.0 (gold) to alpha=0.0 (h_K), with a peak at alpha=0.67 (recall 0.204 > gold 0.183 — mixing some h_K INTO gold helps, suggesting complementary information). **BUT random z gets 0.187** (cos=0.001 with gold), matching gold (0.183). The FiLM decoder at eval time is not strongly z-direction-dependent.
     - **Diagnosis: PRESENCE vs MEANING.** The FiLM renderer weights learn a beneficial modulation pattern during training. At eval, the specific z-content is secondary — the learned (γ,β) pattern is mostly fixed in the renderer weights. Training z quality matters (ceiling trained with gold > latent trained with h_K > baseline trained without FiLM), but eval z does not. This means FiLM is acting as a "learned adaptive layer norm" — a capacity boost from the extra ~12M trainable params — not as a true conditioning mechanism responsive to z content.
-20. **Next diagnostic: constant-z arm + z-dropout (2026-07-03).** To disentangle "FiLM extra params" from "z-content signal": (a) constant-z arm trains FiLM with mean(h_K) for ALL instances (same z everywhere) — if latent > constant-z, z-content carries semantic signal; if latent ≈ constant-z, FiLM just wants extra capacity. (b) z-dropout during training: randomly drop z (replace with None) with probability p, forcing FiLM to USE z when present (can't learn a fixed pattern if z sometimes disappears). Analogous to classifier-free guidance in diffusion.
+20. **Constant-z arm + z-dropout (2026-07-03).** Diagnostic to disentangle FiLM capacity from z-content signal. constant-z = FiLM with mean(h_K) for all instances. z-dropout = randomly drop z during training (p=0.15), forces FiLM to USE z when present. **Results (best run):** baseline=0.079, constant=0.139, latent=0.203, ceiling=0.210. Decomposed: +0.060 capacity, +0.065 z-content, +0.007 refiner gap. z-dropout critical: without it latent was only 0.125. **Z-CONTENT MATTERS** — the graph's latent carries semantic signal, not just a capacity boost.
+21. **Permuted-latent control (2026-07-03).** Replaced random Gaussian with permuted gold (gold_f from WRONG instance — correct distribution, wrong semantic match). **Result: perm=0.167** (cos=0.375 with correct gold). Permuted < h_K (0.196) < gold (0.210). Wrong-instance gold actively MISLEADS — coherent-but-wrong conditioning hurts more than noise. Confirms partial instance-specificity: the decoder extracts SOME instance-specific content from z. The full sensitivity curve on the ceiling decoder remains flat (no z-dropout on ceiling), but the latent decoder (with z-dropout) is genuinely z-dependent.
+22. **Strategic assessment (2026-07-03).** The graph read path is validated (refine→FiLM→decode). The write path is shallow (counter increments). Identified 10 structural graph edit operations needed for amortization. Training data gap: 116 instances is insufficient; need full SWE-bench + agentic traces. The 4B model CAN emit patches at 83% recall with exact gold in prompt — the FiLM channel bandwidth (ceiling 21%) and training scale are the bottleneck, not model size. The graph should ELEVATE the model, not be bypassed by model scaling.
 
-## Current verdicts (updated 2026-07-02)
-- **LGGN refiner:** ALL 4 PILLARS PASS at r=512 (recurrence, constraints, graph, learnedness). The reasoning substrate is validated.
-- **Graph value:** per-step learned directions (discrete ops > free MLP at r=512). NOT topology, NOT hybrid prior, NOT compounding. The graph is a learned dictionary, not a planner.
+## Current verdicts (updated 2026-07-03)
+- **LGGN refiner:** ALL 4 PILLARS PASS at r=512 (recurrence, constraints, graph, learnedness). Reasoning substrate validated.
+- **Graph value:** per-step learned directions (discrete ops > free MLP at r=512). NOT topology, NOT hybrid prior, NOT compounding. The graph is a learned dictionary of fix-directions.
 - **Reasoner (traverse):** LEARNS (40%, scales) — VALIDATED.
 - **Compositionality:** intra-task (0.91) + cross-task (0.58) — VALIDATED.
-- **Decode v1 (soft prefix):** FAILED. LoRA ignores prefix tokens. Baseline 0.136 > latent 0.098 > ceiling 0.113. Injection mechanism broken — the latent changes the input, not the computation.
-- **Decode v2 (FiLM):** THREE GATES PASS. FiLM injection works (ceiling-baseline=+0.104), bridge works (latent-baseline=+0.046), training stable (monotonic loss with warmup+grad clip). **BUT:** sensitivity sweep shows random z (cos=0.001 with gold) gets recall 0.187, matching gold (0.183). Diagnosis: FiLM responds to latent PRESENCE more than latent MEANING. The renderer weights learn a beneficial modulation pattern during training; at eval time, specific z-content is secondary. Training z quality matters (ceiling>latent>baseline as separately-trained decoders), but eval z does not. Next experiment: constant-z arm + z-dropout to disentangle capacity boost from semantic signal.
-- **Architectural pivot:** the graph is being redefined as a library of model BEHAVIORS (computational modulations), not embedding directions. BehaviorEncoder → FiLM Renderer. Operators in behavior space. Behavioral write-back = procedural memory.
-- **Write-back:** UNBUILT but re-scoped. Now stores behavioral configurations (FiLM states), not just embedding directions. Procedural memory, not semantic memory.
-- **Open builds:** constant-z diagnostic (immediate), z-dropout training, ops-in-behavior-space, behavioral write-back (V6), conditioned extraction (feedback loop), loop assembly (traverse→realize→verify→refine).
+- **Decode v1 (soft prefix):** FAILED. LoRA ignores prefix tokens.
+- **Decode v2 (FiLM):** VALIDATED (5 runs on molab). FiLM benefit decomposed: +0.060 capacity (constant-baseline), +0.065 z-content (latent-constant), +0.007 refiner gap (ceiling-latent). z-dropout (0.15) essential: latent 0.125→0.203. Permuted gold (wrong instance) = 0.167 < h_K 0.196 — wrong-instance actively misleads. The decoder partially uses instance-specific z-content; z-dropout forces this dependence.
+- **Architectural pivot:** the graph IS a library of model BEHAVIORS (computational modulations). BehaviorEncoder → FiLM Renderer. Operators live in behavior space. VALIDATED by the FiLM results.
+- **Graph read path:** WORKS (refine → FiLM → decode). The chain is proven.
+- **Graph write path:** UNBUILT. Current write-back = counter increments only. Need 10 structural edit operations (MINT/STRENGTHEN/WEAKEN/CONNECT/MERGE/SPLIT/RETIRE/REFINE_PRECONDITION/REFINE_EMBEDDING/COMPOSE). This is the amortization mechanism. Without it, the graph accumulates but doesn't compound.
+- **Training data gap:** currently 116 instances per run. Need full SWE-bench (~2300) + agentic traces (SWE-agent/OpenHands) for sequential structure (CONNECT, REFINE_PRECONDITION). Agentic traces provide the failure→revision signal the graph edit mechanism needs.
+- **Model ceiling:** 4B with EXACT gold in prompt = 83% recall (solution_ladder). FiLM ceiling = 21%. Gap = FiLM channel bandwidth + training data scale, NOT 4B capacity. The graph SHOULD elevate the model — more training + wider FiLM channel is the path, not swapping models.
 
 ## Next (recommended order, updated 2026-07-03)
-1. ~~**FiLM gate test**~~ — **PASSED** (3 runs on molab). ceiling-baseline=+0.104, latent-baseline=+0.046. Training stable with warmup+grad clip+separate LR. Injection works; bridge works.
-2. **Presence vs meaning diagnostic** — constant-z arm (FiLM with mean(h_K) for all instances) + z-dropout during training. If latent > constant-z → z carries semantic signal → proceed to ops-in-behavior-space. If latent ≈ constant-z → FiLM is just extra capacity → fix with z-dropout (forces z-dependence) or escalate to hypernetwork (z generates actual weight updates). **Run on molab: `--z-dropout 0.15`**
-3. **Operators in behavior space** — redefine graph operators as directions in the compact behavior manifold (BehaviorEncoder output space, ~64-128d), not Qwen embedding space. Discovery: successful patches → extract FiLM states → compress → cluster → operator nodes. Composition = composing behavioral changes.
-4. **Behavioral write-back** — after successful decode, compress the learned FiLM configuration into a behavior vector → store as a graph node. Future similar instances retrieve the behavior vector → FiLM Renderer → reinstall the computational state. Procedural memory: the graph stores "ways of thinking that worked," not facts.
-5. **Conditioned extraction (feedback loop)** — Qwen + FiLM(h_K) re-extracts representations → refiner runs on new reprs → new h_K → new FiLM → ... converges to a fixed point. Iterative belief propagation.
-6. **Model-internal verify (soft gate)** — multiple signals (repr similarity, confidence, edit consistency) → gate before Docker. Not a replacement for Docker — a cost filter.
-7. **Assemble the loop** — traverse→realize→verify→refine (the full POMDP). Each stage now has a validated component. Docker for final gate only; internal verify for the inner loop.
-8. ~~Cross-task compositionality probe~~ — already validated (0.58 vs 0.38, 98%).
-9. ~~V7 topology kill-test~~ — **answered by lggn_refine extended**: topology flat at r=512.
-10. ~~Decode v1 (soft prefix)~~ — **FAILED**. Replaced by FiLM.
-11. ~~Decode v2 FiLM gate test~~ — **PASSED**. Three gates clear. Random-z anomaly leads to step 2.
+
+### Phase A — Graph structural edits (the amortization mechanism)
+1. **Implement MINT + STRENGTHEN + WEAKEN** in `lggn.py` OperatorLibrary. After each decode: FiLM state → BehaviorEncoder → behavior vector → new node or update existing. Verification outcome gates STRENGTHEN vs WEAKEN. Replaces current counter-increment write-back.
+2. **Implement CONNECT** — edge formation from successful trajectories. Refiner's K-step trajectory → edges between consecutively-selected operators. Weight = outcome-weighted co-occurrence.
+3. **Implement REFINE_PRECONDITION** — lightweight classifier per operator: given input features (issue embedding, code embedding), predict success. Trained from accumulated success/failure instances.
+4. **V6 kill-test: does solving A help B?** Compare fresh library vs library-after-A on similar task B. If library-after-A wins → amortization is real, T.4 confirmed.
+
+### Phase B — Scale training data
+5. **Full SWE-bench training** — train LoRA + FiLM on ~2300 instances (not 116). Save weights. This should raise the FiLM ceiling (currently 0.21) closer to the 0.83 emission ceiling.
+6. **Ingest agentic traces** (SWE-agent, OpenHands) — provides sequential structure for CONNECT edges and failure→revision signal for REFINE_PRECONDITION. Each tool-call transition = one graph edge.
+7. **Widen FiLM channel** — bottleneck 128 or 256 (currently 64). More information from graph to decoder. Trade VRAM for bandwidth.
+
+### Phase C — Assemble the end-to-end loop
+8. **Wire refine → FiLM decode → verify → write-back** as a single pipeline. Refiner produces h_K → FiLM decodes to patch → Docker verifies → graph edits from outcome.
+9. **Conditioned extraction (feedback loop)** — FiLM-conditioned Qwen re-reads code → refiner runs on new representations → iterate until convergence.
+10. **Model-internal verify (soft gate)** — multiple signals before Docker. Cost filter, not replacement.
+
+### Completed
+- ~~FiLM gate test~~ — **PASSED** (ceiling-baseline=+0.131)
+- ~~Presence vs meaning~~ — **RESOLVED** (z-content=+0.065, z-dropout essential)
+- ~~Permuted control~~ — **DONE** (wrong-instance misleads: perm=0.167 < h_K=0.196)
+- ~~Compositionality~~ — **VALIDATED** (intra 0.91, cross 0.58)
+- ~~Topology kill-test~~ — topology flat at r=512 (value in directions, not sequencing)
+- ~~Decode v1 soft prefix~~ — **FAILED** (replaced by FiLM)
