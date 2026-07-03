@@ -299,19 +299,20 @@ class _Decoder:
             return out.unsqueeze(0) if out.dim() == 1 else out
         return torch.tensor(out).unsqueeze(0) if not isinstance(out, torch.Tensor) else out
 
-    def train_on(self, texts, latents, indices, epochs=2, film_warmup=1, log=print):
+    def train_on(self, texts, latents, indices, epochs=2, film_warmup=1,
+                 z_dropout=0.0, log=print):
         """Train LoRA + FiLM on the training set.
 
         film_warmup: freeze FiLM for this many epochs, let LoRA settle first.
-        Prevents early FiLM gradients from destabilizing LoRA when latents are noisy.
-        Gradient clipping (max_grad_norm=1.0) prevents the loss explosion seen with
-        imperfect latents at epoch 4-5.
+        z_dropout: probability of replacing z with zeros for each instance (0-1).
+            Forces FiLM to USE z-content, not learn a fixed modulation pattern.
+            Analogous to classifier-free guidance in diffusion models.
         """
+        import random as _rng
         self.model.train()
         if self.film is not None:
             self.film.train()
         for ep in range(epochs):
-            # FiLM warmup: freeze FiLM params for the first film_warmup epochs
             if self.film is not None:
                 film_frozen = ep < film_warmup
                 for p in self.film.parameters():
@@ -319,9 +320,13 @@ class _Decoder:
                 if ep == film_warmup:
                     log(f"      [FiLM unfrozen at epoch {ep+1}]")
 
-            tot = 0.0
+            tot = 0.0; n_dropped = 0
             for i in indices:
-                self._set_z(latents[i] if latents is not None else None)
+                if latents is not None and z_dropout > 0 and _rng.random() < z_dropout:
+                    self._set_z(None)
+                    n_dropped += 1
+                else:
+                    self._set_z(latents[i] if latents is not None else None)
                 prompt, target = _prompt(texts[i]), _target(texts[i])
 
                 full_ids = self._apply_chat(
@@ -344,7 +349,8 @@ class _Decoder:
                     self.max_grad_norm)
                 self.opt.step()
                 tot += float(out.loss.detach())
-            log(f"      epoch {ep+1}/{epochs}: loss {tot/max(1,len(indices)):.3f}")
+            drop_pct = f" (z_drop={n_dropped}/{len(indices)})" if z_dropout > 0 else ""
+            log(f"      epoch {ep+1}/{epochs}: loss {tot/max(1,len(indices)):.3f}{drop_pct}")
 
         # restore FiLM grad state
         if self.film is not None:
@@ -439,7 +445,7 @@ def _sensitivity_sweep(dec, texts, gold_f, h_K, tr, he, n_points=7, log=print):
 
 def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
         refiner_epochs=400, decoder_epochs=2, bottleneck=64, film_warmup=1,
-        seed=0, sensitivity=False, log=print):
+        z_dropout=0.0, seed=0, sensitivity=False, log=print):
     import numpy as np
 
     rng = np.random.RandomState(seed); idx = rng.permutation(len(g))
@@ -451,19 +457,26 @@ def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
     h_K, ops, ref_net, cos_he = _train_refiner(
         g, f, ctx, cmask, tr, K=K, r=r, n_op=n_op, epochs=refiner_epochs, seed=seed, log=log)
 
+    # constant-z: mean of h_K over TRAINING set, broadcast to all instances.
+    # Tests: does FiLM benefit come from extra params (constant = latent) or z-content (latent > constant)?
+    h_K_mean = h_K[tr].mean(axis=0)
+    h_K_const = np.broadcast_to(h_K_mean[None], h_K.shape).copy()
+
     # phase 2: decoder per arm
     d = g.shape[1]
     arms = [
-        ("baseline", None,  False),   # LoRA only — no conditioning
-        ("latent",   h_K,   True),    # LoRA + FiLM(h_K)
-        ("ceiling",  f,     True),    # LoRA + FiLM(gold_f)
+        ("baseline", None,      False, 0.0),       # LoRA only
+        ("constant", h_K_const, True,  0.0),        # LoRA + FiLM(mean_h_K) — extra-params control
+        ("latent",   h_K,       True,  z_dropout),  # LoRA + FiLM(h_K) + optional z-dropout
+        ("ceiling",  f,         True,  0.0),        # LoRA + FiLM(gold_f) — injection ceiling
     ]
     results = {}; per_inst = {}; sens_curve = None
-    for arm_name, latents, use_film in arms:
-        log(f"  [2/3] decoder arm '{arm_name}' (film={use_film}, bn={bottleneck})...")
+    for arm_name, latents, use_film, zdrop in arms:
+        log(f"  [2/3] decoder arm '{arm_name}' (film={use_film}, bn={bottleneck}, zdrop={zdrop})...")
         dec = _Decoder(model_name, d_latent=d, use_film=use_film, bottleneck=bottleneck)
         warmup = film_warmup if use_film else 0
-        dec.train_on(texts, latents, tr, epochs=decoder_epochs, film_warmup=warmup, log=log)
+        dec.train_on(texts, latents, tr, epochs=decoder_epochs, film_warmup=warmup,
+                     z_dropout=zdrop, log=log)
         mean_rec, recs = dec.eval_on(texts, latents, he, log=log)
         results[arm_name] = mean_rec; per_inst[arm_name] = recs
         log(f"    {arm_name}: held recall = {mean_rec:.3f}")
@@ -487,18 +500,25 @@ def _report(results, n_held, cos_refiner, wb, sens_curve=None):
     print(f"  refiner cos(h_K, gold_f) = {cos_refiner:.3f}")
     print(f"  [v1 soft-prefix FAILED: baseline 0.136 > latent 0.098 > ceiling 0.113]")
     print()
-    for arm in ("baseline", "latent", "ceiling"):
+    for arm in ("baseline", "constant", "latent", "ceiling"):
         if arm in results:
             print(f"  {arm:10}: held recall {results[arm]:.3f}")
-    bl, lt, ce = results.get("baseline", 0), results.get("latent", 0), results.get("ceiling", 0)
+    bl = results.get("baseline", 0)
+    cn = results.get("constant", 0)
+    lt = results.get("latent", 0)
+    ce = results.get("ceiling", 0)
     print()
-    print(f"  latent - baseline  = {lt - bl:+.3f}  -> "
-          f"{'BRIDGE WORKS (h_K helps decode)' if lt > bl + 0.03 else 'h_K does not help the trained decoder'}")
-    print(f"  ceiling - latent   = {ce - lt:+.3f}  -> "
-          f"{'refiner loses info vs gold (improve refiner)' if ce > lt + 0.05 else 'refiner captures what decoder needs'}")
     print(f"  ceiling - baseline = {ce - bl:+.3f}  -> "
-          f"{'FiLM INJECTION WORKS' if ce > bl + 0.03 else 'FiLM mechanism broken -> escalate to hypernetwork (DeltaW)'}  "
-          f"[v1 soft-prefix was: -0.023 = BROKEN]")
+          f"{'FiLM INJECTION WORKS' if ce > bl + 0.03 else 'FiLM mechanism broken'}  "
+          f"[v1 was: -0.023]")
+    print(f"  constant - baseline= {cn - bl:+.3f}  -> "
+          f"{'FiLM extra-params help (capacity boost)' if cn > bl + 0.02 else 'FiLM params alone insufficient'}")
+    print(f"  latent - constant  = {lt - cn:+.3f}  -> "
+          f"{'Z-CONTENT MATTERS (semantic signal)' if lt > cn + 0.02 else 'z-content NOT used (presence only)'}")
+    print(f"  latent - baseline  = {lt - bl:+.3f}  -> "
+          f"{'BRIDGE WORKS' if lt > bl + 0.03 else 'h_K does not help'}")
+    print(f"  ceiling - latent   = {ce - lt:+.3f}  -> "
+          f"{'refiner loses info vs gold' if ce > lt + 0.05 else 'refiner captures what decoder needs'}")
     if wb.get("n_success", 0) > 0:
         print(f"\n  write-back: {wb['n_success']}/{n_held} decodes above threshold")
         print(f"  dominant ops: {wb.get('op_usage', {})}")
@@ -613,6 +633,8 @@ def main():
     ap.add_argument("--bottleneck", type=int, default=64, help="BehaviorEncoder output dim")
     ap.add_argument("--film-warmup", type=int, default=1,
                     help="freeze FiLM for N epochs while LoRA settles (stability)")
+    ap.add_argument("--z-dropout", type=float, default=0.0,
+                    help="prob of dropping z during latent-arm training (forces z-content use)")
     ap.add_argument("--sensitivity", action="store_true",
                     help="run gold->h_K interpolation sweep after ceiling arm")
     ap.add_argument("--selftest", action="store_true")
@@ -621,7 +643,7 @@ def main():
         raise SystemExit(0 if _selftest() else 1)
     print(f"[lggn-decode v2 FiLM] model={a.model} dataset={a.dataset} n={a.n} "
           f"r={a.r} K={a.K} bn={a.bottleneck} epochs={a.decoder_epochs} "
-          f"warmup={a.film_warmup} sensitivity={a.sensitivity}")
+          f"warmup={a.film_warmup} zdrop={a.z_dropout} sensitivity={a.sensitivity}")
     g, f, ctx, cmask, texts = _load_paired(a.model, a.dataset, a.split, a.n)
     print(f"  {len(g)} instances, d={g.shape[1]}")
     results, n_held, cos_ref, wb, sens = run(
@@ -629,7 +651,7 @@ def main():
         n_op=a.n_op, K=a.K, r=a.r,
         refiner_epochs=a.refiner_epochs, decoder_epochs=a.decoder_epochs,
         bottleneck=a.bottleneck, film_warmup=a.film_warmup,
-        sensitivity=a.sensitivity)
+        z_dropout=a.z_dropout, sensitivity=a.sensitivity)
     _report(results, n_held, cos_ref, wb, sens)
 
 
