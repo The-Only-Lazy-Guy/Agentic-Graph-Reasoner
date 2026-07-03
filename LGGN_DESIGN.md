@@ -702,6 +702,7 @@ NOT the wall: localization (file-level works), emission (80% applyable), retriev
 | `v5/runtime/swe_slot.py` | 2121 | **the INFERENCE ENGINE** | oneshot/slot/kv solve; `--exemplar`(+`--exemplar-rank`), `--lggn-realize`(+`--lggn-multileaf`), `--test-feedback`, `--exact-verify`; `fix_user(plan=)`, `_multileaf_patch`, `_repair_sr_to_src` | built |
 | `v5/training/ingest_fable5.py` | 226 | **Fable-5 ingestion** | per-session event streams -> (intent,edit) records; `--probe/--ingest/--selftest` | built (4781->2539 recs) |
 | `v5/runtime/lggn_decode.py` | ~660 | **decode bridge v2 (FiLM)** | `_FiLMModule` (BehaviorEncoder+Renderer, identity-init), `_Decoder` (LoRA + FiLM + per-layer hooks, gradient-checkpointing-safe), `_extract_trajectory`, `_write_back_report`, `_sensitivity_sweep` (interpolation + permuted control); 4 arms: baseline / constant (mean z) / latent / ceiling; `--z-dropout` (forces z-content dependence, seeded RNG); `--sensitivity` (gold→h_K interpolation + permuted baseline). **VALIDATED:** +0.060 capacity, +0.065 z-content, permuted=0.167 confirms instance-specificity. | validated |
+| `v5/runtime/graph_edits.py` | ~520 | **graph edits ENGINE (the write path)** | `BehaviorNode` (behavior_emb + pos/neg precondition centroids + provenance), `BehaviorGraph` (nodes/edges/usage/bigrams/edit-log, save/load/snapshot), `GraphEditEngine` — `observe(Outcome)` per-decode (MINT/STRENGTHEN/WEAKEN/CONNECT/REFINE_EMBEDDING/REFINE_PRECONDITION) + `maintain()` periodic (MERGE/SPLIT/RETIRE/COMPOSE); conf-gated `retrieve()`; `seed_from_centroids` bridge. Poison gate preserved (mint conf 0.35 < floor 0.40). V6-mini in selftest PASSES (after-A retrieval helps similar A'). | built + selftest |
 | `v5/graph_grower/swe_verify.py` | 323 | **Docker SWE verifier** | gold-sanity gate, resolve; `--predictions --backend docker` | reused |
 
 ## Data / artifacts
@@ -769,10 +770,9 @@ NOT the wall: localization (file-level works), emission (80% applyable), retriev
 ## Next (recommended order, updated 2026-07-03)
 
 ### Phase A — Graph structural edits (the amortization mechanism)
-1. **Implement MINT + STRENGTHEN + WEAKEN** in `lggn.py` OperatorLibrary. After each decode: FiLM state → BehaviorEncoder → behavior vector → new node or update existing. Verification outcome gates STRENGTHEN vs WEAKEN. Replaces current counter-increment write-back.
-2. **Implement CONNECT** — edge formation from successful trajectories. Refiner's K-step trajectory → edges between consecutively-selected operators. Weight = outcome-weighted co-occurrence.
-3. **Implement REFINE_PRECONDITION** — lightweight classifier per operator: given input features (issue embedding, code embedding), predict success. Trained from accumulated success/failure instances.
-4. **V6 kill-test: does solving A help B?** Compare fresh library vs library-after-A on similar task B. If library-after-A wins → amortization is real, T.4 confirmed.
+1. ~~**Implement the edits engine**~~ — **BUILT** (`graph_edits.py`): all 10 edits, poison gate, pos/neg precondition centroids, edge decay, edit log, persistence. Selftest PASSES including V6-mini (after-A retrieval helps similar A').
+2. **Wire to real outcomes** — connect `GraphEditEngine.observe()` to lggn_decode's eval loop: FiLM state → BehaviorEncoder → `Outcome.behavior_emb`; refiner trajectory → `Outcome.trajectory`; recall/Docker → `Outcome.verified`; issue+code embedding → `Outcome.ctx_emb`.
+3. **V6 kill-test at scale: does solving A help B?** Compare fresh graph vs graph-after-A on similar REAL tasks (not synthetic). If graph-after-A wins → amortization real, T.4 confirmed. This is the publishable claim.
 
 ### Phase B — Scale training data
 5. **Full SWE-bench training** — train LoRA + FiLM on ~2300 instances (not 116). Save weights. This should raise the FiLM ceiling (currently 0.21) closer to the 0.83 emission ceiling.
