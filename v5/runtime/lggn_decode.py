@@ -569,7 +569,8 @@ def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
         # seed behavior_embs: use mean of VERIFIED h_K projections per dominant
         # op (real FiLM states), fallback to centroid projection for unseen ops
         dom_per_inst = np.argmax(traj[:, he, :].mean(axis=0), axis=1)  # [n_held]
-        verified_mask = np.array([r >= threshold for r in per_inst["latent"]])
+        seed_threshold = 0.3
+        verified_mask = np.array([r >= seed_threshold for r in per_inst["latent"]])
         beh_by_op = {}
         for j in range(len(he)):
             if verified_mask[j]:
