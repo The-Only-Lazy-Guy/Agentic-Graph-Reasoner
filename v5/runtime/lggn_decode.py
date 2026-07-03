@@ -429,16 +429,23 @@ def _sensitivity_sweep(dec, texts, gold_f, h_K, tr, he, n_points=7, log=print):
         log(f"  {alpha:6.2f}  {mean_cos:10.3f}  {mean_rec:7.3f}")
         curve.append((float(alpha), mean_cos, mean_rec))
 
-    # random baseline: same norm as gold_f, random direction
+    # permuted baseline: gold_f from a DIFFERENT instance (correct distribution,
+    # wrong instance). Isolates "right latent for THIS input" from "plausible latent."
+    #   permuted ~ constant -> decoder needs the RIGHT latent for the instance
+    #   permuted ~ ceiling  -> decoder just needs plausible latent (not instance-matched)
     rng = np.random.RandomState(42)
-    h_rand = rng.randn(*gold_f.shape).astype("float32")
-    h_rand *= np.linalg.norm(gold_f, axis=-1, keepdims=True) / \
-              np.linalg.norm(h_rand, axis=-1, keepdims=True)
-    cos_rand = float(torch.nn.functional.cosine_similarity(
-        torch.tensor(h_rand[he]), torch.tensor(gold_f[he])).mean())
-    rec_rand, _ = dec.eval_on(texts, h_rand, he, log=lambda *a: None)
-    log(f"  {'rand':>6}  {cos_rand:10.3f}  {rec_rand:7.3f}")
-    curve.append(("rand", cos_rand, rec_rand))
+    perm = np.arange(len(he))
+    rng.shuffle(perm)
+    while np.any(perm == np.arange(len(he))):
+        rng.shuffle(perm)
+    h_perm = gold_f.copy()
+    for k, orig_idx in enumerate(he):
+        h_perm[orig_idx] = gold_f[he[perm[k]]]
+    cos_perm = float(torch.nn.functional.cosine_similarity(
+        torch.tensor(h_perm[he]), torch.tensor(gold_f[he])).mean())
+    rec_perm, _ = dec.eval_on(texts, h_perm, he, log=lambda *a: None)
+    log(f"  {'perm':>6}  {cos_perm:10.3f}  {rec_perm:7.3f}")
+    curve.append(("perm", cos_perm, rec_perm))
 
     return curve
 
