@@ -491,7 +491,7 @@ class _Decoder:
                     [{"role": "user", "content": prompt}],
                     add_generation_prompt=True, return_tensors="pt").to(self.dev)
                 out = self.model.generate(
-                    input_ids=ids, max_new_tokens=256, min_new_tokens=8,
+                    input_ids=ids, max_new_tokens=512, min_new_tokens=8,
                     do_sample=False, pad_token_id=self.tok.eos_token_id)
                 raw = self.tok.decode(out[0, ids.shape[1]:],
                                       skip_special_tokens=True)
