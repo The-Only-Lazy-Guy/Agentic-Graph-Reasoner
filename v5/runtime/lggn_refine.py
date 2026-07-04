@@ -343,7 +343,7 @@ def _report(outs, n):
     a small delta is not over-read as a verdict (the n=29 single-seed trap)."""
     import numpy as np, re
     kk = [k for k in outs[0] if re.match(r"K\d+_full", k)]
-    K = int(re.search(r"K(\d+)_full", kk[0]).group(1)) if kk else 4
+    K = max(int(re.search(r"K(\d+)_full", k).group(1)) for k in kk) if kk else 4
     keys = ["raw_g", "direct", "K1_full", f"K{K}_full", f"K{K}_nocode", f"K{K}_nograph", f"K{K}_randops"]
     ext_keys = [f"K{K}_topo", f"K{K}_hybrid", f"K{K}_ops_half"]
     has_ext = any(k in outs[0] for k in ext_keys)
@@ -357,11 +357,19 @@ def _report(outs, n):
         v = [o[k] for o in outs]
         print(f"  {k:14}: cos = {np.mean(v):.3f} +/- {np.std(v):.3f}")
     KF = f"K{K}_full"
-    dl = {f"recurrence  K{K}-K1       ": [o[KF] - o["K1_full"] for o in outs],
-          f"constraints K{K}-nocode   ": [o[KF] - o[f"K{K}_nocode"] for o in outs],
-          f"graph       K{K}-nograph  ": [o[KF] - o[f"K{K}_nograph"] for o in outs],
-          f"learnedness K{K}-randops  ": [o[KF] - o[f"K{K}_randops"] for o in outs],
-          f"vs_noniter  K{K}-direct   ": [o[KF] - o["direct"] for o in outs]}
+    def _dl(a, b):
+        return [o[a] - o[b] for o in outs] if (a in outs[0] and b in outs[0]) else None
+    dl = {}
+    for name, a, b in [
+        (f"recurrence  K{K}-K1       ", KF, "K1_full"),
+        (f"constraints K{K}-nocode   ", KF, f"K{K}_nocode"),
+        (f"graph       K{K}-nograph  ", KF, f"K{K}_nograph"),
+        (f"learnedness K{K}-randops  ", KF, f"K{K}_randops"),
+        (f"vs_noniter  K{K}-direct   ", KF, "direct"),
+    ]:
+        d = _dl(a, b)
+        if d is not None:
+            dl[name] = d
     if has_ext:
         if f"K{K}_topo" in outs[0]:
             dl["topology   topo-full   "] = [o[f"K{K}_topo"] - o[KF] for o in outs]
