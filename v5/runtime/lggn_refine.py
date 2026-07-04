@@ -159,6 +159,7 @@ class Refiner:
             import torch, math
             h = g
             traj_weights = [] if return_traj else None
+            h_steps = [] if return_traj else None
             for step in range(K):
                 h = h + s.step_emb.weight[step]
                 if use_code:
@@ -185,8 +186,10 @@ class Refiner:
                 else:
                     delta = s.B(torch.relu(s.A(base)))
                 h = s.ln(h + s.gc * a + s.go * delta)
+                if h_steps is not None:
+                    h_steps.append(h)
             if return_traj:
-                return h, torch.stack(traj_weights)  # h:[N,d], traj:[K,N,n_op]
+                return h, torch.stack(traj_weights), torch.stack(h_steps)  # h:[N,d], traj:[K,N,n_op], h_steps:[K,N,d]
             return h
 
     @staticmethod

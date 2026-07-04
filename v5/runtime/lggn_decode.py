@@ -206,14 +206,15 @@ def _train_refiner(g, f, ctx, cmask, tr, K=4, r=512, n_op=24, epochs=400, seed=0
 
 
 def _extract_trajectory(net, g, ctx, cmask, ops, K):
-    """Per-step op-selection weights from the trained refiner. Shape [K, N, n_op]."""
+    """Per-step op-selection weights and intermediate latents from trained refiner.
+    Returns (traj_weights: [K, N, n_op], h_steps: [K, N, d])."""
     import numpy as np
     T = lambda x: torch.as_tensor(x, dtype=torch.float32)
     gt, ct, ot = T(g), T(ctx), T(ops); cm = torch.as_tensor(cmask)
     net.eval()
     with torch.no_grad():
-        _, traj_t = net(gt, ct, cm, ot, K, True, True, return_traj=True)
-    return traj_t.cpu().numpy()
+        _, traj_t, h_steps_t = net(gt, ct, cm, ot, K, True, True, return_traj=True)
+    return traj_t.cpu().numpy(), h_steps_t.cpu().numpy()
 
 
 def _write_back_report(traj_held, recall_per_instance, threshold=0.3):
@@ -553,6 +554,46 @@ class _Decoder:
                 behs.append(b)
         return np.stack(behs)
 
+    def save_checkpoint(self, path):
+        """Save LoRA + FiLM weights for later standalone generation."""
+        from pathlib import Path as _P
+        _P(path).mkdir(parents=True, exist_ok=True)
+        self.model.save_pretrained(str(_P(path) / "lora"))
+        if self.film is not None:
+            torch.save(self.film.state_dict(), str(_P(path) / "film.pt"))
+
+    @classmethod
+    def load_checkpoint(cls, model_name, path, d_latent, bottleneck=64):
+        """Load a trained decoder from checkpoint (no optimizer, eval-only)."""
+        from pathlib import Path as _P
+        dec = cls(model_name, d_latent, use_film=(_P(path) / "film.pt").exists(), bottleneck=bottleneck)
+        from peft import PeftModel
+        dec.model = PeftModel.from_pretrained(dec.model.get_base_model(), str(_P(path) / "lora"))
+        dec.model.eval()
+        if dec.film is not None and (_P(path) / "film.pt").exists():
+            dec.film.load_state_dict(torch.load(str(_P(path) / "film.pt"), map_location=dec.dev, weights_only=True))
+            dec.film.eval()
+            dec._hooks.clear()
+            dec._install_hooks(_find_layers(dec.model))
+        return dec
+
+    def generate(self, prompt, z=None, max_new_tokens=512):
+        """Standalone generation with optional FiLM conditioning from latent z."""
+        self.model.eval()
+        if self.film is not None:
+            self.film.eval()
+        self._set_z(z)
+        with torch.no_grad():
+            ids = self._apply_chat(
+                [{"role": "user", "content": prompt}],
+                add_generation_prompt=True, return_tensors="pt").to(self.dev)
+            out = self.model.generate(
+                input_ids=ids, max_new_tokens=max_new_tokens, min_new_tokens=8,
+                do_sample=False, pad_token_id=self.tok.eos_token_id)
+            raw = self.tok.decode(out[0, ids.shape[1]:], skip_special_tokens=True)
+        self._set_z(None)
+        return raw
+
     def cleanup(self):
         """Free GPU memory between arms."""
         import gc
@@ -684,7 +725,7 @@ def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
     # phase 3: write-back trajectory
     t0 = time.time()
     log("  [3/4] write-back trajectory extraction...")
-    traj = _extract_trajectory(ref_net, g, ctx, cmask, ops, K)
+    traj, h_steps = _extract_trajectory(ref_net, g, ctx, cmask, ops, K)
     wb = _write_back_report(traj[:, he], per_inst.get("latent", []))
     log(f"    write-back: {wb['n_success']} successful decodes")
     if wb.get("op_usage"):
@@ -892,9 +933,10 @@ def _selftest() -> bool:
           f"(delta {cos2-cos:+.3f} vs vanilla)")
 
     # --- trajectory ---
-    traj = _extract_trajectory(net, g, ctx, cmask, ops, K=4)
+    traj, h_steps = _extract_trajectory(net, g, ctx, cmask, ops, K=4)
     assert traj.shape[0] == 4 and traj.shape[1] == N, f"traj shape wrong: {traj.shape}"
-    print(f"  trajectory: shape {traj.shape}")
+    assert h_steps.shape == (4, N, d), f"h_steps shape wrong: {h_steps.shape}"
+    print(f"  trajectory: shape {traj.shape}, h_steps: shape {h_steps.shape}")
 
     # --- write-back ---
     he = np.arange(N * 4 // 5, N)
