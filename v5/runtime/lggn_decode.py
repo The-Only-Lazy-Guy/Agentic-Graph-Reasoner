@@ -478,11 +478,13 @@ class _Decoder:
         self.model.eval()
         if self.film is not None:
             self.film.eval()
+        import time as _time
         recs = []
         diag = {"format_fail": 0, "zero_recall": 0, "partial": 0, "good": 0,
-                "samples": []} if diagnose else None
+                "samples": [], "gen_times_ms": []} if diagnose else None
         with torch.no_grad():
             for j, i in enumerate(indices):
+                t_gen = _time.time()
                 self._set_z(latents[i] if latents is not None else None)
                 prompt = _prompt(texts[i])
                 ids = self._apply_chat(
@@ -493,10 +495,12 @@ class _Decoder:
                     do_sample=False, pad_token_id=self.tok.eos_token_id)
                 raw = self.tok.decode(out[0, ids.shape[1]:],
                                       skip_special_tokens=True)
+                gen_ms = (_time.time() - t_gen) * 1000
                 emitted = _emitted_replace(raw)
                 rec, exact = _fidelity(emitted, texts[i]["added"])
                 recs.append(rec)
                 if diag is not None:
+                    diag["gen_times_ms"].append(gen_ms)
                     if not emitted:
                         diag["format_fail"] += 1
                         cat = "FORMAT_FAIL"
@@ -519,11 +523,17 @@ class _Decoder:
         self._set_z(None)
         if diagnose:
             n = len(recs)
+            gt = diag["gen_times_ms"]
+            diag["mean_gen_ms"] = sum(gt) / len(gt) if gt else 0
+            diag["min_gen_ms"] = min(gt) if gt else 0
+            diag["max_gen_ms"] = max(gt) if gt else 0
             log(f"\n      --- diagnostic ({n} instances) ---")
             log(f"      format_fail: {diag['format_fail']}/{n} ({100*diag['format_fail']/n:.0f}%)")
             log(f"      zero_recall: {diag['zero_recall']}/{n} ({100*diag['zero_recall']/n:.0f}%)")
             log(f"      partial (<0.5): {diag['partial']}/{n} ({100*diag['partial']/n:.0f}%)")
             log(f"      good (>=0.5): {diag['good']}/{n} ({100*diag['good']/n:.0f}%)")
+            log(f"      inference: {diag['mean_gen_ms']:.0f}ms/instance "
+                f"(min={diag['min_gen_ms']:.0f} max={diag['max_gen_ms']:.0f})")
             log(f"\n      --- samples ---")
             for s in diag["samples"]:
                 log(f"      [{s['cat']}] recall={s['recall']}")
@@ -611,7 +621,8 @@ def _sensitivity_sweep(dec, texts, gold_f, h_K, tr, he, n_points=7, log=print):
 def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
         refiner_epochs=400, decoder_epochs=2, bottleneck=64, film_warmup=1,
         z_dropout=0.0, seed=0, sensitivity=False,
-        learn_ops=False, k_warmup=0.5, contrastive=0.0, log=print):
+        learn_ops=False, k_warmup=0.5, contrastive=0.0,
+        arm_filter=None, log=print):
     import numpy as np, time
 
     rng = np.random.RandomState(seed); idx = rng.permutation(len(g))
@@ -634,12 +645,17 @@ def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
 
     # phase 2: decoder per arm
     d = g.shape[1]
-    arms = [
+    all_arms = [
         ("baseline", None,      False, 0.0),       # LoRA only
         ("constant", h_K_const, True,  0.0),        # LoRA + FiLM(mean_h_K) — extra-params control
         ("latent",   h_K,       True,  z_dropout),  # LoRA + FiLM(h_K) + optional z-dropout
         ("ceiling",  f,         True,  0.0),        # LoRA + FiLM(gold_f) — injection ceiling
     ]
+    arms = [(n, l, u, z) for n, l, u, z in all_arms
+            if arm_filter is None or n in arm_filter]
+    if arm_filter:
+        log(f"  arms filter: {','.join(n for n,_,_,_ in arms)} "
+            f"(skipped: {','.join(n for n,_,_,_ in all_arms if n not in arm_filter) or 'none'})")
     results = {}; per_inst = {}; sens_curve = None
     latent_behs_he = None; ops_behavior = None
     diagnostics = {}
@@ -962,6 +978,8 @@ def main():
                     help="fraction of refiner epochs to ramp K from 1 to max (scheduled K)")
     ap.add_argument("--contrastive", type=float, default=0.0,
                     help="weight for wrong-instance triplet loss (push h_K away from f_wrong)")
+    ap.add_argument("--arms", default="baseline,constant,latent,ceiling",
+                    help="comma-separated decoder arms to run (skip unneeded to save time)")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
@@ -976,15 +994,18 @@ def main():
           f"ref_ep={a.refiner_epochs} dec_ep={a.decoder_epochs} "
           f"warmup={a.film_warmup} zdrop={a.z_dropout} "
           f"sensitivity={a.sensitivity}{ex}")
+    import time as _t; _t0_load = _t.time()
     g, f, ctx, cmask, texts = _load_paired(a.model, a.dataset, a.split, a.n)
-    print(f"  {len(g)} instances, d={g.shape[1]}")
+    print(f"  {len(g)} instances, d={g.shape[1]} (loaded in {_t.time()-_t0_load:.1f}s)")
+    af = set(a.arms.split(",")) if a.arms != "baseline,constant,latent,ceiling" else None
     results, n_held, cos_ref, wb, sens, graph_stats = run(
         g, f, ctx, cmask, texts, a.model,
         n_op=a.n_op, K=a.K, r=a.r,
         refiner_epochs=a.refiner_epochs, decoder_epochs=a.decoder_epochs,
         bottleneck=a.bottleneck, film_warmup=a.film_warmup,
         z_dropout=a.z_dropout, sensitivity=a.sensitivity,
-        learn_ops=a.learn_ops, k_warmup=a.k_warmup, contrastive=a.contrastive)
+        learn_ops=a.learn_ops, k_warmup=a.k_warmup, contrastive=a.contrastive,
+        arm_filter=af)
     _report(results, n_held, cos_ref, wb, sens, graph_stats)
 
 
