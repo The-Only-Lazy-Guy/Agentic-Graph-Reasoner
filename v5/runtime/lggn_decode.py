@@ -466,10 +466,11 @@ class _Decoder:
                 p.requires_grad_(True)
         self._set_z(None)
 
-    def eval_on(self, texts, latents, indices, log=print):
+    def eval_on(self, texts, latents, indices, log=print, diagnose=False):
         """Generate patches on held-out instances, measure recall vs gold.
 
         Returns (mean_recall, per_instance_recalls).
+        If diagnose=True, also returns diagnostic dict with failure breakdown + samples.
         """
         import numpy as np
         from v5.runtime.solution_ladder import _emitted_replace, _fidelity
@@ -478,6 +479,8 @@ class _Decoder:
         if self.film is not None:
             self.film.eval()
         recs = []
+        diag = {"format_fail": 0, "zero_recall": 0, "partial": 0, "good": 0,
+                "samples": []} if diagnose else None
         with torch.no_grad():
             for j, i in enumerate(indices):
                 self._set_z(latents[i] if latents is not None else None)
@@ -490,11 +493,44 @@ class _Decoder:
                     do_sample=False, pad_token_id=self.tok.eos_token_id)
                 raw = self.tok.decode(out[0, ids.shape[1]:],
                                       skip_special_tokens=True)
-                rec, _ = _fidelity(_emitted_replace(raw), texts[i]["added"])
+                emitted = _emitted_replace(raw)
+                rec, exact = _fidelity(emitted, texts[i]["added"])
                 recs.append(rec)
+                if diag is not None:
+                    if not emitted:
+                        diag["format_fail"] += 1
+                        cat = "FORMAT_FAIL"
+                    elif rec == 0:
+                        diag["zero_recall"] += 1
+                        cat = "ZERO_RECALL"
+                    elif rec < 0.5:
+                        diag["partial"] += 1
+                        cat = "PARTIAL"
+                    else:
+                        diag["good"] += 1
+                        cat = "GOOD"
+                    if len(diag["samples"]) < 8:
+                        diag["samples"].append({
+                            "idx": int(i), "cat": cat, "recall": round(rec, 3),
+                            "raw": raw[:400], "emitted": emitted[:300],
+                            "gold": texts[i]["added"][:200]})
                 if (j + 1) % 10 == 0:
                     log(f"      {j+1}/{len(indices)} eval'd, running recall {np.mean(recs):.3f}")
         self._set_z(None)
+        if diagnose:
+            n = len(recs)
+            log(f"\n      --- diagnostic ({n} instances) ---")
+            log(f"      format_fail: {diag['format_fail']}/{n} ({100*diag['format_fail']/n:.0f}%)")
+            log(f"      zero_recall: {diag['zero_recall']}/{n} ({100*diag['zero_recall']/n:.0f}%)")
+            log(f"      partial (<0.5): {diag['partial']}/{n} ({100*diag['partial']/n:.0f}%)")
+            log(f"      good (>=0.5): {diag['good']}/{n} ({100*diag['good']/n:.0f}%)")
+            log(f"\n      --- samples ---")
+            for s in diag["samples"]:
+                log(f"      [{s['cat']}] recall={s['recall']}")
+                log(f"        raw: {s['raw'][:150]}")
+                log(f"        gold: {s['gold'][:100]}")
+                log("")
+            return float(np.mean(recs)) if recs else 0.0, recs, diag
         return float(np.mean(recs)) if recs else 0.0, recs
 
     def behavior_embeddings(self, latents, indices):
@@ -606,6 +642,7 @@ def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
     ]
     results = {}; per_inst = {}; sens_curve = None
     latent_behs_he = None; ops_behavior = None
+    diagnostics = {}
     for arm_name, latents, use_film, zdrop in arms:
         t0 = time.time()
         log(f"  [2/4] decoder arm '{arm_name}' (film={use_film}, bn={bottleneck}, zdrop={zdrop})...")
@@ -613,7 +650,13 @@ def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
         warmup = film_warmup if use_film else 0
         dec.train_on(texts, latents, tr, epochs=decoder_epochs, film_warmup=warmup,
                      z_dropout=zdrop, log=log)
-        mean_rec, recs = dec.eval_on(texts, latents, he, log=log)
+        do_diag = arm_name in ("baseline", "ceiling")
+        eval_out = dec.eval_on(texts, latents, he, log=log, diagnose=do_diag)
+        if do_diag:
+            mean_rec, recs, diag = eval_out
+            diagnostics[arm_name] = diag
+        else:
+            mean_rec, recs = eval_out
         results[arm_name] = mean_rec; per_inst[arm_name] = recs
         log(f"    {arm_name}: held recall = {mean_rec:.3f}")
         if arm_name == "latent" and use_film:
