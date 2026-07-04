@@ -30,10 +30,12 @@ This doc is the canonical design. It supersedes the single-vector "floor" (`swe_
 | **Decode v1 — soft prefix** (`lggn_decode.py` v1, LoRA + soft prefix from h_K, 4-bit Qwen3.5-4B) | baseline **0.136** · latent **0.098** · ceiling **0.113** — ALL prefix arms WORSE than baseline. Training loss identical (~0.35) across all arms | **INJECTION MECHANISM BROKEN.** LoRA ignores prefix tokens, learns text→text shortcut. The prefix is a weak injection point diluted by self-attention over 200+ text tokens. Soft prefix = prompt engineering in disguise — the latent changes the INPUT, not the COMPUTATION. Escalate to FiLM. |
 | **Decode v2 — FiLM** (`lggn_decode.py` v2, LoRA + FiLM(z), 4-bit Qwen3.5-4B, 5ep, stability fixes) | baseline **0.079** · constant **0.139** · latent **0.106-0.203** (variance) · ceiling **0.210**. Permuted gold: **0.167** | **FiLM MECHANISM VALIDATED** (ceiling-baseline=+0.131). But latent arm unstable across runs — refiner h_K (cos 0.553) is below the decoder's sensitivity cliff (~0.78). Ceiling decoder handles h_K (0.196) better than latent decoder trained ON h_K (0.106). **Refiner quality is the bottleneck, not decode.** |
 | **Graph edits wiring** (`graph_edits.py` + `lggn_decode.py` phase 4) | 10 structural edits · selftest PASSES · wired to real FiLM outcomes: top-2 trajectories, verified-based seeding, all 7 per-outcome + maintenance edits fire | **BUILT.** 3 semantic issues found and fixed: (1) MINT dead (trajectory always populated) — not fixable without DERIVE branch, (2) CONNECT/COMPOSE dead from argmax lock-in — fixed via top-2 distinct-op trajectory, (3) seed behavior_embs wrong space — fixed via mean of verified h_K projections. Graph→decode loop still OPEN (write-only, no retrieval→decode path yet). |
+| **Fable-5 HF integration** (`lggn_decode.py`, `_load_fable5_texts`) | 4782 agentic coding sessions from `Glint-Research/Fable-5-traces` · str_replace displacement pairs (old→new) extracted · `--dataset fable5\|lite+fable5` | **BUILT** |
+| **Decoder diagnostic breakdown** (n=200 lite, post-fixes) | format_fail **0%** · zero_recall **55%** · partial **28%** · good **17%** · baseline 0.153 · ceiling 0.181 | **MEASURED.** 55% zero_recall = 4B capacity wall (valid patches, wrong fix strategy). Truncation fixed (14%→0%). |
 
 **Honest negatives the kill-tests caught** (right-for-the-right-reason): signature operators were goal-blind (~chance → embedding ops fixed it); raw topology 65% was a self-loop artifact (op-change is the real 38%); Fable-greenfield obs=0% (no failures → domain-mismatch, rescued on SWE debug); retrieval has no resolve headroom (best-of-3=top-1).
 
-**One-line thesis status (2026-07-03):** LGGN reasoning substrate **validated** (refiner at r=512, 5-seed CI, all 4 pillars pass). FiLM decode mechanism **validated** — ceiling 0.210, decoder CAN read gold representations. Graph edits engine **built and wired** to real outcomes (behavior_emb extraction, top-2 trajectories, all 7 edit types fire). **But the WALL moved BACK to the REFINER:** h_K at cos 0.553 is below the decoder's sensitivity cliff (~0.78). Sensitivity curve shows recall flatlines at 0.196 below cos 0.7, jumps to 0.217+ above 0.78. The latent arm (0.106) underperforms even the ceiling-decoder-fed-h_K (0.196) — training LoRA on noisy h_K teaches bad co-adaptations worse than a gold-trained decoder degrading gracefully. **The decoder is NOT the bottleneck. The refiner is.** The graph edits engine is ready but can't help until the refiner produces h_K closer to gold. **Next:** improve refiner quality (cos 0.553 → 0.78+), THEN close the graph→decode→verify→graph loop.
+**One-line thesis status (2026-07-04):** LGGN reasoning substrate **validated** (refiner at r=512, 5-seed CI, all 4 pillars pass). FiLM decode mechanism **validated** — ceiling 0.210, decoder CAN read gold representations. Graph edits engine **built and wired** to real outcomes. **Fable-5 HF dataset wired** to decoder pipeline (`Glint-Research/Fable-5-traces`, 4782 sessions, str_replace displacement pairs). **Diagnostic breakdown** after truncation fix (256→512 tokens): format_fail **0%**, zero_recall **55%**, partial 28%, good 17%. The 55% zero_recall = **4B model capacity wall** (generates valid patches, wrong fix strategy), not pipeline issue. **The WALL is STILL the REFINER:** h_K at cos 0.561 is below the decoder's sensitivity cliff (~0.78). **Next:** improve refiner quality (cos 0.56 → 0.78+), THEN close the graph→decode→verify→graph loop. Model size discussion pending.
 
 **CORRECTION (2026-07-01) — resolve is UNBUILT, not closed.** The HRM lens exposed the gap: HRM iterates *against the puzzle state*; we only ever ran a one-shot operator picker + frozen executor. `iterative_refine.py` probe: iteration on a *static goal-embedding* is FLAT (K=1..8 ≈ 0.39) — a fixed input has no constraints to propagate.
 
@@ -702,7 +704,7 @@ NOT the wall: localization (file-level works), emission (80% applyable), retriev
 | `v5/runtime/swe_rl.py` | 1180 | **the TRAINER** (SFT->GRPO->distill, LoRA) | `--realizer` (operator-plan->gold SFT), `--discovered-ops`, `--fable-corpus/--fable-frac`, `--distill`, `--plots-dir` (`_save_train_plots`), `--rep-penalty`, `--eff-coef`, `--use-exemplar`, `--staged`, `--graph` | built; realizer proxy-up resolve-flat |
 | `v5/runtime/swe_slot.py` | 2121 | **the INFERENCE ENGINE** | oneshot/slot/kv solve; `--exemplar`(+`--exemplar-rank`), `--lggn-realize`(+`--lggn-multileaf`), `--test-feedback`, `--exact-verify`; `fix_user(plan=)`, `_multileaf_patch`, `_repair_sr_to_src` | built |
 | `v5/training/ingest_fable5.py` | 226 | **Fable-5 ingestion** | per-session event streams -> (intent,edit) records; `--probe/--ingest/--selftest` | built (4781->2539 recs) |
-| `v5/runtime/lggn_decode.py` | ~740 | **decode bridge v2 (FiLM) + graph wiring** | `_FiLMModule` (BehaviorEncoder+Renderer, identity-init), `_Decoder` (LoRA + FiLM + per-layer hooks + `behavior_embeddings()` extraction), `_extract_trajectory`, `_write_back_report`, `_sensitivity_sweep` (interpolation + permuted control); 4 arms + phase 4 graph integration: behavior_emb extraction → `GraphEditEngine.observe()` with top-2 distinct-op trajectories + verified-based seeding → `maintain()`. Graph stats in `_report()`. `--z-dropout` (forces z-content dependence, seeded RNG); `--sensitivity` (gold→h_K interpolation + permuted baseline). | FiLM mechanism validated, refiner quality blocking |
+| `v5/runtime/lggn_decode.py` | ~1010 | **decode bridge v2 (FiLM) + graph wiring + Fable-5** | `_FiLMModule` (BehaviorEncoder+Renderer, identity-init), `_Decoder` (LoRA + FiLM + per-layer hooks + `behavior_embeddings()` extraction), `_extract_trajectory`, `_write_back_report`, `_sensitivity_sweep` (interpolation + permuted control); 4 arms + phase 4 graph integration. **New (2026-07-04):** `_load_fable5_texts(limit=0)` — Fable-5 HF str_replace displacement pairs; `--dataset fable5\|lite+fable5`; `--arms` filter (comma-sep arm subset, cuts 4.8h→2.2h); `eval_on(diagnose=True)` — failure breakdown (format_fail/zero_recall/partial/good) + raw samples + per-instance timing; generic prompt framing ("Task:"/"Code:" not "Fix this bug"/"Buggy code"); `max_new_tokens=512` (was 256). `--z-dropout`; `--sensitivity`. | FiLM validated, refiner blocking, Fable-5 wired |
 | `v5/runtime/graph_edits.py` | ~520 | **graph edits ENGINE (the write path)** | `BehaviorNode` (behavior_emb + pos/neg precondition centroids + provenance), `BehaviorGraph` (nodes/edges/usage/bigrams/edit-log, save/load/snapshot), `GraphEditEngine` — `observe(Outcome)` per-decode (MINT/STRENGTHEN/WEAKEN/CONNECT/REFINE_EMBEDDING/REFINE_PRECONDITION) + `maintain()` periodic (MERGE/SPLIT/RETIRE/COMPOSE); conf-gated `retrieve()`; `seed_from_centroids` bridge. Poison gate preserved (mint conf 0.35 < floor 0.40). V6-mini in selftest PASSES (after-A retrieval helps similar A'). | built + selftest |
 | `v5/graph_grower/swe_verify.py` | 323 | **Docker SWE verifier** | gold-sanity gate, resolve; `--predictions --backend docker` | reused |
 
@@ -756,8 +758,14 @@ NOT the wall: localization (file-level works), emission (80% applyable), retriev
 22. **Strategic assessment (2026-07-03).** The graph read path is validated (refine→FiLM→decode). The write path is shallow (counter increments). Identified 10 structural graph edit operations needed for amortization. Training data gap: 116 instances is insufficient; need full SWE-bench + agentic traces. The 4B model CAN emit patches at 83% recall with exact gold in prompt — the FiLM channel bandwidth (ceiling 21%) and training scale are the bottleneck, not model size. The graph should ELEVATE the model, not be bypassed by model scaling.
 23. **Graph edits wired to lggn_decode (2026-07-03).** `graph_edits.py` engine wired to real FiLM outcomes in lggn_decode phase 4. Three semantic issues found and fixed during validation: **(1) MINT never fires** — refiner always picks from op basis, trajectory always populated, MINT requires empty trajectory (DERIVE branch). Graph grows only via SPLIT. **(2) CONNECT/COMPOSE dead** — refiner locks onto one dominant op across K steps (argmax same op K times → no transitions). **Fixed**: top-2 distinct-op trajectory with diversity threshold (weight > 0.15 for runner-up). After fix: CONNECT and COMPOSE both fire. **(3) Seed behavior_embs wrong space** — `BehaviorEncoder(op_centroid)` projects Qwen-space displacement direction through encoder trained on h_K (different distributions). **Fixed**: seed from mean of VERIFIED h_K projections per dominant op (real FiLM states), fallback to centroid projection for unseen ops. Selftest: 10 nodes (6 retrievable), 142 edits, all 7 edit kinds fire. Graph→decode loop remains open (write-only, no retrieval→decode path).
 24. **Molab confirmation: refiner is the bottleneck (2026-07-03).** Latest molab run: baseline=0.079, constant=0.139, latent=0.106, ceiling=0.210. Sensitivity curve reveals the critical finding: **decoder sensitivity cliff at cos ≈ 0.78.** Recall flatlines at ~0.196 for cos < 0.7, jumps to ~0.217 for cos ≥ 0.78. 50/50 gold+h_K mix (cos 0.783) peaks at 0.219 > pure gold 0.210 (complementary info). Refiner h_K at cos 0.553 is well below the cliff. **Worse: latent decoder (0.106) < ceiling decoder at h_K (0.196).** Training LoRA on noisy h_K teaches bad co-adaptations — the gold-trained decoder handles noisy input MORE gracefully than the noise-trained decoder. This flips the roadmap: **refiner quality (cos 0.55 → 0.78) is the critical path, not graph wiring or decoder improvements.** Latent arm variance 0.106-0.203 across runs needs investigation (z_dropout RNG seeding may not be deployed to molab).
+25. **Fable-5 HF dataset integration (2026-07-04).** `_load_fable5_texts(limit=0)` extracts str_replace displacement pairs (old→new) from `Glint-Research/Fable-5-traces` on HuggingFace. 4782 agentic coding sessions, deduped by content hash. Only str_replace/edit edits with both old+new code used (greenfield writes skipped). Mixed dataset via `--dataset lite+fable5` (splits on "+", concatenates reprs). Corresponding `_reprs_from_texts()` added to `lggn_refine.py` for generic Qwen repr computation.
+26. **Diagnostic failure breakdown (2026-07-04).** `eval_on(diagnose=True)` classifies each held instance into: format_fail (truncation / malformed output), zero_recall (valid SR format but wrong code), partial (recall > 0 but < 0.5), good (recall >= 0.5). Captures 8 raw output samples with category labels. Per-instance inference timing (ms/instance, min, max). Runs automatically on baseline + ceiling arms.
+27. **Truncation fix (2026-07-04).** `max_new_tokens=256` was too small — SEARCH block consumed most tokens, REPLACE block cut off before `>>>>>>> REPLACE` marker. 14% format failures. Fixed to `max_new_tokens=512`. Result: format_fail **14% → 0%**.
+28. **Generic prompt framing (2026-07-04).** `_prompt()` said "Fix this bug" / "Buggy code" but Fable-5 data is feature-building, not bug-fixing. Fixed to "Task:" / "Code:". Also fixed in `lggn_refine.py` `_reprs()` (`hid("Buggy code:\n" + removed)` → `hid("Code:\n" + removed)`). Note: changing ctx prompt invalidates cached `.npz` files.
+29. **Training time optimization (2026-07-04).** `--arms` CLI flag — comma-separated arm filter to skip unneeded decoder arms. `--arms latent,ceiling` cuts total time from 4.8h to ~2.2h. `--arms baseline,ceiling --decoder-epochs 3` for 30min diagnostic runs. Per-phase timing dict added throughout `run()`.
+30. **Post-fix diagnostic (2026-07-04, n=200 lite, baseline+ceiling, 3 epochs).** After truncation + prompt fixes: format_fail **0%**, zero_recall **55%**, partial **28%**, good **17%**. baseline=0.153, ceiling=0.181, gap=+0.027 (FiLM works). **55% zero_recall is the dominant failure mode** — model generates syntactically valid search/replace patches but with the wrong fix strategy. This is 4B model capacity wall, not pipeline issue. The model finds the right code location but invents a different (wrong) repair.
 
-## Current verdicts (updated 2026-07-03)
+## Current verdicts (updated 2026-07-04)
 - **LGGN refiner:** ALL 4 PILLARS PASS at r=512 (recurrence, constraints, graph, learnedness). Reasoning substrate validated. **BUT cos(h_K, f) = 0.553 — below the decoder's sensitivity cliff (~0.78).** The refiner produces useful reasoning but NOT precise enough for the FiLM decoder to cash in. Need cos ≥ 0.78.
 - **Graph value:** per-step learned directions (discrete ops > free MLP at r=512). NOT topology, NOT hybrid prior, NOT compounding. The graph is a learned dictionary of fix-directions.
 - **Reasoner (traverse):** LEARNS (40%, scales) — VALIDATED.
@@ -767,11 +775,30 @@ NOT the wall: localization (file-level works), emission (80% applyable), retriev
 - **Architectural pivot:** the graph IS a library of model BEHAVIORS (computational modulations). BehaviorEncoder → FiLM Renderer. Operators live in behavior space. VALIDATED by the FiLM results.
 - **Graph read path:** WORKS (refine → FiLM → decode). Proven when h_K is good enough (cos ≥ 0.78).
 - **Graph write path:** BUILT (`graph_edits.py`, 10 edits, selftest PASS). Wired to real outcomes in lggn_decode (behavior_emb extraction, top-2 trajectories, verified seeding). All 7 edit types fire in practice. CONNECT/COMPOSE activated via top-2 trajectory diversity. **Graph→decode loop still OPEN** (graph learns from outcomes, but nothing reads retrieved nodes back into FiLM decode yet). Closing this loop is blocked on refiner quality — a noisy graph (from noisy h_K) won't help decode.
-- **The wall is the REFINER, not the decoder.** The decoder reads gold fine (ceiling 0.210). The refiner's h_K (cos 0.553) is too noisy. Improving refiner cos from 0.55 → 0.78 is the critical path. Everything downstream (graph edits, closed loop, V6 kill-test) depends on this.
-- **Training data gap:** currently 116 instances per run. Need full SWE-bench (~2300) + agentic traces. Agentic traces provide the failure→revision signal the graph edit mechanism needs.
-- **Model ceiling:** 4B with EXACT gold in prompt = 83% recall (solution_ladder). FiLM ceiling = 21%. Gap = FiLM channel bandwidth + training data scale, NOT 4B capacity.
+- **Fable-5 HF integration:** BUILT. `_load_fable5_texts()` extracts str_replace displacement pairs from `Glint-Research/Fable-5-traces` (4782 sessions). `--dataset fable5|lite+fable5`. Generic prompt framing ("Task:"/"Code:") replaces bug-only framing.
+- **Truncation:** FIXED. `max_new_tokens` 256→512. format_fail 14%→0%.
+- **Dominant failure mode:** 55% zero_recall. Model generates syntactically valid patches with wrong fix strategy. This is 4B capacity, not pipeline. 28% partial (close but not exact), 17% good (recall >= 0.5).
+- **The wall is the REFINER, not the decoder.** The decoder reads gold fine (ceiling 0.210). The refiner's h_K (cos 0.561) is too noisy. Improving refiner cos from 0.56 → 0.78 is the critical path. Everything downstream (graph edits, closed loop, V6 kill-test) depends on this. The diagnostic confirms: even with perfect pipeline (no truncation, correct prompts), 55% of instances hit the 4B's reasoning limit.
+- **Training data gap:** currently 116-722 instances per run (lite=222, lite+fable5=722). Need full SWE-bench (~2300) + agentic traces. Agentic traces provide the failure→revision signal the graph edit mechanism needs.
+- **Model ceiling:** 4B with EXACT gold in prompt = 83% recall (solution_ladder). FiLM ceiling = 21%. Gap = FiLM channel bandwidth + training data scale, NOT 4B capacity. **Model size discussion pending** — user considering whether to scale up from 4B.
 
-## Next (recommended order, updated 2026-07-03)
+## Strategic decision (2026-07-04): 4B + full LGGN pipeline FIRST
+
+**Goal:** diverse consumer usage with good performance on small model. Bigger model is a drop-in upgrade AFTER pipeline proves out.
+
+**Rationale:** LGGN's value = structured reasoning (decompose + iterate + retrieve) routing around single-shot capacity limits. The 55% zero_recall is a wall on ONE-SHOT generation, not on the SYSTEM. The system doesn't rely on single-shot — it decomposes, iterates, retrieves. Prove this at 4B, then model scaling compounds with the pipeline.
+
+**Don't:** propose model scaling as the fix for capacity walls. **Do:** build decomposition, iteration, retrieval, MoLoRA.
+
+```
+Current:   issue → refiner → FiLM → ONE generate → done          (ceiling 0.21)
+Target:    issue → refiner → decompose → [FiLM → generate → test → update] × N
+           + graph retrieval pre-loads similar solved configs      (ceiling >> 0.21)
+```
+
+---
+
+## Next (recommended order, updated 2026-07-04)
 
 ### Phase A — Refiner quality (THE CRITICAL PATH)
 The decoder works (ceiling 0.210). The graph edits engine is built and wired. **Everything is blocked on refiner quality:** cos(h_K, f) must rise from 0.553 → 0.78+ for the decoder to cash in z-content. The sensitivity cliff at cos ~0.78 is the design target.
@@ -780,18 +807,23 @@ The decoder works (ceiling 0.210). The graph edits engine is built and wired. **
 2. **Refiner training regime** — currently vanilla Adam on cosine loss. Consider: (a) curriculum (easy instances first, hard later), (b) scheduled K (start K=1, increase — lets the refiner learn single-step fixes before multi-step), (c) contrastive loss (not just cos to gold, also push away from wrong-instance gold — the permuted baseline showed wrong-instance is actively harmful).
 3. **Stabilize latent arm variance** — latent recall 0.106-0.203 across runs with "identical" settings. Confirm z_dropout RNG seeding is deployed. If seeded, the variance is from train/held split randomness at n=29 — need more held instances.
 
-### Phase B — Close the graph→decode loop (BLOCKED ON PHASE A)
-4. ~~**Implement the edits engine**~~ — **BUILT** (`graph_edits.py`).
-5. ~~**Wire to real outcomes**~~ — **DONE** (lggn_decode phase 4, behavior_emb extraction, top-2 trajectories, verified seeding, all edit types fire).
-6. **Close the retrieval→decode path** — retrieve graph node → feed `behavior_emb` (64d) directly to `film.modulate()` (bypass BehaviorEncoder) → decode → verify → observe. Architecture supports this: `modulate()` already takes bottleneck-d `b` directly.
-7. **V6 kill-test at scale** — does solving A help later B? Fresh graph vs graph-after-A on real tasks. Requires refiner cos ≥ 0.78 first (otherwise graph signal is noise).
+### Phase B — Decomposition + iteration (THE SYSTEM VALUE)
+The pipeline that routes around 4B single-shot capacity. Each piece independently useful, together they compound.
 
-### Phase C — Scale and assemble
-8. **Full SWE-bench training** — ~2300 instances (not 116). Raise FiLM ceiling.
-9. **Ingest agentic traces** — sequential structure for CONNECT + failure→revision for REFINE_PRECONDITION.
-10. **Widen FiLM channel** — bottleneck 128 or 256 (currently 64).
-11. **End-to-end pipeline** — refine → FiLM decode → Docker verify → graph edits → next task.
-12. **Conditioned extraction (feedback loop)** — FiLM-conditioned Qwen re-reads code → refiner on new reprs → iterate.
+4. **Multi-leaf FiLM decode** — wire `--lggn-multileaf` through FiLM. Each leaf = one operator, one FiLM modulation, one simple generation. Operator trajectory from refiner determines leaf sequence. Existing `_multileaf_patch` applies each leaf against live tree. Key: each leaf is WITHIN 4B capacity (the decomposition payoff).
+5. **Iteration loop (POMDP)** — decode → Docker verify → observe failure → update refiner goal (INVALIDATE failed approach) → re-decode. The §2 loop assembled end-to-end. Convergence: stop when tests pass or budget exhausted. Each iteration narrows search space.
+6. **Graph retrieval→decode** — retrieve graph node → feed `behavior_emb` (64d) directly to `film.modulate()` (bypass BehaviorEncoder) → decode → verify → observe. Architecture supports this: `modulate()` already takes bottleneck-d `b` directly. Closes the loop: past solutions help future problems.
+7. **V6 kill-test** — does solving A help later B? Fresh graph vs graph-after-A on real tasks.
+
+### Phase C — Bandwidth + scale
+8. **MoLoRA** — z generates LoRA expert weights instead of scale+shift. Orders of magnitude more bandwidth. Only viable once refiner cos ≥ 0.78 (otherwise amplifies noise).
+9. **Widen FiLM channel** — bottleneck 128 or 256 (currently 64). Intermediate step before MoLoRA.
+10. **Full SWE-bench training** — ~2300 instances (not 116-722). Raise FiLM ceiling.
+11. **Ingest agentic traces** — sequential structure for CONNECT + failure→revision for REFINE_PRECONDITION.
+12. **Conditioned extraction (feedback loop)** — FiLM-conditioned Qwen re-reads code → refiner on new reprs → iterate (fixed-point inference).
+
+### Phase D — Model scaling (AFTER pipeline proves out)
+13. **Drop-in bigger model** — 7B/14B replaces 4B leaf. Pipeline + graph stay identical. Each leaf succeeds MORE → decomposition needed LESS → but graph still compounds. The system value (graph + iteration) ADDS to model capacity, not replaces it.
 
 ### Completed
 - ~~FiLM gate test~~ — **PASSED** (ceiling-baseline=+0.131, decoder reads gold)
@@ -802,3 +834,74 @@ The decoder works (ceiling 0.210). The graph edits engine is built and wired. **
 - ~~Decode v1 soft prefix~~ — **FAILED** (replaced by FiLM)
 - ~~Graph edits engine~~ — **BUILT** (10 edits, selftest PASS, V6-mini PASS)
 - ~~Wire edits to real outcomes~~ — **DONE** (3 semantic issues found & fixed, all edit types fire)
+- ~~Fable-5 HF integration~~ — **BUILT** (str_replace displacement pairs from HuggingFace, `--dataset fable5|lite+fable5`)
+- ~~Truncation fix~~ — **FIXED** (max_new_tokens 256→512, format_fail 14%→0%)
+- ~~Prompt framing~~ — **FIXED** (generic "Task:"/"Code:" for mixed SWE+Fable-5)
+- ~~Diagnostic breakdown~~ — **BUILT** (`eval_on(diagnose=True)`, failure categories + raw samples + timing)
+- ~~Training time optimization~~ — **BUILT** (`--arms` filter, 4.8h→2.2h or 30min diagnostic)
+
+---
+
+## Research audit — implementation readiness (2026-07-04)
+
+Deep code audit of refiner, multi-leaf, FiLM decoder, and iteration loop. Findings shape the implementation plan.
+
+### Refiner architecture bottlenecks (`lggn_refine.py`)
+
+The refiner reaching cos 0.55-0.59 is NOT a hard ceiling — the architecture has multiple clear bottlenecks:
+
+1. **No value projection in cross-attention** (line 159): attention weights applied directly to raw d-dim context vectors. Cannot recombine code features — only weighted average of raw hidden states. Fix: add Wv projection.
+2. **24 ops in 2560d space**: delta at each step trapped in convex hull of 24 vectors. Tiny subspace. Even K=4 additive steps can't escape. Fix: increase n_op to 48-96, or use continuous displacement (free MLP showed comparable at r=512).
+3. **Single head, scalar gates** (`gc`, `go` at line 148): one attention head, two shared scalars for all instances/steps/dimensions. Fix: multi-head attention + instance-dependent gating.
+4. **No GRU** — despite "HRM recurrence" framing, it's just additive: `h_{k+1} = h_k + gc*a + go*delta`. No gated recurrence, no step encoding, no memory of prior steps. Fix: GRU cell or step-index embedding.
+5. **No normalization**: h_t norm drifts over K steps. Fix: LayerNorm after each update.
+6. **Context downsampled to 48 tokens** (t_ctx=48): 256-token sequence gets every ~5th token. Loses local structure. Fix: increase to 128-256.
+7. **~5M params on ~160 instances** (80% of ~200): likely overfitting. Train/held gap would confirm. Fix: more data (722 with Fable-5), or regularization.
+8. **Fix text is lossy**: gold f = last-token hidden of 6 removed + 8 added lines, 1500 char cap. Multi-hunk patches lose most content. This sets an UPPER BOUND on cos(h_K, f) — even a perfect refiner can't reach cos=1.0 against a lossy target.
+
+**Key insight**: the refiner is surprisingly simple. Multiple low-hanging improvements available BEFORE architectural overhaul. Priority: (1) more ops or continuous displacement, (2) value projection, (3) multi-head, (4) more context tokens, (5) LayerNorm.
+
+### Multi-leaf + FiLM wiring gap (5 specific gaps)
+
+**Gap 1 — No per-operator latent.** Refiner produces ONE h_K per instance. Multi-leaf needs one latent PER leaf/step. The refiner's internal loop has intermediate `h_k` at each step — these ARE the per-leaf latents, just never exposed. `_extract_trajectory()` already walks the steps. Fix: expose `[h_0, h_1, ..., h_{K-1}]` from `Refiner.Net.forward()`.
+
+**Gap 2 — FiLM decoder is training-only.** `_Decoder` creates model+LoRA+FiLM, trains, evaluates, destroys. No save/load checkpoint, no standalone generate method. Fix: add `save_checkpoint(path)`, `load_checkpoint(path)`, and `generate(prompt, z) → str`.
+
+**Gap 3 — Prompt format mismatch.** Multi-leaf uses `fix_user()` (complex: issue+source+diagnosis+plan+hints). FiLM decode uses `_prompt()` (minimal: issue+code+SR instruction). FiLM decoder trained on one format won't work with the other. Fix: since FiLM z carries the plan semantics, use the simple prompt format — the plan moves INTO the latent, not the text.
+
+**Gap 4 — `gen()` in swe_slot has no FiLM hook.** Multi-leaf loop (line 1973) hardcodes `inject=False`. Fix: accept a `film_decoder` object, replace `gen()` call with `film_decoder.generate(prompt, z=per_step_latent[k])`.
+
+**Gap 5 — `lggn.solve()` doesn't carry latents.** `decode_fn` signature is `(prompt, task) → str`. No way to pass z. Fix: extend to `(prompt, task, z=None) → str`, populate `Operator.embedding` with behavior embedding.
+
+**Estimated effort**: Gaps 1,3 = small (expose existing data, align on format). Gaps 2,4,5 = medium (new methods, CLI args, signature changes). No gap is architecturally hard — all are wiring.
+
+### Iteration loop feasibility
+
+**Key discovery: `lggn_loop.py` already exists** with the full POMDP skeleton:
+```python
+def solve_instance(task, rank_fn, realize_fn, verify_fn, iters=4):
+    invalidated, feedback, trace = [], "", []
+    for k in range(iters):
+        plan = rank_fn(task, invalidated)          # next-best op not yet tried
+        patch = realize_fn(task, plan, feedback)    # frozen LLM + prior feedback
+        resolved, fb = verify_fn(task, patch)
+        if resolved: return ...
+        invalidated.append(plan.get("name"))        # INVALIDATE
+        feedback = fb                               # carry observation forward
+```
+
+**What's ready (EASY):**
+- `verify_one()` returns `(resolved, feedback)` — exact POMDP observe signal
+- `_failure_feedback()` extracts structured info (which tests fail, targeted excerpts)
+- Refiner is stateless — pass new `g` to re-invoke, trivial
+- `_Decoder._set_z()` supports swapping z between generations
+- `graph_edits.observe(Outcome)` accepts exactly what the loop produces
+
+**What's missing:**
+- **Goal update in latent space** (MEDIUM): compute `g' = hid(issue + failure_feedback)` via Qwen forward pass (~200ms). Simplest viable approach. `lggn.py` line 245 already does text-concat version.
+- **Operator masking in refiner** (MEDIUM): add mask arg to softmax in `Refiner.Net.forward()` line 164. ~10-line change.
+- **Learned belief updater** (HARD, LATER): trained observation encoder + update rule. Not needed for v1 — text-concat goal update is sufficient.
+
+**Latency**: Docker verify = 2-10 min/instance. 4-iteration loop = 8-40 min/instance. Wall-clock constraint, not code constraint.
+
+**Pragmatic path**: use `lggn_loop.py` skeleton → replace `rank_fn` with refiner trajectory → replace `realize_fn` with FiLM decoder generate → text-concat goal update → wire `graph_edits.observe()`. All connections are individually EASY-MEDIUM.

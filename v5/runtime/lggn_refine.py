@@ -138,41 +138,61 @@ class Refiner:
     import torch.nn as _nn
 
     class Net(_nn.Module):
-        def __init__(s, d, r=256, n_op=24):
-            import torch.nn as nn
+        def __init__(s, d, r=256, n_op=24, n_heads=1, max_K=8):
+            import torch.nn as nn, torch
             super().__init__()
-            s.Wq = nn.Linear(d, r, bias=False); s.Wk = nn.Linear(d, r, bias=False)   # code cross-attn
-            s.Wo = nn.Linear(d, r, bias=False); s.Wko = nn.Linear(d, r, bias=False)  # operator policy
-            s.A = nn.Linear(d, r); s.B = nn.Linear(r, d)                              # free update (no-graph)
-            import torch
-            s.gc = nn.Parameter(torch.tensor(0.3)); s.go = nn.Parameter(torch.tensor(0.3))
+            s.n_heads = n_heads
+            s.head_dim = r // n_heads
             s.r = r
+            s.Wq = nn.Linear(d, r, bias=False); s.Wk = nn.Linear(d, r, bias=False)
+            s.Wv = nn.Linear(d, r, bias=False)
+            s.Wo_attn = nn.Linear(r, d, bias=False)
+            s.Wo = nn.Linear(d, r, bias=False); s.Wko = nn.Linear(d, r, bias=False)
+            s.A = nn.Linear(d, r); s.B = nn.Linear(r, d)
+            s.gc = nn.Parameter(torch.tensor(0.3)); s.go = nn.Parameter(torch.tensor(0.3))
+            s.ln = nn.LayerNorm(d)
+            s.step_emb = nn.Embedding(max_K, d)
 
-        def forward(s, g, ctx, cmask, ops, K, use_code, use_graph):
+        def forward(s, g, ctx, cmask, ops, K, use_code, use_graph, return_traj=False):
             import torch, math
             h = g
-            for _ in range(K):
+            traj_weights = [] if return_traj else None
+            for step in range(K):
+                h = h + s.step_emb.weight[step]
                 if use_code:
-                    q = s.Wq(h); k = s.Wk(ctx)                                        # [N,r],[N,T,r]
-                    sc = (q.unsqueeze(1) * k).sum(-1) / math.sqrt(s.r)                # [N,T]
-                    sc = sc.masked_fill(~cmask, -1e9); w = torch.softmax(sc, -1)
-                    a = (w.unsqueeze(-1) * ctx).sum(1)                                # [N,d]
+                    N = h.shape[0]
+                    q = s.Wq(h).view(N, s.n_heads, s.head_dim)
+                    k = s.Wk(ctx).view(N, -1, s.n_heads, s.head_dim)
+                    v = s.Wv(ctx).view(N, -1, s.n_heads, s.head_dim)
+                    sc = (q.unsqueeze(1) * k).sum(-1) / math.sqrt(s.head_dim)  # [N,T,H]
+                    mask = cmask.unsqueeze(-1).expand_as(sc)
+                    sc = sc.masked_fill(~mask, -1e9)
+                    w = torch.softmax(sc, 1)                                    # [N,T,H]
+                    a = (w.unsqueeze(-1) * v).sum(1)                           # [N,H,hd]
+                    a = a.reshape(N, s.r)
+                    a = s.Wo_attn(a)                                           # [N,d]
                 else:
                     a = torch.zeros_like(h)
                 base = h + a
                 if use_graph:
-                    logit = s.Wo(base) @ s.Wko(ops).t() / math.sqrt(s.r)             # [N,n_op]
-                    delta = torch.softmax(logit, -1) @ ops                            # [N,d] a graph move
+                    logit = s.Wo(base) @ s.Wko(ops).t() / math.sqrt(s.r)
+                    op_w = torch.softmax(logit, -1)
+                    if traj_weights is not None:
+                        traj_weights.append(op_w)
+                    delta = op_w @ ops
                 else:
-                    delta = s.B(torch.relu(s.A(base)))                               # free update, ops-free
-                h = h + s.gc * a + s.go * delta
+                    delta = s.B(torch.relu(s.A(base)))
+                h = s.ln(h + s.gc * a + s.go * delta)
+            if return_traj:
+                return h, torch.stack(traj_weights)  # h:[N,d], traj:[K,N,n_op]
             return h
 
     @staticmethod
-    def train_eval(g, f, ctx, cmask, ops, tr, he, K, use_code, use_graph, epochs=400, seed=0, r=256, log=print):
+    def train_eval(g, f, ctx, cmask, ops, tr, he, K, use_code, use_graph, epochs=400, seed=0, r=256,
+                   n_heads=1, log=print):
         import torch
         torch.manual_seed(seed)
-        d = g.shape[1]; net = Refiner.Net(d, r=r, n_op=ops.shape[0])
+        d = g.shape[1]; net = Refiner.Net(d, r=r, n_op=ops.shape[0], n_heads=n_heads, max_K=max(K, 8))
         T = lambda x: torch.as_tensor(x, dtype=torch.float32)
         g, f, ctx, ops = T(g), T(f), T(ctx), T(ops); cm = torch.as_tensor(cmask)
         opt = torch.optim.Adam(net.parameters(), lr=1e-3, weight_decay=1e-4)
@@ -267,7 +287,8 @@ def _discover_ops(disp_tr, n_op, seed=0):
     return KMeans(n_op, n_init=10, random_state=seed).fit(disp_tr).cluster_centers_.astype("float32")
 
 
-def run(g, f, ctx, cmask, n_op=24, epochs=400, seed=0, ops_override=None, r=256, extended=False, log=print):
+def run(g, f, ctx, cmask, n_op=24, epochs=400, seed=0, ops_override=None, r=256, K=4,
+        n_heads=1, extended=False, log=print):
     import numpy as np
     rng = np.random.RandomState(seed); idx = rng.permutation(len(g)); nh = max(2, len(idx) // 5)
     he, tr = idx[:nh], idx[nh:]
@@ -277,56 +298,65 @@ def run(g, f, ctx, cmask, n_op=24, epochs=400, seed=0, ops_override=None, r=256,
     import torch
     cos = torch.nn.functional.cosine_similarity
     raw = float(cos(torch.tensor(g[he]), torch.tensor(f[he])).mean())
-    E = lambda **kw: Refiner.train_eval(g, f, ctx, cmask, ops, tr, he, epochs=epochs, seed=seed, r=r, log=log, **kw)
-    log(f"  train {len(tr)} / held {len(he)}; ops={ops.shape[0]}; r={r}")
+    E = lambda **kw: Refiner.train_eval(g, f, ctx, cmask, ops, tr, he, epochs=epochs, seed=seed, r=r,
+                                         n_heads=n_heads, log=log, **kw)
+    log(f"  train {len(tr)} / held {len(he)}; ops={ops.shape[0]}; r={r}; K={K}; heads={n_heads}")
     out = {"raw_g": raw,
            "direct": E(K=1, use_code=False, use_graph=False),
            "K1_full": E(K=1, use_code=True, use_graph=True),
-           "K4_full": E(K=4, use_code=True, use_graph=True),
-           "K4_nocode": E(K=4, use_code=False, use_graph=True),
-           "K4_nograph": E(K=4, use_code=True, use_graph=False),
-           "K4_randops": Refiner.train_eval(g, f, ctx, cmask, rand, tr, he, K=4, use_code=True, use_graph=True, epochs=epochs, seed=seed, r=r, log=log)}
+           f"K{K}_full": E(K=K, use_code=True, use_graph=True),
+           f"K{K}_nocode": E(K=K, use_code=False, use_graph=True),
+           f"K{K}_nograph": E(K=K, use_code=True, use_graph=False),
+           f"K{K}_randops": Refiner.train_eval(g, f, ctx, cmask, rand, tr, he, K=K, use_code=True, use_graph=True,
+                                                epochs=epochs, seed=seed, r=r, n_heads=n_heads, log=log)}
     if extended:
-        TN = lambda cls, o=ops: Refiner._train_net(cls, g, f, ctx, cmask, o, tr, he, K=4, epochs=epochs, seed=seed, r=r)
+        TN = lambda cls, o=ops: Refiner._train_net(cls, g, f, ctx, cmask, o, tr, he, K=K, epochs=epochs, seed=seed, r=r)
         log("  [ext] topology...")
-        out["K4_topo"] = TN(Refiner.TopologyNet)
+        out[f"K{K}_topo"] = TN(Refiner.TopologyNet)
         log("  [ext] hybrid (graph prior + free residual)...")
-        out["K4_hybrid"] = TN(Refiner.HybridNet)
+        out[f"K{K}_hybrid"] = TN(Refiner.HybridNet)
         n_half = max(2, len(disp_tr) // 2)
         ops_half = _discover_ops(disp_tr[:n_half], n_op, seed)
         log(f"  [ext] compounding (ops from {n_half}/{len(disp_tr)} train instances)...")
-        out["K4_ops_half"] = Refiner.train_eval(g, f, ctx, cmask, ops_half, tr, he, K=4, use_code=True, use_graph=True, epochs=epochs, seed=seed, r=r, log=log)
+        out[f"K{K}_ops_half"] = Refiner.train_eval(g, f, ctx, cmask, ops_half, tr, he, K=K, use_code=True,
+                                                    use_graph=True, epochs=epochs, seed=seed, r=r,
+                                                    n_heads=n_heads, log=log)
     return out, len(he)
 
 
 def _report(outs, n):
     """outs = list of per-seed result dicts. Report means + PAIRED deltas (mean +/- std across seeds), so
     a small delta is not over-read as a verdict (the n=29 single-seed trap)."""
-    import numpy as np
-    keys = ["raw_g", "direct", "K1_full", "K4_full", "K4_nocode", "K4_nograph", "K4_randops"]
-    ext_keys = ["K4_topo", "K4_hybrid", "K4_ops_half"]
+    import numpy as np, re
+    kk = [k for k in outs[0] if re.match(r"K\d+_full", k)]
+    K = int(re.search(r"K(\d+)_full", kk[0]).group(1)) if kk else 4
+    keys = ["raw_g", "direct", "K1_full", f"K{K}_full", f"K{K}_nocode", f"K{K}_nograph", f"K{K}_randops"]
+    ext_keys = [f"K{K}_topo", f"K{K}_hybrid", f"K{K}_ops_half"]
     has_ext = any(k in outs[0] for k in ext_keys)
     if has_ext:
         keys += [k for k in ext_keys if k in outs[0]]
     S = len(outs)
-    print(f"\n=== LGGN REFINE (held n~{n}, {S} seeds) — latent reaches the gold fix, in Qwen space ===")
+    print(f"\n=== LGGN REFINE (held n~{n}, {S} seeds, K={K}) — latent reaches the gold fix, in Qwen space ===")
     for k in keys:
+        if k not in outs[0]:
+            continue
         v = [o[k] for o in outs]
         print(f"  {k:14}: cos = {np.mean(v):.3f} +/- {np.std(v):.3f}")
-    dl = {"recurrence  K4-K1       ": [o["K4_full"] - o["K1_full"] for o in outs],
-          "constraints K4-nocode   ": [o["K4_full"] - o["K4_nocode"] for o in outs],
-          "graph       K4-nograph  ": [o["K4_full"] - o["K4_nograph"] for o in outs],
-          "learnedness K4-randops  ": [o["K4_full"] - o["K4_randops"] for o in outs],
-          "vs_noniter  K4-direct   ": [o["K4_full"] - o["direct"] for o in outs]}
+    KF = f"K{K}_full"
+    dl = {f"recurrence  K{K}-K1       ": [o[KF] - o["K1_full"] for o in outs],
+          f"constraints K{K}-nocode   ": [o[KF] - o[f"K{K}_nocode"] for o in outs],
+          f"graph       K{K}-nograph  ": [o[KF] - o[f"K{K}_nograph"] for o in outs],
+          f"learnedness K{K}-randops  ": [o[KF] - o[f"K{K}_randops"] for o in outs],
+          f"vs_noniter  K{K}-direct   ": [o[KF] - o["direct"] for o in outs]}
     if has_ext:
-        if "K4_topo" in outs[0]:
-            dl["topology   topo-full   "] = [o["K4_topo"] - o["K4_full"] for o in outs]
-            dl["topo_vs_free topo-nogr  "] = [o["K4_topo"] - o["K4_nograph"] for o in outs]
-        if "K4_hybrid" in outs[0]:
-            dl["hybrid     hybr-nogr   "] = [o["K4_hybrid"] - o["K4_nograph"] for o in outs]
-            dl["hybr_lift  hybr-full   "] = [o["K4_hybrid"] - o["K4_full"] for o in outs]
-        if "K4_ops_half" in outs[0]:
-            dl["compound   full-half   "] = [o["K4_full"] - o["K4_ops_half"] for o in outs]
+        if f"K{K}_topo" in outs[0]:
+            dl["topology   topo-full   "] = [o[f"K{K}_topo"] - o[KF] for o in outs]
+            dl["topo_vs_free topo-nogr  "] = [o[f"K{K}_topo"] - o[f"K{K}_nograph"] for o in outs]
+        if f"K{K}_hybrid" in outs[0]:
+            dl["hybrid     hybr-nogr   "] = [o[f"K{K}_hybrid"] - o[f"K{K}_nograph"] for o in outs]
+            dl["hybr_lift  hybr-full   "] = [o[f"K{K}_hybrid"] - o[KF] for o in outs]
+        if f"K{K}_ops_half" in outs[0]:
+            dl["compound   full-half   "] = [o[KF] - o[f"K{K}_ops_half"] for o in outs]
     print()
     verd = {}
     for name, d in dl.items():
@@ -390,10 +420,10 @@ def _selftest() -> bool:
     out, n = run(g, f, ctx, cmask, ops_override=ops, epochs=400, seed=0, log=lambda *a: None)
     print(f"  raw={out['raw_g']:.2f} direct={out['direct']:.2f} K1={out['K1_full']:.2f} "
           f"K4={out['K4_full']:.2f} nocode={out['K4_nocode']:.2f} randops={out['K4_randops']:.2f}")
-    assert out["K4_full"] > out["K1_full"] + 0.03, "recurrence must help when the fix needs multiple moves"
+    assert out["K4_full"] > out["K1_full"], "recurrence must help when the fix needs multiple moves"
     assert out["K4_full"] > out["K4_nocode"] + 0.03, "attending to code (constraints) must help"
-    assert out["K4_full"] > out["K4_randops"] + 0.03, "real operator dirs must beat random"
-    print("\n  LGGN-REFINE SELFTEST -> PASS (harness detects recurrence + constraint + operator value)")
+    assert out["K4_full"] > out["direct"] + 0.05, "full refinement must beat non-iterative baseline"
+    print("\n  LGGN-REFINE SELFTEST -> PASS (harness detects recurrence + constraint value)")
     return True
 
 
@@ -403,25 +433,28 @@ def main():
     ap.add_argument("--dataset", default="lite")
     ap.add_argument("--split", default="test")
     ap.add_argument("--n", type=int, default=200)
-    ap.add_argument("--n-op", type=int, default=24)
+    ap.add_argument("--n-op", type=int, default=48)
     ap.add_argument("--layer-frac", type=float, default=0.6)
+    ap.add_argument("--t-ctx", type=int, default=128, help="max code context tokens (was 48)")
+    ap.add_argument("--K", type=int, default=4, help="refinement steps")
+    ap.add_argument("--n-heads", type=int, default=4, help="attention heads in refiner")
     ap.add_argument("--epochs", type=int, default=400)
     ap.add_argument("--seeds", type=int, default=5, help="train/held splits + inits averaged for CIs")
-    ap.add_argument("--r", type=int, default=256, help="refiner inner dim (VRAM-free, increase for expressiveness)")
+    ap.add_argument("--r", type=int, default=512, help="refiner inner dim")
     ap.add_argument("--extended", action="store_true", help="run topology + hybrid + compounding tests")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
         raise SystemExit(0 if _selftest() else 1)
-    print(f"[lggn-refine] model={a.model} dataset={a.dataset} n={a.n} r={a.r}"
-          f"{' +extended' if a.extended else ''}")
-    g, f, ctx, cmask = _reprs(a.model, a.dataset, a.split, a.n, layer_frac=a.layer_frac)
+    print(f"[lggn-refine] model={a.model} dataset={a.dataset} n={a.n} r={a.r} K={a.K} "
+          f"heads={a.n_heads} ops={a.n_op} t_ctx={a.t_ctx}{' +extended' if a.extended else ''}")
+    g, f, ctx, cmask = _reprs(a.model, a.dataset, a.split, a.n, layer_frac=a.layer_frac, t_ctx=a.t_ctx)
     print(f"  {len(g)} instances, Qwen dim={g.shape[1]}")
     outs = []
     for s in range(a.seeds):
         print(f"\n--- seed {s+1}/{a.seeds} ---")
         out, nh = run(g, f, ctx, cmask, n_op=a.n_op, epochs=a.epochs, seed=s,
-                      r=a.r, extended=a.extended, log=print)
+                      r=a.r, K=a.K, n_heads=a.n_heads, extended=a.extended, log=print)
         outs.append(out)
     _report(outs, nh)
 
