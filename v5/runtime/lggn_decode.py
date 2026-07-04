@@ -139,7 +139,7 @@ def _load_paired(model_name, dataset, split, n, layer_frac=0.6, t_ctx=48):
 # ── refiner (from lggn_refine, returns h_K + trajectory) ───────────────────────
 
 def _train_refiner(g, f, ctx, cmask, tr, K=4, r=512, n_op=24, epochs=400, seed=0,
-                   learn_ops=False, k_warmup=0.5, contrastive=0.0, log=print):
+                   learn_ops=False, k_warmup=0.5, contrastive=0.0, n_heads=1, log=print):
     """Train refiner on tr, return (h_K_all, ops, net, cos_held).
 
     Improvements over vanilla cosine training:
@@ -149,14 +149,15 @@ def _train_refiner(g, f, ctx, cmask, tr, K=4, r=512, n_op=24, epochs=400, seed=0
       contrastive:  weight for wrong-instance-gold triplet loss
                     (push h_K away from f_wrong, not just toward f_own)
     """
-    import numpy as np
+    import numpy as np, time
     from v5.runtime.lggn_refine import Refiner, _discover_ops
     torch.manual_seed(seed)
+    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     disp_tr = (f - g)[tr]
     ops = _discover_ops(disp_tr, n_op, seed)
-    net = Refiner.Net(g.shape[1], r=r, n_op=ops.shape[0])
-    T = lambda x: torch.as_tensor(x, dtype=torch.float32)
-    gt, ft, ct, ot = T(g), T(f), T(ctx), T(ops); cm = torch.as_tensor(cmask)
+    net = Refiner.Net(g.shape[1], r=r, n_op=ops.shape[0], n_heads=n_heads, max_K=max(K, 8)).to(dev)
+    T = lambda x: torch.as_tensor(x, dtype=torch.float32).to(dev)
+    gt, ft, ct, ot = T(g), T(f), T(ctx), T(ops); cm = torch.as_tensor(cmask).to(dev)
 
     if learn_ops:
         ops_param = torch.nn.Parameter(ot.clone())
@@ -168,6 +169,7 @@ def _train_refiner(g, f, ctx, cmask, tr, K=4, r=512, n_op=24, epochs=400, seed=0
 
     Fn = torch.nn.functional.cosine_similarity
     margin = 0.2
+    t0 = time.time()
     for ep in range(epochs):
         K_cur = 1 + int((K - 1) * min(1.0, ep / max(1, epochs * k_warmup - 1)))
 
@@ -181,19 +183,23 @@ def _train_refiner(g, f, ctx, cmask, tr, K=4, r=512, n_op=24, epochs=400, seed=0
             loss = loss + contrastive * torch.clamp(Fn(h, f_neg) - margin, min=0).mean()
 
         loss.backward(); opt.step()
+        if (ep + 1) % 100 == 0 or ep == epochs - 1:
+            log(f"      ep {ep+1}/{epochs} loss={loss.item():.4f} ({time.time()-t0:.0f}s)")
 
-    final_ops = ops_param.detach() if learn_ops else ot
+    final_ops = ops_param.detach().cpu() if learn_ops else ot.cpu()
     ops_np = final_ops.float().numpy()
 
     net.eval()
     with torch.no_grad():
-        h_all = net(gt, ct, cm, final_ops, K, True, True).float().numpy()
+        h_all = net(gt, ct, cm, final_ops.to(dev), K, True, True).cpu().float().numpy()
         he = np.setdiff1d(np.arange(len(g)), tr)
-        cos_he = float(Fn(torch.tensor(h_all[he]), ft[he]).mean())
+        cos_he = float(Fn(torch.tensor(h_all[he]), torch.tensor(f[he])).mean())
+    net.cpu()
     extras = []
     if learn_ops: extras.append("learn_ops")
     if contrastive > 0: extras.append(f"contra={contrastive}")
     if k_warmup < 1.0: extras.append(f"k_warmup={k_warmup}")
+    if n_heads > 1: extras.append(f"heads={n_heads}")
     ex = f" ({', '.join(extras)})" if extras else ""
     log(f"    refiner: held cos(h_K, f) = {cos_he:.3f} [K={K} r={r} ops={len(ops_np)}{ex}]")
     return h_all, ops_np, net, cos_he
@@ -612,7 +618,7 @@ def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
         refiner_epochs=400, decoder_epochs=2, bottleneck=64, film_warmup=1,
         z_dropout=0.0, seed=0, sensitivity=False,
         learn_ops=False, k_warmup=0.5, contrastive=0.0,
-        arm_filter=None, log=print):
+        arm_filter=None, n_heads=1, log=print):
     import numpy as np, time
 
     rng = np.random.RandomState(seed); idx = rng.permutation(len(g))
@@ -625,7 +631,8 @@ def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
     log("  [1/4] training refiner (graph+code, K={}, r={})...".format(K, r))
     h_K, ops, ref_net, cos_he = _train_refiner(
         g, f, ctx, cmask, tr, K=K, r=r, n_op=n_op, epochs=refiner_epochs, seed=seed,
-        learn_ops=learn_ops, k_warmup=k_warmup, contrastive=contrastive, log=log)
+        learn_ops=learn_ops, k_warmup=k_warmup, contrastive=contrastive,
+        n_heads=n_heads, log=log)
     timings["refiner"] = time.time() - t0
 
     # constant-z: mean of h_K over TRAINING set, broadcast to all instances.
@@ -968,6 +975,7 @@ def main():
                     help="fraction of refiner epochs to ramp K from 1 to max (scheduled K)")
     ap.add_argument("--contrastive", type=float, default=0.0,
                     help="weight for wrong-instance triplet loss (push h_K away from f_wrong)")
+    ap.add_argument("--n-heads", type=int, default=1, help="refiner attention heads")
     ap.add_argument("--arms", default="baseline,constant,latent,ceiling",
                     help="comma-separated decoder arms to run (skip unneeded to save time)")
     ap.add_argument("--selftest", action="store_true")
@@ -995,7 +1003,7 @@ def main():
         bottleneck=a.bottleneck, film_warmup=a.film_warmup,
         z_dropout=a.z_dropout, sensitivity=a.sensitivity,
         learn_ops=a.learn_ops, k_warmup=a.k_warmup, contrastive=a.contrastive,
-        arm_filter=af)
+        arm_filter=af, n_heads=a.n_heads)
     _report(results, n_held, cos_ref, wb, sens, graph_stats)
 
 
