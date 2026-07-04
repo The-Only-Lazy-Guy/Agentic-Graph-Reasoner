@@ -92,6 +92,48 @@ def _reprs(model_name, dataset, split, n, layer_frac=0.6, t_ctx=48, cache="artif
     return g, f, ctx, cmask
 
 
+def _reprs_from_texts(model_name, texts, layer_frac=0.6, t_ctx=48, cache_key=""):
+    """Qwen reprs from pre-built [{issue, code, added}] texts. Same output as _reprs."""
+    import os, numpy as np, torch
+    from pathlib import Path
+    if cache_key and Path(cache_key).exists():
+        d = np.load(cache_key); print(f"  cached reprs <- {cache_key}")
+        return d["g"], d["f"], d["ctx"], d["cmask"]
+    from transformers import AutoTokenizer
+    from v5.lm_loader import load_frozen_lm
+    trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
+    tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=trust)
+    lm = load_frozen_lm(model_name); lm.eval()
+    dev = next(lm.parameters()).device
+    L = max(1, int(layer_frac * lm.config.num_hidden_layers))
+
+    @torch.no_grad()
+    def hid(text, seq=False):
+        enc = tok(text[:2000], return_tensors="pt", truncation=True, max_length=256).to(dev)
+        hs = lm(**enc, output_hidden_states=True).hidden_states[L][0]
+        return hs.float().cpu().numpy() if seq else hs[-1].float().cpu().numpy()
+
+    G, F, CTX, MASK = [], [], [], []
+    print(f"  extracting reprs from {len(texts)} texts (layer {L})...")
+    for ii, t in enumerate(texts):
+        G.append(hid(t["issue"]))
+        F.append(hid(t["added"]))
+        c = hid("Code:\n" + t["code"], seq=True)
+        idx = np.linspace(0, len(c) - 1, min(t_ctx, len(c))).astype(int)
+        c = c[idx]
+        pad = np.zeros((t_ctx - len(c), c.shape[1]), c.dtype)
+        CTX.append(np.concatenate([c, pad], 0))
+        MASK.append([1] * len(idx) + [0] * (t_ctx - len(idx)))
+        if (ii + 1) % 10 == 0 or ii == len(texts) - 1:
+            print(f"    {ii+1}/{len(texts)} processed", flush=True)
+    g, f, ctx, cmask = (np.asarray(G), np.asarray(F), np.asarray(CTX), np.asarray(MASK, dtype=bool))
+    if cache_key:
+        Path(cache_key).parent.mkdir(parents=True, exist_ok=True)
+        np.savez(cache_key, g=g, f=f, ctx=ctx, cmask=cmask)
+        print(f"  reprs -> {cache_key}  ({len(g)} inst, d={g.shape[1]}, L={L})")
+    return g, f, ctx, cmask
+
+
 class Refiner:
     import torch.nn as _nn
 

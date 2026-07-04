@@ -40,29 +40,100 @@ import torch.nn as nn
 
 # ── data ────────────────────────────────────────────────────────────────────────
 
+def _load_fable5_texts(limit=0):
+    """Fable-5 str_replace edits -> [{issue, code, added}] for LGGN training.
+
+    Only extracts edits with both old_string and new_string (displacement pairs).
+    Greenfield writes (create_file) skipped — no before-state for refiner to learn from.
+    """
+    import ast, json
+    from v5.training.ingest_fable5 import _download_files, _read_events, _parts, _is_edit, _goal
+
+    files = _download_files()
+    texts, seen = [], set()
+    for fp in files:
+        events = _read_events(fp)
+        if not events:
+            continue
+        goal = _goal(events)
+        if not goal.strip():
+            continue
+        for ev in events:
+            for p in _parts(ev):
+                if not _is_edit(p):
+                    continue
+                args = p.get("arguments") or p.get("input") or {}
+                if isinstance(args, str):
+                    for parse in (json.loads, ast.literal_eval):
+                        try:
+                            args = parse(args)
+                            break
+                        except Exception:
+                            pass
+                if not isinstance(args, dict):
+                    continue
+                old = args.get("old_string") or args.get("old_str") or ""
+                new = args.get("new_string") or args.get("new_str") or ""
+                if not old.strip() or not new.strip() or old.strip() == new.strip():
+                    continue
+                key = hash((goal[:200], old[:200], new[:200]))
+                if key in seen:
+                    continue
+                seen.add(key)
+                texts.append({"issue": goal[:700], "code": old[:900], "added": new[:600]})
+                if limit and len(texts) >= limit:
+                    print(f"  fable5: {len(texts)} displacement edits from {len(files)} sessions")
+                    return texts
+    print(f"  fable5: {len(texts)} displacement edits from {len(files)} sessions")
+    return texts
+
+
 def _load_paired(model_name, dataset, split, n, layer_frac=0.6, t_ctx=48):
-    """Qwen reprs (g,f,ctx,cmask) paired with source text per instance."""
-    from v5.runtime.lggn_refine import _reprs
-    from v5.graph_grower.swe_load import load_instances
-    from v5.runtime.operator_discovery import extract_hunks, _fix_text
-    instances = load_instances(name=dataset, split=split, limit=n)
-    texts = []
-    for inst in instances:
-        hs = extract_hunks(inst.get("patch", "") or "")
-        if not hs:
-            continue
-        removed = "\n".join(l for _f, r, _a in hs for l in r)
-        if not removed.strip():
-            continue
-        fx = _fix_text(hs)
-        if not fx.strip():
-            continue
-        added = "\n".join(l for _f, _r, a in hs for l in a)
-        texts.append({"issue": (inst.get("problem_statement") or "")[:700],
-                      "code": removed[:900], "added": added[:600]})
-    g, f, ctx, cmask = _reprs(model_name, dataset, split, n, layer_frac, t_ctx)
-    assert len(texts) == len(g), f"text/repr count mismatch: {len(texts)} texts vs {len(g)} reprs"
-    return g, f, ctx, cmask, texts
+    """Qwen reprs (g,f,ctx,cmask) paired with source text per instance.
+
+    dataset: 'lite', 'verified', 'full', 'gym', 'fable5', or 'lite+fable5' for mixed.
+    """
+    import numpy as np
+    parts = [p.strip() for p in dataset.split("+")]
+
+    all_g, all_f, all_ctx, all_cmask, all_texts = [], [], [], [], []
+    for part in parts:
+        if part == "fable5":
+            texts = _load_fable5_texts(limit=n)
+            if not texts:
+                raise RuntimeError("fable5: 0 displacement edits found — run ingest_fable5 --probe to check")
+            from v5.runtime.lggn_refine import _reprs_from_texts
+            cache = (f"artifacts/lggn_reprs_fable5_{model_name.split('/')[-1]}"
+                     f"_n{len(texts)}_L{layer_frac}_T{t_ctx}.npz")
+            g, f, ctx, cmask = _reprs_from_texts(model_name, texts, layer_frac, t_ctx, cache)
+        else:
+            from v5.runtime.lggn_refine import _reprs
+            from v5.graph_grower.swe_load import load_instances
+            from v5.runtime.operator_discovery import extract_hunks, _fix_text
+            instances = load_instances(name=part, split=split, limit=n)
+            texts = []
+            for inst in instances:
+                hs = extract_hunks(inst.get("patch", "") or "")
+                if not hs:
+                    continue
+                removed = "\n".join(l for _f, r, _a in hs for l in r)
+                if not removed.strip():
+                    continue
+                fx = _fix_text(hs)
+                if not fx.strip():
+                    continue
+                added = "\n".join(l for _f, _r, a in hs for l in a)
+                texts.append({"issue": (inst.get("problem_statement") or "")[:700],
+                              "code": removed[:900], "added": added[:600]})
+            g, f, ctx, cmask = _reprs(model_name, part, split, n, layer_frac, t_ctx)
+            assert len(texts) == len(g), f"text/repr count mismatch: {len(texts)} texts vs {len(g)} reprs"
+        all_g.append(g); all_f.append(f); all_ctx.append(ctx); all_cmask.append(cmask)
+        all_texts.extend(texts)
+
+    if len(parts) == 1:
+        return all_g[0], all_f[0], all_ctx[0], all_cmask[0], all_texts
+    return (np.concatenate(all_g), np.concatenate(all_f),
+            np.concatenate(all_ctx), np.concatenate(all_cmask), all_texts)
 
 
 # ── refiner (from lggn_refine, returns h_K + trajectory) ───────────────────────
@@ -505,17 +576,20 @@ def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
         refiner_epochs=400, decoder_epochs=2, bottleneck=64, film_warmup=1,
         z_dropout=0.0, seed=0, sensitivity=False,
         learn_ops=False, k_warmup=0.5, contrastive=0.0, log=print):
-    import numpy as np
+    import numpy as np, time
 
     rng = np.random.RandomState(seed); idx = rng.permutation(len(g))
     nh = max(2, len(idx) // 5); he, tr = idx[:nh], idx[nh:]
     log(f"  train {len(tr)} / held {len(he)}")
+    timings = {}; t0_total = time.time()
 
     # phase 1: refiner
+    t0 = time.time()
     log("  [1/4] training refiner (graph+code, K={}, r={})...".format(K, r))
     h_K, ops, ref_net, cos_he = _train_refiner(
         g, f, ctx, cmask, tr, K=K, r=r, n_op=n_op, epochs=refiner_epochs, seed=seed,
         learn_ops=learn_ops, k_warmup=k_warmup, contrastive=contrastive, log=log)
+    timings["refiner"] = time.time() - t0
 
     # constant-z: mean of h_K over TRAINING set, broadcast to all instances.
     # Tests: does FiLM benefit come from extra params (constant = latent) or z-content (latent > constant)?
@@ -533,6 +607,7 @@ def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
     results = {}; per_inst = {}; sens_curve = None
     latent_behs_he = None; ops_behavior = None
     for arm_name, latents, use_film, zdrop in arms:
+        t0 = time.time()
         log(f"  [2/4] decoder arm '{arm_name}' (film={use_film}, bn={bottleneck}, zdrop={zdrop})...")
         dec = _Decoder(model_name, d_latent=d, use_film=use_film, bottleneck=bottleneck)
         warmup = film_warmup if use_film else 0
@@ -548,16 +623,20 @@ def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
         if arm_name == "ceiling" and sensitivity:
             sens_curve = _sensitivity_sweep(dec, texts, f, h_K, tr, he, log=log)
         dec.cleanup()
+        timings[f"decoder_{arm_name}"] = time.time() - t0
 
     # phase 3: write-back trajectory
+    t0 = time.time()
     log("  [3/4] write-back trajectory extraction...")
     traj = _extract_trajectory(ref_net, g, ctx, cmask, ops, K)
     wb = _write_back_report(traj[:, he], per_inst.get("latent", []))
     log(f"    write-back: {wb['n_success']} successful decodes")
     if wb.get("op_usage"):
         log(f"    dominant ops: {wb['op_usage']}")
+    timings["trajectory"] = time.time() - t0
 
     # phase 4: graph structural edits (wired to real outcomes)
+    t0 = time.time()
     graph_stats = None
     if latent_behs_he is not None and ops_behavior is not None:
         from v5.runtime.graph_edits import (
@@ -623,6 +702,12 @@ def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
         log(f"    {len(he)} outcomes -> {len(bg.nodes)} nodes ({n_ret} retrievable), "
             f"{graph_stats['n_edges']} edges, {len(bg.log)} edits")
         log(f"    edit breakdown: {edit_counts}")
+    timings["graph_edits"] = time.time() - t0
+    timings["total"] = time.time() - t0_total
+
+    log(f"\n  --- timing (seconds) ---")
+    for phase, secs in timings.items():
+        log(f"    {phase:20s}: {secs:7.1f}s")
 
     return results, len(he), cos_he, wb, sens_curve, graph_stats
 
