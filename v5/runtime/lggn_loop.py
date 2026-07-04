@@ -21,6 +21,7 @@ def solve_instance(task, rank_fn, realize_fn, verify_fn, iters=4):
     """traverse -> realize -> verify -> INVALIDATE + re-traverse. Returns resolved + per-iter trace."""
     invalidated, feedback, trace = [], "", []
     for k in range(iters):
+        task["_iter"] = k
         plan = rank_fn(task, invalidated)                 # next-best operator not yet tried
         if plan is None:
             break
@@ -67,6 +68,34 @@ def make_rank(embed_fn, ops):
     return rank
 
 
+def make_rank_from_trajectory(traj_weights, ops_list, op_names):
+    """Rank ops using trained refiner trajectory instead of raw cosine.
+
+    traj_weights: [K, N, n_op] — per-step op-selection weights from refiner.
+    ops_list: list of op dicts (with 'name', 'realize_hint', etc.).
+    op_names: list of op name strings (parallel to n_op axis).
+
+    Uses the refiner's learned op-selection policy: sum weights across steps,
+    rank by total attention each op received for this instance.
+    """
+    import numpy as np
+    agg = traj_weights.sum(axis=0)  # [N, n_op] — total attention per op
+
+    def rank(task, invalidated):
+        idx = task.get("_instance_idx")
+        if idx is None:
+            return None
+        scores = agg[idx]
+        order = np.argsort(-scores)
+        for i in order:
+            if i < len(op_names) and op_names[i] not in invalidated:
+                op = next((o for o in ops_list if o["name"] == op_names[i]), None)
+                if op is not None:
+                    return op
+        return None
+    return rank
+
+
 DEBUG = [False]
 
 
@@ -100,6 +129,50 @@ def make_realize(gen_fn):
             print(f"      SEARCH[:120]={sr!r}")
             if patch:
                 print(f"      PATCH[:200]={patch[:200]!r}")
+        return patch
+    return realize
+
+
+def make_realize_film(film_decoder, h_steps=None):
+    """Realize via FiLM-conditioned decoder. Each iteration uses the per-step latent
+    from the refiner trajectory (h_steps[k] for iteration k), falling back to h_K.
+
+    film_decoder: _Decoder with trained LoRA+FiLM (from load_checkpoint or train_on).
+    h_steps: [K, N, d] per-step latents from refiner. If None, generates without FiLM.
+    """
+    from v5.runtime.swe_slot import _repair_sr_to_src, _patch
+    from v5.runtime.search_replace import parse_sr
+
+    def realize(task, plan, feedback):
+        dest = task["_dest"]
+        src, f = _src_window(dest, task["patch"], span=220)
+        fb = (f"\n\nThe PREVIOUS attempt FAILED the tests:\n{feedback[:400]}\nTry a DIFFERENT fix.\n"
+              if feedback else "")
+        hint = plan.get("realize_hint", "")
+        prompt = (f"Task:\n{task.get('problem_statement', '')[:700]}\n\n"
+                  f"File {f}:\n{src[:3500]}\n{fb}\n"
+                  f"A known repair pattern from memory (adapt it to this code):\n{hint[:450]}\n\n"
+                  "Output ONLY a search/replace block. SEARCH must be EXACT existing code copied from the file:\n"
+                  "<<<<<<< SEARCH\n<exact existing code>\n=======\n<fixed code>\n>>>>>>> REPLACE")
+        z = None
+        if h_steps is not None:
+            idx = task.get("_instance_idx")
+            step = task.get("_iter", 0)
+            if idx is not None:
+                K = h_steps.shape[0]
+                z = h_steps[min(step, K - 1), idx]
+        raw = film_decoder.generate(prompt, z=z)
+        blocks = parse_sr(raw)
+        for b in blocks:
+            b["file"] = f
+        patch = ""
+        if blocks:
+            blocks = _repair_sr_to_src(blocks, dest)
+            patch = _patch(blocks, dest)
+        if DEBUG[0]:
+            sr = blocks[0]["search"][:120] if blocks else ""
+            print(f"    [realize-film op={plan['name']}] file={f} z={'yes' if z is not None else 'no'} "
+                  f"blocks={len(blocks or [])} patch_len={len(patch)}")
         return patch
     return realize
 
