@@ -89,6 +89,7 @@ def _reprs(model_name, dataset, split, n, layer_frac=0.6, t_ctx=48, cache="artif
     g, f, ctx, cmask = (np.asarray(G), np.asarray(F), np.asarray(CTX), np.asarray(MASK, dtype=bool))
     Path(key).parent.mkdir(parents=True, exist_ok=True)
     np.savez(key, g=g, f=f, ctx=ctx, cmask=cmask); print(f"  reprs -> {key}  ({len(g)} inst, d={g.shape[1]}, L={L})")
+    del lm, tok; torch.cuda.empty_cache(); print("  Qwen freed from VRAM")
     return g, f, ctx, cmask
 
 
@@ -131,6 +132,7 @@ def _reprs_from_texts(model_name, texts, layer_frac=0.6, t_ctx=48, cache_key="")
         Path(cache_key).parent.mkdir(parents=True, exist_ok=True)
         np.savez(cache_key, g=g, f=f, ctx=ctx, cmask=cmask)
         print(f"  reprs -> {cache_key}  ({len(g)} inst, d={g.shape[1]}, L={L})")
+    del lm, tok; torch.cuda.empty_cache(); print("  Qwen freed from VRAM")
     return g, f, ctx, cmask
 
 
@@ -190,21 +192,27 @@ class Refiner:
     @staticmethod
     def train_eval(g, f, ctx, cmask, ops, tr, he, K, use_code, use_graph, epochs=400, seed=0, r=256,
                    n_heads=1, log=print):
-        import torch
+        import torch, time
         torch.manual_seed(seed)
-        d = g.shape[1]; net = Refiner.Net(d, r=r, n_op=ops.shape[0], n_heads=n_heads, max_K=max(K, 8))
-        T = lambda x: torch.as_tensor(x, dtype=torch.float32)
-        g, f, ctx, ops = T(g), T(f), T(ctx), T(ops); cm = torch.as_tensor(cmask)
+        dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        d = g.shape[1]; net = Refiner.Net(d, r=r, n_op=ops.shape[0], n_heads=n_heads, max_K=max(K, 8)).to(dev)
+        T = lambda x: torch.as_tensor(x, dtype=torch.float32).to(dev)
+        g, f, ctx, ops = T(g), T(f), T(ctx), T(ops); cm = torch.as_tensor(cmask).to(dev)
         opt = torch.optim.Adam(net.parameters(), lr=1e-3, weight_decay=1e-4)
         Fn = torch.nn.functional.cosine_similarity
-        for _ in range(epochs):
+        t0 = time.time()
+        for ep in range(epochs):
             net.train(); opt.zero_grad()
             h = net(g[tr], ctx[tr], cm[tr], ops, K, use_code, use_graph)
             loss = (1 - Fn(h, f[tr])).mean(); loss.backward(); opt.step()
+            if (ep + 1) % 100 == 0 or ep == epochs - 1:
+                log(f"      ep {ep+1}/{epochs} loss={loss.item():.4f} ({time.time()-t0:.0f}s)")
         net.eval()
         with torch.no_grad():
             h = net(g[he], ctx[he], cm[he], ops, K, use_code, use_graph)
-            return float(Fn(h, f[he]).mean())
+            cos = float(Fn(h, f[he]).mean())
+        net.cpu()
+        return cos
 
 
     class TopologyNet(_nn.Module):
@@ -261,22 +269,28 @@ class Refiner:
             return h
 
     @staticmethod
-    def _train_net(cls, g, f, ctx, cmask, ops, tr, he, K, epochs=400, seed=0, r=256):
+    def _train_net(cls, g, f, ctx, cmask, ops, tr, he, K, epochs=400, seed=0, r=256, log=print):
         """Train+eval any net with forward(g, ctx, cmask, ops, K)."""
-        import torch
+        import torch, time
         torch.manual_seed(seed)
-        d = g.shape[1]; net = cls(d, r=r, n_op=ops.shape[0])
-        T = lambda x: torch.as_tensor(x, dtype=torch.float32)
-        gt, ft, ct, ot = T(g), T(f), T(ctx), T(ops); cm = torch.as_tensor(cmask)
+        dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        d = g.shape[1]; net = cls(d, r=r, n_op=ops.shape[0]).to(dev)
+        T = lambda x: torch.as_tensor(x, dtype=torch.float32).to(dev)
+        gt, ft, ct, ot = T(g), T(f), T(ctx), T(ops); cm = torch.as_tensor(cmask).to(dev)
         opt = torch.optim.Adam(net.parameters(), lr=1e-3, weight_decay=1e-4)
         Fn = torch.nn.functional.cosine_similarity
-        for _ in range(epochs):
+        t0 = time.time()
+        for ep in range(epochs):
             net.train(); opt.zero_grad()
             h = net(gt[tr], ct[tr], cm[tr], ot, K)
             loss = (1 - Fn(h, ft[tr])).mean(); loss.backward(); opt.step()
+            if (ep + 1) % 100 == 0 or ep == epochs - 1:
+                log(f"      ep {ep+1}/{epochs} loss={loss.item():.4f} ({time.time()-t0:.0f}s)")
         net.eval()
         with torch.no_grad():
-            return float(Fn(net(gt[he], ct[he], cm[he], ot, K), ft[he]).mean())
+            cos = float(Fn(net(gt[he], ct[he], cm[he], ot, K), ft[he]).mean())
+        net.cpu()
+        return cos
 
 
 def _discover_ops(disp_tr, n_op, seed=0):
