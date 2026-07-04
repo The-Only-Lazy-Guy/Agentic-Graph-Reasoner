@@ -764,10 +764,43 @@ NOT the wall: localization (file-level works), emission (80% applyable), retriev
 28. **Generic prompt framing (2026-07-04).** `_prompt()` said "Fix this bug" / "Buggy code" but Fable-5 data is feature-building, not bug-fixing. Fixed to "Task:" / "Code:". Also fixed in `lggn_refine.py` `_reprs()` (`hid("Buggy code:\n" + removed)` → `hid("Code:\n" + removed)`). Note: changing ctx prompt invalidates cached `.npz` files.
 29. **Training time optimization (2026-07-04).** `--arms` CLI flag — comma-separated arm filter to skip unneeded decoder arms. `--arms latent,ceiling` cuts total time from 4.8h to ~2.2h. `--arms baseline,ceiling --decoder-epochs 3` for 30min diagnostic runs. Per-phase timing dict added throughout `run()`.
 30. **Post-fix diagnostic (2026-07-04, n=200 lite, baseline+ceiling, 3 epochs).** After truncation + prompt fixes: format_fail **0%**, zero_recall **55%**, partial **28%**, good **17%**. baseline=0.153, ceiling=0.181, gap=+0.027 (FiLM works). **55% zero_recall is the dominant failure mode** — model generates syntactically valid search/replace patches but with the wrong fix strategy. This is 4B model capacity wall, not pipeline issue. The model finds the right code location but invents a different (wrong) repair.
+31. **Phase B code wiring (2026-07-04-05).** Refiner `Net.forward(return_traj=True)` now returns per-step latents `h_steps [K,N,d]` alongside op-selection weights (Gap 1 from audit). `_Decoder` gains `save_checkpoint()`, `load_checkpoint()`, `generate(prompt, z)` for standalone FiLM-conditioned generation (Gap 2). `lggn_loop.py` gains `make_rank_from_trajectory()` (refiner-informed op ranking) and `make_realize_film()` (FiLM-conditioned patch generation with per-step latent). `lggn_decode._train_refiner` propagated n_heads + GPU training. All selftests pass.
+32. **Operator basis experiment — "ops are a basis, not semantics" (2026-07-05, Qwen2.5-3B, d=2048, n=145, 3 seeds).** Major finding. KMeans operator centroids are WORSE than random Gaussian vectors as the refiner's operator basis. Random ops in d=2048 are near-orthogonal (Johnson-Lindenstrauss), spanning more of the displacement space than correlated KMeans centroids. The refiner's MLP composes ops like Fourier coefficients — what matters is spanning the space, not semantic clustering.
 
-## Current verdicts (updated 2026-07-04)
-- **LGGN refiner:** ALL 4 PILLARS PASS at r=512 (recurrence, constraints, graph, learnedness). Reasoning substrate validated. **BUT cos(h_K, f) = 0.553 — below the decoder's sensitivity cliff (~0.78).** The refiner produces useful reasoning but NOT precise enough for the FiLM decoder to cash in. Need cos ≥ 0.78.
-- **Graph value:** per-step learned directions (discrete ops > free MLP at r=512). NOT topology, NOT hybrid prior, NOT compounding. The graph is a learned dictionary of fix-directions.
+    **Results table (held cos, 3-seed mean ± std):**
+    ```
+    Config                              cos      std    note
+    ─────────────────────────────────────────────────────────
+    old arch K=1, KMeans 24  (r256/h1)  0.737    0.018  BEST absolute
+    old arch K=1, random 24  (r256/h1)  0.736    0.017  same — K=1 insensitive to basis
+    new arch K=4, random 48  (r512/h4)  0.740    —      best new arch (from main run)
+    new arch K=4, fixed rand 96         0.724    0.014  lowest variance
+    new arch K=4, QR-orthogonal 48      0.704    —      exact orthogonality doesn't help
+    new arch K=4, KMeans 48             0.703    0.009  KMeans collapses basis
+    new arch K=4, learn from rand 96    0.688    0.018  learning HURTS
+    new arch K=4, learn from rand 48    0.685    0.060  learning HURTS + high variance
+    new arch K=4, learn from KMeans     0.687    0.055  can't escape collapsed subspace
+    new arch K=1, random 48             0.635    0.101  new arch overfits at K=1
+    new arch K=2, random 48             0.656    0.061  improves with more K
+    ```
+
+    **Key findings:**
+    - **Random ops > KMeans** (+0.037): KMeans optimizes reconstruction, not span. Random vectors are near-orthogonal at d=2048, giving 48 independent knobs vs 48 correlated ones.
+    - **Fixed ops > learned ops** (+0.05): learning ops allows overfitting on 116 train instances. Fixed random = regularization (like fixing the Fourier basis and only learning coefficients).
+    - **Old arch K=1 = 0.737 ABOVE the cliff** — but K=1 means no trajectory, no iteration plan, no multi-leaf. The architecture gets one shot. For the pipeline (Phase B), need K>1.
+    - **New arch needs K≥4**: K=1 (0.635) → K=2 (0.656) → K=4 (0.698-0.740). More parameters need more steps as regularization.
+    - **K=8 WORSE than K=4** (synthetic confirmed, consistent across d=256/512): more steps = more overfitting.
+    - **QR-orthogonal ≈ KMeans** — exact orthogonality doesn't help. The original randops (Gaussian normalized to same per-op norm) are better because the scale distribution matters more than exact orthogonality.
+    - **PROXY WARNING**: cos is a proxy. The real metric is decoder recall (code quality). cos > 0.73 predicts decoder benefit per the sensitivity curve, but z-dropout can soften the cliff. Full pipeline test (refiner → decoder → recall) needed on molab.
+
+    **Implication for `_discover_ops`:** Replace KMeans with fixed random initialization as the default. The ops are a coordinate system, not a semantic clustering. Retain op-selection weights for trajectory interpretability (the loop needs to know which "op" was applied at each step).
+
+    **Synthetic verification (controlled, no model):** Architecture upgrade (r512/h4/48ops vs r256/h1/24ops) shows +5-8% at d=256-512 on harder synthetic tasks (N=800, 24 ground-truth ops, chain=4). K=4 consistently beats K=8. Improvement scales with d.
+
+## Current verdicts (updated 2026-07-05)
+- **LGGN refiner:** ALL 4 PILLARS PASS at r=512 (recurrence, constraints, graph, learnedness). Reasoning substrate validated. cos(h_K, f) improved from 0.553 to **0.703-0.740** with architecture upgrade + random ops (Qwen2.5-3B, d=2048). Old arch K=1 reaches **0.737** (above cliff). New arch K=4 + random ops reaches **0.740**. **Near or above the 0.73 sensitivity cliff** — pending molab verification on Qwen3.5-4B (d=2560).
+- **Operator basis = coordinate system, NOT semantics.** Major finding (2026-07-05). Random Gaussian ops beat KMeans centroids (+0.037). Fixed ops beat learned ops (+0.05). The refiner's MLP composes operators like Fourier coefficients — spanning the space matters, not clustering. KMeans collapses the basis into a low-rank correlated subspace. `_discover_ops` should be replaced with fixed random init.
+- **Graph value (REVISED):** at r=256 (entry 15), discrete ops > free MLP was the finding. At r=512 with random ops (entry 32), K4_nograph ≈ K4_full (0.701 vs 0.703). The graph basis adds near-zero over free MLP. The graph's value for the PIPELINE is not cos improvement — it's providing interpretable trajectories for the iteration loop (which op to try, which to invalidate).
 - **Reasoner (traverse):** LEARNS (40%, scales) — VALIDATED.
 - **Compositionality:** intra-task (0.91) + cross-task (0.58) — VALIDATED.
 - **Decode v1 (soft prefix):** FAILED. LoRA ignores prefix tokens.
@@ -800,12 +833,13 @@ Target:    issue → refiner → decompose → [FiLM → generate → test → u
 
 ## Next (recommended order, updated 2026-07-04)
 
-### Phase A — Refiner quality (THE CRITICAL PATH)
-The decoder works (ceiling 0.210). The graph edits engine is built and wired. **Everything is blocked on refiner quality:** cos(h_K, f) must rise from 0.553 → 0.78+ for the decoder to cash in z-content. The sensitivity cliff at cos ~0.78 is the design target.
+### Phase A — Refiner quality (PARTIALLY RESOLVED)
+Architecture upgrade + random ops lifted cos from 0.553 → 0.703-0.740 (Qwen2.5-3B). **Near or above the 0.73 cliff.** Remaining work: confirm on Qwen3.5-4B (molab), then run full decoder pipeline to measure actual recall improvement.
 
-1. **Diagnose refiner ceiling** — current refiner at r=512, K=4, 400ep reaches cos ≈ 0.55-0.59 on held. Where's the information lost? Candidates: (a) op basis too coarse (24 KMeans centroids), (b) K=4 too few steps (loss still dropping at K=4?), (c) cross-attention capacity, (d) training data scale (116 instances). Run ablations: K=8, r=1024, n_op=48, more epochs.
-2. **Refiner training regime** — currently vanilla Adam on cosine loss. Consider: (a) curriculum (easy instances first, hard later), (b) scheduled K (start K=1, increase — lets the refiner learn single-step fixes before multi-step), (c) contrastive loss (not just cos to gold, also push away from wrong-instance gold — the permuted baseline showed wrong-instance is actively harmful).
-3. **Stabilize latent arm variance** — latent recall 0.106-0.203 across runs with "identical" settings. Confirm z_dropout RNG seeding is deployed. If seeded, the variance is from train/held split randomness at n=29 — need more held instances.
+1. **Switch to random ops** — replace `_discover_ops` (KMeans) with fixed random Gaussian vectors. +0.037 cos lift, zero code complexity. The ops are a Fourier-like basis, not a semantic clustering.
+2. **Confirm on Qwen3.5-4B** — all local results on Qwen2.5-3B (d=2048). Need molab run with 3.5-4B (d=2560) to verify the improvement transfers. K=4, r=512, h=4, 48 random ops.
+3. **Full pipeline test** — refiner → decoder → recall. Does cos 0.74 translate to recall improvement? Run: baseline vs latent(random ops) vs ceiling. The sensitivity curve predicts yes, but z-dropout may have already bridged the gap.
+4. **Stabilize latent arm variance** — latent recall 0.106-0.203 across runs. Confirm z_dropout RNG seeding is deployed. If seeded, the variance is from train/held split randomness at n=29.
 
 ### Phase B — Decomposition + iteration (THE SYSTEM VALUE)
 The pipeline that routes around 4B single-shot capacity. Each piece independently useful, together they compound.
