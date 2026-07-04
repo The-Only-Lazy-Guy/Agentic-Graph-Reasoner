@@ -295,9 +295,9 @@ class _FiLMModule(nn.Module):
 # ── decoder (LoRA Qwen + FiLM conditioning from latent) ──────────────────────
 
 def _prompt(text):
-    return (f"Fix this bug.\n\nIssue:\n{text['issue']}\n\nBuggy code:\n{text['code']}\n\n"
+    return (f"Task:\n{text['issue']}\n\nCode:\n{text['code']}\n\n"
             "Output ONLY a search/replace block:\n"
-            "<<<<<<< SEARCH\n<exact buggy code>\n=======\n<fixed code>\n>>>>>>> REPLACE")
+            "<<<<<<< SEARCH\n<original code>\n=======\n<updated code>\n>>>>>>> REPLACE")
 
 
 def _target(text):

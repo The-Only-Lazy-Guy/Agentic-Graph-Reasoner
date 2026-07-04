@@ -79,7 +79,7 @@ def _reprs(model_name, dataset, split, n, layer_frac=0.6, t_ctx=48, cache="artif
             continue
         G.append(hid(i.get("problem_statement") or ""))
         F.append(hid(fx))
-        c = hid("Buggy code:\n" + removed, seq=True)                      # [Tc, d] the constraint set
+        c = hid("Code:\n" + removed, seq=True)                              # [Tc, d] the constraint set
         idx = np.linspace(0, len(c) - 1, min(t_ctx, len(c))).astype(int)
         c = c[idx]
         pad = np.zeros((t_ctx - len(c), c.shape[1]), c.dtype)
