@@ -939,7 +939,47 @@ NOT the wall: localization (file-level works), emission (80% applyable), retriev
     - **raw_g dropped** (0.336 vs 0.394 in broken run). Aggregated sessions have longer concatenated text → different Qwen embeddings → different raw alignment. Direct also dropped (0.533 vs 0.637), confirming different held set composition.
     - **The model IS a general agentic coder.** Bug fixes + feature-building coexist in the same refiner when data preparation is correct. "Domain mismatch" was always a misdiagnosis.
 
-    **Next:** K=4 on lite+fable5 (aggregated) to compare against the 0.740 lite-only peak.
+    **Next:** ~~K=4 on lite+fable5 (aggregated) to compare against the 0.740 lite-only peak.~~ DONE in entry 38.
+
+38. **K=4 on lite+fable5 (aggregated) — recurrence plateau (2026-07-05, Qwen2.5-3B, d=2048, n=722, 5 seeds).** Mixed data works, but K=4 doesn't beat K=1.
+
+    **Results (Qwen2.5-3B, d=2048, lite+fable5 aggregated, r=512, K=4, 5 seeds):**
+    ```
+    Config         cos     std     note
+    ───────────────────────────────────────────────────
+    raw_g          0.336   0.005   starting point
+    direct         0.538   0.005   no refinement
+    K1_full        0.673   0.013   strong single-step
+    K4_full        0.672   0.025   recurrence flat (K4≈K1)
+    K4_nocode      0.624   0.011   code helps (+0.047 PASS)
+    K4_nograph     0.656   0.022   graph neutral (+0.016)
+    K4_randops     0.672   0.022   random = learned
+    ```
+
+    **lite-only vs lite+fable5 (K=4, r=512):**
+    ```
+    Metric              lite-only (n=145)   lite+fable5 (n=722)
+    ──────────────────────────────────────────────────────────
+    K1_full             0.637               0.673 (+0.036)
+    K4_full             0.703               0.672 (-0.031)
+    K4_randops          0.740               0.672 (-0.068)
+    K4-direct           +0.160              +0.134 (both PASS)
+    K4-K1               +0.067              -0.002 (flat)
+    constraints         +0.013 flat         +0.047 PASS
+    ```
+
+    **Key findings:**
+    - **K1 benefits from more data** (+0.036). Single-step refiner generalizes better with 722 instances.
+    - **K4 recurrence plateau.** K4≈K1 on mixed data vs K4>>K1 on lite-only. Diverse task distribution may need more steps or more epochs to benefit from recurrence. Some K4 training losses remain high (0.29-0.31), suggesting 400 epochs insufficient for 578 training instances.
+    - **Constraints signal STRONGER** on mixed data (+0.047 vs +0.013). Code attention matters more when tasks are diverse — code distinguishes bug-fix from feature-building context.
+    - **Held set composition differs** — 69% fable5 here vs 100% SWE in lite-only. Absolute cos not directly comparable. Per-domain held cos needed for apples-to-apples.
+    - **Refiner IS a general agentic coder.** K4-direct = +0.134 (strong PASS) on mixed bug-fix + feature-building data. The model learns displacement structure across task types.
+
+    **Options for improving K4 on mixed data:**
+    - More epochs (800-1000) — some seeds show training not converged
+    - Larger r (1024) — K=2 r=1024 entry 37 got K1=0.658 vs here K1=0.673 at r=512, so r isn't the bottleneck
+    - K=8 — unlikely (K=8 hurt on lite-only)
+    - Per-domain held cos breakdown — understand if fable5 instances are inherently lower cos
 
 ## Current verdicts (updated 2026-07-05)
 - **LGGN refiner:** ALL 4 PILLARS PASS at r=512 (recurrence, constraints, graph, learnedness). Reasoning substrate validated. cos(h_K, f) improved from 0.553 to **0.703-0.740** with architecture upgrade + random ops (Qwen2.5-3B, d=2048). Old arch K=1 reaches **0.737** (above cliff). New arch K=4 + random ops reaches **0.740**. **Near or above the 0.73 sensitivity cliff.** Qwen3.5-4B (d=2560) verified: peaks at **0.584** — significantly worse. **Use Qwen2.5-3B (d=2048) as refiner backbone.**
