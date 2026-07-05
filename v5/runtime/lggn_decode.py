@@ -827,7 +827,7 @@ def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
                        use_molora=use_cond and use_molora,
                        n_experts=n_experts, expert_r=expert_r,
                        bottleneck=bottleneck)
-        warmup = film_warmup if use_film else 0
+        warmup = film_warmup if use_cond else 0
         dec.train_on(texts, latents, tr, epochs=decoder_epochs, film_warmup=warmup,
                      z_dropout=zdrop, log=log)
         do_diag = arm_name in ("baseline", "ceiling")
@@ -840,7 +840,7 @@ def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
         raw_gens[arm_name] = raws
         results[arm_name] = mean_rec; per_inst[arm_name] = recs
         log(f"    {arm_name}: held recall = {mean_rec:.3f}")
-        if arm_name == "latent" and use_film:
+        if arm_name == "latent" and use_cond:
             latent_behs_he = dec.behavior_embeddings(latents, he)
             ops_behavior = dec.behavior_embeddings(ops, list(range(len(ops))))
             log(f"    extracted {len(latent_behs_he)} behavior embs (d={latent_behs_he.shape[1]})")
