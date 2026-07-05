@@ -32,14 +32,42 @@ This doc is the canonical design. It supersedes the single-vector "floor" (`swe_
 | **Graph edits wiring** (`graph_edits.py` + `lggn_decode.py` phase 4) | 10 structural edits · selftest PASSES · wired to real FiLM outcomes: top-2 trajectories, verified-based seeding, all 7 per-outcome + maintenance edits fire | **BUILT.** 3 semantic issues found and fixed: (1) MINT dead (trajectory always populated) — not fixable without DERIVE branch, (2) CONNECT/COMPOSE dead from argmax lock-in — fixed via top-2 distinct-op trajectory, (3) seed behavior_embs wrong space — fixed via mean of verified h_K projections. Graph→decode loop still OPEN (write-only, no retrieval→decode path yet). |
 | **Fable-5 HF integration** (`lggn_decode.py`, `_load_fable5_texts`) | 4782 agentic coding sessions from `Glint-Research/Fable-5-traces` · str_replace displacement pairs (old→new) extracted · `--dataset fable5\|lite+fable5` | **BUILT** |
 | **Decoder diagnostic breakdown** (n=200 lite, post-fixes) | format_fail **0%** · zero_recall **55%** · partial **28%** · good **17%** · baseline 0.153 · ceiling 0.181 | **MEASURED.** 55% zero_recall = 4B capacity wall (valid patches, wrong fix strategy). Truncation fixed (14%→0%). |
+| **Decode v2 — MoLoRA** (`lggn_decode.py --molora`, 8ep/2warmup, Qwen2.5-3B, n=29 held) | run A: baseline **0.121** · latent **0.192** (+0.071, first latent>baseline) · run B (ceiling-only): **0.120** · 66% zero_recall | **MECHANISM TRAINS, CONTENT DOESN'T TRANSMIT.** Ceiling ≈ baseline band (0.12-0.19 = n=29 noise). z (2048d→64d→4 experts) physically cannot carry literal identifiers; the recall metric demands them. Needs ≥6 effective epochs (2ep = noise). |
+| **ARCHITECTURE v2 PIVOT** (2026-07-06) | graph reasons, LM realizes: refiner h_K → tracer (z→trace text) → frozen realizer (trace+span→edit). Trained on REAL Fable-5 (thinking→str_replace) pairs | **DESIGNED + M1 BUILT.** See §Architecture v2. Kills the content-through-z fallacy: z carries WHAT-TO-DO (semantic), the span carries identifiers (literal). |
 
 **Honest negatives the kill-tests caught** (right-for-the-right-reason): signature operators were goal-blind (~chance → embedding ops fixed it); raw topology 65% was a self-loop artifact (op-change is the real 38%); Fable-greenfield obs=0% (no failures → domain-mismatch, rescued on SWE debug); retrieval has no resolve headroom (best-of-3=top-1).
 
-**One-line thesis status (2026-07-04):** LGGN reasoning substrate **validated** (refiner at r=512, 5-seed CI, all 4 pillars pass). FiLM decode mechanism **validated** — ceiling 0.210, decoder CAN read gold representations. Graph edits engine **built and wired** to real outcomes. **Fable-5 HF dataset wired** to decoder pipeline (`Glint-Research/Fable-5-traces`, 4782 sessions, str_replace displacement pairs). **Diagnostic breakdown** after truncation fix (256→512 tokens): format_fail **0%**, zero_recall **55%**, partial 28%, good 17%. The 55% zero_recall = **4B model capacity wall** (generates valid patches, wrong fix strategy), not pipeline issue. **The WALL is STILL the REFINER:** h_K at cos 0.561 is below the decoder's sensitivity cliff (~0.78). **Next:** improve refiner quality (cos 0.56 → 0.78+), THEN close the graph→decode→verify→graph loop. Model size discussion pending.
+**One-line thesis status (2026-07-06):** LGGN reasoning substrate **validated** (refiner cos 0.703-0.740, near/above the 0.73 cliff). Conditioning mechanisms (FiLM, MoLoRA) **train but cannot transmit content**: MoLoRA ceiling with GOLD fix reprs = 0.120-0.192 recall, 66% zero_recall — z is a semantic channel, the recall metric demands literal identifiers. **ARCHITECTURE v2 PIVOT (§Architecture v2): graph reasons, LM realizes.** The refiner's h_K retargets to TRACE space (reasoning, compressible); a tracer LM decodes z into a ~100-token reasoning trace; a frozen realizer LM (trained on real Fable-5 thinking→edit pairs, raw completion, zero instruction text) turns (trace + old span) into the new span. Identifiers ride the span, semantics ride z — each channel does what it physically can. M1 (realizer) built; gates G1a-c falsify or confirm the premise before M2 (tracer) starts.
 
 **CORRECTION (2026-07-01) — resolve is UNBUILT, not closed.** The HRM lens exposed the gap: HRM iterates *against the puzzle state*; we only ever ran a one-shot operator picker + frozen executor. `iterative_refine.py` probe: iteration on a *static goal-embedding* is FLAT (K=1..8 ≈ 0.39) — a fixed input has no constraints to propagate.
 
 **UPDATE (2026-07-02) — the TRAINED REFINER is now VALIDATED.** `lggn_refine.py` builds exactly the missing piece: a trained refiner that iterates h_t against code-token hidden states (the constraint environment), selecting graph operators each step. At r=512, all 4 pillars PASS (5-seed CI). The refiner reaches cos=0.593 with the gold fix in Qwen space — the *reasoning* works. **What remains:** (1) a **trained decoder** that turns h_K into the actual patch (the decode wall — frozen 4B can't cash in the composition), (2) the **loop assembled** (traverse→realize→verify→refine), (3) **write-back** — successful trajectories feed back into the graph as new/strengthened operators (the growth mechanism). The r=256→512 flip taught us the policy projection was capacity-starved; the graph earns its place when given enough room. Extended tests (topology/hybrid/compounding all flat) tell us: don't complicate the op selection — the value is in the learned directions themselves.
+
+---
+
+## ARCHITECTURE v2 — GRAPH USES LM (reasoner/realizer split, 2026-07-06)
+
+**The diagnosis that forced it** (all verified in code + molab runs):
+1. **z cannot carry content.** MoLoRA ceiling (z = GOLD fix repr) = 0.120-0.192 recall, 66% zero_recall. The metric demands literal tokens (`.clone()`, `atomic` — identifiers absent from the input); a 2048d→64d bottleneck routing 4 experts transmits semantics only. Conditioning selects strategies; it cannot inject identifiers. Same conclusion as FiLM, one level deeper: the fallacy was asking ANY conditioning channel to do content injection.
+2. **The task was partly impossible.** `extract_hunks` drops all diff context lines; issue truncated to 700 chars. Gold REPLACE lines often reference identifiers invisible in the input.
+3. **One LM call entangled** understanding + localization + generation — the 3B fails at the first two.
+4. **n=29 single-split eval was noise** (12% vs 19% across runs = the same band).
+5. **The best supervision was unused.** `ingest_fable5.parse_session` already extracts `intent` = the assistant's thinking immediately before each edit tool-call. The LGGN pipeline read only old/new strings — the (reasoning → edit) pairs, Fable-5's core signal, were dropped.
+
+**The flip:** stop making the LM reason (LM-uses-graph); make the graph reason and call the LM as a bounded micro-executor (graph-uses-LM).
+
+```
+issue+code reprs → LGGN refiner → h_K   (retargeted: trace-repr space, not fix-repr space)
+                       ↓
+   TRACER LM  (input: old span only; MoLoRA z=h_K) → ~100-token reasoning trace
+                       ↓
+   REALIZER LM (frozen; input: old span + trace)   → edited span
+```
+
+- **Realizer (M1):** raw completion on base Qwen2.5-3B, NO chat template, NO instruction text. Prompt = `old + "\n###T\n" + trace + "\n###N\n"`, target = `new + EOS`. Trained on real Fable-5 (thinking, old_string, new_string) triples (per-edit, fresh-intent only, goal-level split). Metric = **added-line recall** (gold lines absent from input; copying scores 0). Arms: trace vs notrace vs shuffled-trace (derangement). Gates: G1a trace ≥ 0.15 · G1b trace−notrace ≥ +0.05 every seed · G1c true−shuffled ≥ +0.05. NO-GO on G1b/G1c falsifies the premise.
+- **Tracer (M2):** same RawLM + MoLoRA, prompt = `old + "\n###T\n"` (a strict prefix of the realizer prompt — future single-pass merge stays open), target = trace. The tracer input has NO goal text, so z is the only intent channel (clean attribution). Arms: baseline/constant/latent/ceiling. Gates: G2 refiner-retarget cos ≥ 0.45 · G3 ceiling-first e2e ceiling−baseline ≥ +0.05 · G4 latent−baseline ≥ +0.03 every seed.
+- **Why the trace fits z when code didn't:** the trace is SEMANTIC (compressible, ~100 tokens of what-to-do); identifiers now come from the span sitting in the realizer's context. Literature: Coconut (arXiv 2412.06769, latent reasoning > discrete CoT), R-Capsule (2509.22131, bottlenecked plan capsules condition generation), CodePLAN (2403.13271, plan distillation lifts small-model code gen +130%), Agentless (2407.01489, decomposed pipeline beats agents on SWE-bench Lite), GrACE/Coeditor (2305.14129/2305.18584, intent-conditioned edit prediction with small models). Nobody combines real agent traces as supervision + graph-refined latent → trace decode + frozen realizer.
+- **Files:** `v5/training/ingest_fable5.py` (`parse_session_triples`, `--ingest-triples`), `v5/runtime/lggn_realizer.py` (M1: loader funnel, RawLM, added_recall, arms+gates), `v5/runtime/lggn_tracer.py` (M2, pending M1 gates). SWE-bench eval explicitly deferred until M2 passes (transfer needs a localization stage à la Agentless).
 
 ---
 
@@ -981,7 +1009,27 @@ NOT the wall: localization (file-level works), emission (80% applyable), retriev
     - K=8 — unlikely (K=8 hurt on lite-only)
     - Per-domain held cos breakdown — understand if fable5 instances are inherently lower cos
 
-## Current verdicts (updated 2026-07-05)
+39. **MoLoRA implemented + molab runs — mechanism trains, content doesn't transmit (2026-07-05/06, Qwen2.5-3B, n=29 held).** `_MoLoRAModule` (mixture of 4 LoRA experts per layer, z routes via softmax; B=0 init = exact no-op) replaced FiLM as the conditioner (`--molora`). Selftest covers identity init, gradient flow, z-sensitivity, per-layer independence. Two bugs caught in review before molab: `use_film` NameError at the arm loop (warmup + behavior-embedding extraction) after the `use_cond` rename.
+
+    **Molab results:**
+    ```
+    Run                              baseline   latent   ceiling   note
+    ─────────────────────────────────────────────────────────────────
+    2ep (1 effective)                0.117      ~equal   0.134     experts unspecialized, noise
+    8ep (6 effective)                0.121      0.192    (timeout) first latent > baseline (+0.071)
+    8ep ceiling-only (separate run)  —          —        0.120     66% zero_recall, 21% partial, 10% good
+    ```
+
+    **Key findings:**
+    - **MoLoRA needs ≥6 effective epochs.** At 2 epochs the router hasn't specialized; loss is noise.
+    - **Ceiling ≈ baseline band.** 0.120-0.192 across runs is the n=29 single-split noise band (if ~15% of instances are 3B-solvable, held draws give 10-28%). Neither the +0.071 nor the 0.120 is reliable.
+    - **66% zero_recall with GOLD z.** Even handing the conditioner the gold fix repr, the model produces valid-format wrong-content patches. z carries strategy; recall demands literal identifiers. **Content-through-z is architecturally dead** — this, plus the input-impossibility audit (removed-lines only, no context, issue[:700]), forced the v2 pivot.
+
+40. **ARCHITECTURE v2 pivot — graph uses LM (2026-07-06).** Full diagnosis + design in §Architecture v2. Reasoner/realizer split: refiner h_K retargets to TRACE-repr space; tracer LM decodes z → ~100-token reasoning trace; frozen realizer LM (trace + old span → new span) trained on REAL Fable-5 (thinking → str_replace) triples — the supervision `parse_session` extracted but the pipeline never used. Raw completion, no chat template, zero instruction text (2 fixed separators, ~5 tokens). New metric **added_recall** (gold lines absent from input; copy scores 0). Goal-level md5 split, 3 seeds, falsifiable gates G1-G4 with a NO-GO that kills the architecture before M2 compute. Built this session: `parse_session_triples` + `--ingest-triples` (ingest_fable5.py, selftest PASS), `lggn_realizer.py` (loader funnel, RawLM, M1 arms trace/notrace/shuffled, gates, selftest PASS). Related work: Coconut, R-Capsule, iCLP, CodePLAN, Agentless, GrACE/Coeditor (see §Architecture v2). SWE-bench eval deferred until M2 passes.
+
+## Current verdicts (updated 2026-07-06)
+- **Decode v2 — MoLoRA:** mechanism trains (needs ≥6 effective epochs) but **content does not transmit**: ceiling with gold fix reprs = 0.120-0.192 = the n=29 noise band; 66% zero_recall. Conditioning (FiLM or MoLoRA) selects strategy, cannot inject identifiers. **Closes the content-through-z line.**
+- **ARCHITECTURE v2 (active):** graph reasons, LM realizes — refiner h_K (trace space) → tracer (z→trace) → frozen realizer (trace+span→edit) on real Fable-5 (thinking→edit) triples. M1 realizer BUILT (selftests pass); M1 molab gates G1a-c decide GO/NO-GO for M2 tracer. See §Architecture v2.
 - **LGGN refiner:** ALL 4 PILLARS PASS at r=512 (recurrence, constraints, graph, learnedness). Reasoning substrate validated. cos(h_K, f) improved from 0.553 to **0.703-0.740** with architecture upgrade + random ops (Qwen2.5-3B, d=2048). Old arch K=1 reaches **0.737** (above cliff). New arch K=4 + random ops reaches **0.740**. **Near or above the 0.73 sensitivity cliff.** Qwen3.5-4B (d=2560) verified: peaks at **0.584** — significantly worse. **Use Qwen2.5-3B (d=2048) as refiner backbone.**
 - **Operator basis = coordinate system, NOT semantics.** Major finding (2026-07-05). Random Gaussian ops beat KMeans centroids (+0.037). Fixed ops beat learned ops (+0.05). The refiner's MLP composes operators like Fourier coefficients — spanning the space matters, not clustering. KMeans collapses the basis into a low-rank correlated subspace. `_discover_ops` should be replaced with fixed random init.
 - **Graph value (REVISED):** at r=256 (entry 15), discrete ops > free MLP was the finding. At r=512 with random ops (entry 32), K4_nograph ≈ K4_full (0.701 vs 0.703). The graph basis adds near-zero over free MLP. The graph's value for the PIPELINE is not cos improvement — it's providing interpretable trajectories for the iteration loop (which op to try, which to invalidate).

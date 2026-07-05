@@ -14,17 +14,20 @@ mixed file schemas -> we download raw + parse manually, per session.
 
   python -m v5.training.ingest_fable5 --probe --n 3        # parse a few SESSION files
   python -m v5.training.ingest_fable5 --ingest --limit 0   # -> data/fable5/realizer_corpus.jsonl
+  python -m v5.training.ingest_fable5 --ingest-triples     # -> data/fable5/realizer_triples.jsonl
   python -m v5.training.ingest_fable5 --selftest           # synthetic session, no network
 """
 from __future__ import annotations
 
 import argparse
+import ast
 import gzip
 import json
 from pathlib import Path
 
 DATASET = "Glint-Research/Fable-5-traces"
 OUT = "data/fable5/realizer_corpus.jsonl"
+OUT_TRIPLES = "data/fable5/realizer_triples.jsonl"
 _SKIP = ("history.jsonl",)                                 # session index, not traces
 
 _EDIT_TOOLS = ("edit", "write", "str_replace", "apply_patch", "create_file", "patch",
@@ -130,6 +133,75 @@ def parse_session(events: list, sid: str = "") -> list[dict]:
     return out
 
 
+def _edit_args(part: dict) -> dict:
+    """Edit tool-call part -> its arguments as a dict (arguments may be a JSON/py-literal string)."""
+    args = part.get("arguments") or part.get("input")
+    if isinstance(args, str):
+        for parse in (json.loads, ast.literal_eval):
+            try:
+                args = parse(args)
+                break
+            except Exception:
+                continue
+    return args if isinstance(args, dict) else {}
+
+
+def parse_session_triples(events: list, sid: str = "") -> list[dict]:
+    """A session's event stream -> [{goal, intent, old, new, file_path, tool, session_id, fresh}].
+    Unlike parse_session (which flattens the edit to ONE payload field and drops old_string), this
+    keeps BOTH sides of a str_replace-style edit — the realizer needs (intent, old) -> new.
+    Only edits with non-empty old AND new are emitted (mechanically excludes write/create_file).
+    fresh=True only for the FIRST edit after each text/thinking part: parse_session never clears
+    intent, so consecutive tool-calls share one stale thinking block (one-to-many supervision noise
+    the loader can filter on)."""
+    goal = _goal(events)
+    out, intent, fresh = [], "", False
+    for ev in events:
+        for p in _parts(ev):
+            txt = p.get("text") or p.get("thinking") or ""
+            if _is_edit(p):
+                args = _edit_args(p)
+                old = args.get("old_string") or args.get("old_str") or ""
+                new = args.get("new_string") or args.get("new_str") or ""
+                if isinstance(old, str) and isinstance(new, str) and old.strip() and new.strip():
+                    out.append({
+                        "goal": goal, "intent": intent[:2000],
+                        "old": old[:6000], "new": new[:6000],
+                        "file_path": (args.get("file_path") or args.get("path") or ""),
+                        "tool": (p.get("name") or "").lower(),
+                        "session_id": sid, "fresh": fresh,
+                    })
+                fresh = False                              # this thinking block is consumed
+            elif isinstance(txt, str) and txt.strip():
+                intent, fresh = txt, True
+    return out
+
+
+def ingest_triples(limit: int, out: str) -> None:
+    """All sessions -> per-edit (goal, intent, old, new) triples jsonl. Mechanical: keeps caveat
+    goals and stale-intent rows — the realizer LOADER filters (so filters stay tunable without
+    re-downloading)."""
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    files = _download_files()
+    if limit:
+        files = files[:limit]
+    n_sess = n_rows = n_fresh = 0
+    with open(out, "w", encoding="utf-8") as f:
+        for fp in files:
+            events = _read_events(fp)
+            if not events:
+                continue
+            n_sess += 1
+            for rec in parse_session_triples(events, fp.stem):
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                n_rows += 1
+                n_fresh += int(rec["fresh"])
+    print(f"ingested {n_sess} sessions -> {n_rows} (intent,old,new) triples ({n_fresh} fresh-intent) -> {out}")
+    print("AGPL-3.0 — research/eval only by default.")
+    if n_rows == 0:
+        print("WARN: 0 triples — run --probe; are old_string/new_string the real arg names?")
+
+
 def probe(n: int) -> None:
     files = _download_files()
     print(f"[fable5] {len(files)} session files (history.jsonl skipped); first: {[f.name for f in files[:3]]}")
@@ -199,6 +271,33 @@ def _selftest() -> bool:
     assert recs[0]["tool"] == "str_replace" and "retry(3)" in recs[0]["edit"], "edit payload"
     assert "retry" in recs[0]["intent"], "intent = preceding CoT"
     assert recs[0]["goal"].startswith("Add retry"), "goal from first user text"
+
+    # --- triples: both sides kept, create_file excluded, fresh/stale, string-encoded args ---
+    events2 = [
+        {"type": "msg", "message": {"role": "user", "content": [{"type": "text", "text": "Add retry with backoff to the http client."}]}},
+        {"type": "msg", "message": {"role": "assistant", "content": [
+            {"type": "thinking", "thinking": "I'll wrap get() in a retry(3) decorator."},
+            {"type": "tool_use", "name": "str_replace", "arguments":
+                {"file_path": "http.py", "old_string": "return _raw(url)", "new_string": "return retry(3)(_raw)(url)"}},
+            {"type": "tool_use", "name": "str_replace", "arguments":                    # 2nd edit, SAME thinking -> stale
+                {"file_path": "http.py", "old_string": "TIMEOUT = 5", "new_string": "TIMEOUT = 30"}}]}},
+        {"type": "msg", "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "Now create the test."},
+            {"type": "tool_use", "name": "create_file", "arguments":                    # no old_string -> excluded
+                {"file_path": "test_http.py", "content": "def test_retry(): ..."}},
+            {"type": "tool_use", "name": "edit", "arguments":                           # string-encoded args
+                '{"file_path": "http.py", "old_str": "MAX = 1", "new_str": "MAX = 3"}'}]}},
+    ]
+    trips = parse_session_triples(events2, "sess2")
+    for t in trips:
+        print(f"  triple tool={t['tool']:12} fresh={t['fresh']!s:5} old='{t['old'][:24]}' new='{t['new'][:24]}'")
+    assert len(trips) == 3, f"expected 3 triples (create_file excluded), got {len(trips)}"
+    assert trips[0]["old"] == "return _raw(url)" and "retry(3)" in trips[0]["new"], "both sides kept"
+    assert trips[0]["fresh"] and not trips[1]["fresh"], "fresh only for FIRST edit after thinking"
+    assert trips[2]["old"] == "MAX = 1" and trips[2]["new"] == "MAX = 3", "string-encoded args parsed"
+    assert not trips[2]["fresh"], "create_file (unemitted) still consumes the thinking block"
+    assert all(t["goal"].startswith("Add retry") for t in trips), "goal on every triple"
+    assert "retry" in trips[0]["intent"] and "test" in trips[2]["intent"], "intent carried per block"
     print("\n  FABLE5 INGEST SELFTEST -> PASS")
     return True
 
@@ -207,17 +306,21 @@ def main():
     ap = argparse.ArgumentParser(description="Ingest Fable-5 traces -> realizer/operator-mining corpus.")
     ap.add_argument("--probe", action="store_true", help="parse a few SESSION files; print tool names + samples")
     ap.add_argument("--ingest", action="store_true")
+    ap.add_argument("--ingest-triples", action="store_true",
+                    help="per-edit (goal,intent,old,new,fresh) triples -> data/fable5/realizer_triples.jsonl")
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--n", type=int, default=3, help="probe: edit records to dump")
     ap.add_argument("--limit", type=int, default=0, help="ingest: max sessions (0=all)")
-    ap.add_argument("--out", default=OUT)
+    ap.add_argument("--out", default="")
     a = ap.parse_args()
     if a.selftest:
         raise SystemExit(0 if _selftest() else 1)
     if a.probe:
         probe(a.n)
+    elif a.ingest_triples:
+        ingest_triples(a.limit, a.out or OUT_TRIPLES)
     elif a.ingest:
-        ingest(a.limit, a.out)
+        ingest(a.limit, a.out or OUT)
     else:
         ap.print_help()
 

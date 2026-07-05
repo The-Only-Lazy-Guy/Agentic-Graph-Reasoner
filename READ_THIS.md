@@ -1,205 +1,91 @@
-# READ_THIS — LGGN Decode v2 Progress & Raw Results (2026-07-04)
+# READ_THIS — LGGN v2: Graph-uses-LM Pivot (2026-07-06)
 
-> At-a-glance dump of the latest runs (raw outputs, numbers, repro commands).
+> At-a-glance dump of the latest session (raw numbers, decisions, repro commands).
 > Updated each working session.
 
-## Architecture
+## THE PIVOT (this session)
+
+MoLoRA validated the conditioning MECHANISM but killed the content-through-z line:
 
 ```
-BehaviorEncoder: 2560d (Qwen space) → 64d (behavior space)
-FiLM injection: h' = γ(z)⊙h + β(z) at every transformer layer
-Refiner: g → h_K via K graph-operator steps (cross-attention + operator policy)
-Decoder: Qwen3.5-4B + LoRA + FiLM(z) → search/replace patches
+Run                              baseline   latent   ceiling
+2ep (1 effective)                0.117      ~equal   0.134     experts unspecialized
+8ep (6 effective)                0.121      0.192    timeout   first latent > baseline
+8ep ceiling-only (separate)      —          —        0.120     66% zero_recall
 ```
 
-## What's Proven
+- Ceiling (z = GOLD fix repr) lands in the same 0.12-0.19 band as baseline → **n=29 noise**.
+- 66% zero_recall WITH gold z: valid-format wrong-content patches.
+- **Diagnosis:** z (2048d → 64d bottleneck → 4-expert router) transmits SEMANTICS; the recall
+  metric demands LITERAL identifiers (`.clone()`, `atomic`) that aren't even in the input
+  (`extract_hunks` drops context lines, issue truncated to 700 chars). Task partly impossible.
+- **Conclusion: conditioning selects strategies, it cannot inject content. Architectural, not tunable.**
 
-| Claim | Evidence | Status |
-|-------|----------|--------|
-| FiLM injection works | ceiling > baseline (+0.027 to +0.037) | CONFIRMED |
-| v1 soft-prefix failed | baseline 0.136 > latent 0.098 | CONFIRMED (motivates v2) |
-| z-dropout is key | latent(0.188) > ceiling(0.165) at n=1000 | CONFIRMED |
-| Bridge works | latent > baseline in favorable conditions | CONFIRMED (cos > 0.73) |
-| Sensitivity cliff | decoder recall drops sharply at cos 0.73-0.81 | CONFIRMED |
-| Refiner is bottleneck | cos=0.561 << cliff at 0.73 | CONFIRMED |
-| Truncation was 14% | format_fail: 14% → 0% after max_tokens 256→512 | FIXED |
-
-## Latest Run: Diagnostic (n=200 lite, baseline+ceiling, 3 epochs)
+## Architecture v2 — graph reasons, LM realizes
 
 ```
-format_fail:  0/29 (0%)   ← FIXED (was 14%)
-zero_recall: 16/29 (55%)  ← model generates valid patch, wrong code
-partial:      8/29 (28%)  ← close but not exact match
-good:         5/29 (17%)  ← recall >= 0.5
-
-baseline recall: 0.153
-ceiling recall:  0.181
-ceiling - baseline: +0.027 (FiLM mechanism works)
-
-inference: ~3.4s/instance baseline, ~4.1s ceiling
+issue+code reprs → LGGN refiner → h_K   (retargeted to TRACE-repr space)
+                       ↓
+   TRACER LM  (input: old span; MoLoRA z=h_K)  → ~100-token reasoning trace
+                       ↓
+   REALIZER LM (frozen; input: old span+trace) → edited span
 ```
 
-## Full Run: n=722 (lite+fable5, all arms, 5 epochs, sensitivity)
+- z carries WHAT-TO-DO (semantic, fits the bottleneck); the SPAN carries identifiers (literal, free).
+- Supervision that was dropped on the floor: Fable-5 `thinking` immediately before each edit
+  tool-call = real (reasoning → str_replace) pairs. `parse_session` extracted it; nothing used it.
+- Zero instruction text: raw completion on base Qwen2.5-3B, two fixed separators (`###T`, `###N`),
+  ~5 tokens of scaffolding total. No chat template. No output parsing (text-to-EOS IS the new span).
+- New metric **added_recall**: recall over gold lines ABSENT from the input span — copying scores 0.
+- Related work: Coconut (2412.06769), R-Capsule (2509.22131), iCLP (2512.24014),
+  CodePLAN (2403.13271), Agentless (2407.01489), GrACE/Coeditor (2305.14129/2305.18584).
+
+## Data (real, ingested this session)
 
 ```
-[lggn-decode v2 FiLM] dataset=lite+fable5 n=500 r=1024 K=8 ops=32
-  722 instances (222 SWE-bench + 500 Fable-5)
-  train 578 / held 144
-
-  refiner cos(h_K, gold_f) = 0.561
-
-  baseline  : held recall 0.196
-  constant  : held recall 0.203
-  latent    : held recall 0.179
-  ceiling   : held recall 0.228
-
-  ceiling - baseline = +0.033  → FiLM INJECTION WORKS
-  latent  - baseline = -0.017  → h_K HURTS (refiner too noisy)
-  
-  sensitivity curve (ceiling decoder, gold→h_K interpolation):
-   alpha  cos(h_a,f)   recall
-    1.00       1.000    0.228
-    0.83       0.923    0.228   ← flat above cos 0.80
-    0.67       0.805    0.228
-    0.50       0.712    0.217   ← starts dropping
-    0.33       0.645    0.194   ← at baseline
-    0.17       0.597    0.147   ← BELOW baseline (z hurts)
-    0.00       0.561    0.124   ← h_K alone = worst
-    perm       0.259    0.214   ← wrong-instance gold > h_K (!!)
-
-  graph edits: 56 nodes (26 retrievable), 51 edges, 2761 edits
-  
-  timing:
-    refiner             :  1457.4s  (24 min)
-    decoder_baseline    :  2020.6s  (34 min)
-    decoder_constant    :  2675.0s  (45 min)
-    decoder_latent      :  2564.0s  (43 min)
-    decoder_ceiling     :  8752.3s  (146 min, includes sensitivity)
-    total               : 17471.4s  (4.85 hours)
+ingested 4781 sessions -> 1863 (intent,old,new) triples (1284 fresh-intent)
+filter funnel: raw 1863 -> goal_ok 1653 -> fresh_only 1191 -> dedup 1007 -> caps 936
+936 usable triples | 737 unique goals (1.3 triples/goal)
+len(old) p50=145 chars | len(new) p50=272 | trace tail-capped at 400
 ```
 
-## Prior Run: n=1000 (lite only, all arms, z-dropout=0.15)
+Sample (real): trace = "…Opens a `<Box flexDirection=\"column\" height={dynRows}>` to allocate the
+dynamic height…" → old/new spans show exactly that edit. Traces ARE concrete plans.
 
-```
-  222 instances (lite caps at 222 kept), d=2560
-  train 178 / held 44
-  
-  refiner cos(h_K, gold_f) = 0.585
+## Built this session (all selftests PASS, no GPU needed)
 
-  baseline  : held recall 0.141
-  constant  : held recall 0.124
-  latent    : held recall 0.188   ← BEATS ceiling (z-dropout effect)
-  ceiling   : held recall 0.165
+| What | Where |
+|------|-------|
+| `parse_session_triples` + `--ingest-triples` (BOTH old+new + intent + fresh flag) | `v5/training/ingest_fable5.py` |
+| M1 realizer: loader funnel, goal-level md5 split, RawLM (no chat template), added_recall, arms trace/notrace/shuffled, gates | `v5/runtime/lggn_realizer.py` |
+| Design section + entries 39-40 | `LGGN_DESIGN.md` §Architecture v2 |
 
-  latent - baseline  = +0.047  → BRIDGE WORKS
-  latent - ceiling   = +0.023  → z-dropout > gold injection
-```
+## Gates (falsifiable, decided BEFORE runs)
 
-## Diagnostic Samples (raw model output)
+- **G1a** trace added_recall ≥ 0.15 (floor)
+- **G1b** trace − notrace ≥ +0.05, positive EVERY seed ← the claim
+- **G1c** true − shuffled ≥ +0.05, shuffled ≈ notrace (content-specificity)
+- NO-GO on G1b/G1c = traces don't carry realization signal = premise falsified, M2 never starts.
+- M2 gates: G2 refiner-retarget cos ≥ 0.45 · G3 e2e ceiling−baseline ≥ +0.05 (ceiling-first, 1 seed) · G4 latent−baseline ≥ +0.03 every seed.
 
-```
-[ZERO_RECALL] recall=0.0 — valid format, wrong fix:
-  raw:  <<<<<<< SEARCH
-        kwargs = {k: v for k, v in match.groupdict().items() if v is not None}
-        =======
-        kwargs = {k: v for k, v in match...
-  gold: kwargs = match.groupdict()
-        kwargs = {k: v for k, v in kwargs.items() if v is...
-  → model finds right code, generates different fix strategy
-
-[GOOD] recall=0.5 — correct fix:
-  raw:  <<<<<<< SEARCH
-        self.query = getattr(queryset, 'query', queryset)
-        =======
-        self.query = getattr(queryset, 'query', queryset)
-        sel...
-  gold: self.query = getattr(queryset, 'query', queryset).clone()
-        self.query.subquery = True
-```
-
-## Root Cause of 0.2 Plateau
-
-| Factor | Impact | Status |
-|--------|--------|--------|
-| Truncation (256 tokens) | 14% format fail | FIXED → 0% |
-| Wrong fix strategy | 55% zero recall | 4B model capacity wall |
-| Partial matches | 28% | Close but not exact |
-| Refiner cos (0.561) | Below cliff (0.73) | Needs architectural fix |
-| Bug-only prompt | Wrong for Fable-5 data | FIXED (generic prompt) |
-
-## Commits This Session
-
-```
-b716d48 fix(lggn_decode): generic prompt framing for mixed SWE + Fable-5 data
-1952328 fix(lggn_decode): increase max_new_tokens 256->512 to fix truncation
-e036f23 feat(lggn_decode): inference timing + --arms filter to cut training time
-363db4f feat(lggn_decode): diagnostic failure breakdown in decoder eval
-5c0345e feat(lggn_decode): Fable-5 HF dataset integration + inference timing
-```
-
-## New Features
-
-### Fable-5 HF Dataset Integration
-```bash
-# Fable-5 only
-python -m v5.runtime.lggn_decode --dataset fable5 --n 500
-
-# Mixed SWE-bench + Fable-5
-python -m v5.runtime.lggn_decode --dataset lite+fable5 --n 500
-
-# Fable-5 extracts str_replace displacement pairs (old→new) from
-# Glint-Research/Fable-5-traces on HuggingFace (4782 sessions)
-```
-
-### Arms Filter (cut training time)
-```bash
-# Full run (4.8h):
---arms baseline,constant,latent,ceiling
-
-# Fast iteration (1.2h):
---arms latent,ceiling
-
-# Diagnostic only (30min):
---arms baseline,ceiling --decoder-epochs 3 --n 200
-```
-
-### Diagnostic Failure Breakdown
-Runs on baseline + ceiling arms automatically. Reports:
-- format_fail / zero_recall / partial / good percentages
-- 8 raw output samples with category
-- Per-instance inference timing (ms/instance, min, max)
-
-## Repro Commands
+## Repro
 
 ```bash
-# Quick diagnostic (30 min)
-python -m v5.runtime.lggn_decode --dataset lite --n 200 \
-    --arms baseline,ceiling --decoder-epochs 3 --refiner-epochs 200
-
-# Full run with Fable-5 + sensitivity (4-5h)
-python -m v5.runtime.lggn_decode --dataset lite+fable5 --n 500 \
-    --K 8 --r 1024 --n-op 32 --refiner-epochs 600 \
-    --learn-ops --k-warmup 0.5 --contrastive 0.1 \
-    --decoder-epochs 5 --z-dropout 0.15 --sensitivity
-
-# Selftest (no GPU, 10s)
-python -m v5.runtime.lggn_decode --selftest
+python -m v5.training.ingest_fable5 --selftest        # triples extraction wiring
+python -m v5.runtime.lggn_realizer --selftest         # funnel/masking/metrics/split
+python -m v5.training.ingest_fable5 --ingest-triples  # -> data/fable5/realizer_triples.jsonl
+python -m v5.runtime.lggn_realizer --stats            # filter funnel + length percentiles
+python -m v5.runtime.lggn_realizer --smoke            # 0.5B, real loop, local GPU (6GB OK)
+# molab (A40):
+V5_LM_QUANT=4bit python -m v5.runtime.lggn_realizer --seeds 3 --save-ckpt
 ```
 
-## Open Questions for Next Session
+## Status / next
 
-1. **Model size**: 4B model generates valid patches but wrong code (55% zero_recall).
-   Bigger model (7B+) would help but VRAM cost. Is 6GB VRAM the hard cap?
-
-2. **Refiner quality**: cos=0.561 << cliff at 0.73. Options:
-   - Deeper refiner architecture
-   - Separate refiners per domain (SWE vs Fable-5)
-   - Stronger contrastive loss
-   - More refiner capacity
-
-3. **MoLoRA vs FiLM**: FiLM mechanism works (ceiling proves it) but is weak.
-   MoLoRA (mixture of LoRA experts) could give z more steering power.
-   BUT: only helps if refiner gets above the cliff first. Otherwise amplifies noise.
-
-4. **Fable-5 data quality**: Mixed lite+fable5 may hurt refiner (different displacement
-   distributions). Need to test fable5-only vs lite-only vs mixed.
+- [x] Design + related-work grounding
+- [x] Data layer + M1 code + selftests
+- [x] Ingest + `--stats` funnel: 936 usable triples
+- [ ] Local `--smoke` (0.5B) — prove the loop end-to-end before molab
+- [ ] molab M1 3 seeds → gates G1a-c
+- [ ] M2 tracer (`lggn_tracer.py`) — only after G1 passes
+- SWE-bench eval DEFERRED until M2 passes (needs localization stage à la Agentless).
