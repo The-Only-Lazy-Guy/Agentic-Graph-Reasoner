@@ -1,34 +1,31 @@
-"""LGGN decode v2 — FiLM injection: the refiner's h_K modulates Qwen's computation.
+"""LGGN decode v2 — latent-conditioned code generation via LoRA + FiLM or MoLoRA.
 
 v1 (soft prefix) FAILED: baseline=0.136, latent=0.098, ceiling=0.113 — LoRA ignores prefix tokens.
-Root cause: soft prefix adds info to the INPUT; model is free to ignore it. Same failure mode as
-composition_decode (ops-as-text hurt). The latent must change the COMPUTATION, not the input.
+Root cause: soft prefix adds info to the INPUT; model is free to ignore it.
 
-v2: FiLM (Feature-wise Linear Modulation). At every transformer layer:
-    h' = γ(z)⊙h + β(z)
-where z is the refiner's h_K (or gold_f for ceiling). The latent modulates every layer's hidden
-states — the model CANNOT ignore it. Proven in diffusion transformers (DiT, SD3).
+v2 conditioning mechanisms (mutually exclusive, selected via --molora flag):
 
-Architecture (3 layers):
-    h_K (2560d, Qwen space) -> BehaviorEncoder (2560->bottleneck) -> behavior embedding (~64d)
-    -> FiLM Renderer (per-layer expansion to γ,β) -> modulate Qwen at every layer
+  FiLM (default): h' = γ(z)⊙h + β(z) — per-channel affine modulation.
+    Proven: modulates computation. Disproven: sensitivity curve flat, scale+shift
+    can't encode actionable semantic guidance for code generation.
 
-The BehaviorEncoder creates a compact behavior space where the graph will eventually operate
-(operators, composition, write-back, retrieval). The FiLM Renderer is just a renderer.
+  MoLoRA (--molora): h' = h + Σ wᵢ(z)·Bᵢ(Aᵢ(h)) — mixture of LoRA experts.
+    z selects WHICH editing strategy via soft routing, not WHAT to change.
+    Each expert learns a different low-rank perturbation (rotate/stretch/translate).
+    No sequence length increase, no cross-attention.
 
-Arms (each trains a fresh LoRA + FiLM):
-  baseline   LoRA only, no FiLM (issue+code -> gold SR)
-  latent     LoRA + FiLM(h_K)     (THE TEST — does the refiner help decode?)
-  ceiling    LoRA + FiLM(gold_f)  (injection ceiling — can the mechanism work at all?)
+Architecture:
+    h_K (d, Qwen space) -> BehaviorEncoder (d->bottleneck) -> behavior embedding (~64d)
+    -> FiLM Renderer OR MoLoRA Router+Experts -> modulate Qwen at every layer
 
-  ceiling > baseline -> FiLM injection WORKS (latent modulates computation, model uses it)
-  latent > baseline  -> h_K helps decode (the bridge works)
-  ceiling ~ baseline -> FiLM mechanism broken (escalate to hypernetwork / DeltaW)
+Arms (each trains a fresh LoRA + conditioner):
+  baseline   LoRA only, no conditioning
+  constant   LoRA + cond(mean_h_K) — extra-params control
+  latent     LoRA + cond(h_K) — THE TEST
+  ceiling    LoRA + cond(gold_f) — injection ceiling
 
-VRAM: ~3.5GB (4-bit Qwen3.5-4B + LoRA ~9M + FiLM ~12M). Under 6GB.
-
-  V5_LM_TRUST_REMOTE_CODE=1 V5_LM_QUANT=4bit python -m v5.runtime.lggn_decode \\
-      --model Qwen/Qwen3.5-4B --dataset lite --n 200 --r 512
+Usage:
+  python -m v5.runtime.lggn_decode --molora --n-experts 4 --expert-r 8
   python -m v5.runtime.lggn_decode --selftest
 """
 from __future__ import annotations
@@ -298,7 +295,84 @@ class _FiLMModule(nn.Module):
         return gamma.unsqueeze(1) * h + beta.unsqueeze(1)
 
 
-# ── decoder (LoRA Qwen + FiLM conditioning from latent) ──────────────────────
+# ── MoLoRA conditioner ───────────────────────────────────────────────────────
+#
+# h' = h + Σ wᵢ(z) · Bᵢ(Aᵢ(h)) at every transformer layer.
+#
+# Architecture:
+#   BehaviorEncoder: Linear(d_latent -> bottleneck) + GELU   (same as FiLM)
+#   Router:          Linear(bottleneck -> n_experts) + softmax (shared across layers)
+#   Experts:         per-layer, per-expert (A: d_model->r, B: r->d_model)
+#
+# Init: B=0 -> no-op until trained (same principle as FiLM identity init).
+# Each expert learns a different code-editing strategy. z selects which
+# strategy via soft routing — encodes WHICH approach, not WHAT to change.
+
+class _MoLoRAModule(nn.Module):
+    """BehaviorEncoder + Mixture of LoRA experts as conditioner.
+
+    Replaces FiLM's scale+shift with z-routed low-rank perturbations.
+    FiLM: h' = γ(z)⊙h + β(z)  — per-channel affine (can't encode direction)
+    MoLoRA: h' = h + Σ wᵢ(z)·Bᵢ(Aᵢ(h))  — expert-weighted LoRA (encodes strategy)
+    """
+
+    def __init__(self, d_model: int, d_latent: int, n_layers: int,
+                 n_experts: int = 4, expert_r: int = 8, bottleneck: int = 64):
+        super().__init__()
+        self.d_model = d_model
+        self.n_layers = n_layers
+        self.n_experts = n_experts
+        self.bottleneck = bottleneck
+
+        self.behavior_encoder = nn.Sequential(
+            nn.Linear(d_latent, bottleneck),
+            nn.GELU(),
+        )
+        self.router = nn.Linear(bottleneck, n_experts)
+
+        self.experts_A = nn.ModuleList([
+            nn.ModuleList([nn.Linear(d_model, expert_r, bias=False)
+                           for _ in range(n_experts)])
+            for _ in range(n_layers)
+        ])
+        self.experts_B = nn.ModuleList([
+            nn.ModuleList([nn.Linear(expert_r, d_model, bias=False)
+                           for _ in range(n_experts)])
+            for _ in range(n_layers)
+        ])
+        self._init_lora()
+
+    def _init_lora(self):
+        """B=0 at init -> MoLoRA is a no-op until trained."""
+        nn.init.zeros_(self.router.weight)
+        nn.init.zeros_(self.router.bias)
+        for layer_As in self.experts_A:
+            for A in layer_As:
+                nn.init.kaiming_uniform_(A.weight, a=5 ** 0.5)
+        for layer_Bs in self.experts_B:
+            for B in layer_Bs:
+                nn.init.zeros_(B.weight)
+
+    def encode(self, z):
+        """z: [B, d_latent] -> behavior embedding [B, bottleneck]."""
+        return self.behavior_encoder(z)
+
+    def route(self, b):
+        """b: [B, bottleneck] -> expert weights [B, n_experts]."""
+        return torch.softmax(self.router(b), dim=-1)
+
+    def modulate(self, h, b, layer_idx):
+        """h: [B, T, d_model], b: [B, bottleneck] -> h + expert-weighted LoRA."""
+        weights = self.route(b)
+        delta = 0
+        for i in range(self.n_experts):
+            Ah = self.experts_A[layer_idx][i](h)
+            BAh = self.experts_B[layer_idx][i](Ah)
+            delta = delta + weights[:, i].view(-1, 1, 1) * BAh
+        return h + delta
+
+
+# ── decoder (LoRA Qwen + FiLM/MoLoRA conditioning from latent) ───────────────
 
 def _prompt(text):
     return (f"Task:\n{text['issue']}\n\nCode:\n{text['code']}\n\n"
@@ -319,15 +393,16 @@ def _find_layers(model):
 
 
 class _Decoder:
-    """Qwen + LoRA + FiLM conditioning. The latent modulates every layer — can't be ignored.
+    """Qwen + LoRA + FiLM/MoLoRA conditioning. The latent modulates every layer.
 
-    When use_film=False (baseline arm): pure LoRA, no FiLM hooks, no behavior encoder.
-    When use_film=True: FiLM hooks on every transformer layer. The behavior embedding (from
-    BehaviorEncoder) determines (γ,β) at each layer. Gradients flow through the hooks
-    to train both LoRA and FiLM jointly.
+    Conditioning modes (mutually exclusive):
+      use_film=False, use_molora=False: pure LoRA, no hooks (baseline arm).
+      use_film=True:  FiLM hooks — h' = γ(z)⊙h + β(z) at every layer.
+      use_molora=True: MoLoRA hooks — h' = h + Σ wᵢ(z)·Bᵢ(Aᵢ(h)) at every layer.
     """
 
-    def __init__(self, model_name, d_latent, use_film=True, bottleneck=64, lr=2e-4):
+    def __init__(self, model_name, d_latent, use_film=True, use_molora=False,
+                 n_experts=4, expert_r=8, bottleneck=64, lr=2e-4):
         import os
         from transformers import AutoTokenizer
         from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
@@ -344,36 +419,36 @@ class _Decoder:
         self.model = get_peft_model(base, lcfg)
         self.dev = next(self.model.parameters()).device
         self.d_model = self.model.get_input_embeddings().weight.shape[1]
-        self.use_film = use_film
+        self.use_film = use_film and not use_molora
+        self.use_molora = use_molora
 
         layers = _find_layers(self.model)
         n_layers = len(layers)
         cdt = next(p for p in self.model.parameters() if p.is_floating_point()).dtype
 
-        # FiLM module (BehaviorEncoder + Renderer)
         self.film = None
-        self._z_raw = None   # raw latent vector (detached); encode runs inside each hook
+        self.molora = None
+        self._z_raw = None
         self._hooks = []
-        if use_film:
+        if use_molora:
+            self.molora = _MoLoRAModule(
+                self.d_model, d_latent, n_layers, n_experts, expert_r, bottleneck
+            ).to(self.dev, cdt)
+            self._install_molora_hooks(layers)
+        elif use_film:
             self.film = _FiLMModule(self.d_model, d_latent, n_layers, bottleneck).to(self.dev, cdt)
             self._install_hooks(layers)
 
-        # separate param groups: LoRA at full LR, FiLM at half LR for stability
         lora_params = [p for p in self.model.parameters() if p.requires_grad]
         param_groups = [{"params": lora_params, "lr": lr}]
-        if self.film is not None:
-            param_groups.append({"params": list(self.film.parameters()), "lr": lr * 0.5})
+        cond = self.molora or self.film
+        if cond is not None:
+            param_groups.append({"params": list(cond.parameters()), "lr": lr * 0.5})
         self.opt = torch.optim.AdamW(param_groups)
         self.max_grad_norm = 1.0
 
     def _install_hooks(self, layers):
-        """Register forward hooks on every transformer layer for FiLM modulation.
-
-        Each hook computes film.encode(z_raw) -> film.modulate(h, b, layer_idx).
-        The encode is recomputed per hook call (not cached) so that gradient
-        checkpointing can replay the forward without hitting freed graph nodes.
-        Overhead is negligible: 36x a Linear(2560->64)+GELU vs transformer layers.
-        """
+        """Register forward hooks on every transformer layer for FiLM modulation."""
         for l, layer in enumerate(layers):
             def hook(module, input, output, layer_idx=l):
                 if self._z_raw is None:
@@ -386,17 +461,27 @@ class _Decoder:
                 return h
             self._hooks.append(layer.register_forward_hook(hook))
 
-    def _set_z(self, v):
-        """Set conditioning vector for subsequent forward passes.
+    def _install_molora_hooks(self, layers):
+        """Register forward hooks on every transformer layer for MoLoRA modulation."""
+        for l, layer in enumerate(layers):
+            def hook(module, input, output, layer_idx=l):
+                if self._z_raw is None:
+                    return output
+                b = self.molora.encode(self._z_raw)
+                h = output[0]
+                h = self.molora.modulate(h, b, layer_idx)
+                if isinstance(output, tuple):
+                    return (h,) + output[1:]
+                return h
+            self._hooks.append(layer.register_forward_hook(hook))
 
-        Stores the raw latent as a detached tensor. Each hook recomputes
-        film.encode(z_raw) to create a fresh computation graph, compatible
-        with gradient checkpointing (which replays forward during backward).
-        """
-        if v is None or self.film is None:
+    def _set_z(self, v):
+        """Set conditioning vector for subsequent forward passes."""
+        cond = self.molora or self.film
+        if v is None or cond is None:
             self._z_raw = None
             return
-        cdt = next(self.film.parameters()).dtype
+        cdt = next(cond.parameters()).dtype
         self._z_raw = torch.as_tensor(v, dtype=cdt, device=self.dev).unsqueeze(0)
 
     def _apply_chat(self, msgs, **extra):
@@ -414,25 +499,25 @@ class _Decoder:
 
     def train_on(self, texts, latents, indices, epochs=2, film_warmup=1,
                  z_dropout=0.0, log=print):
-        """Train LoRA + FiLM on the training set.
+        """Train LoRA + conditioner (FiLM or MoLoRA) on the training set.
 
-        film_warmup: freeze FiLM for this many epochs, let LoRA settle first.
+        film_warmup: freeze conditioner for this many epochs, let LoRA settle first.
         z_dropout: probability of replacing z with zeros for each instance (0-1).
-            Forces FiLM to USE z-content, not learn a fixed modulation pattern.
-            Analogous to classifier-free guidance in diffusion models.
         """
         import random as _rng
         _drop_rng = _rng.Random(42)
         self.model.train()
-        if self.film is not None:
-            self.film.train()
+        cond = self.molora or self.film
+        cond_name = "MoLoRA" if self.use_molora else "FiLM"
+        if cond is not None:
+            cond.train()
         for ep in range(epochs):
-            if self.film is not None:
-                film_frozen = ep < film_warmup
-                for p in self.film.parameters():
-                    p.requires_grad_(not film_frozen)
+            if cond is not None:
+                frozen = ep < film_warmup
+                for p in cond.parameters():
+                    p.requires_grad_(not frozen)
                 if ep == film_warmup:
-                    log(f"      [FiLM unfrozen at epoch {ep+1}]")
+                    log(f"      [{cond_name} unfrozen at epoch {ep+1}]")
 
             tot = 0.0; n_dropped = 0
             for i in indices:
@@ -466,9 +551,8 @@ class _Decoder:
             drop_pct = f" (z_drop={n_dropped}/{len(indices)})" if z_dropout > 0 else ""
             log(f"      epoch {ep+1}/{epochs}: loss {tot/max(1,len(indices)):.3f}{drop_pct}")
 
-        # restore FiLM grad state
-        if self.film is not None:
-            for p in self.film.parameters():
+        if cond is not None:
+            for p in cond.parameters():
                 p.requires_grad_(True)
         self._set_z(None)
 
@@ -483,8 +567,9 @@ class _Decoder:
         from v5.runtime.solution_ladder import _emitted_replace, _fidelity
 
         self.model.eval()
-        if self.film is not None:
-            self.film.eval()
+        cond = self.molora or self.film
+        if cond is not None:
+            cond.eval()
         import time as _time
         recs = []
         raw_list = [] if capture_raw else None
@@ -560,34 +645,49 @@ class _Decoder:
     def behavior_embeddings(self, latents, indices):
         """Extract behavior embeddings [bottleneck-d] for given instances via BehaviorEncoder."""
         import numpy as np
-        if self.film is None or latents is None:
+        cond = self.molora or self.film
+        if cond is None or latents is None:
             return None
         behs = []
-        cdt = next(self.film.parameters()).dtype
+        cdt = next(cond.parameters()).dtype
         with torch.no_grad():
             for i in indices:
                 z = torch.as_tensor(latents[i], dtype=cdt, device=self.dev).unsqueeze(0)
-                b = self.film.encode(z).squeeze(0).float().cpu().numpy()
+                b = cond.encode(z).squeeze(0).float().cpu().numpy()
                 behs.append(b)
         return np.stack(behs)
 
     def save_checkpoint(self, path):
-        """Save LoRA + FiLM weights for later standalone generation."""
+        """Save LoRA + conditioner weights for later standalone generation."""
         from pathlib import Path as _P
         _P(path).mkdir(parents=True, exist_ok=True)
         self.model.save_pretrained(str(_P(path) / "lora"))
-        if self.film is not None:
+        if self.molora is not None:
+            torch.save(self.molora.state_dict(), str(_P(path) / "molora.pt"))
+        elif self.film is not None:
             torch.save(self.film.state_dict(), str(_P(path) / "film.pt"))
 
     @classmethod
-    def load_checkpoint(cls, model_name, path, d_latent, bottleneck=64):
+    def load_checkpoint(cls, model_name, path, d_latent, bottleneck=64,
+                        n_experts=4, expert_r=8):
         """Load a trained decoder from checkpoint (no optimizer, eval-only)."""
         from pathlib import Path as _P
-        dec = cls(model_name, d_latent, use_film=(_P(path) / "film.pt").exists(), bottleneck=bottleneck)
+        has_molora = (_P(path) / "molora.pt").exists()
+        has_film = (_P(path) / "film.pt").exists()
+        dec = cls(model_name, d_latent,
+                  use_film=has_film and not has_molora,
+                  use_molora=has_molora,
+                  n_experts=n_experts, expert_r=expert_r,
+                  bottleneck=bottleneck)
         from peft import PeftModel
         dec.model = PeftModel.from_pretrained(dec.model.get_base_model(), str(_P(path) / "lora"))
         dec.model.eval()
-        if dec.film is not None and (_P(path) / "film.pt").exists():
+        if has_molora and dec.molora is not None:
+            dec.molora.load_state_dict(torch.load(str(_P(path) / "molora.pt"), map_location=dec.dev, weights_only=True))
+            dec.molora.eval()
+            dec._hooks.clear()
+            dec._install_molora_hooks(_find_layers(dec.model))
+        elif has_film and dec.film is not None:
             dec.film.load_state_dict(torch.load(str(_P(path) / "film.pt"), map_location=dec.dev, weights_only=True))
             dec.film.eval()
             dec._hooks.clear()
@@ -595,10 +695,11 @@ class _Decoder:
         return dec
 
     def generate(self, prompt, z=None, max_new_tokens=512):
-        """Standalone generation with optional FiLM conditioning from latent z."""
+        """Standalone generation with optional conditioner from latent z."""
         self.model.eval()
-        if self.film is not None:
-            self.film.eval()
+        cond = self.molora or self.film
+        if cond is not None:
+            cond.eval()
         self._set_z(z)
         with torch.no_grad():
             ids = self._apply_chat(
@@ -620,6 +721,8 @@ class _Decoder:
         del self.model
         if self.film is not None:
             del self.film
+        if self.molora is not None:
+            del self.molora
         del self.opt
         gc.collect()
         torch.cuda.empty_cache()
@@ -676,7 +779,8 @@ def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
         refiner_epochs=400, decoder_epochs=2, bottleneck=64, film_warmup=1,
         z_dropout=0.0, seed=0, sensitivity=False,
         learn_ops=False, k_warmup=0.5, contrastive=0.0,
-        arm_filter=None, n_heads=1, ops_init="random", log=print):
+        arm_filter=None, n_heads=1, ops_init="random",
+        use_molora=False, n_experts=4, expert_r=8, log=print):
     import numpy as np, time
 
     rng = np.random.RandomState(seed); idx = rng.permutation(len(g))
@@ -700,11 +804,12 @@ def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
 
     # phase 2: decoder per arm
     d = g.shape[1]
+    mech = "MoLoRA" if use_molora else "FiLM"
     all_arms = [
-        ("baseline", None,      False, 0.0),       # LoRA only
-        ("constant", h_K_const, True,  0.0),        # LoRA + FiLM(mean_h_K) — extra-params control
-        ("latent",   h_K,       True,  z_dropout),  # LoRA + FiLM(h_K) + optional z-dropout
-        ("ceiling",  f,         True,  0.0),        # LoRA + FiLM(gold_f) — injection ceiling
+        ("baseline", None,      False, 0.0),
+        ("constant", h_K_const, True,  0.0),
+        ("latent",   h_K,       True,  z_dropout),
+        ("ceiling",  f,         True,  0.0),
     ]
     arms = [(n, l, u, z) for n, l, u, z in all_arms
             if arm_filter is None or n in arm_filter]
@@ -714,10 +819,14 @@ def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
     results = {}; per_inst = {}; sens_curve = None
     latent_behs_he = None; ops_behavior = None
     diagnostics = {}; raw_gens = {}
-    for arm_name, latents, use_film, zdrop in arms:
+    for arm_name, latents, use_cond, zdrop in arms:
         t0 = time.time()
-        log(f"  [2/4] decoder arm '{arm_name}' (film={use_film}, bn={bottleneck}, zdrop={zdrop})...")
-        dec = _Decoder(model_name, d_latent=d, use_film=use_film, bottleneck=bottleneck)
+        log(f"  [2/4] decoder arm '{arm_name}' ({mech}={use_cond}, bn={bottleneck}, zdrop={zdrop})...")
+        dec = _Decoder(model_name, d_latent=d,
+                       use_film=use_cond and not use_molora,
+                       use_molora=use_cond and use_molora,
+                       n_experts=n_experts, expert_r=expert_r,
+                       bottleneck=bottleneck)
         warmup = film_warmup if use_film else 0
         dec.train_on(texts, latents, tr, epochs=decoder_epochs, film_warmup=warmup,
                      z_dropout=zdrop, log=log)
@@ -843,8 +952,9 @@ def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
     return results, len(he), cos_he, wb, sens_curve, graph_stats
 
 
-def _report(results, n_held, cos_refiner, wb, sens_curve=None, graph_stats=None):
-    print(f"\n=== LGGN DECODE v2 (FiLM, held n={n_held}) — refiner h_K -> actual patches ===")
+def _report(results, n_held, cos_refiner, wb, sens_curve=None, graph_stats=None,
+            mechanism="FiLM"):
+    print(f"\n=== LGGN DECODE v2 ({mechanism}, held n={n_held}) — refiner h_K -> actual patches ===")
     print(f"  refiner cos(h_K, gold_f) = {cos_refiner:.3f}")
     print(f"  [v1 soft-prefix FAILED: baseline 0.136 > latent 0.098 > ceiling 0.113]")
     print()
@@ -857,10 +967,10 @@ def _report(results, n_held, cos_refiner, wb, sens_curve=None, graph_stats=None)
     ce = results.get("ceiling", 0)
     print()
     print(f"  ceiling - baseline = {ce - bl:+.3f}  -> "
-          f"{'FiLM INJECTION WORKS' if ce > bl + 0.03 else 'FiLM mechanism broken'}  "
+          f"{f'{mechanism} INJECTION WORKS' if ce > bl + 0.03 else f'{mechanism} mechanism broken'}  "
           f"[v1 was: -0.023]")
     print(f"  constant - baseline= {cn - bl:+.3f}  -> "
-          f"{'FiLM extra-params help (capacity boost)' if cn > bl + 0.02 else 'FiLM params alone insufficient'}")
+          f"{f'{mechanism} extra-params help (capacity boost)' if cn > bl + 0.02 else f'{mechanism} params alone insufficient'}")
     print(f"  latent - constant  = {lt - cn:+.3f}  -> "
           f"{'Z-CONTENT MATTERS (semantic signal)' if lt > cn + 0.02 else 'z-content NOT used (presence only)'}")
     print(f"  latent - baseline  = {lt - bl:+.3f}  -> "
@@ -891,8 +1001,8 @@ def _report(results, n_held, cos_refiner, wb, sens_curve=None, graph_stats=None)
 # ── selftest ────────────────────────────────────────────────────────────────────
 
 def _selftest() -> bool:
-    """FiLM module + refiner h_K + trajectory extraction + write-back + graph wiring (no GPU)."""
-    print("lggn_decode v2 --selftest: FiLM module + refiner + trajectory + write-back + graph wiring\n")
+    """FiLM + MoLoRA modules + refiner + trajectory + write-back + graph wiring (no GPU)."""
+    print("lggn_decode v2 --selftest: FiLM + MoLoRA + refiner + trajectory + write-back + graph wiring\n")
     import numpy as np
 
     d, N, T, n_op = 32, 60, 8, 6
@@ -948,6 +1058,48 @@ def _selftest() -> bool:
             assert params_per_layer[i].isdisjoint(params_per_layer[j]), \
                 f"layers {i} and {j} share parameters"
     print(f"  FiLM per-layer independence: {n_layers} layers, all independent")
+
+    # --- MoLoRA module unit tests ---
+    n_exp, exp_r = 4, 8
+    molora = _MoLoRAModule(d_model=d, d_latent=d, n_layers=n_layers,
+                           n_experts=n_exp, expert_r=exp_r, bottleneck=16)
+
+    z = torch.randn(2, d)
+    b = molora.encode(z)
+    assert b.shape == (2, 16), f"MoLoRA behavior embedding shape: {b.shape}"
+    h = torch.randn(2, 10, d)
+    h_mod = molora.modulate(h, b, layer_idx=0)
+    assert h_mod.shape == h.shape, f"MoLoRA output shape mismatch"
+    delta = (h_mod - h).abs().max().item()
+    assert delta < 1e-6, f"MoLoRA should init as no-op (B=0), max delta = {delta:.6f}"
+    print(f"  MoLoRA identity init: max delta = {delta:.6f} (< 1e-6, exact zero from B=0)")
+
+    w = molora.route(b)
+    assert w.shape == (2, n_exp), f"MoLoRA router output shape: {w.shape}"
+    assert abs(w.sum(dim=-1).mean().item() - 1.0) < 1e-5, "router weights must sum to 1"
+    print(f"  MoLoRA router: weights sum={w.sum(dim=-1).mean().item():.5f}, shape={w.shape}")
+
+    loss = h_mod.sum()
+    loss.backward()
+    assert molora.experts_A[0][0].weight.grad is not None, "gradients must flow through expert A"
+    assert molora.behavior_encoder[0].weight.grad is not None, "gradients must flow through BehaviorEncoder"
+    assert molora.router.weight.grad is not None, "gradients must flow through router"
+    print(f"  MoLoRA gradient flow: OK (experts + BehaviorEncoder + router)")
+
+    molora.zero_grad()
+    z1, z2 = torch.randn(1, d), torch.randn(1, d)
+    b1, b2 = molora.encode(z1), molora.encode(z2)
+    assert (b1 - b2).abs().max().item() > 0, "different z must produce different behavior embeddings"
+    w1, w2 = molora.route(b1), molora.route(b2)
+    print(f"  MoLoRA z-sensitivity: ||b1-b2|| = {(b1-b2).abs().mean().item():.4f}, "
+          f"router diff = {(w1-w2).abs().mean().item():.4f} (0 at init, grows with training)")
+
+    for i in range(n_layers):
+        for j in range(i+1, n_layers):
+            a_ids_i = set(id(p) for e in molora.experts_A[i] for p in e.parameters())
+            a_ids_j = set(id(p) for e in molora.experts_A[j] for p in e.parameters())
+            assert a_ids_i.isdisjoint(a_ids_j), f"layers {i} and {j} share expert params"
+    print(f"  MoLoRA per-layer independence: {n_layers} layers, all independent")
 
     # --- refiner (vanilla) ---
     tr = np.arange(N * 4 // 5)
@@ -1022,14 +1174,14 @@ def _selftest() -> bool:
           f"{len(bg.log)} edits, {len(maint)} maintenance")
     print(f"  edit kinds: {edit_kinds}")
 
-    print("\n  LGGN-DECODE v2 SELFTEST -> PASS (FiLM + refiner + trajectory + write-back + graph wiring)")
+    print("\n  LGGN-DECODE v2 SELFTEST -> PASS (FiLM + MoLoRA + refiner + trajectory + write-back + graph wiring)")
     return True
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────────
 
 def main():
-    ap = argparse.ArgumentParser(description="LGGN decode v2: refiner h_K -> patches via LoRA + FiLM.")
+    ap = argparse.ArgumentParser(description="LGGN decode v2: refiner h_K -> patches via LoRA + FiLM/MoLoRA.")
     ap.add_argument("--model", default="Qwen/Qwen2.5-3B")
     ap.add_argument("--dataset", default="lite"); ap.add_argument("--split", default="test")
     ap.add_argument("--n", type=int, default=200)
@@ -1041,7 +1193,7 @@ def main():
     ap.add_argument("--decoder-epochs", type=int, default=2)
     ap.add_argument("--bottleneck", type=int, default=64, help="BehaviorEncoder output dim")
     ap.add_argument("--film-warmup", type=int, default=1,
-                    help="freeze FiLM for N epochs while LoRA settles (stability)")
+                    help="freeze conditioner for N epochs while LoRA settles")
     ap.add_argument("--z-dropout", type=float, default=0.0,
                     help="prob of dropping z during latent-arm training (forces z-content use)")
     ap.add_argument("--sensitivity", action="store_true",
@@ -1057,16 +1209,24 @@ def main():
                     help="operator basis init: random (default) or kmeans (legacy)")
     ap.add_argument("--arms", default="baseline,constant,latent,ceiling",
                     help="comma-separated decoder arms to run (skip unneeded to save time)")
+    ap.add_argument("--molora", action="store_true",
+                    help="use MoLoRA (mixture of LoRA experts) instead of FiLM")
+    ap.add_argument("--n-experts", type=int, default=4,
+                    help="MoLoRA: number of LoRA experts per layer")
+    ap.add_argument("--expert-r", type=int, default=8,
+                    help="MoLoRA: rank per expert (smaller than main LoRA r=16)")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
         raise SystemExit(0 if _selftest() else 1)
+    mech = "MoLoRA" if a.molora else "FiLM"
     extras = []
     if a.learn_ops: extras.append("learn_ops")
     if a.contrastive > 0: extras.append(f"contra={a.contrastive}")
     if a.k_warmup != 1.0: extras.append(f"k_warmup={a.k_warmup}")
+    if a.molora: extras.append(f"experts={a.n_experts} expert_r={a.expert_r}")
     ex = f" {' '.join(extras)}" if extras else ""
-    print(f"[lggn-decode v2 FiLM] model={a.model} dataset={a.dataset} n={a.n} "
+    print(f"[lggn-decode v2 {mech}] model={a.model} dataset={a.dataset} n={a.n} "
           f"r={a.r} K={a.K} ops={a.n_op} bn={a.bottleneck} "
           f"ref_ep={a.refiner_epochs} dec_ep={a.decoder_epochs} "
           f"warmup={a.film_warmup} zdrop={a.z_dropout} "
@@ -1082,8 +1242,9 @@ def main():
         bottleneck=a.bottleneck, film_warmup=a.film_warmup,
         z_dropout=a.z_dropout, sensitivity=a.sensitivity,
         learn_ops=a.learn_ops, k_warmup=a.k_warmup, contrastive=a.contrastive,
-        arm_filter=af, n_heads=a.n_heads, ops_init=a.ops_init)
-    _report(results, n_held, cos_ref, wb, sens, graph_stats)
+        arm_filter=af, n_heads=a.n_heads, ops_init=a.ops_init,
+        use_molora=a.molora, n_experts=a.n_experts, expert_r=a.expert_r)
+    _report(results, n_held, cos_ref, wb, sens, graph_stats, mechanism=mech)
 
 
 if __name__ == "__main__":
