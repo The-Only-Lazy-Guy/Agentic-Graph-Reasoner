@@ -848,7 +848,40 @@ NOT the wall: localization (file-level works), emission (80% applyable), retriev
     - **Refiner WORSE than direct.** K2-direct = -0.092. The refiner learns to move AWAY from gold. This never happened on Qwen2.5-3B (d=2048) with lite-only.
     - **Free MLP > graph ops** at 0.484 vs 0.437. Graph constraints actively harm when the displacement space is incoherent (mixed domain data).
     - **More data ≠ better.** 722 instances > 145, but performance dropped 0.100. Domain coherence matters more than quantity.
-    - **OPEN QUESTION:** Does fable5 also hurt on Qwen2.5-3B (d=2048)? The d=2048 refiner reaches 0.740 on lite-only. If lite+fable5 also degrades there, the issue is domain mismatch, not dimensionality. If it holds, d=2048 can absorb mixed data.
+    - **OPEN QUESTION:** ~~Does fable5 also hurt on Qwen2.5-3B (d=2048)?~~ **ANSWERED in entry 35: YES, it hurts on both.** Domain mismatch confirmed as root cause, not dimensionality.
+
+35. **Fable5 hurts refiner on BOTH models — domain mismatch confirmed (2026-07-05, Qwen2.5-3B, d=2048, n=722, 5 seeds).** Resolves the open question from entry 34. Fable5 data is destructive for the refiner regardless of dimensionality.
+
+    **Results (Qwen2.5-3B, d=2048, lite+fable5, r=1024, K=2, 5 seeds):**
+    ```
+    Config         cos     std     note
+    ───────────────────────────────────────────────────
+    raw_g          0.394   0.007   starting point
+    direct         0.637   0.011   NO refinement (r=1024 projection)
+    K1_full        0.615   0.049   refiner HURTS (-0.022 vs direct)
+    K2_full        0.595   0.046   recurrence doesn't help
+    K2_nocode      0.584   0.011   code attention neutral
+    K2_nograph     0.634   0.019   free MLP ≈ direct (best refiner arm)
+    K2_randops     0.597   0.065   random ops ≈ learned
+    ```
+
+    **Cross-model comparison (lite+fable5, K=2, r=1024):**
+    ```
+    Metric              d=2048      d=2560
+    ───────────────────────────────────────
+    direct              0.637       0.529
+    K2_full             0.595       0.437
+    K2-direct           -0.043      -0.092
+    K2_nograph-full     +0.040      +0.047
+    ```
+
+    **Hypothesis resolution:**
+    - ~~H3 (d-specific)~~ **RULED OUT.** Both models show same pattern: refiner < direct, nograph > full.
+    - **H1 (parameter interference) CONFIRMED.** Fable5 displacements (feature-building) and SWE displacements (bug-fixing) compete for shared refiner parameters. Fable5 dominates (69% of training) → SWE-optimal parameters shift → all held instances degrade.
+    - H2 (fable5 gold inherently noisy) may COMPOUND H1 but is not the primary cause — if it were, direct would also be lower for fable5 instances, but direct actually increased (0.637 vs 0.543 in lite-only, though r difference contributes).
+    - d=2048 less severely affected (-0.043 vs -0.092) because the displacement space has more structure (raw_g 0.394 vs 0.229), giving the optimizer more signal to separate domains. But not enough to overcome the interference.
+
+    **Verdict: DOMAIN-MATCHED TRAINING ONLY for refiner.** Fable5 useful for decoder (generation quality doesn't need displacement structure), not refiner. Future: domain-conditional refiner (separate heads or domain token) could potentially use mixed data, but adds complexity for unclear benefit.
 
 ## Current verdicts (updated 2026-07-05)
 - **LGGN refiner:** ALL 4 PILLARS PASS at r=512 (recurrence, constraints, graph, learnedness). Reasoning substrate validated. cos(h_K, f) improved from 0.553 to **0.703-0.740** with architecture upgrade + random ops (Qwen2.5-3B, d=2048). Old arch K=1 reaches **0.737** (above cliff). New arch K=4 + random ops reaches **0.740**. **Near or above the 0.73 sensitivity cliff.** Qwen3.5-4B (d=2560) verified: peaks at **0.584** — significantly worse. **Use Qwen2.5-3B (d=2048) as refiner backbone.**
@@ -861,11 +894,11 @@ NOT the wall: localization (file-level works), emission (80% applyable), retriev
 - **Architectural pivot:** the graph IS a library of model BEHAVIORS (computational modulations). BehaviorEncoder → FiLM Renderer. Operators live in behavior space. VALIDATED by the FiLM results.
 - **Graph read path:** WORKS (refine → FiLM → decode). Proven when h_K is good enough (cos ≥ 0.78).
 - **Graph write path:** BUILT (`graph_edits.py`, 10 edits, selftest PASS). Wired to real outcomes in lggn_decode (behavior_emb extraction, top-2 trajectories, verified seeding). All 7 edit types fire in practice. CONNECT/COMPOSE activated via top-2 trajectory diversity. **Graph→decode loop still OPEN** (graph learns from outcomes, but nothing reads retrieved nodes back into FiLM decode yet). Closing this loop is blocked on refiner quality — a noisy graph (from noisy h_K) won't help decode.
-- **Fable-5 HF integration:** BUILT but **HARMFUL for refiner at d=2560** (entry 34). Adding 500 fable5 to 222 SWE degraded cos by -0.100. Feature-building displacements interfere with bug-fix displacements. **Use lite-only for refiner training until domain-specific separation proven.** Pending: test on Qwen2.5-3B (d=2048) to isolate dimensionality vs domain mismatch.
+- **Fable-5 HF integration:** BUILT but **HARMFUL for refiner on BOTH models** (entries 34-35). d=2560: -0.100 degradation. d=2048: -0.043 degradation. Domain mismatch confirmed (H1), not dimensionality. **Use SWE-only for refiner. Use fable5 for decoder only.**
 - **Truncation:** FIXED. `max_new_tokens` 256→512. format_fail 14%→0%.
 - **Dominant failure mode:** 55% zero_recall. Model generates syntactically valid patches with wrong fix strategy. This is 4B capacity, not pipeline. 28% partial (close but not exact), 17% good (recall >= 0.5).
 - **The wall is the REFINER, not the decoder.** The decoder reads gold fine (ceiling 0.210). The refiner's h_K (cos 0.561) is too noisy. Improving refiner cos from 0.56 → 0.78 is the critical path. Everything downstream (graph edits, closed loop, V6 kill-test) depends on this. The diagnostic confirms: even with perfect pipeline (no truncation, correct prompts), 55% of instances hit the 4B's reasoning limit.
-- **Training data gap (REVISED):** More data ≠ better. lite+fable5 (722) WORSE than lite-only (145-222) at d=2560 due to domain mismatch. **Domain coherence matters more than quantity.** Next: full SWE-bench (~2300, same domain) should help. Fable5 may need separate refiner or domain-conditional training. Agentic traces still needed for graph edit mechanism.
+- **Training data gap (REVISED):** More data ≠ better when domains conflict. lite+fable5 (722) WORSE than lite-only (145-222) on BOTH d=2048 and d=2560. **Domain coherence > quantity.** Next: full SWE-bench (~2300, same domain) should help. Fable5 = decoder data only. Agentic traces still needed for graph edits.
 - **Model ceiling:** 4B with EXACT gold in prompt = 83% recall (solution_ladder). FiLM ceiling = 21%. Gap = FiLM channel bandwidth + training data scale, NOT 4B capacity. **Model size discussion pending** — user considering whether to scale up from 4B.
 
 ## Strategic decision (2026-07-04): 4B + full LGGN pipeline FIRST
