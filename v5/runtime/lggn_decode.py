@@ -472,11 +472,12 @@ class _Decoder:
                 p.requires_grad_(True)
         self._set_z(None)
 
-    def eval_on(self, texts, latents, indices, log=print, diagnose=False):
+    def eval_on(self, texts, latents, indices, log=print, diagnose=False, capture_raw=False):
         """Generate patches on held-out instances, measure recall vs gold.
 
         Returns (mean_recall, per_instance_recalls).
         If diagnose=True, also returns diagnostic dict with failure breakdown + samples.
+        If capture_raw=True, also returns list of raw generated strings (one per index).
         """
         import numpy as np
         from v5.runtime.solution_ladder import _emitted_replace, _fidelity
@@ -486,6 +487,7 @@ class _Decoder:
             self.film.eval()
         import time as _time
         recs = []
+        raw_list = [] if capture_raw else None
         diag = {"format_fail": 0, "zero_recall": 0, "partial": 0, "good": 0,
                 "samples": [], "gen_times_ms": []} if diagnose else None
         with torch.no_grad():
@@ -505,6 +507,8 @@ class _Decoder:
                 emitted = _emitted_replace(raw)
                 rec, exact = _fidelity(emitted, texts[i]["added"])
                 recs.append(rec)
+                if raw_list is not None:
+                    raw_list.append(raw)
                 if diag is not None:
                     diag["gen_times_ms"].append(gen_ms)
                     if not emitted:
@@ -546,7 +550,11 @@ class _Decoder:
                 log(f"        raw: {s['raw'][:150]}")
                 log(f"        gold: {s['gold'][:100]}")
                 log("")
+            if capture_raw:
+                return float(np.mean(recs)) if recs else 0.0, recs, diag, raw_list
             return float(np.mean(recs)) if recs else 0.0, recs, diag
+        if capture_raw:
+            return float(np.mean(recs)) if recs else 0.0, recs, raw_list
         return float(np.mean(recs)) if recs else 0.0, recs
 
     def behavior_embeddings(self, latents, indices):
@@ -705,7 +713,7 @@ def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
             f"(skipped: {','.join(n for n,_,_,_ in all_arms if n not in arm_filter) or 'none'})")
     results = {}; per_inst = {}; sens_curve = None
     latent_behs_he = None; ops_behavior = None
-    diagnostics = {}
+    diagnostics = {}; raw_gens = {}
     for arm_name, latents, use_film, zdrop in arms:
         t0 = time.time()
         log(f"  [2/4] decoder arm '{arm_name}' (film={use_film}, bn={bottleneck}, zdrop={zdrop})...")
@@ -714,12 +722,13 @@ def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
         dec.train_on(texts, latents, tr, epochs=decoder_epochs, film_warmup=warmup,
                      z_dropout=zdrop, log=log)
         do_diag = arm_name in ("baseline", "ceiling")
-        eval_out = dec.eval_on(texts, latents, he, log=log, diagnose=do_diag)
+        eval_out = dec.eval_on(texts, latents, he, log=log, diagnose=do_diag, capture_raw=True)
         if do_diag:
-            mean_rec, recs, diag = eval_out
+            mean_rec, recs, diag, raws = eval_out
             diagnostics[arm_name] = diag
         else:
-            mean_rec, recs = eval_out
+            mean_rec, recs, raws = eval_out
+        raw_gens[arm_name] = raws
         results[arm_name] = mean_rec; per_inst[arm_name] = recs
         log(f"    {arm_name}: held recall = {mean_rec:.3f}")
         if arm_name == "latent" and use_film:
@@ -730,6 +739,22 @@ def run(g, f, ctx, cmask, texts, model_name, n_op=24, K=4, r=512,
             sens_curve = _sensitivity_sweep(dec, texts, f, h_K, tr, he, log=log)
         dec.cleanup()
         timings[f"decoder_{arm_name}"] = time.time() - t0
+
+    # side-by-side: what did each arm generate for the same instances?
+    arm_names = [n for n, _, _, _ in arms if n in raw_gens]
+    if len(arm_names) >= 2 and len(he) > 0:
+        log("\n  --- side-by-side comparison (first 6 held instances) ---")
+        for j, idx in enumerate(he[:6]):
+            rec_per_arm = {a: per_inst[a][j] for a in arm_names if a in per_inst}
+            log(f"\n  [instance {idx}] gold: {texts[idx]['added'][:120]}")
+            log(f"    task: {texts[idx]['issue'][:100]}")
+            for a in arm_names:
+                r = raw_gens[a][j] if j < len(raw_gens[a]) else "(no gen)"
+                rec = rec_per_arm.get(a, -1)
+                changed = ""
+                if a != arm_names[0] and j < len(raw_gens[arm_names[0]]):
+                    changed = " SAME" if r == raw_gens[arm_names[0]][j] else " DIFF"
+                log(f"    {a:>10} (rec={rec:.3f}{changed}): {r[:150]}")
 
     # phase 3: write-back trajectory
     t0 = time.time()
