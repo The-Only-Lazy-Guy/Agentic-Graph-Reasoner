@@ -1005,10 +1005,11 @@ def _selftest() -> bool:
 
 def main():
     ap = argparse.ArgumentParser(description="LGGN decode v2: refiner h_K -> patches via LoRA + FiLM.")
-    ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
+    ap.add_argument("--model", default="Qwen/Qwen2.5-3B")
     ap.add_argument("--dataset", default="lite"); ap.add_argument("--split", default="test")
     ap.add_argument("--n", type=int, default=200)
-    ap.add_argument("--n-op", type=int, default=24)
+    ap.add_argument("--n-op", type=int, default=48)
+    ap.add_argument("--t-ctx", type=int, default=128, help="context token count for reprs")
     ap.add_argument("--r", type=int, default=512, help="refiner inner dim")
     ap.add_argument("--K", type=int, default=4, help="refiner steps")
     ap.add_argument("--refiner-epochs", type=int, default=400)
@@ -1046,7 +1047,7 @@ def main():
           f"warmup={a.film_warmup} zdrop={a.z_dropout} "
           f"sensitivity={a.sensitivity}{ex}")
     import time as _t; _t0_load = _t.time()
-    g, f, ctx, cmask, texts = _load_paired(a.model, a.dataset, a.split, a.n)
+    g, f, ctx, cmask, texts = _load_paired(a.model, a.dataset, a.split, a.n, t_ctx=a.t_ctx)
     print(f"  {len(g)} instances, d={g.shape[1]} (loaded in {_t.time()-_t0_load:.1f}s)")
     af = set(a.arms.split(",")) if a.arms != "baseline,constant,latent,ceiling" else None
     results, n_held, cos_ref, wb, sens, graph_stats = run(
