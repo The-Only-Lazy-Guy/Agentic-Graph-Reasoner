@@ -174,6 +174,16 @@ def _encode_pair(tok, prompt: str, target: str, max_tokens: int = 1024):
     return p_ids + t_ids, [-100] * len(p_ids) + t_ids
 
 
+def _pad_batch(encs: list[tuple[list[int], list[int]]], pad_id: int):
+    """Right-pad a batch of (input_ids, labels) to the batch max. Pads get label -100 and
+    mask 0. Mask comes from LENGTHS, never from `ids != pad` — the supervised EOS equals pad."""
+    width = max(len(ids) for ids, _ in encs)
+    ids = [seq + [pad_id] * (width - len(seq)) for seq, _ in encs]
+    lbl = [lab + [-100] * (width - len(lab)) for _, lab in encs]
+    mask = [[1] * len(seq) + [0] * (width - len(seq)) for seq, _ in encs]
+    return ids, lbl, mask
+
+
 # ── metrics ─────────────────────────────────────────────────────────────────────
 
 def added_recall(gen: str, old: str, gold_new: str) -> float | None:
@@ -224,6 +234,11 @@ class RawLM:
         base = load_frozen_lm(model_name)
         if resolve_quant(None) in ("4bit", "8bit"):
             base = prepare_model_for_kbit_training(base)
+        else:
+            # non-quant path (local dev): still need activation checkpointing for batched
+            # training, and input grads so LoRA gets gradients through the frozen embed
+            base.gradient_checkpointing_enable()
+            base.enable_input_require_grads()
         lcfg = LoraConfig(r=16, lora_alpha=32, lora_dropout=0.05, bias="none",
                           task_type="CAUSAL_LM",
                           target_modules=["q_proj", "k_proj", "v_proj", "o_proj"])
@@ -270,16 +285,48 @@ class RawLM:
         cdt = next(self.molora.parameters()).dtype
         self._z_raw = self.torch.as_tensor(v, dtype=cdt, device=self.dev).unsqueeze(0)
 
+    def _set_z_batch(self, zs: list):
+        """Per-row z for a batch; None rows become zero vectors (NOTE: in the batched path a
+        dropped z is a ZEROS vector through the encoder, not the hook bypass of _set_z(None) —
+        same 'no signal' intent, slightly different mechanics)."""
+        if self.molora is None or all(z is None for z in zs):
+            self._z_raw = None
+            return
+        torch = self.torch
+        cdt = next(self.molora.parameters()).dtype
+        d = next(self.molora.behavior_encoder.parameters()).shape[1]
+        rows = [torch.zeros(d) if z is None else torch.as_tensor(z, dtype=torch.float32)
+                for z in zs]
+        self._z_raw = torch.stack(rows).to(self.dev, cdt)
+
     def train_on(self, pairs: list[tuple[str, str]], latents=None, epochs: int = 2,
-                 warmup: int = 1, z_dropout: float = 0.0, max_tokens: int = 1024, log=print):
-        """pairs: [(prompt, target)] already formatted; latents: optional per-pair z (M2)."""
+                 warmup: int = 1, z_dropout: float = 0.0, max_tokens: int = 1024,
+                 batch_size: int = 8, log=print):
+        """pairs: [(prompt, target)] already formatted; latents: optional per-pair z (M2).
+        Batched: pairs are packed batch_size at a time (right pad, labels -100 on pads)."""
         torch = self.torch
         _drop_rng = random.Random(42)
         self.model.train()
         if self.molora is not None:
             self.molora.train()
+        pad = self.tok.eos_token_id
+        encs = []                                          # [(pair_idx, (ids, labels))]
         n_skip = 0
+        for k, (prompt, target) in enumerate(pairs):
+            e = _encode_pair(self.tok, prompt, target, max_tokens)
+            if e is None:
+                n_skip += 1
+                continue
+            encs.append((k, e))
+        if n_skip:
+            log(f"      [skipped {n_skip} over-budget pairs (> {max_tokens} tok)]")
+        # length-sorted batches: uniform lengths -> minimal padding, bounded peak memory.
+        # Batch ORDER is shuffled per epoch so sorting doesn't become a length curriculum.
+        encs.sort(key=lambda ke: len(ke[1][0]))
+        batches = [encs[i:i + batch_size] for i in range(0, len(encs), batch_size)]
+        _order_rng = random.Random(43)
         for ep in range(epochs):
+            _order_rng.shuffle(batches)
             if self.molora is not None:
                 frozen = ep < warmup
                 for p in self.molora.parameters():
@@ -287,32 +334,38 @@ class RawLM:
                 if ep == warmup:
                     log(f"      [MoLoRA unfrozen at epoch {ep+1}]")
             tot, n_used, n_dropped = 0.0, 0, 0
-            for k, (prompt, target) in enumerate(pairs):
-                enc = _encode_pair(self.tok, prompt, target, max_tokens)
-                if enc is None:
-                    n_skip += 1
-                    continue
-                if latents is not None and z_dropout > 0 and _drop_rng.random() < z_dropout:
-                    self._set_z(None)
-                    n_dropped += 1
+            t0 = time.time()
+            every = max(1, len(batches) // 8)
+            for bi, batch in enumerate(batches):
+                ids_l, lbl_l, mask_l = _pad_batch([e for _, e in batch], pad)
+                ids = torch.tensor(ids_l, device=self.dev)
+                lbl = torch.tensor(lbl_l, device=self.dev)
+                mask = torch.tensor(mask_l, device=self.dev)
+                if latents is not None:
+                    zs = []
+                    for k, _ in batch:
+                        if z_dropout > 0 and _drop_rng.random() < z_dropout:
+                            zs.append(None)
+                            n_dropped += 1
+                        else:
+                            zs.append(latents[k])
+                    self._set_z_batch(zs)
                 else:
-                    self._set_z(latents[k] if latents is not None else None)
-                input_ids, labels = enc
-                ids = torch.tensor([input_ids], device=self.dev)
-                lbl = torch.tensor([labels], device=self.dev)
-                out = self.model(ids, attention_mask=torch.ones_like(ids), labels=lbl)
+                    self._set_z(None)
+                out = self.model(ids, attention_mask=mask, labels=lbl)
                 self.opt.zero_grad()
                 out.loss.backward()
                 torch.nn.utils.clip_grad_norm_(
                     [p for g in self.opt.param_groups for p in g["params"] if p.requires_grad],
                     self.max_grad_norm)
                 self.opt.step()
-                tot += float(out.loss.detach())
-                n_used += 1
+                tot += float(out.loss.detach()) * len(batch)
+                n_used += len(batch)
+                if (bi + 1) % every == 0:
+                    log(f"      ep {ep+1} batch {bi+1}/{len(batches)}: loss {tot/max(1, n_used):.3f} "
+                        f"({time.time()-t0:.0f}s)")
             drop = f" (z_drop={n_dropped})" if n_dropped else ""
             log(f"      epoch {ep+1}/{epochs}: loss {tot/max(1, n_used):.3f} on {n_used} pairs{drop}")
-        if n_skip:
-            log(f"      [skipped {n_skip} over-budget pair-epochs (> {max_tokens} tok)]")
         if self.molora is not None:
             for p in self.molora.parameters():
                 p.requires_grad_(True)
@@ -335,6 +388,30 @@ class RawLM:
             raw = self.tok.decode(out[0, ids.shape[1]:], skip_special_tokens=True)
         self._set_z(None)
         return raw
+
+    def generate_raw_batch(self, prompts: list[str], zs=None, max_new_tokens: int = 512) -> list[str]:
+        """Batched greedy completion. LEFT padding so every prompt ends at the same position;
+        position ids follow the attention mask (Qwen2 honors it)."""
+        torch = self.torch
+        self.model.eval()
+        if self.molora is not None:
+            self.molora.eval()
+        pad = self.tok.eos_token_id
+        enc = [self.tok(p, add_special_tokens=False)["input_ids"] for p in prompts]
+        width = max(len(e) for e in enc)
+        ids = torch.tensor([[pad] * (width - len(e)) + e for e in enc], device=self.dev)
+        mask = torch.tensor([[0] * (width - len(e)) + [1] * len(e) for e in enc], device=self.dev)
+        if zs is not None:
+            self._set_z_batch(zs)
+        else:
+            self._set_z(None)
+        with torch.no_grad():
+            out = self.model.generate(input_ids=ids, attention_mask=mask,
+                                      max_new_tokens=max_new_tokens, min_new_tokens=2,
+                                      do_sample=False, pad_token_id=pad)
+        self._set_z(None)
+        return [self.tok.decode(out[i, width:], skip_special_tokens=True)
+                for i in range(len(prompts))]
 
     def save_checkpoint(self, path: str):
         Path(path).mkdir(parents=True, exist_ok=True)
@@ -378,29 +455,32 @@ class RawLM:
 
 # ── M1 experiment ───────────────────────────────────────────────────────────────
 
-def _eval_arm(lm: RawLM, triples, he_idx, traces_for, max_new: int, log=print):
+def _eval_arm(lm: RawLM, triples, he_idx, traces_for, max_new: int, eval_batch: int = 8, log=print):
     """traces_for(j, i) -> trace or None for held position j / triple index i."""
     import numpy as np
     recs, copies, gens = [], 0, []
     t0 = time.time()
-    for j, i in enumerate(he_idx):
-        t = triples[i]
-        gen = lm.generate_raw(realizer_prompt(t["old"], traces_for(j, i)), max_new_tokens=max_new)
-        gens.append(gen)
-        r = added_recall(gen, t["old"], t["new"])
-        if r is not None:
-            recs.append(r)
-        copies += int(is_copy(gen, t["old"]))
-        if (j + 1) % 10 == 0:
-            log(f"      {j+1}/{len(he_idx)} eval'd, added_recall {np.mean(recs):.3f} "
-                f"({(time.time()-t0)/(j+1):.1f}s/inst)")
+    for b0 in range(0, len(he_idx), eval_batch):
+        chunk = he_idx[b0:b0 + eval_batch]
+        prompts = [realizer_prompt(triples[i]["old"], traces_for(b0 + j, i))
+                   for j, i in enumerate(chunk)]
+        for g, i in zip(lm.generate_raw_batch(prompts, max_new_tokens=max_new), chunk):
+            gens.append(g)
+            r = added_recall(g, triples[i]["old"], triples[i]["new"])
+            if r is not None:
+                recs.append(r)
+            copies += int(is_copy(g, triples[i]["old"]))
+        done = b0 + len(chunk)
+        log(f"      {done}/{len(he_idx)} eval'd, added_recall {np.mean(recs) if recs else 0.0:.3f} "
+            f"({(time.time()-t0)/done:.1f}s/inst)")
     mean = float(np.mean(recs)) if recs else 0.0
     return mean, recs, copies / max(1, len(he_idx)), gens
 
 
 def run_m1(model_name: str, triples: list[dict], seeds: list[int], arms: set[str],
            epochs: int, eval_n: int, held_frac: float, max_new: int, max_tokens: int,
-           save_ckpt: bool, out_dir: str = "artifacts/lggn_realizer", log=print):
+           save_ckpt: bool, batch_size: int = 8, eval_batch: int = 8,
+           out_dir: str = "artifacts/lggn_realizer", log=print):
     import numpy as np
     results: dict[str, dict[str, list]] = {}
     Path(out_dir).mkdir(parents=True, exist_ok=True)
@@ -420,19 +500,19 @@ def run_m1(model_name: str, triples: list[dict], seeds: list[int], arms: set[str
             pairs = [(realizer_prompt(triples[i]["old"],
                                       triples[i]["trace"] if arm == "trace" else None),
                       triples[i]["new"]) for i in tr_idx]
-            lm.train_on(pairs, epochs=epochs, max_tokens=max_tokens, log=log)
+            lm.train_on(pairs, epochs=epochs, max_tokens=max_tokens, batch_size=batch_size, log=log)
 
             mean, recs, cp, gens = _eval_arm(
                 lm, triples, he_eval,
                 (lambda j, i: triples[i]["trace"]) if arm == "trace" else (lambda j, i: None),
-                max_new, log)
+                max_new, eval_batch, log)
             log(f"  [{arm}] added_recall={mean:.3f} copy_rate={cp:.2f} (n={len(recs)})")
             seed_res[arm] = {"added_recall": mean, "n": len(recs), "copy_rate": cp}
 
             if arm == "trace":
                 s_mean, s_recs, s_cp, s_gens = _eval_arm(
                     lm, triples, he_eval,
-                    lambda j, i: triples[he_eval[shuffle_map[j]]]["trace"], max_new, log)
+                    lambda j, i: triples[he_eval[shuffle_map[j]]]["trace"], max_new, eval_batch, log)
                 log(f"  [trace@shuffled] added_recall={s_mean:.3f} copy_rate={s_cp:.2f}")
                 seed_res["shuffled"] = {"added_recall": s_mean, "n": len(s_recs), "copy_rate": s_cp}
                 if save_ckpt:
@@ -538,7 +618,16 @@ def _selftest() -> bool:
     assert labels[p_len:] == ids[p_len:], "target supervised"
     assert ids[-1] == tok.eos_token_id and labels[-1] == tok.eos_token_id, "EOS appended + supervised"
     assert _encode_pair(tok, "w " * 2000, "x", max_tokens=64) is None, "over-budget -> None"
-    print("  [2] masking -> PASS")
+    e1 = _encode_pair(tok, "a b c", "d e")
+    e2 = _encode_pair(tok, "a b c d e f", "g")
+    ids, lbl, mask = _pad_batch([e1, e2], pad_id=tok.eos_token_id)
+    w = len(e2[0])
+    assert all(len(r) == w for r in ids + lbl + mask), "padded to batch max"
+    assert ids[0][len(e1[0]):] == [tok.eos_token_id] * (w - len(e1[0])), "pad id fills"
+    assert lbl[0][len(e1[0]):] == [-100] * (w - len(e1[0])), "pads not supervised"
+    assert mask[0] == [1] * len(e1[0]) + [0] * (w - len(e1[0])), "mask from lengths"
+    assert mask[1] == [1] * w and lbl[1][-1] == tok.eos_token_id, "full row: no pads, EOS supervised"
+    print("  [2] masking + batch padding -> PASS")
 
     # 3. metrics
     old, new = "keep_a\nkeep_b", "keep_a\nkeep_b\nadded_line_1\nadded_line_2"
@@ -592,6 +681,8 @@ def main():
     ap.add_argument("--held-frac", type=float, default=0.2)
     ap.add_argument("--max-new", type=int, default=512)
     ap.add_argument("--max-tokens", type=int, default=1024, help="train pair budget; longer pairs skipped")
+    ap.add_argument("--batch-size", type=int, default=8, help="train batch (A40: 8-16; local 6GB: 2-4)")
+    ap.add_argument("--eval-batch", type=int, default=8, help="generation batch at eval")
     ap.add_argument("--limit", type=int, default=0, help="cap triples (smoke/debug)")
     ap.add_argument("--no-fresh-only", action="store_true", help="keep stale-intent rows too")
     ap.add_argument("--save-ckpt", action="store_true", help="save trace-arm checkpoints (M2 needs them)")
@@ -611,13 +702,13 @@ def main():
         print(f"[SMOKE] model={a.model} n={len(triples)} 1 seed, 1 epoch, eval 8")
         run_m1(a.model, triples, [0], {"trace", "notrace"}, epochs=1, eval_n=8,
                held_frac=0.25, max_new=min(a.max_new, 256), max_tokens=a.max_tokens,
-               save_ckpt=False)
+               save_ckpt=False, batch_size=min(a.batch_size, 2), eval_batch=min(a.eval_batch, 2))
         return
     print(f"[lggn-realizer M1] model={a.model} seeds={a.seeds} arms={a.arms} epochs={a.epochs} "
-          f"trace_chars={a.trace_chars} eval_n={a.eval_n}")
+          f"trace_chars={a.trace_chars} eval_n={a.eval_n} batch={a.batch_size}/{a.eval_batch}")
     run_m1(a.model, triples, list(range(a.seeds)), set(a.arms.split(",")), epochs=a.epochs,
            eval_n=a.eval_n, held_frac=a.held_frac, max_new=a.max_new, max_tokens=a.max_tokens,
-           save_ckpt=a.save_ckpt)
+           save_ckpt=a.save_ckpt, batch_size=a.batch_size, eval_batch=a.eval_batch)
 
 
 if __name__ == "__main__":
