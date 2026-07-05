@@ -666,6 +666,13 @@ def _selftest() -> bool:
 # ── CLI ─────────────────────────────────────────────────────────────────────────
 
 def main():
+    import sys
+    # molab pipes stdout -> Python block-buffers print() (8KB) while tqdm/warnings on stderr
+    # stream through -> the run LOOKS hung for a whole epoch. Force line buffering.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
     ap = argparse.ArgumentParser(description="LGGN v2 M1 — realizer: (trace, old span) -> new span.")
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--stats", action="store_true", help="print filter funnel + length percentiles, exit")
