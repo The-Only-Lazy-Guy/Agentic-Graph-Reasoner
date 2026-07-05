@@ -494,7 +494,30 @@ def main():
     print(f"[lggn-refine] model={a.model} dataset={a.dataset} n={a.n} r={a.r} K={a.K} "
           f"heads={a.n_heads} ops={a.n_op} t_ctx={a.t_ctx} init={a.ops_init}"
           f"{' +extended' if a.extended else ''}")
-    g, f, ctx, cmask = _reprs(a.model, a.dataset, a.split, a.n, layer_frac=a.layer_frac, t_ctx=a.t_ctx)
+    parts = [p.strip() for p in a.dataset.split("+")]
+    if len(parts) == 1:
+        g, f, ctx, cmask = _reprs(a.model, a.dataset, a.split, a.n,
+                                   layer_frac=a.layer_frac, t_ctx=a.t_ctx)
+    else:
+        import numpy as np
+        arrays = {"g": [], "f": [], "ctx": [], "cmask": []}
+        for part in parts:
+            if part == "fable5":
+                from v5.runtime.lggn_decode import _load_fable5_texts
+                texts = _load_fable5_texts(limit=a.n)
+                if not texts:
+                    raise RuntimeError("fable5: 0 displacement edits")
+                ck = (f"artifacts/lggn_reprs_{a.model.split('/')[-1]}"
+                      f"_fable5_n{a.n}_L{a.layer_frac}_T{a.t_ctx}.npz")
+                gp, fp, cp, mp = _reprs_from_texts(a.model, texts,
+                    layer_frac=a.layer_frac, t_ctx=a.t_ctx, cache_key=ck)
+            else:
+                gp, fp, cp, mp = _reprs(a.model, part, a.split, a.n,
+                    layer_frac=a.layer_frac, t_ctx=a.t_ctx)
+            arrays["g"].append(gp); arrays["f"].append(fp)
+            arrays["ctx"].append(cp); arrays["cmask"].append(mp)
+        g = np.concatenate(arrays["g"]); f = np.concatenate(arrays["f"])
+        ctx = np.concatenate(arrays["ctx"]); cmask = np.concatenate(arrays["cmask"])
     print(f"  {len(g)} instances, Qwen dim={g.shape[1]}")
     outs = []
     for s in range(a.seeds):

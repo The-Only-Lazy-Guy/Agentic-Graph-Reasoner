@@ -797,8 +797,33 @@ NOT the wall: localization (file-level works), emission (80% applyable), retriev
 
     **Synthetic verification (controlled, no model):** Architecture upgrade (r512/h4/48ops vs r256/h1/24ops) shows +5-8% at d=256-512 on harder synthetic tasks (N=800, 24 ground-truth ops, chain=4). K=4 consistently beats K=8. Improvement scales with d.
 
+33. **Qwen3.5-4B (d=2560) molab results + `_reprs()` mixed dataset fix (2026-07-05).** Qwen3.5-4B has DeltaNet layers (theoretically more efficient) but d=2560 vs Qwen2.5-3B's d=2048. Refiner peaks much lower. Fixed `_reprs()` in lggn_refine.py to handle `lite+fable5` mixed dataset syntax (split on `+`, handle `fable5` via `_load_fable5_texts()` + `_reprs_from_texts()`, concatenate).
+
+    **Molab results (Qwen3.5-4B, d=2560, K=4/K=2, random ops):**
+    ```
+    Config                    cos     note
+    ─────────────────────────────────────────
+    r=512  K4_full            0.502   code hurts -0.081
+    r=512  K4_nocode          0.583   best K=4
+    r=1024 K4_full            0.529   more r helps +0.027
+    r=1024 K4_nocode          0.584   nocode still wins
+    r=1024 K2_full            0.537   K=2 code neutral
+    r=1024 K2_nocode          0.525   code helps slightly at K=2
+    ```
+
+    **Compare Qwen2.5-3B (d=2048):** K4_full=0.703, K4_randops=0.740. Gap is **0.156** (0.584 vs 0.740).
+
+    **Key findings:**
+    - **d=2560 is harder.** raw_g is 0.226 (vs 0.372 for d=2048). Higher dimensionality = sparser displacement space = harder to learn directional structure.
+    - **Code attention HURTS at K=4** consistently (-0.055 to -0.081). At K=2, effect is neutral/slightly positive. Hypothesis: code tokens add noise the attention can't filter with 4 recurrent steps.
+    - **All results below 0.73 cliff.** Even best (0.584) is far below where decoder starts benefiting.
+    - **Doubling r (512→1024) gives diminishing returns** (+0.027 for K4_full, +0.001 for K4_nocode). Bottleneck is not model capacity but displacement space difficulty.
+    - **Verdict: Qwen2.5-3B (d=2048) is the better refiner backbone.** DeltaNet efficiency doesn't compensate for the d=2560 displacement learning difficulty. Use Qwen3.5-4B only for decode (where raw generation quality matters).
+
+    **`_reprs()` fix:** `main()` in lggn_refine.py now splits dataset on `+`, handles `fable5` part via `_load_fable5_texts()` + `_reprs_from_texts()`, and SWE parts via `_reprs()`, concatenating all arrays. Previously passed raw `"lite+fable5"` to `load_instances()` which triggered HFValidationError.
+
 ## Current verdicts (updated 2026-07-05)
-- **LGGN refiner:** ALL 4 PILLARS PASS at r=512 (recurrence, constraints, graph, learnedness). Reasoning substrate validated. cos(h_K, f) improved from 0.553 to **0.703-0.740** with architecture upgrade + random ops (Qwen2.5-3B, d=2048). Old arch K=1 reaches **0.737** (above cliff). New arch K=4 + random ops reaches **0.740**. **Near or above the 0.73 sensitivity cliff** — pending molab verification on Qwen3.5-4B (d=2560).
+- **LGGN refiner:** ALL 4 PILLARS PASS at r=512 (recurrence, constraints, graph, learnedness). Reasoning substrate validated. cos(h_K, f) improved from 0.553 to **0.703-0.740** with architecture upgrade + random ops (Qwen2.5-3B, d=2048). Old arch K=1 reaches **0.737** (above cliff). New arch K=4 + random ops reaches **0.740**. **Near or above the 0.73 sensitivity cliff.** Qwen3.5-4B (d=2560) verified: peaks at **0.584** — significantly worse. **Use Qwen2.5-3B (d=2048) as refiner backbone.**
 - **Operator basis = coordinate system, NOT semantics.** Major finding (2026-07-05). Random Gaussian ops beat KMeans centroids (+0.037). Fixed ops beat learned ops (+0.05). The refiner's MLP composes operators like Fourier coefficients — spanning the space matters, not clustering. KMeans collapses the basis into a low-rank correlated subspace. `_discover_ops` should be replaced with fixed random init.
 - **Graph value (REVISED):** at r=256 (entry 15), discrete ops > free MLP was the finding. At r=512 with random ops (entry 32), K4_nograph ≈ K4_full (0.701 vs 0.703). The graph basis adds near-zero over free MLP. The graph's value for the PIPELINE is not cos improvement — it's providing interpretable trajectories for the iteration loop (which op to try, which to invalidate).
 - **Reasoner (traverse):** LEARNS (40%, scales) — VALIDATED.
@@ -833,11 +858,11 @@ Target:    issue → refiner → decompose → [FiLM → generate → test → u
 
 ## Next (recommended order, updated 2026-07-04)
 
-### Phase A — Refiner quality (PARTIALLY RESOLVED)
-Architecture upgrade + random ops lifted cos from 0.553 → 0.703-0.740 (Qwen2.5-3B). **Near or above the 0.73 cliff.** Remaining work: confirm on Qwen3.5-4B (molab), then run full decoder pipeline to measure actual recall improvement.
+### Phase A — Refiner quality (RESOLVED)
+Architecture upgrade + random ops lifted cos from 0.553 → 0.703-0.740 (Qwen2.5-3B). **Near or above the 0.73 cliff.** Qwen3.5-4B (d=2560) verified WORSE (0.584 peak) — use Qwen2.5-3B. Remaining: full decoder pipeline test to measure actual recall improvement.
 
-1. **Switch to random ops** — replace `_discover_ops` (KMeans) with fixed random Gaussian vectors. +0.037 cos lift, zero code complexity. The ops are a Fourier-like basis, not a semantic clustering.
-2. **Confirm on Qwen3.5-4B** — all local results on Qwen2.5-3B (d=2048). Need molab run with 3.5-4B (d=2560) to verify the improvement transfers. K=4, r=512, h=4, 48 random ops.
+1. ~~**Switch to random ops**~~ DONE. Default in CLI. +0.037 cos lift.
+2. ~~**Confirm on Qwen3.5-4B**~~ DONE (entry 33). d=2560 peaks at 0.584, far below cliff. Qwen2.5-3B (d=2048) confirmed as refiner backbone.
 3. **Full pipeline test** — refiner → decoder → recall. Does cos 0.74 translate to recall improvement? Run: baseline vs latent(random ops) vs ceiling. The sensitivity curve predicts yes, but z-dropout may have already bridged the gap.
 4. **Stabilize latent arm variance** — latent recall 0.106-0.203 across runs. Confirm z_dropout RNG seeding is deployed. If seeded, the variance is from train/held split randomness at n=29.
 
@@ -873,6 +898,8 @@ The pipeline that routes around 4B single-shot capacity. Each piece independentl
 - ~~Prompt framing~~ — **FIXED** (generic "Task:"/"Code:" for mixed SWE+Fable-5)
 - ~~Diagnostic breakdown~~ — **BUILT** (`eval_on(diagnose=True)`, failure categories + raw samples + timing)
 - ~~Training time optimization~~ — **BUILT** (`--arms` filter, 4.8h→2.2h or 30min diagnostic)
+- ~~Qwen3.5-4B verification~~ — **RESOLVED** (d=2560 peaks at 0.584, far below cliff. Qwen2.5-3B confirmed as refiner backbone)
+- ~~`_reprs()` mixed dataset~~ — **FIXED** (`lite+fable5` split on `+`, fable5 via `_load_fable5_texts`, with caching)
 
 ---
 
