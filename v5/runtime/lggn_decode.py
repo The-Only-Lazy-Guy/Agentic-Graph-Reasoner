@@ -43,14 +43,16 @@ import torch.nn as nn
 def _load_fable5_texts(limit=0):
     """Fable-5 str_replace edits -> [{issue, code, added}] for LGGN training.
 
-    Only extracts edits with both old_string and new_string (displacement pairs).
-    Greenfield writes (create_file) skipped — no before-state for refiner to learn from.
+    Aggregates ALL edits per session into one instance (matching SWE-bench
+    granularity where one instance = one complete patch). Previous per-edit
+    granularity created one-to-many mappings (same goal, different fixes)
+    that added destructive noise to the refiner.
     """
     import ast, json
     from v5.training.ingest_fable5 import _download_files, _read_events, _parts, _is_edit, _goal
 
     files = _download_files()
-    texts, seen = [], set()
+    texts, seen_sessions = [], set()
     for fp in files:
         events = _read_events(fp)
         if not events:
@@ -58,6 +60,10 @@ def _load_fable5_texts(limit=0):
         goal = _goal(events)
         if not goal.strip():
             continue
+        sess_key = hash(goal[:400])
+        if sess_key in seen_sessions:
+            continue
+        olds, news = [], []
         for ev in events:
             for p in _parts(ev):
                 if not _is_edit(p):
@@ -76,15 +82,18 @@ def _load_fable5_texts(limit=0):
                 new = args.get("new_string") or args.get("new_str") or ""
                 if not old.strip() or not new.strip() or old.strip() == new.strip():
                     continue
-                key = hash((goal[:200], old[:200], new[:200]))
-                if key in seen:
-                    continue
-                seen.add(key)
-                texts.append({"issue": goal[:700], "code": old[:900], "added": new[:600]})
-                if limit and len(texts) >= limit:
-                    print(f"  fable5: {len(texts)} displacement edits from {len(files)} sessions")
-                    return texts
-    print(f"  fable5: {len(texts)} displacement edits from {len(files)} sessions")
+                olds.append(old.strip())
+                news.append(new.strip())
+        if not olds:
+            continue
+        seen_sessions.add(sess_key)
+        code = "\n---\n".join(olds)[:1500]
+        added = "\n---\n".join(news)[:1500]
+        texts.append({"issue": goal[:700], "code": code, "added": added})
+        if limit and len(texts) >= limit:
+            print(f"  fable5: {len(texts)} sessions (aggregated) from {len(files)} files")
+            return texts
+    print(f"  fable5: {len(texts)} sessions (aggregated) from {len(files)} files")
     return texts
 
 

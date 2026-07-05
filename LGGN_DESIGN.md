@@ -881,7 +881,30 @@ NOT the wall: localization (file-level works), emission (80% applyable), retriev
     - H2 (fable5 gold inherently noisy) may COMPOUND H1 but is not the primary cause — if it were, direct would also be lower for fable5 instances, but direct actually increased (0.637 vs 0.543 in lite-only, though r difference contributes).
     - d=2048 less severely affected (-0.043 vs -0.092) because the displacement space has more structure (raw_g 0.394 vs 0.229), giving the optimizer more signal to separate domains. But not enough to overcome the interference.
 
-    **Verdict: DOMAIN-MATCHED TRAINING ONLY for refiner.** Fable5 useful for decoder (generation quality doesn't need displacement structure), not refiner. Future: domain-conditional refiner (separate heads or domain token) could potentially use mixed data, but adds complexity for unclear benefit.
+    **~~Verdict: DOMAIN-MATCHED TRAINING ONLY for refiner.~~** REVISED in entry 36 — the problem was a data loading bug, not domain mismatch.
+
+36. **ROOT CAUSE FOUND: per-edit granularity bug in `_load_fable5_texts` (2026-07-05).** Entries 34-35 blamed "domain mismatch" — WRONG. The real cause: each individual str_replace was a separate instance, but sessions share the same goal. One session with 210 edits = 210 instances with IDENTICAL `g` embedding and 210 DIFFERENT `f` targets. This is a one-to-many mapping that's impossible for the refiner to learn.
+
+    **Data analysis (all fable5, no limit):**
+    ```
+    Total individual edits:      1850
+    Unique goals (sessions):      964
+    Mean edits/session:           1.9
+    Sessions with 1 edit:         927  (fine)
+    Sessions with >5 edits:        25  (poisonous)
+    Top session:                  210 edits (same goal!)
+    Top 10 sessions:              672 edits = 36% of all data
+    ```
+
+    With `limit=500`, early sessions dominate. If the 210-edit session appears early, **42% of training data shares one goal embedding** mapping to 210 different fix embeddings. The refiner can't learn — same input, contradictory targets. Averages to noise.
+
+    **Compare SWE-bench:** one instance = one complete patch. Unique (problem_statement, complete_fix) pair. Never one-to-many.
+
+    **Fix:** Aggregate all edits per session into one instance. Concatenate all old_strings → single `code`, all new_strings → single `added`. Matches SWE-bench granularity: one instance = one complete task. 964 sessions → 964 instances max. Truncate concatenated text to 1500 chars (matching `_fix_text`'s cap).
+
+    **Reframing:** The refiner is NOT a "bug fixer" — it's a general agentic coder. Bug fixes AND feature-building are both valid target behaviors. The "domain mismatch" conclusion was premature; the actual problem was data preparation, not task incompatibility. With correct per-session aggregation, fable5 should ADD useful signal (more diverse agentic tasks = better generalization).
+
+    **INVALIDATES entries 34-35 conclusions.** "Domain mismatch" was a misdiagnosis caused by a data loading bug. Must re-run lite+fable5 with aggregated sessions to get valid results.
 
 ## Current verdicts (updated 2026-07-05)
 - **LGGN refiner:** ALL 4 PILLARS PASS at r=512 (recurrence, constraints, graph, learnedness). Reasoning substrate validated. cos(h_K, f) improved from 0.553 to **0.703-0.740** with architecture upgrade + random ops (Qwen2.5-3B, d=2048). Old arch K=1 reaches **0.737** (above cliff). New arch K=4 + random ops reaches **0.740**. **Near or above the 0.73 sensitivity cliff.** Qwen3.5-4B (d=2560) verified: peaks at **0.584** — significantly worse. **Use Qwen2.5-3B (d=2048) as refiner backbone.**
@@ -894,11 +917,11 @@ NOT the wall: localization (file-level works), emission (80% applyable), retriev
 - **Architectural pivot:** the graph IS a library of model BEHAVIORS (computational modulations). BehaviorEncoder → FiLM Renderer. Operators live in behavior space. VALIDATED by the FiLM results.
 - **Graph read path:** WORKS (refine → FiLM → decode). Proven when h_K is good enough (cos ≥ 0.78).
 - **Graph write path:** BUILT (`graph_edits.py`, 10 edits, selftest PASS). Wired to real outcomes in lggn_decode (behavior_emb extraction, top-2 trajectories, verified seeding). All 7 edit types fire in practice. CONNECT/COMPOSE activated via top-2 trajectory diversity. **Graph→decode loop still OPEN** (graph learns from outcomes, but nothing reads retrieved nodes back into FiLM decode yet). Closing this loop is blocked on refiner quality — a noisy graph (from noisy h_K) won't help decode.
-- **Fable-5 HF integration:** BUILT but **HARMFUL for refiner on BOTH models** (entries 34-35). d=2560: -0.100 degradation. d=2048: -0.043 degradation. Domain mismatch confirmed (H1), not dimensionality. **Use SWE-only for refiner. Use fable5 for decoder only.**
+- **Fable-5 HF integration:** BUILT. Entries 34-35 showed degradation — **root cause was per-edit granularity bug** (entry 36), not domain mismatch. Fixed: aggregate all edits per session into one instance (matching SWE-bench granularity). Cached .npz files from per-edit runs are INVALID — must regenerate. **Re-run needed to validate.**
 - **Truncation:** FIXED. `max_new_tokens` 256→512. format_fail 14%→0%.
 - **Dominant failure mode:** 55% zero_recall. Model generates syntactically valid patches with wrong fix strategy. This is 4B capacity, not pipeline. 28% partial (close but not exact), 17% good (recall >= 0.5).
 - **The wall is the REFINER, not the decoder.** The decoder reads gold fine (ceiling 0.210). The refiner's h_K (cos 0.561) is too noisy. Improving refiner cos from 0.56 → 0.78 is the critical path. Everything downstream (graph edits, closed loop, V6 kill-test) depends on this. The diagnostic confirms: even with perfect pipeline (no truncation, correct prompts), 55% of instances hit the 4B's reasoning limit.
-- **Training data gap (REVISED):** More data ≠ better when domains conflict. lite+fable5 (722) WORSE than lite-only (145-222) on BOTH d=2048 and d=2560. **Domain coherence > quantity.** Next: full SWE-bench (~2300, same domain) should help. Fable5 = decoder data only. Agentic traces still needed for graph edits.
+- **Training data gap (REVISED):** Previous "more data ≠ better" conclusion (entries 34-35) was caused by per-edit granularity bug, not domain conflict. With aggregated sessions, fable5 should add ~964 diverse agentic instances. **Re-run needed.** Full SWE-bench (~2300) still the next scale-up target.
 - **Model ceiling:** 4B with EXACT gold in prompt = 83% recall (solution_ladder). FiLM ceiling = 21%. Gap = FiLM channel bandwidth + training data scale, NOT 4B capacity. **Model size discussion pending** — user considering whether to scale up from 4B.
 
 ## Strategic decision (2026-07-04): 4B + full LGGN pipeline FIRST
