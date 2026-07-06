@@ -235,10 +235,44 @@ decode + frozen realizer. That's the novel bet.
 - Note for Windows local runs: console is cp1252 — use `PYTHONIOENCODING=utf-8` (traces contain
   unicode). Artifacts are always written utf-8.
 
+**2026-07-06 — M1 molab runs: ALL GATES PASS (the premise is validated):**
+
+First molab attempt (350 min, one process, all 6 arms sequential) was walltime-killed before the
+single end-of-run results write → resilience fixes (commit `bb0e508`): merge-write results after
+EVERY arm, checkpoint saved before eval, shuffled samples dumped, `--seed-list` per-seed jobs.
+Buffering fix (`e231217`): piped stdout was block-buffered while tqdm streamed on stderr — runs
+looked hung while training fine.
+
+Re-run as 3 per-seed jobs (Qwen2.5-3B 4-bit, 748 train / ~188 eval per seed, 2 epochs,
+batch 16 — ~35 min/seed, eval ~1.5-2s/inst):
+
+```
+arm        added_recall (3 seeds)         per-seed trace: 0.174 / 0.238 / 0.217
+notrace    0.004 ± 0.000
+shuffled   0.003 ± 0.001
+trace      0.210 ± 0.027
+
+G1a  trace >= 0.15            0.210                    PASS
+G1b  trace - notrace          +0.205 ± 0.026 all +     PASS   (41x the floor)
+G1c  true - shuffled          +0.207 ± 0.026           PASS
+     shuffled - notrace       -0.001  (predicted ~0)   exactly on prediction
+```
+
+Reading:
+- **The span alone predicts NOTHING (0.004).** All realization signal comes from the trace.
+- **A WRONG trace = no trace (0.003 ≈ 0.004).** The signal is 100% trace CONTENT — not format,
+  not length, not "any plausible text after ###T".
+- **copy_rate drops under tracing** (0.04-0.18 vs 0.19-0.25 notrace): traces pull the model off
+  the copy-the-input attractor.
+- Training loss: trace arm converges lower (0.64-0.71) than notrace (0.91-0.93) — the trace
+  genuinely disambiguates the target.
+- All 3 seed checkpoints saved (`artifacts/lggn_realizer/seed{0,1,2}_trace/`) — M2's frozen
+  realizers.
+
 **Pending:**
-- [ ] molab M1: `V5_LM_QUANT=4bit python -m v5.runtime.lggn_realizer --seeds 3 --save-ckpt
-  --batch-size 16 --eval-batch 16` → gates G1a-c.
-- [ ] M2 `lggn_tracer.py` (build gated on G1 PASS).
+- [x] molab M1 3 seeds → G1a-c ALL PASS.
+- [ ] M2 `lggn_tracer.py` — BUILT (selftest PASS); local 0.5B smoke, then molab:
+  G3 ceiling-first (`--seed-list 0 --arms ceiling,baseline`), then G4 full.
 - [ ] SWE-bench transfer — DEFERRED until M2 passes; needs a localization stage (à la
   Agentless / `code_retrieve.retrieve_support`, the one repr-based span scorer in the repo).
 
@@ -248,7 +282,7 @@ decode + frozen realizer. That's the novel bet.
 |---|---|
 | `v5/training/ingest_fable5.py` | `parse_session_triples`, `--ingest-triples` → `data/fable5/realizer_triples.jsonl` (gitignored; regenerate anywhere) |
 | `v5/runtime/lggn_realizer.py` | M1: loader funnel, `RawLM`, format constants, added_recall, arms, gates, smoke |
-| `v5/runtime/lggn_tracer.py` | M2 (not yet built — gated on G1) |
+| `v5/runtime/lggn_tracer.py` | M2: refiner retarget (trace-repr space, new cache ns), arms baseline/constant/latent/ceiling, e2e through frozen M1 ckpt, trace-cos diagnostic, gates G2-G4 |
 | `LGGN_DESIGN.md` | v1 canonical doc; §Architecture v2 summary + entries 39-40 point here |
 | `READ_THIS.md` | per-session raw-results dump |
 | Reused untouched | `_MoLoRAModule`, `_train_refiner`, `_find_layers` (lggn_decode.py); `_reprs_from_texts`, `Refiner` (lggn_refine.py); `_norm_lines`/`_fidelity` (solution_ladder.py) |

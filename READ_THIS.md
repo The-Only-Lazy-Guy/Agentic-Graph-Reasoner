@@ -1,7 +1,43 @@
-# READ_THIS — LGGN v2: Graph-uses-LM Pivot (2026-07-06)
+# READ_THIS — LGGN v2: M1 GATES ALL PASS (2026-07-06)
 
 > At-a-glance dump of the latest session (raw numbers, decisions, repro commands).
 > Updated each working session.
+
+## M1 REALIZER — molab, 3 seeds, Qwen2.5-3B 4-bit, ~188 eval/seed
+
+```
+notrace  : 0.004 ± 0.000     span alone predicts NOTHING
+shuffled : 0.003 ± 0.001     wrong trace = no trace (perfect control)
+trace    : 0.210 ± 0.027     seeds 0.174 / 0.238 / 0.217
+
+G1a  trace >= 0.15                     0.210    PASS
+G1b  trace - notrace, all seeds +      +0.205   PASS  (41x the floor)
+G1c  true - shuffled                   +0.207   PASS  (shuffled-notrace = -0.001, predicted ~0)
+```
+
+**Premise validated: real reasoning traces carry essentially ALL realization signal, and the
+3B realizer cashes them.** Copy-rate drops under tracing (0.04-0.18 vs 0.19-0.25 notrace).
+Trace-arm loss converges lower (0.64-0.71 vs 0.91-0.93) — the trace disambiguates the target.
+Checkpoints: `artifacts/lggn_realizer/seed{0,1,2}_trace/` (M2's frozen realizers).
+
+Ops lessons burned in: results merge-written after EVERY arm (walltime kill lost 4 arms once),
+stdout line-buffered (piped runs looked hung), per-seed jobs via --seed-list, batched
+train/generation (seed = ~35 min).
+
+## M2 TRACER — built, next up
+
+`v5/runtime/lggn_tracer.py`: refiner retargeted to TRACE-repr space (f = repr(gold trace), new
+cache ns `lggn_reprs_fable5trace_*`), arms baseline/constant/latent/ceiling, e2e through frozen
+seed-matched M1 realizer, trace-cos diagnostic, gates G2-G4. Selftest PASS.
+
+```bash
+# G3 ceiling-first (~1.5h) — if z can't carry traces given GOLD reprs, stop:
+V5_LM_QUANT=4bit python -u -m v5.runtime.lggn_tracer --seed-list 0 --arms ceiling,baseline
+# then full (per-seed jobs):
+V5_LM_QUANT=4bit python -u -m v5.runtime.lggn_tracer --seed-list 0
+V5_LM_QUANT=4bit python -u -m v5.runtime.lggn_tracer --seed-list 1
+V5_LM_QUANT=4bit python -u -m v5.runtime.lggn_tracer --seed-list 2
+```
 
 ## THE PIVOT (this session)
 

@@ -448,31 +448,34 @@ class _Decoder:
         self.max_grad_norm = 1.0
 
     def _install_hooks(self, layers):
-        """Register forward hooks on every transformer layer for FiLM modulation."""
+        """Register forward hooks on every transformer layer for FiLM modulation.
+        NOTE: transformers >= 4.5x returns a BARE TENSOR from decoder layers (older: tuple);
+        `output[0]` on a tensor slices the first BATCH ROW — silent batch corruption
+        (found via lggn_realizer M2 smoke). Handle both shapes. Batch-1 paths (all v1
+        lggn_decode runs) were unaffected: [T,D] + zeros[1,T,D] rebroadcasts correctly."""
         for l, layer in enumerate(layers):
             def hook(module, input, output, layer_idx=l):
                 if self._z_raw is None:
                     return output
+                is_tuple = isinstance(output, tuple)
+                h = output[0] if is_tuple else output
                 b = self.film.encode(self._z_raw)
-                h = output[0]
                 h = self.film.modulate(h, b, layer_idx)
-                if isinstance(output, tuple):
-                    return (h,) + output[1:]
-                return h
+                return (h,) + output[1:] if is_tuple else h
             self._hooks.append(layer.register_forward_hook(hook))
 
     def _install_molora_hooks(self, layers):
-        """Register forward hooks on every transformer layer for MoLoRA modulation."""
+        """Register forward hooks on every transformer layer for MoLoRA modulation.
+        Same tensor-vs-tuple handling as _install_hooks (see note there)."""
         for l, layer in enumerate(layers):
             def hook(module, input, output, layer_idx=l):
                 if self._z_raw is None:
                     return output
+                is_tuple = isinstance(output, tuple)
+                h = output[0] if is_tuple else output
                 b = self.molora.encode(self._z_raw)
-                h = output[0]
                 h = self.molora.modulate(h, b, layer_idx)
-                if isinstance(output, tuple):
-                    return (h,) + output[1:]
-                return h
+                return (h,) + output[1:] if is_tuple else h
             self._hooks.append(layer.register_forward_hook(hook))
 
     def _set_z(self, v):

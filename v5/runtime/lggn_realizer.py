@@ -267,15 +267,21 @@ class RawLM:
         self.max_grad_norm = 1.0
 
     def _install_molora_hooks(self, layers):
+        # transformers >= 4.5x returns a BARE TENSOR from decoder layers (older: tuple).
+        # `output[0]` on a tensor slices the FIRST BATCH ROW, and broadcasting then silently
+        # rebuilds [B,T,D] with every row = row 0 — corrupt batches, no crash. Caught by the
+        # M2 local smoke (batch>=2 with different rows is the only case that exposes it).
         for l, layer in enumerate(layers):
             def hook(module, input, output, layer_idx=l):
                 if self._z_raw is None:
                     return output
+                is_tuple = isinstance(output, tuple)
+                h = output[0] if is_tuple else output
+                assert h.dim() == 3 and self._z_raw.shape[0] in (1, h.shape[0]), \
+                    f"hook shape mismatch: h{tuple(h.shape)} z{tuple(self._z_raw.shape)}"
                 b = self.molora.encode(self._z_raw)
-                h = self.molora.modulate(output[0], b, layer_idx)
-                if isinstance(output, tuple):
-                    return (h,) + output[1:]
-                return h
+                h = self.molora.modulate(h, b, layer_idx)
+                return (h,) + output[1:] if is_tuple else h
             self._hooks.append(layer.register_forward_hook(hook))
 
     def _set_z(self, v):
