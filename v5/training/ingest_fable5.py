@@ -155,8 +155,9 @@ def parse_session_triples(events: list, sid: str = "") -> list[dict]:
     intent, so consecutive tool-calls share one stale thinking block (one-to-many supervision noise
     the loader can filter on)."""
     goal = _goal(events)
-    out, intent, fresh = [], "", False
+    out, intent, fresh, last_user = [], "", False, ""
     for ev in events:
+        role = ((ev.get("message") or {}).get("role") or "").lower()
         for p in _parts(ev):
             txt = p.get("text") or p.get("thinking") or ""
             if _is_edit(p):
@@ -166,6 +167,7 @@ def parse_session_triples(events: list, sid: str = "") -> list[dict]:
                 if isinstance(old, str) and isinstance(new, str) and old.strip() and new.strip():
                     out.append({
                         "goal": goal, "intent": intent[:2000],
+                        "last_user": last_user[:2000],
                         "old": old[:6000], "new": new[:6000],
                         "file_path": (args.get("file_path") or args.get("path") or ""),
                         "tool": (p.get("name") or "").lower(),
@@ -173,6 +175,8 @@ def parse_session_triples(events: list, sid: str = "") -> list[dict]:
                     })
                 fresh = False                              # this thinking block is consumed
             elif isinstance(txt, str) and txt.strip():
+                if role in ("user", "human"):
+                    last_user = txt                        # nearest user steering before the edit
                 intent, fresh = txt, True
     return out
 

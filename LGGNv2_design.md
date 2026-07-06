@@ -301,13 +301,57 @@ unaffected. Fixed version-agnostically in lggn_realizer + lggn_decode (`54878ab`
 - G3/G4 keep their form; baseline is now goal+span (stronger, honest): G4 = does the GRAPH's
   h_K add anything over the raw goal text — the actual LGGN system question.
 
+**2026-07-06 — bridge-v2 G3: FAIL — and the complete diagnosis (the gates did their job):**
+
+Molab seed 0, arms baseline/ceiling/retrieval, 8ep/warmup2 (proper conditioner training):
+
+```
+trace source                          e2e     trace_cos
+gold (this instance)                  0.165   1.0 (by def)
+generated from goal+span (baseline)   0.002   0.520
+generated + gold-trace-repr z (ceil)  0.005   0.496
+retrieved real trace, similar task    0.002   0.589
+real trace, random instance (M1)      0.003   —
+M1 notrace floor                      0.004   —
+```
+
+Three findings, each verified:
+1. **Quote-rate hypothesis WRONG** (measured): only 7.4% of gold ADDED lines appear verbatim in
+   gold traces; 91% of instances have zero quotes. The realizer genuinely SYNTHESIZES code from
+   semantic descriptions — it is a real prose→code translator. M1's 0.21 is not quote-copying.
+2. **But only instance-accurate descriptions pay.** Real trace text from the nearest similar
+   task (retrieval, full fluency) = 0.002. Wrong specifics = zero, however well-formed.
+3. **(goal, span) underdetermines the edit** — the actual blocker. Fable-5 goals are
+   whole-session requests; the per-edit intent was determined by the assistant's session state
+   (files read, prior edits, its own plan), which our triples don't carry. Checked the cheapest
+   context extension: `last_user` (nearest preceding user message) differs from goal in only
+   18% of triples and adds ZERO added-code token coverage (0.187→0.188). The missing signal is
+   not in any user text.
+
+**Net:** the trace is answer-grade content (in prose); producing it point-blank from compact
+context is the original hard problem relocated, and Fable-5's per-edit supervision cannot be
+predicted from what our pipeline can see. The realizer (M1) stands validated; the tracer as a
+POINT GENERATOR is falsified on this corpus.
+
+**Fork (user decision pending):**
+- **A. Selection, not generation:** sample N diverse traces from the goal+span tracer
+  (temperature), realize all, then the LATENT RANKS/selects (z proximity — trace_cos shows z
+  measures this) or tests select. First number to buy: ORACLE best-of-N e2e — if even the
+  oracle stays at floor, generation coverage is dead and the tracer line closes on Fable-5.
+  Cheap: one molab run, existing machinery + sampling + ranking.
+- **B. Data pivot to SWE-bench for M2:** SWE issues DETERMINE the fix (benchmark premise) —
+  (issue, span) → trace is well-posed there, unlike Fable-5. No gold traces exist → synthesize
+  rationales from gold patches (STaR/CodePLAN-style), train tracer on determined data. Realizer
+  transfers as-is.
+- **C. Stop M2, ship M1+retrieval as the system component** and move the reasoning budget to
+  the iteration loop (generate→realize→verify→re-derive), where LGGN's POMDP design lives.
+
 **Pending:**
 - [x] molab M1 3 seeds → G1a-c ALL PASS.
 - [x] M2 span-only G3 → FAIL (z steers, cannot reconstruct) → bridge v2.
-- [ ] molab bridge-v2 G3: `--seed-list 0 --arms ceiling,baseline,retrieval` (8ep/warmup2
-  defaults), then G4 full matrix per seed.
-- [ ] SWE-bench transfer — DEFERRED until M2 passes; needs a localization stage (à la
-  Agentless / `code_retrieve.retrieve_support`, the one repr-based span scorer in the repo).
+- [x] molab bridge-v2 G3 → FAIL (underdetermination, not bandwidth). Diagnosis complete.
+- [ ] Fork decision A/B/C above.
+- [ ] SWE-bench transfer — relevant to fork B directly.
 
 ## 9. File map
 
