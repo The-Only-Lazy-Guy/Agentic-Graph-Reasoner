@@ -269,10 +269,43 @@ Reading:
 - All 3 seed checkpoints saved (`artifacts/lggn_realizer/seed{0,1,2}_trace/`) — M2's frozen
   realizers.
 
+**2026-07-06 — M2 G3 (span-only tracer): FAIL, and the failure is the finding:**
+
+Two molab attempts, seed 0, arms ceiling+baseline:
+1. 2 epochs / warmup 1 = ONE effective conditioner epoch → ceiling training loss batch-for-batch
+   IDENTICAL to baseline (2.845/2.407 vs 2.843/2.407) — the v1 "MoLoRA needs ≥6 effective
+   epochs" finding, not carried over. Fixed: defaults 8 ep / warmup 2 + loud WARN (`8f7c4b2`).
+2. 8 epochs / warmup 2 (proper training): ceiling loss now DIVERGES (ep8 1.038 vs 1.158) and
+   trace_cos moves (ceiling 0.541 vs baseline 0.493) — **z is read and steers** — but e2e stays
+   at the notrace floor (ceiling 0.002, baseline 0.005; gold anchor 0.165). **G3 FAIL.**
+
+**Verdict:** z cannot RECONSTRUCT ~100 tokens of specific trace text from one repr through a
+64-d/4-expert router — that is embedding inversion (vec2text needs millions of pairs + iterative
+correction; we have 936). The v1 bottleneck argument, one level up: moving the target from code
+to trace made z's job easier but reconstruction is still the wrong job. z steers; it cannot
+dictate content. Also on the books: M2 smoke caught a CRITICAL silent bug first — transformers
+≥4.5x returns bare tensors from decoder layers; `output[0]` sliced the first batch row and
+broadcasting rebuilt corrupt [B,T,D] batches (every row = row 0). Batch-1 paths (all v1 runs)
+unaffected. Fixed version-agnostically in lggn_realizer + lggn_decode (`54878ab`).
+
+**BRIDGE v2 (active):** the tracer sees GOAL TEXT + old span; z only steers.
+- The goal is DATA available at inference (hiding it was for attribution cleanliness, not
+  deployment realism). Fable-5's goal = whole-session request; the trace = edit-specific plan —
+  goal→trace stays a real derivation task.
+- `tracer_goal_prompt = goal[:700] + "\n###O\n" + old + "\n###T\n"` (still zero instructions).
+  Prefix property vs the realizer prompt is dropped (belonged to the span-only design).
+- New **retrieval arm** (free, no LM): h_K nearest-neighbor over TRAIN gold-trace reprs → that
+  train instance's trace TEXT. Full text fidelity, wrong instance — measures how much trace
+  SPECIFICITY vs generality matters. Smoke: retrieval trace_cos 0.677 > generated arms (real
+  text wins in repr space, as expected).
+- G3/G4 keep their form; baseline is now goal+span (stronger, honest): G4 = does the GRAPH's
+  h_K add anything over the raw goal text — the actual LGGN system question.
+
 **Pending:**
 - [x] molab M1 3 seeds → G1a-c ALL PASS.
-- [ ] M2 `lggn_tracer.py` — BUILT (selftest PASS); local 0.5B smoke, then molab:
-  G3 ceiling-first (`--seed-list 0 --arms ceiling,baseline`), then G4 full.
+- [x] M2 span-only G3 → FAIL (z steers, cannot reconstruct) → bridge v2.
+- [ ] molab bridge-v2 G3: `--seed-list 0 --arms ceiling,baseline,retrieval` (8ep/warmup2
+  defaults), then G4 full matrix per seed.
 - [ ] SWE-bench transfer — DEFERRED until M2 passes; needs a localization stage (à la
   Agentless / `code_retrieve.retrieve_support`, the one repr-based span scorer in the repo).
 

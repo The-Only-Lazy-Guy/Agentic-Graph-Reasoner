@@ -1,24 +1,32 @@
-"""LGGN v2 M2 — the TRACER: graph latent h_K -> ~100-token reasoning trace -> frozen M1 realizer.
+"""LGGN v2 M2 — the TRACER: graph latent h_K + goal text -> reasoning trace -> frozen M1 realizer.
 
 M1 PASSED all gates (trace 0.210 vs notrace 0.004 vs shuffled 0.003, 3 seeds): real traces carry
-essentially ALL realization signal. M2 asks: can the GRAPH supply the trace? The refiner is
-RETARGETED to trace-repr space (f = repr of the gold trace, not the gold fix), and a MoLoRA-
-conditioned tracer LM decodes z into trace text. The tracer input is the old span ONLY — no goal
-text — so z is the single channel carrying task intent: any latent-over-baseline delta is
-attributable to z content.
+essentially ALL realization signal. M2 asks: can the GRAPH supply the trace?
 
-Arms (fresh tracer each): baseline (span only, pure LoRA) / constant (mean h_K broadcast) /
-latent (h_K per instance, z_dropout) / ceiling (z = gold trace repr).
+BRIDGE v2 (after the span-only G3 verdict, 2026-07-06): the tracer sees GOAL TEXT + old span,
+and z STEERS. The span-only tracer proved z cannot RECONSTRUCT trace content (that is embedding
+inversion — vec2text needs millions of pairs, we have 936): with z = the gold trace's own repr,
+generation reached only trace_cos 0.541 (baseline 0.493) and e2e stayed at the notrace floor
+(0.002-0.005 vs gold-anchor 0.165) — while training loss DID diverge (1.038 vs 1.158) and
+trace_cos DID move, i.e. z steers but cannot dictate. So give the tracer the content basis that
+exists at inference anyway (the issue/goal is DATA, not prompt engineering — Fable-5's goal is
+the whole-session request, the trace is the edit-specific plan, so goal->trace remains a real
+derivation task) and let z do the one job it demonstrably can: disambiguate/steer.
+
+Arms (fresh tracer each): baseline (goal+span, pure LoRA) / constant (mean h_K broadcast) /
+latent (h_K per instance, z_dropout) / ceiling (z = gold trace repr) / retrieval (NO LM:
+h_K nearest-neighbor over TRAIN gold-trace reprs -> that train instance's trace text; full text
+fidelity, wrong instance — measures specificity-vs-generality of traces).
 End-to-end: generated trace -> frozen seed-matched M1 realizer -> added_recall vs gold new span.
 Anchors: gold-trace-through-realizer (upper), M1 notrace (lower, from M1 results json).
 
 Gates: G2 refiner cos(h_K, f_trace) >= 0.45 and >= raw cos(g,f)+0.05 (before tracer training) |
-G3 ceiling-first: e2e ceiling-baseline >= +0.05 (1 seed, else the z channel is dead -> stop) |
-G4 e2e latent-baseline >= +0.03 every seed, and trace-cos latent > constant.
+G3 ceiling-first: e2e ceiling-baseline >= +0.05 (1 seed, else the z channel adds nothing over
+goal text -> stop) | G4 e2e latent-baseline >= +0.03 every seed, and trace-cos latent > constant.
 
   wiring  : python -m v5.runtime.lggn_tracer --selftest        # no GPU, no model
   smoke   : python -m v5.runtime.lggn_tracer --smoke           # 0.5B, real loop, local GPU
-  G3 first: V5_LM_QUANT=4bit python -m v5.runtime.lggn_tracer --seed-list 0 --arms ceiling,baseline
+  G3 first: V5_LM_QUANT=4bit python -m v5.runtime.lggn_tracer --seed-list 0 --arms ceiling,baseline,retrieval
   full    : V5_LM_QUANT=4bit python -m v5.runtime.lggn_tracer --seed-list 0   (then 1, then 2)
 """
 from __future__ import annotations
@@ -29,12 +37,21 @@ import random
 import time
 from pathlib import Path
 
-from v5.runtime.lggn_realizer import (TRIPLES, RawLM, added_recall, load_triples,
+from v5.runtime.lggn_realizer import (SEP_T, TRIPLES, RawLM, added_recall, load_triples,
                                       realizer_prompt, split_by_goal, tracer_prompt)
 
 RESULTS_PATH = "artifacts/lggn_tracer_results.json"
 M1_RESULTS_PATH = "artifacts/lggn_realizer_results.json"
-ARM_ORDER = ("baseline", "constant", "latent", "ceiling")
+ARM_ORDER = ("baseline", "constant", "latent", "ceiling", "retrieval")
+
+SEP_O = "\n###O\n"          # old span follows (tracer-side only; realizer format unchanged)
+
+
+def tracer_goal_prompt(goal: str, old: str) -> str:
+    """Bridge v2 tracer input: goal text (content basis, available at inference) + old span.
+    Still zero instruction text — both fields are data. NOTE: no longer a prefix of the
+    realizer prompt (that property belonged to the span-only tracer)."""
+    return goal[:700] + SEP_O + old + SEP_T
 
 
 def _trace_texts(triples: list[dict]) -> list[dict]:
@@ -165,29 +182,43 @@ def run_m2(model_name: str, triples: list[dict], seeds: list[int], arms: list[st
         # tracer arms
         gen_traces: dict[str, list[str]] = {}
         for arm in arms:
-            log(f"  [tracer/{arm}] training ({tracer_epochs} epochs, {len(tr)} pairs)...")
-            lm = RawLM(model_name, d_latent=d_latent, use_molora=(arm != "baseline"))
-            pairs = [(tracer_prompt(triples[i]["old"]), triples[i]["trace"]) for i in tr]
-            lm.train_on(pairs, latents=_arm_latents(arm, tr, h_all, f, h_mean),
-                        epochs=tracer_epochs, warmup=warmup,
-                        z_dropout=(z_dropout if arm == "latent" else 0.0),
-                        max_tokens=max_tokens, batch_size=batch_size, log=log)
-            outs: list[str] = []
-            t0 = time.time()
-            for b0 in range(0, len(he_eval), eval_batch):
-                chunk = he_eval[b0:b0 + eval_batch]
-                prompts = [tracer_prompt(triples[i]["old"]) for i in chunk]
-                zs = _arm_latents(arm, chunk, h_all, f, h_mean)
-                outs.extend(lm.generate_raw_batch(prompts, zs=zs, max_new_tokens=max_new_trace))
-                log(f"      {b0+len(chunk)}/{len(he_eval)} traces gen'd "
-                    f"({(time.time()-t0)/(b0+len(chunk)):.1f}s/inst)")
+            if arm == "retrieval":
+                # NO LM: h_K of the held instance -> nearest TRAIN gold-trace repr -> that
+                # train instance's trace TEXT. Full text fidelity, wrong instance.
+                # No leakage: h_K uses only (g, ctx); the pool is train-only.
+                f_tr = f[np.asarray(tr)]
+                f_tr_n = f_tr / (np.linalg.norm(f_tr, axis=1, keepdims=True) + 1e-9)
+                outs = []
+                for i in he_eval:
+                    q = h_all[i] / (np.linalg.norm(h_all[i]) + 1e-9)
+                    outs.append(triples[tr[int(np.argmax(f_tr_n @ q))]]["trace"])
+                log(f"  [tracer/retrieval] {len(outs)} traces retrieved (no training)")
+            else:
+                log(f"  [tracer/{arm}] training ({tracer_epochs} epochs, {len(tr)} pairs)...")
+                lm = RawLM(model_name, d_latent=d_latent, use_molora=(arm != "baseline"))
+                pairs = [(tracer_goal_prompt(triples[i]["goal"], triples[i]["old"]),
+                          triples[i]["trace"]) for i in tr]
+                lm.train_on(pairs, latents=_arm_latents(arm, tr, h_all, f, h_mean),
+                            epochs=tracer_epochs, warmup=warmup,
+                            z_dropout=(z_dropout if arm == "latent" else 0.0),
+                            max_tokens=max_tokens, batch_size=batch_size, log=log)
+                outs = []
+                t0 = time.time()
+                for b0 in range(0, len(he_eval), eval_batch):
+                    chunk = he_eval[b0:b0 + eval_batch]
+                    prompts = [tracer_goal_prompt(triples[i]["goal"], triples[i]["old"])
+                               for i in chunk]
+                    zs = _arm_latents(arm, chunk, h_all, f, h_mean)
+                    outs.extend(lm.generate_raw_batch(prompts, zs=zs, max_new_tokens=max_new_trace))
+                    log(f"      {b0+len(chunk)}/{len(he_eval)} traces gen'd "
+                        f"({(time.time()-t0)/(b0+len(chunk)):.1f}s/inst)")
+                lm.cleanup()
             gen_traces[arm] = outs
             with open(f"{out_dir}/traces_seed{seed}_{arm}.jsonl", "w", encoding="utf-8") as w:
                 for j, i in enumerate(he_eval):
                     w.write(json.dumps({"idx": i, "gen_trace": outs[j][:600],
                                         "gold_trace": triples[i]["trace"][:400]},
                                        ensure_ascii=False) + "\n")
-            lm.cleanup()
 
         # e2e through the frozen seed-matched M1 realizer (one load scores all arms + anchor)
         ck = f"{realizer_dir}/seed{seed}_trace"
@@ -331,13 +362,25 @@ def _selftest() -> bool:
     assert h.shape == (N, d) and cos_he > 0.5, f"refiner failed to learn shared shift (cos={cos_he:.2f})"
     print(f"  [3] refiner retarget wiring (synthetic cos={cos_he:.2f}) -> PASS")
 
-    tp = tracer_prompt("OLD SPAN")
-    rp = realizer_prompt("OLD SPAN", "GEN TRACE")
-    assert rp.startswith(tp), "tracer prompt must be a strict prefix of the realizer prompt"
+    tp = tracer_goal_prompt("THE GOAL", "OLD SPAN")
+    assert tp == "THE GOAL" + SEP_O + "OLD SPAN" + SEP_T, "bridge-v2 tracer format"
+    assert tracer_goal_prompt("g" * 2000, "o").startswith("g" * 700 + SEP_O), "goal capped at 700"
     fake_traces = [f"t{k}" for k in range(3)]
     prompts = [realizer_prompt(trips[i]["old"], fake_traces[j]) for j, i in enumerate([0, 2, 4])]
     assert all(fake_traces[j] in prompts[j] for j in range(3)), "gen traces flow into realizer prompts"
-    print("  [4] e2e plumbing + prefix property -> PASS")
+    print("  [4] e2e plumbing + bridge-v2 format -> PASS")
+
+    # retrieval arm: h_K nearest TRAIN gold-trace repr -> that train instance's trace
+    f6 = np.eye(6, 4, dtype=np.float32)                     # instance i points along axis i (i<4)
+    h6 = np.zeros((6, 4), dtype=np.float32)
+    h6[4] = [0, 1, 0.1, 0]                                  # held 4 nearest to train 1
+    h6[5] = [0.1, 0, 0, 1]                                  # held 5 nearest to train 3
+    tr6, he6 = [0, 1, 2, 3], [4, 5]
+    f_tr = f6[np.asarray(tr6)]
+    f_tr_n = f_tr / (np.linalg.norm(f_tr, axis=1, keepdims=True) + 1e-9)
+    picked = [tr6[int(np.argmax(f_tr_n @ (h6[i] / (np.linalg.norm(h6[i]) + 1e-9)))) ] for i in he6]
+    assert picked == [1, 3], f"retrieval NN picked {picked}"
+    print("  [6] retrieval nearest-neighbor -> PASS")
 
     import tempfile
     with tempfile.TemporaryDirectory() as td:
@@ -376,7 +419,7 @@ def main():
     ap.add_argument("--triples", default=TRIPLES)
     ap.add_argument("--seeds", type=int, default=3)
     ap.add_argument("--seed-list", default="", help="exact seeds, e.g. '0' (walltime-safe jobs)")
-    ap.add_argument("--arms", default="baseline,constant,latent,ceiling")
+    ap.add_argument("--arms", default="baseline,constant,latent,ceiling,retrieval")
     ap.add_argument("--K", type=int, default=4)
     ap.add_argument("--r", type=int, default=512)
     ap.add_argument("--n-op", type=int, default=48)
@@ -414,7 +457,7 @@ def main():
         a.model = "Qwen/Qwen2.5-0.5B" if a.model == "Qwen/Qwen2.5-3B" else a.model
         triples = triples[:32]
         print(f"[SMOKE] model={a.model} n={len(triples)} seed 0, arms baseline+latent")
-        run_m2(a.model, triples, [0], ["baseline", "latent"], K=2, r=64, n_op=8,
+        run_m2(a.model, triples, [0], ["baseline", "latent", "retrieval"], K=2, r=64, n_op=8,
                refiner_epochs=60, tracer_epochs=1, z_dropout=0.1, eval_n=6, held_frac=0.25,
                max_new_trace=96, max_new_realize=192, max_tokens=a.max_tokens,
                batch_size=2, eval_batch=2, realizer_dir=a.realizer_dir,
