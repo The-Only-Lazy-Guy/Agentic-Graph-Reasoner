@@ -1,0 +1,191 @@
+"""TotalMemory — the single facade the agent loop talks to. Clear LM<->graph contract:
+
+  read(ctx)  -> MemoryHit: ONE short implementation payload (trace + capped old->new) chosen
+                by the two-hop path  ctx -> L2 concepts (conf-gated) -> member impls ->
+                LOCAL-FIT re-rank (0.6·ctx-cos + 0.4·ident_overlap with the code in front of
+                the model). Payload is DATA for the prompt's trace slot (~<=300 tokens);
+                steering/constraint channels come later (P5) and cost zero tokens.
+  write(...) -> L1 append (verified strong on pass) + L2 lifecycle observe (+ caller feeds
+                touched files to L0 via syntax.scan_files).
+
+Modes (the GM1 ablation): off (empty hit) | flat (ANN over ALL impls, no concepts) |
+concept (two-hop). Same interface, so the loop's arms differ ONLY in memory content.
+
+  python -m v5.memory.memory --selftest
+  python -m v5.memory.memory --seed       # fable5 -> L1, KMeans -> L2 (mpnet, local)
+  python -m v5.memory.memory --stats
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import numpy as np
+
+from v5.memory.episodic import ImplStore, _skel
+from v5.memory.semantic import ConceptStore
+from v5.memory.store import stable_id
+from v5.memory.syntax import SyntaxStore, ident_overlap
+
+W_CTX, W_IDENT = 0.6, 0.4          # local-fit blend
+FLAT_POOL = 16                     # candidates pulled before local-fit re-rank
+
+
+@dataclass
+class MemoryHit:
+    impls: list = field(default_factory=list)          # full L1 records, best first
+    concepts: list = field(default_factory=list)       # [{concept_id, confidence, ...}]
+    trace_text: str = ""                               # the deliverable payload (may be "")
+    tokens_est: int = 0                                # ~chars/4, the GS speed budget number
+
+
+class TotalMemory:
+    def __init__(self, root: str | Path = "data/memory", mode: str = "concept",
+                 embed_fn=None):
+        assert mode in ("off", "flat", "concept"), mode
+        self.root = Path(root)
+        self.mode = mode
+        self.embed_fn = embed_fn
+        self.impls = ImplStore(self.root, embed_fn=embed_fn)
+        self.concepts = ConceptStore(self.root)
+        self.syntax = SyntaxStore(self.root, embed_fn=embed_fn)
+
+    # ── read ─────────────────────────────────────────────────────────────────
+    def _embed_one(self, text: str) -> np.ndarray:
+        key = stable_id("q", text)
+        return np.asarray(self.embed_fn({key: text})[key], dtype=np.float32)
+
+    def read(self, goal: str, span: str = "", obs: str = "", k_impl: int = 1) -> MemoryHit:
+        if self.mode == "off" or len(self.impls) == 0 or self.embed_fn is None:
+            return MemoryHit()
+        q = self._embed_one((goal or "")[:400] + ("\n" + obs[-200:] if obs else ""))
+        concepts_meta: list[dict] = []
+        if self.mode == "concept":
+            concepts_meta = self.concepts.retrieve(q, k=3)
+            pool = [i for c in concepts_meta for i in c["impl_ids"]]
+            cand = self.impls.search_ctx(q, k=FLAT_POOL, within=pool) if pool else []
+            if not cand:                                   # cold concepts -> flat fallback
+                cand = self.impls.search_ctx(q, k=FLAT_POOL)
+        else:                                              # flat
+            cand = self.impls.search_ctx(q, k=FLAT_POOL)
+        scored = []
+        for impl_id, ctx_cos in cand:
+            rec = self.impls.get(impl_id)
+            if rec is None:
+                continue
+            fit = W_CTX * ctx_cos + W_IDENT * ident_overlap(
+                span or goal, (rec["old"] or "") + "\n" + (rec["new"] or ""))
+            scored.append((fit, rec))
+        scored.sort(key=lambda x: -x[0])
+        top = [r for _, r in scored[:k_impl]]
+        payload = ""
+        if top:
+            r = top[0]
+            payload = (r["trace"] or "").strip()[:400]
+            delta = (r["old"] or "")[:250] + "\n=>\n" + (r["new"] or "")[:350]
+            payload = (payload + "\n" + delta).strip()
+        return MemoryHit(impls=top, concepts=concepts_meta, trace_text=payload,
+                         tokens_est=len(payload) // 4)
+
+    # ── write ────────────────────────────────────────────────────────────────
+    def write(self, goal: str, old: str, new: str, trace: str, verified: bool,
+              file_path: str = "", task_id: str = "") -> str | None:
+        """One loop outcome -> L1 record + L2 lifecycle. Returns impl_id (None = duplicate)."""
+        impl_id = self.impls.add(
+            ctx_text=goal[:400], old=old, new=new, trace=trace, file_path=file_path,
+            outcome="pass" if verified else "fail",
+            verified="strong" if verified else "fail", task_id=task_id)
+        if impl_id is None or self.embed_fn is None:
+            return impl_id
+        ctx_vec = self.impls.emb_ctx.get([impl_id])[0]
+        skel_vec = self.impls.emb_skel.get([impl_id])[0]
+        cid = self.concepts.observe_impl(impl_id, ctx_vec, skel_vec, verified)
+        if cid:
+            self.impls.records[impl_id]["concept_id"] = cid
+        return impl_id
+
+    def seed(self, k_concepts: int = 32, limit: int = 0, log=print) -> None:
+        self.impls.seed_from_fable5(limit=limit, log=log)
+        self.concepts.bootstrap(self.impls, k=k_concepts, log=log)
+
+    def stats(self) -> dict:
+        return {"mode": self.mode, "impls": len(self.impls),
+                "syntax": len(self.syntax), **self.concepts.stats()}
+
+
+# ── selftest ────────────────────────────────────────────────────────────────────
+
+def _selftest() -> bool:
+    import tempfile
+    from v5.memory.store import make_fake_embedder
+    print("memory.memory --selftest: modes, two-hop read, local fit, write lifecycle\n")
+    fe = make_fake_embedder()
+    with tempfile.TemporaryDirectory() as td:
+        tm = TotalMemory(td, mode="concept", embed_fn=fe)
+        assert tm.read("anything").trace_text == "", "empty memory -> empty hit"
+
+        # seed impls: two strategy families with distinct identifiers
+        for i in range(5):
+            tm.impls.add(f"retry http call variant {i}", f"return _raw{i}(url)",
+                         f"return retry(3)(_raw{i})(url)", "wrap the call in a retry decorator")
+        for i in range(5):
+            tm.impls.add(f"cap rows in stream {i}", f"rows{i} = fetch_all()",
+                         f"rows{i} = fetch_all()[:cap]", "slice the fetched list to the cap")
+        tm.concepts.bootstrap(tm.impls, k=2, log=lambda *a: None)
+        assert tm.stats()["concepts"] == 2 and tm.stats()["impls"] == 10
+        print("  [1] seed + bootstrap -> PASS")
+
+        # same-ctx query: fake embedder is hash-exact, so reuse a seeded ctx text
+        hit = tm.read("retry http call variant 2", span="x = _raw2(url)")
+        assert hit.impls and "retry" in hit.trace_text, "concept read returns retry impl"
+        assert hit.tokens_est <= 300, f"payload budget {hit.tokens_est}"
+        # local fit: identifier overlap must prefer the _raw2 variant among equals
+        assert "_raw2" in hit.impls[0]["old"], f"ident fit picked {hit.impls[0]['old']}"
+        print("  [2] two-hop read + local ident fit -> PASS")
+
+        tm_flat = TotalMemory(td, mode="flat", embed_fn=fe)
+        hf = tm_flat.read("retry http call variant 2", span="x = _raw2(url)")
+        assert hf.impls and hf.concepts == [], "flat mode skips concepts"
+        tm_off = TotalMemory(td, mode="off", embed_fn=fe)
+        assert tm_off.read("retry http call variant 2").trace_text == ""
+        print("  [3] flat + off modes -> PASS")
+
+        n_before = tm.stats()["member_impls"]
+        iid = tm.write("retry http call variant 9", "return _raw9(url)",
+                       "return retry(3)(_raw9)(url)", "wrap the call in a retry decorator",
+                       verified=True, task_id="t9")
+        assert iid is not None
+        s = tm.stats()
+        assert s["impls"] == 11 and s["member_impls"] == n_before + 1, "write joined a concept"
+        assert tm.impls.get(iid)["concept_id"], "impl remembers its concept"
+        dup = tm.write("retry http call variant 9", "return _raw9(url)",
+                       "return retry(3)(_raw9)(url)", "wrap the call in a retry decorator",
+                       verified=True)
+        assert dup is None, "duplicate write ignored"
+        print("  [4] write -> lifecycle + dedup -> PASS")
+    print("\n  MEMORY.MEMORY SELFTEST -> PASS")
+    return True
+
+
+if __name__ == "__main__":
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--seed", action="store_true", help="fable5 -> L1 + KMeans -> L2 (mpnet)")
+    ap.add_argument("--stats", action="store_true")
+    ap.add_argument("--root", default="data/memory")
+    ap.add_argument("--k-concepts", type=int, default=32)
+    ap.add_argument("--limit", type=int, default=0)
+    a = ap.parse_args()
+    if a.selftest:
+        raise SystemExit(0 if _selftest() else 1)
+    if a.seed:
+        from v5.memory.store import make_mpnet_embedder
+        tm = TotalMemory(a.root, embed_fn=make_mpnet_embedder())
+        tm.seed(k_concepts=a.k_concepts, limit=a.limit)
+        print(f"  stats: {tm.stats()}")
+    elif a.stats:
+        tm = TotalMemory(a.root)
+        print(tm.stats())
+    else:
+        ap.print_help()
