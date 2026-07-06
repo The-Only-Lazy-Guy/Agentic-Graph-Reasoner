@@ -129,7 +129,7 @@ def run_m2(model_name: str, triples: list[dict], seeds: list[int], arms: list[st
            z_dropout: float, eval_n: int, held_frac: float, max_new_trace: int,
            max_new_realize: int, max_tokens: int, batch_size: int, eval_batch: int,
            realizer_dir: str, layer_frac: float = 0.6, t_ctx: int = 128,
-           trace_cos: bool = True, smoke_realizer: bool = False,
+           warmup: int = 2, trace_cos: bool = True, smoke_realizer: bool = False,
            out_dir: str = "artifacts/lggn_tracer", log=print):
     import numpy as np
     from v5.runtime.lggn_decode import _train_refiner
@@ -169,7 +169,7 @@ def run_m2(model_name: str, triples: list[dict], seeds: list[int], arms: list[st
             lm = RawLM(model_name, d_latent=d_latent, use_molora=(arm != "baseline"))
             pairs = [(tracer_prompt(triples[i]["old"]), triples[i]["trace"]) for i in tr]
             lm.train_on(pairs, latents=_arm_latents(arm, tr, h_all, f, h_mean),
-                        epochs=tracer_epochs, warmup=1,
+                        epochs=tracer_epochs, warmup=warmup,
                         z_dropout=(z_dropout if arm == "latent" else 0.0),
                         max_tokens=max_tokens, batch_size=batch_size, log=log)
             outs: list[str] = []
@@ -381,7 +381,10 @@ def main():
     ap.add_argument("--r", type=int, default=512)
     ap.add_argument("--n-op", type=int, default=48)
     ap.add_argument("--refiner-epochs", type=int, default=400)
-    ap.add_argument("--epochs", type=int, default=2, help="tracer LM epochs")
+    ap.add_argument("--epochs", type=int, default=8,
+                    help="tracer LM epochs. MoLoRA needs >=6 EFFECTIVE epochs (v1 finding: "
+                         "2ep/1eff = unspecialized experts, loss identical to baseline)")
+    ap.add_argument("--warmup", type=int, default=2, help="conditioner freeze epochs (v1 recipe: 2 of 8)")
     ap.add_argument("--z-dropout", type=float, default=0.1)
     ap.add_argument("--eval-n", type=int, default=150)
     ap.add_argument("--held-frac", type=float, default=0.2)
@@ -415,18 +418,22 @@ def main():
                refiner_epochs=60, tracer_epochs=1, z_dropout=0.1, eval_n=6, held_frac=0.25,
                max_new_trace=96, max_new_realize=192, max_tokens=a.max_tokens,
                batch_size=2, eval_batch=2, realizer_dir=a.realizer_dir,
-               layer_frac=a.layer_frac, t_ctx=32, trace_cos=True, smoke_realizer=True)
+               layer_frac=a.layer_frac, t_ctx=32, warmup=0, trace_cos=True, smoke_realizer=True)
         return
     arms = [x for x in ARM_ORDER if x in set(a.arms.split(","))]
     print(f"[lggn-tracer M2] model={a.model} seeds={seeds} arms={arms} K={a.K} r={a.r} "
-          f"ops={a.n_op} ref_ep={a.refiner_epochs} tracer_ep={a.epochs} zdrop={a.z_dropout} "
-          f"eval_n={a.eval_n} batch={a.batch_size}/{a.eval_batch}")
+          f"ops={a.n_op} ref_ep={a.refiner_epochs} tracer_ep={a.epochs} warmup={a.warmup} "
+          f"zdrop={a.z_dropout} eval_n={a.eval_n} batch={a.batch_size}/{a.eval_batch}")
+    if a.epochs - a.warmup < 6:
+        print(f"  WARN: only {a.epochs - a.warmup} effective MoLoRA epochs (<6) — v1 showed "
+              "experts stay unspecialized; conditioned arms will look like baseline.")
     run_m2(a.model, triples, seeds, arms, K=a.K, r=a.r, n_op=a.n_op,
            refiner_epochs=a.refiner_epochs, tracer_epochs=a.epochs, z_dropout=a.z_dropout,
            eval_n=a.eval_n, held_frac=a.held_frac, max_new_trace=a.max_new_trace,
            max_new_realize=a.max_new_realize, max_tokens=a.max_tokens,
            batch_size=a.batch_size, eval_batch=a.eval_batch, realizer_dir=a.realizer_dir,
-           layer_frac=a.layer_frac, t_ctx=a.t_ctx, trace_cos=not a.no_trace_cos)
+           layer_frac=a.layer_frac, t_ctx=a.t_ctx, warmup=a.warmup,
+           trace_cos=not a.no_trace_cos)
 
 
 if __name__ == "__main__":
