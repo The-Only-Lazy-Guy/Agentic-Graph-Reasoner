@@ -281,6 +281,292 @@ def run_m2(model_name: str, triples: list[dict], seeds: list[int], arms: list[st
     return merged
 
 
+# ── E1: trace decomposition — where does the trace's information live? ──────────
+
+_IDENT = None  # compiled lazily
+
+
+def _ident_pattern():
+    global _IDENT
+    if _IDENT is None:
+        import re
+        # code-ish tokens: backticked spans, dotted.paths, snake_case, CamelCase, CONSTS,
+        # quoted short strings — the BINDINGS of a trace
+        _IDENT = re.compile(
+            r"`[^`]+`"
+            r"|\b[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+\b"   # dotted.path
+            r"|\b[a-z0-9]+(?:_[a-z0-9]+)+\b"                               # snake_case
+            r"|\b[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+\b"                      # CamelCase
+            r"|\b[A-Z][A-Z0-9_]{2,}\b"                                     # CONSTS
+            r"|\"[^\"\n]{1,40}\"|'[^'\n]{1,40}'")
+    return _IDENT
+
+
+def trace_skeleton(trace: str) -> str:
+    """Strategy skeleton: identifiers/bindings masked out."""
+    return _ident_pattern().sub("<X>", trace or "")
+
+
+def trace_idents(trace: str) -> list[str]:
+    return _ident_pattern().findall(trace or "")
+
+
+def bind_skeleton(skeleton: str, idents: list[str]) -> str:
+    """v0 binder: fill <X> slots round-robin with the given identifiers (naive; measures
+    whether skeleton+bindings carries the signal before building a learned binder)."""
+    out, k = [], 0
+    parts = (skeleton or "").split("<X>")
+    for i, part in enumerate(parts):
+        out.append(part)
+        if i < len(parts) - 1:
+            out.append(idents[k % len(idents)] if idents else "<X>")
+            k += 1
+    return "".join(out)
+
+
+def run_e1_decompose(model_name: str, triples: list[dict], seed: int, eval_n: int,
+                     held_frac: float, max_new_realize: int, max_tokens: int,
+                     batch_size: int, eval_batch: int, realizer_dir: str,
+                     layer_frac: float = 0.6, t_ctx: int = 128,
+                     smoke_realizer: bool = False,
+                     out_dir: str = "artifacts/lggn_tracer", log=print):
+    """Feed the frozen realizer VARIANTS of the gold trace (no training anywhere):
+      gold        : as-is (anchor, ~0.165)
+      skeleton    : identifiers masked            -> value of strategy alone
+      idents_only : identifiers without prose     -> value of bindings alone
+      nbr_bound   : NEIGHBOR skeleton (h_K-retrieved from TRAIN) + THIS instance's gold
+                    identifiers (v0 round-robin binder) -> viability of the operator-library
+                    path (graph retrieves skeleton, binder fills, LM realizes)
+    Decomposes the trace's information into strategy vs bindings."""
+    import numpy as np
+    from v5.runtime.lggn_decode import _train_refiner
+    from v5.runtime.lggn_refine import _reprs_from_texts
+
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    texts = _trace_texts(triples)
+    g, f, ctx, cmask = _reprs_from_texts(
+        model_name, texts, layer_frac=layer_frac, t_ctx=t_ctx,
+        cache_key=_cache_key(model_name, len(texts), layer_frac, t_ctx))
+    tr, he = split_by_goal(triples, seed, held_frac)
+    he_eval = he[:eval_n]
+    log(f"\n--- E1 decompose, seed {seed}: eval {len(he_eval)} held (no training) ---")
+    # h_K only for neighbor retrieval (train-pool skeletons)
+    h_all, _ops, _net, cos_he = _train_refiner(
+        g, f, ctx, cmask, np.asarray(tr), K=4, r=512, n_op=48, epochs=400, seed=seed,
+        log=lambda *a, **k: None)
+    log(f"  refiner cos = {cos_he:.3f} (used for neighbor skeleton retrieval only)")
+    f_tr = f[np.asarray(tr)]
+    f_tr_n = f_tr / (np.linalg.norm(f_tr, axis=1, keepdims=True) + 1e-9)
+
+    variants: dict[str, list[str]] = {"gold": [], "skeleton": [], "idents_only": [], "nbr_bound": []}
+    for i in he_eval:
+        gold = triples[i]["trace"]
+        ids_ = trace_idents(gold)
+        q = h_all[i] / (np.linalg.norm(h_all[i]) + 1e-9)
+        nbr = triples[tr[int(np.argmax(f_tr_n @ q))]]["trace"]
+        variants["gold"].append(gold)
+        variants["skeleton"].append(trace_skeleton(gold))
+        variants["idents_only"].append(" ".join(ids_) if ids_ else gold)
+        variants["nbr_bound"].append(bind_skeleton(trace_skeleton(nbr), ids_))
+
+    ck = f"{realizer_dir}/seed{seed}_trace"
+    if smoke_realizer and not Path(ck).exists():
+        log(f"  [smoke] no realizer ckpt at {ck} -> training a throwaway stand-in...")
+        rlz = RawLM(model_name)
+        rp = [(realizer_prompt(triples[i]["old"], triples[i]["trace"]), triples[i]["new"])
+              for i in tr]
+        rlz.train_on(rp, epochs=1, max_tokens=max_tokens, batch_size=batch_size, log=log)
+    else:
+        log(f"  [e2e] loading frozen M1 realizer <- {ck}")
+        rlz = RawLM.load_checkpoint(model_name, ck)
+    res = {"refiner_cos": cos_he, "n": 0}
+    for name, tr_list in variants.items():
+        recs = []
+        for b0 in range(0, len(he_eval), eval_batch):
+            chunk = he_eval[b0:b0 + eval_batch]
+            outs = rlz.generate_raw_batch(
+                [realizer_prompt(triples[i]["old"], tr_list[b0 + j])
+                 for j, i in enumerate(chunk)],
+                max_new_tokens=max_new_realize)
+            for gen, i in zip(outs, chunk):
+                rec = added_recall(gen, triples[i]["old"], triples[i]["new"])
+                if rec is not None:
+                    recs.append(rec)
+        res[name] = float(np.mean(recs)) if recs else 0.0
+        res["n"] = len(recs)
+        log(f"  [{name:12}] added_recall = {res[name]:.3f} (n={len(recs)})")
+    rlz.cleanup()
+    with open(f"{out_dir}/decompose_seed{seed}.jsonl", "w", encoding="utf-8") as w:
+        for j, i in enumerate(he_eval[:30]):
+            w.write(json.dumps({
+                "idx": int(i),
+                "gold": variants["gold"][j][:250], "skeleton": variants["skeleton"][j][:250],
+                "idents_only": variants["idents_only"][j][:250],
+                "nbr_bound": variants["nbr_bound"][j][:250],
+            }, ensure_ascii=False) + "\n")
+    _save_results({f"decompose_seed{seed}": res})
+    log(f"\n=== E1 TRACE DECOMPOSITION (seed {seed}, n={res['n']}) ===")
+    log(f"  gold         {res['gold']:.3f}   (anchor)")
+    log(f"  skeleton     {res['skeleton']:.3f}   <- strategy alone")
+    log(f"  idents_only  {res['idents_only']:.3f}   <- bindings alone")
+    log(f"  nbr_bound    {res['nbr_bound']:.3f}   <- retrieved skeleton + my bindings (the architecture)")
+    log(f"  reading: skeleton+bindings both needed if each alone << gold; nbr_bound >> retrieval "
+        f"floor (0.002) = operator-library path viable")
+    log(f"  results -> {RESULTS_PATH} | samples -> {out_dir}/decompose_seed{seed}.jsonl")
+    return res
+
+
+# ── M2-A: sampling + selection (generation for COVERAGE, latent for SELECTION) ──
+
+def _rank_candidates(cand_reprs, query, n_samples: int) -> list[int]:
+    """Per instance: argmax cosine(candidate repr, query repr). cand_reprs [N*S, d] grouped by
+    instance (S consecutive rows each), query [N, d]. Returns picked candidate index per instance."""
+    import numpy as np
+    picks = []
+    for i in range(len(query)):
+        c = cand_reprs[i * n_samples:(i + 1) * n_samples]
+        cn = c / (np.linalg.norm(c, axis=1, keepdims=True) + 1e-9)
+        q = query[i] / (np.linalg.norm(query[i]) + 1e-9)
+        picks.append(int(np.argmax(cn @ q)))
+    return picks
+
+
+def run_m2a_selection(model_name: str, triples: list[dict], seed: int, n_samples: int,
+                      temperature: float, K: int, r: int, n_op: int, refiner_epochs: int,
+                      tracer_epochs: int, eval_n: int, held_frac: float, max_new_trace: int,
+                      max_new_realize: int, max_tokens: int, batch_size: int, eval_batch: int,
+                      realizer_dir: str, layer_frac: float = 0.6, t_ctx: int = 128,
+                      warmup: int = 2, smoke_realizer: bool = False,
+                      out_dir: str = "artifacts/lggn_tracer", log=print):
+    """Sample N traces per held instance, realize ALL, compare pickers on the same candidates:
+      oracle   : max added_recall over candidates  (coverage — does a good trace even exist?)
+      random   : mean over candidates              (expected single sample)
+      z_rank   : candidate nearest h_K             (THE LGGN selection mechanism)
+      gold_rank: candidate nearest gold-trace repr (selection ceiling given perfect z)
+    Gates: GA1 oracle >= 0.05 (else generation coverage dead on this corpus) |
+           GA2 z_rank - random >= +0.02 and gold_rank > random (selection signal exists)."""
+    import numpy as np
+    import torch as _torch
+    from v5.runtime.lggn_decode import _train_refiner
+    from v5.runtime.lggn_refine import _reprs_from_texts
+
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    texts = _trace_texts(triples)
+    g, f, ctx, cmask = _reprs_from_texts(
+        model_name, texts, layer_frac=layer_frac, t_ctx=t_ctx,
+        cache_key=_cache_key(model_name, len(texts), layer_frac, t_ctx))
+    d_latent = g.shape[1]
+    tr, he = split_by_goal(triples, seed, held_frac)
+    he_eval = he[:eval_n]
+    log(f"\n--- M2-A seed {seed}: train {len(tr)} / eval {len(he_eval)} x {n_samples} samples "
+        f"(temp={temperature}) ---")
+    h_all, ops, net, cos_he = _train_refiner(
+        g, f, ctx, cmask, np.asarray(tr), K=K, r=r, n_op=n_op,
+        epochs=refiner_epochs, seed=seed, log=log)
+    log(f"  refiner cos(h_K, f_trace) = {cos_he:.3f}")
+
+    log(f"  [tracer] training ({tracer_epochs} epochs, {len(tr)} pairs, pure LoRA)...")
+    lm = RawLM(model_name)
+    pairs = [(tracer_goal_prompt(triples[i]["goal"], triples[i]["old"]), triples[i]["trace"])
+             for i in tr]
+    lm.train_on(pairs, epochs=tracer_epochs, warmup=warmup, max_tokens=max_tokens,
+                batch_size=batch_size, log=log)
+    cands: list[str] = []                                  # instance-major, S per instance
+    t0 = time.time()
+    for j, i in enumerate(he_eval):
+        _torch.manual_seed(10_000 * seed + j)              # reproducible sampling
+        prompts = [tracer_goal_prompt(triples[i]["goal"], triples[i]["old"])] * n_samples
+        cands.extend(lm.generate_raw_batch(prompts, max_new_tokens=max_new_trace,
+                                           temperature=temperature))
+        if (j + 1) % 10 == 0:
+            log(f"      {j+1}/{len(he_eval)} instances sampled "
+                f"({(time.time()-t0)/(j+1):.1f}s/inst)")
+    lm.cleanup()
+
+    ck = f"{realizer_dir}/seed{seed}_trace"
+    if smoke_realizer and not Path(ck).exists():
+        log(f"  [smoke] no realizer ckpt at {ck} -> training a throwaway stand-in...")
+        rlz = RawLM(model_name)
+        rp = [(realizer_prompt(triples[i]["old"], triples[i]["trace"]), triples[i]["new"])
+              for i in tr]
+        rlz.train_on(rp, epochs=1, max_tokens=max_tokens, batch_size=batch_size, log=log)
+    else:
+        log(f"  [e2e] loading frozen M1 realizer <- {ck}")
+        rlz = RawLM.load_checkpoint(model_name, ck)
+    recalls = np.zeros((len(he_eval), n_samples))          # None -> treated as 0 for ranking
+    scoreable = np.zeros((len(he_eval), n_samples), dtype=bool)
+    t0 = time.time()
+    flat_prompts = [realizer_prompt(triples[i]["old"], cands[j * n_samples + s])
+                    for j, i in enumerate(he_eval) for s in range(n_samples)]
+    done = 0
+    for b0 in range(0, len(flat_prompts), eval_batch):
+        outs = rlz.generate_raw_batch(flat_prompts[b0:b0 + eval_batch],
+                                      max_new_tokens=max_new_realize)
+        for off, gen in enumerate(outs):
+            idx = b0 + off
+            j, s = divmod(idx, n_samples)
+            rec = added_recall(gen, triples[he_eval[j]]["old"], triples[he_eval[j]]["new"])
+            if rec is not None:
+                recalls[j, s] = rec
+                scoreable[j, s] = True
+        done += len(outs)
+        if done % (eval_batch * 8) < eval_batch:
+            log(f"      {done}/{len(flat_prompts)} realized ({(time.time()-t0)/done:.1f}s/cand)")
+    gold_anchor_recs = []
+    for b0 in range(0, len(he_eval), eval_batch):
+        chunk = he_eval[b0:b0 + eval_batch]
+        outs = rlz.generate_raw_batch(
+            [realizer_prompt(triples[i]["old"], triples[i]["trace"]) for i in chunk],
+            max_new_tokens=max_new_realize)
+        for gen, i in zip(outs, chunk):
+            rec = added_recall(gen, triples[i]["old"], triples[i]["new"])
+            if rec is not None:
+                gold_anchor_recs.append(rec)
+    rlz.cleanup()
+
+    log("  embedding candidates for ranking...")
+    cand_reprs = _embed_texts(model_name, cands, layer_frac)
+    he_arr = np.asarray(he_eval)
+    keep = scoreable.any(1)                                # instances with at least one scoreable cand
+    z_picks = _rank_candidates(cand_reprs, h_all[he_arr], n_samples)
+    gold_picks = _rank_candidates(cand_reprs, f[he_arr], n_samples)
+    res = {
+        "n": int(keep.sum()), "n_samples": n_samples, "temperature": temperature,
+        "refiner_cos": cos_he,
+        "oracle": float(recalls[keep].max(1).mean()),
+        "random": float(recalls[keep].mean(1).mean()),
+        "z_rank": float(np.mean([recalls[j, z_picks[j]] for j in range(len(he_eval)) if keep[j]])),
+        "gold_rank": float(np.mean([recalls[j, gold_picks[j]] for j in range(len(he_eval)) if keep[j]])),
+        "gold_anchor": float(np.mean(gold_anchor_recs)) if gold_anchor_recs else 0.0,
+        "cand_nonempty": float(np.mean([bool(c.strip()) for c in cands])),
+    }
+    with open(f"{out_dir}/selection_seed{seed}.jsonl", "w", encoding="utf-8") as w:
+        for j, i in enumerate(he_eval[:40]):
+            w.write(json.dumps({
+                "idx": int(i), "gold_trace": triples[i]["trace"][:300],
+                "recalls": [round(float(x), 3) for x in recalls[j]],
+                "z_pick": z_picks[j], "gold_pick": gold_picks[j],
+                "cands": [c[:200] for c in cands[j * n_samples:(j + 1) * n_samples]],
+            }, ensure_ascii=False) + "\n")
+    merged = _save_results({f"selection_seed{seed}": res})
+    log(f"\n=== M2-A SELECTION (seed {seed}, N={n_samples}, temp={temperature}, "
+        f"n={res['n']}) ===")
+    log(f"  oracle best-of-{n_samples}: {res['oracle']:.3f}   <- coverage")
+    log(f"  random pick          : {res['random']:.3f}")
+    log(f"  z-ranked (h_K)       : {res['z_rank']:.3f}   <- the LGGN selector")
+    log(f"  gold-ranked (ceiling): {res['gold_rank']:.3f}")
+    log(f"  gold-trace anchor    : {res['gold_anchor']:.3f}")
+    ga1 = res["oracle"] >= 0.05
+    ga2 = (res["z_rank"] - res["random"] >= 0.02) and (res["gold_rank"] > res["random"])
+    log(f"\n  GA1 oracle >= 0.05           : {res['oracle']:.3f} -> "
+        f"{'PASS' if ga1 else 'FAIL (generation coverage dead on this corpus)'}")
+    log(f"  GA2 z_rank - random >= +0.02 : {res['z_rank'] - res['random']:+.3f} "
+        f"(gold_rank - random {res['gold_rank'] - res['random']:+.3f}) -> "
+        f"{'PASS' if ga2 else 'FAIL'}")
+    log(f"  results -> {RESULTS_PATH} | candidates -> {out_dir}/selection_seed{seed}.jsonl")
+    return res
+
+
 def _report_m2(results: dict, log=print):
     import numpy as np
     log("\n=== M2 TRACER (z -> trace -> frozen realizer; e2e added-line recall) ===")
@@ -382,6 +668,24 @@ def _selftest() -> bool:
     assert picked == [1, 3], f"retrieval NN picked {picked}"
     print("  [6] retrieval nearest-neighbor -> PASS")
 
+    # E1 decomposition: skeleton masks identifiers, binder refills
+    t = "Wrap `get_url` in a try/except and log conn_err via logger.warning"
+    sk = trace_skeleton(t)
+    assert "`get_url`" not in sk and "conn_err" not in sk and "logger.warning" not in sk, sk
+    assert "<X>" in sk and "try/except" in sk, "prose structure survives masking"
+    ids_ = trace_idents(t)
+    assert "`get_url`" in ids_ and "conn_err" in ids_ and "logger.warning" in ids_, ids_
+    rebound = bind_skeleton(sk, ids_)
+    assert "`get_url`" in rebound and "<X>" not in rebound, "binder fills all slots"
+    assert bind_skeleton("a <X> b", []) == "a <X> b", "no idents -> slots stay"
+
+    # M2-A ranking: z picks the candidate nearest the query
+    cands = np.array([[1, 0], [0, 1], [0.9, 0.1], [0, 1]], dtype=np.float32)  # 2 inst x 2 cands
+    queries = np.array([[1, 0], [0, 1]], dtype=np.float32)
+    picks = _rank_candidates(cands, queries, 2)
+    assert picks == [0, 1], f"rank picks {picks}"
+    print("  [7] skeleton/binder + candidate ranking -> PASS")
+
     import tempfile
     with tempfile.TemporaryDirectory() as td:
         p = str(Path(td) / "r.json")
@@ -420,6 +724,14 @@ def main():
     ap.add_argument("--seeds", type=int, default=3)
     ap.add_argument("--seed-list", default="", help="exact seeds, e.g. '0' (walltime-safe jobs)")
     ap.add_argument("--arms", default="baseline,constant,latent,ceiling,retrieval")
+    ap.add_argument("--select", action="store_true",
+                    help="M2-A: sample N traces, realize all, compare pickers "
+                         "(oracle/random/z-rank/gold-rank)")
+    ap.add_argument("--n-samples", type=int, default=8)
+    ap.add_argument("--temperature", type=float, default=0.8)
+    ap.add_argument("--decompose", action="store_true",
+                    help="E1: gold trace variants (skeleton/idents/nbr_bound) through the "
+                         "frozen realizer — where does the trace's information live? No training.")
     ap.add_argument("--K", type=int, default=4)
     ap.add_argument("--r", type=int, default=512)
     ap.add_argument("--n-op", type=int, default=48)
@@ -456,12 +768,51 @@ def main():
     if a.smoke:
         a.model = "Qwen/Qwen2.5-0.5B" if a.model == "Qwen/Qwen2.5-3B" else a.model
         triples = triples[:32]
+        if a.select:
+            print(f"[SMOKE/select] model={a.model} n={len(triples)} seed 0, N=3 samples")
+            run_m2a_selection(a.model, triples, 0, n_samples=3, temperature=0.8, K=2, r=64,
+                              n_op=8, refiner_epochs=60, tracer_epochs=1, eval_n=6,
+                              held_frac=0.25, max_new_trace=96, max_new_realize=192,
+                              max_tokens=a.max_tokens, batch_size=2, eval_batch=2,
+                              realizer_dir=a.realizer_dir, layer_frac=a.layer_frac,
+                              t_ctx=32, warmup=0, smoke_realizer=True)
+            return
+        if a.decompose:
+            print(f"[SMOKE/decompose] model={a.model} n={len(triples)} seed 0")
+            run_e1_decompose(a.model, triples, 0, eval_n=6, held_frac=0.25,
+                             max_new_realize=192, max_tokens=a.max_tokens, batch_size=2,
+                             eval_batch=2, realizer_dir=a.realizer_dir,
+                             layer_frac=a.layer_frac, t_ctx=32, smoke_realizer=True)
+            return
         print(f"[SMOKE] model={a.model} n={len(triples)} seed 0, arms baseline+latent")
         run_m2(a.model, triples, [0], ["baseline", "latent", "retrieval"], K=2, r=64, n_op=8,
                refiner_epochs=60, tracer_epochs=1, z_dropout=0.1, eval_n=6, held_frac=0.25,
                max_new_trace=96, max_new_realize=192, max_tokens=a.max_tokens,
                batch_size=2, eval_batch=2, realizer_dir=a.realizer_dir,
                layer_frac=a.layer_frac, t_ctx=32, warmup=0, trace_cos=True, smoke_realizer=True)
+        return
+    if a.decompose:
+        print(f"[lggn-tracer E1] model={a.model} seeds={seeds} eval_n={a.eval_n}")
+        for seed in seeds:
+            run_e1_decompose(a.model, triples, seed, eval_n=a.eval_n, held_frac=a.held_frac,
+                             max_new_realize=a.max_new_realize, max_tokens=a.max_tokens,
+                             batch_size=a.batch_size, eval_batch=a.eval_batch,
+                             realizer_dir=a.realizer_dir, layer_frac=a.layer_frac,
+                             t_ctx=a.t_ctx)
+        return
+    if a.select:
+        print(f"[lggn-tracer M2-A] model={a.model} seeds={seeds} N={a.n_samples} "
+              f"temp={a.temperature} tracer_ep={a.epochs} eval_n={a.eval_n} "
+              f"batch={a.batch_size}/{a.eval_batch}")
+        for seed in seeds:
+            run_m2a_selection(a.model, triples, seed, n_samples=a.n_samples,
+                              temperature=a.temperature, K=a.K, r=a.r, n_op=a.n_op,
+                              refiner_epochs=a.refiner_epochs, tracer_epochs=a.epochs,
+                              eval_n=a.eval_n, held_frac=a.held_frac,
+                              max_new_trace=a.max_new_trace, max_new_realize=a.max_new_realize,
+                              max_tokens=a.max_tokens, batch_size=a.batch_size,
+                              eval_batch=a.eval_batch, realizer_dir=a.realizer_dir,
+                              layer_frac=a.layer_frac, t_ctx=a.t_ctx, warmup=a.warmup)
         return
     arms = [x for x in ARM_ORDER if x in set(a.arms.split(","))]
     print(f"[lggn-tracer M2] model={a.model} seeds={seeds} arms={arms} K={a.K} r={a.r} "

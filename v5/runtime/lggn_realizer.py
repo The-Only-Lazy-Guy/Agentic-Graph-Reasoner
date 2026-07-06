@@ -395,9 +395,11 @@ class RawLM:
         self._set_z(None)
         return raw
 
-    def generate_raw_batch(self, prompts: list[str], zs=None, max_new_tokens: int = 512) -> list[str]:
-        """Batched greedy completion. LEFT padding so every prompt ends at the same position;
-        position ids follow the attention mask (Qwen2 honors it)."""
+    def generate_raw_batch(self, prompts: list[str], zs=None, max_new_tokens: int = 512,
+                           temperature: float = 0.0, top_p: float = 0.95) -> list[str]:
+        """Batched completion. LEFT padding so every prompt ends at the same position;
+        position ids follow the attention mask (Qwen2 honors it).
+        temperature 0 -> greedy; >0 -> nucleus sampling (candidate generation)."""
         torch = self.torch
         self.model.eval()
         if self.molora is not None:
@@ -411,10 +413,12 @@ class RawLM:
             self._set_z_batch(zs)
         else:
             self._set_z(None)
+        sample = {"do_sample": True, "temperature": temperature, "top_p": top_p} \
+            if temperature > 0 else {"do_sample": False}
         with torch.no_grad():
             out = self.model.generate(input_ids=ids, attention_mask=mask,
                                       max_new_tokens=max_new_tokens, min_new_tokens=2,
-                                      do_sample=False, pad_token_id=pad)
+                                      pad_token_id=pad, **sample)
         self._set_z(None)
         return [self.tok.decode(out[i, width:], skip_special_tokens=True)
                 for i in range(len(prompts))]
