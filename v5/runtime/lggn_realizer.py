@@ -477,6 +477,26 @@ def _eval_arm(lm: RawLM, triples, he_idx, traces_for, max_new: int, eval_batch: 
     return mean, recs, copies / max(1, len(he_idx)), gens
 
 
+RESULTS_PATH = "artifacts/lggn_realizer_results.json"
+
+
+def _save_results(results: dict, path: str = RESULTS_PATH) -> dict:
+    """MERGE-write after every arm: a walltime kill can no longer eat the whole run, and
+    separate per-seed runs accumulate into one file (the final report reads the merge)."""
+    p = Path(path)
+    merged: dict = {}
+    if p.exists():
+        try:
+            merged = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            merged = {}
+    for s, arms_d in results.items():
+        merged.setdefault(s, {}).update(arms_d)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(merged, indent=2), encoding="utf-8")
+    return merged
+
+
 def run_m1(model_name: str, triples: list[dict], seeds: list[int], arms: set[str],
            epochs: int, eval_n: int, held_frac: float, max_new: int, max_tokens: int,
            save_ckpt: bool, batch_size: int = 8, eval_batch: int = 8,
@@ -501,41 +521,43 @@ def run_m1(model_name: str, triples: list[dict], seeds: list[int], arms: set[str
                                       triples[i]["trace"] if arm == "trace" else None),
                       triples[i]["new"]) for i in tr_idx]
             lm.train_on(pairs, epochs=epochs, max_tokens=max_tokens, batch_size=batch_size, log=log)
+            if arm == "trace" and save_ckpt:                # save BEFORE eval: a walltime kill
+                ck = f"{out_dir}/seed{seed}_trace"          # during eval must not eat the ckpt
+                lm.save_checkpoint(ck)
+                log(f"  [trace] checkpoint -> {ck}")
 
-            mean, recs, cp, gens = _eval_arm(
-                lm, triples, he_eval,
-                (lambda j, i: triples[i]["trace"]) if arm == "trace" else (lambda j, i: None),
-                max_new, eval_batch, log)
+            def _dump_samples(tag, gen_list, trace_of):
+                with open(f"{out_dir.rstrip('/')}/samples_seed{seed}_{tag}.jsonl", "w",
+                          encoding="utf-8") as w:
+                    for j, i in enumerate(he_eval[:40]):
+                        t = triples[i]
+                        w.write(json.dumps({
+                            "idx": i, "trace": (trace_of(j, i) or "")[:400], "old": t["old"][:600],
+                            "gold_new": t["new"][:600], "gen": gen_list[j][:600],
+                            "added_recall": added_recall(gen_list[j], t["old"], t["new"]),
+                        }, ensure_ascii=False) + "\n")
+
+            trace_fn = (lambda j, i: triples[i]["trace"]) if arm == "trace" else (lambda j, i: None)
+            mean, recs, cp, gens = _eval_arm(lm, triples, he_eval, trace_fn, max_new, eval_batch, log)
             log(f"  [{arm}] added_recall={mean:.3f} copy_rate={cp:.2f} (n={len(recs)})")
             seed_res[arm] = {"added_recall": mean, "n": len(recs), "copy_rate": cp}
+            _dump_samples(arm, gens, trace_fn)
+            _save_results(results)                          # incremental: survive walltime kills
 
             if arm == "trace":
+                shuf_fn = lambda j, i: triples[he_eval[shuffle_map[j]]]["trace"]
                 s_mean, s_recs, s_cp, s_gens = _eval_arm(
-                    lm, triples, he_eval,
-                    lambda j, i: triples[he_eval[shuffle_map[j]]]["trace"], max_new, eval_batch, log)
+                    lm, triples, he_eval, shuf_fn, max_new, eval_batch, log)
                 log(f"  [trace@shuffled] added_recall={s_mean:.3f} copy_rate={s_cp:.2f}")
                 seed_res["shuffled"] = {"added_recall": s_mean, "n": len(s_recs), "copy_rate": s_cp}
-                if save_ckpt:
-                    ck = f"{out_dir}/seed{seed}_trace"
-                    lm.save_checkpoint(ck)
-                    log(f"  [trace] checkpoint -> {ck}")
-
-            with open(f"{out_dir.rstrip('/')}/samples_seed{seed}_{arm}.jsonl", "w",
-                      encoding="utf-8") as w:
-                for j, i in enumerate(he_eval[:40]):
-                    t = triples[i]
-                    w.write(json.dumps({
-                        "idx": i, "trace": t["trace"][:400], "old": t["old"][:600],
-                        "gold_new": t["new"][:600], "gen": gens[j][:600],
-                        "added_recall": added_recall(gens[j], t["old"], t["new"]),
-                    }, ensure_ascii=False) + "\n")
+                _dump_samples("shuffled", s_gens, shuf_fn)
+                _save_results(results)
             lm.cleanup()
 
-    _report_m1(results, log)
-    with open("artifacts/lggn_realizer_results.json", "w", encoding="utf-8") as w:
-        json.dump(results, w, indent=2)
-    log("  results -> artifacts/lggn_realizer_results.json")
-    return results
+    merged = _save_results(results)
+    _report_m1(merged, log)                                 # report over ALL seeds on disk,
+    log(f"  results -> {RESULTS_PATH}")                     # incl. earlier per-seed runs
+    return merged
 
 
 def _report_m1(results: dict, log=print):
@@ -680,7 +702,9 @@ def main():
                     help="tiny local run of the REAL loop: 0.5B model, 24 train / 8 eval, 1 seed")
     ap.add_argument("--model", default="Qwen/Qwen2.5-3B")
     ap.add_argument("--triples", default=TRIPLES)
-    ap.add_argument("--seeds", type=int, default=3)
+    ap.add_argument("--seeds", type=int, default=3, help="run seeds 0..N-1 in one process")
+    ap.add_argument("--seed-list", default="", help="run EXACTLY these seeds, e.g. '0' or '1,2' "
+                    "(walltime-safe per-seed jobs; results merge into one json)")
     ap.add_argument("--arms", default="trace,notrace")
     ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--trace-chars", type=int, default=400)
@@ -711,9 +735,11 @@ def main():
                held_frac=0.25, max_new=min(a.max_new, 256), max_tokens=a.max_tokens,
                save_ckpt=False, batch_size=min(a.batch_size, 2), eval_batch=min(a.eval_batch, 2))
         return
-    print(f"[lggn-realizer M1] model={a.model} seeds={a.seeds} arms={a.arms} epochs={a.epochs} "
+    seeds = ([int(s) for s in a.seed_list.split(",") if s.strip() != ""]
+             if a.seed_list.strip() else list(range(a.seeds)))
+    print(f"[lggn-realizer M1] model={a.model} seeds={seeds} arms={a.arms} epochs={a.epochs} "
           f"trace_chars={a.trace_chars} eval_n={a.eval_n} batch={a.batch_size}/{a.eval_batch}")
-    run_m1(a.model, triples, list(range(a.seeds)), set(a.arms.split(",")), epochs=a.epochs,
+    run_m1(a.model, triples, seeds, set(a.arms.split(",")), epochs=a.epochs,
            eval_n=a.eval_n, held_frac=a.held_frac, max_new=a.max_new, max_tokens=a.max_tokens,
            save_ckpt=a.save_ckpt, batch_size=a.batch_size, eval_batch=a.eval_batch)
 
