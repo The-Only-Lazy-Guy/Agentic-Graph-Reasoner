@@ -346,12 +346,51 @@ POINT GENERATOR is falsified on this corpus.
 - **C. Stop M2, ship M1+retrieval as the system component** and move the reasoning budget to
   the iteration loop (generate→realize→verify→re-derive), where LGGN's POMDP design lives.
 
+**2026-07-06 — E1 decomposition + M2-A selection (fork A executed): tracer line CLOSED on Fable-5.**
+
+E1 (gold-trace variants through the frozen realizer, n=146, no training):
+```
+gold         0.176   anchor (fresh-box realizer re-baseline; was 0.165)
+skeleton     0.073   strategy alone keeps 41%
+idents_only  0.091   bindings alone keep 52%
+nbr_bound    0.000   retrieved neighbor skeleton + my identifiers (v0 round-robin binder)
+```
+The trace's information is genuinely SPLIT between strategy and bindings — both needed. But the
+v0 composition (wrong-instance skeleton + right identifiers in arbitrary slots) destroys even
+the identifier value: incoherent binding < bag of identifiers. And idents_only carries leakage
+caveat (identifiers extracted FROM the gold trace include the fix's new identifiers).
+
+M2-A (one goal+span tracer, 8 samples/instance @ temp 0.8, all realized, n=146):
+```
+oracle best-of-8   0.027   <- coverage: the BEST of 8 tries reaches 15% of gold
+random pick        0.006
+z-ranked (h_K)     0.002       gold-ranked ceiling 0.003 — candidates uniformly bad,
+gold anchor        0.176       nothing to select (GA1 FAIL, GA2 FAIL)
+```
+
+**Closing verdict for M2-on-Fable-5:** every mechanism agrees — generation (point, steered,
+sampled), whole-trace retrieval, naive skeleton/binding composition — the per-edit intent is
+NOT derivable from (goal, span, h_K). It was determined by the agent's full session state,
+which the corpus rows do not carry. This is a DATA property. The architecture components that
+faced well-posed tasks all passed: realizer (M1, 0.21), refiner-to-trace-space (G2, 0.64),
+z-steering (loss/trace_cos deltas), selection machinery (gold-rank = oracle in smoke).
+
+**Remaining live paths:**
+- **B. SWE-bench M2** (recommended): SWE issues DETERMINE their fixes — (issue, span)→trace is
+  well-posed. No gold traces → self-rationalize (STaR/CodePLAN): given issue+old+GOLD new, the
+  3B writes the trace (easy mode, answer visible); tracer then trains issue+old→trace WITHOUT
+  seeing new. Realizer + gates + machinery transfer as-is. Cleanest attribution: if v2 works on
+  SWE, Fable-5 was the wrong corpus for M2 (it was the right one for M1). Note: rationale
+  synthesis uses a data-generation prompt (offline); the runtime pipeline stays prompt-free.
+- **C. Verification loop**: LM proposes patches directly, Docker verifies, the graph accumulates
+  outcome statistics (graph_edits write path) — LGGN as experience accumulator, no tracer.
+
 **Pending:**
 - [x] molab M1 3 seeds → G1a-c ALL PASS.
 - [x] M2 span-only G3 → FAIL (z steers, cannot reconstruct) → bridge v2.
-- [x] molab bridge-v2 G3 → FAIL (underdetermination, not bandwidth). Diagnosis complete.
-- [ ] Fork decision A/B/C above.
-- [ ] SWE-bench transfer — relevant to fork B directly.
+- [x] molab bridge-v2 G3 → FAIL (underdetermination, not bandwidth).
+- [x] Fork A (E1 + M2-A) → GA1/GA2 FAIL; tracer line closed on Fable-5.
+- [ ] Fork B vs C decision.
 
 ## 9. File map
 
