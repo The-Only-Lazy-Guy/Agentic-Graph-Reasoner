@@ -128,6 +128,27 @@ def _cos_rows(a, b) -> float:
     return float((an * bn).sum(1).mean())
 
 
+def _get_realizer(model_name: str, ck: str, triples: list[dict], tr: list[int],
+                  max_tokens: int, batch_size: int, smoke: bool = False, log=print) -> "RawLM":
+    """Load the frozen seed-matched M1 realizer; if the checkpoint is missing (fresh box —
+    artifacts/ is gitignored), retrain it inline with the exact M1 recipe (trace arm, same
+    goal-split) and SAVE it, so E1/M2-A/M2 are self-sufficient anywhere."""
+    if Path(ck, "lora").exists():
+        log(f"  [e2e] loading frozen M1 realizer <- {ck}")
+        return RawLM.load_checkpoint(model_name, ck)
+    log(f"  [e2e] realizer ckpt missing at {ck} -> training inline "
+        f"({'1 epoch throwaway' if smoke else 'M1 recipe, 2 epochs, saved'})...")
+    rlz = RawLM(model_name)
+    pairs = [(realizer_prompt(triples[i]["old"], triples[i]["trace"]), triples[i]["new"])
+             for i in tr]
+    rlz.train_on(pairs, epochs=1 if smoke else 2, max_tokens=max_tokens,
+                 batch_size=batch_size, log=log)
+    if not smoke:
+        rlz.save_checkpoint(ck)
+        log(f"  [e2e] realizer checkpoint saved -> {ck}")
+    return rlz
+
+
 def _m1_notrace_anchor(seed: int) -> float | None:
     p = Path(M1_RESULTS_PATH)
     if not p.exists():
@@ -221,16 +242,8 @@ def run_m2(model_name: str, triples: list[dict], seeds: list[int], arms: list[st
                                        ensure_ascii=False) + "\n")
 
         # e2e through the frozen seed-matched M1 realizer (one load scores all arms + anchor)
-        ck = f"{realizer_dir}/seed{seed}_trace"
-        if smoke_realizer and not Path(ck).exists():
-            log(f"  [smoke] no realizer ckpt at {ck} -> training a throwaway stand-in...")
-            rlz = RawLM(model_name)
-            rp = [(realizer_prompt(triples[i]["old"], triples[i]["trace"]), triples[i]["new"])
-                  for i in tr]
-            rlz.train_on(rp, epochs=1, max_tokens=max_tokens, batch_size=batch_size, log=log)
-        else:
-            log(f"  [e2e] loading frozen M1 realizer <- {ck}")
-            rlz = RawLM.load_checkpoint(model_name, ck)
+        rlz = _get_realizer(model_name, f"{realizer_dir}/seed{seed}_trace", triples, tr,
+                            max_tokens, batch_size, smoke=smoke_realizer, log=log)
 
         def realize_score(traces: list[str]) -> tuple[float, int]:
             recs = []
@@ -369,16 +382,8 @@ def run_e1_decompose(model_name: str, triples: list[dict], seed: int, eval_n: in
         variants["idents_only"].append(" ".join(ids_) if ids_ else gold)
         variants["nbr_bound"].append(bind_skeleton(trace_skeleton(nbr), ids_))
 
-    ck = f"{realizer_dir}/seed{seed}_trace"
-    if smoke_realizer and not Path(ck).exists():
-        log(f"  [smoke] no realizer ckpt at {ck} -> training a throwaway stand-in...")
-        rlz = RawLM(model_name)
-        rp = [(realizer_prompt(triples[i]["old"], triples[i]["trace"]), triples[i]["new"])
-              for i in tr]
-        rlz.train_on(rp, epochs=1, max_tokens=max_tokens, batch_size=batch_size, log=log)
-    else:
-        log(f"  [e2e] loading frozen M1 realizer <- {ck}")
-        rlz = RawLM.load_checkpoint(model_name, ck)
+    rlz = _get_realizer(model_name, f"{realizer_dir}/seed{seed}_trace", triples, tr,
+                        max_tokens, batch_size, smoke=smoke_realizer, log=log)
     res = {"refiner_cos": cos_he, "n": 0}
     for name, tr_list in variants.items():
         recs = []
@@ -483,16 +488,8 @@ def run_m2a_selection(model_name: str, triples: list[dict], seed: int, n_samples
                 f"({(time.time()-t0)/(j+1):.1f}s/inst)")
     lm.cleanup()
 
-    ck = f"{realizer_dir}/seed{seed}_trace"
-    if smoke_realizer and not Path(ck).exists():
-        log(f"  [smoke] no realizer ckpt at {ck} -> training a throwaway stand-in...")
-        rlz = RawLM(model_name)
-        rp = [(realizer_prompt(triples[i]["old"], triples[i]["trace"]), triples[i]["new"])
-              for i in tr]
-        rlz.train_on(rp, epochs=1, max_tokens=max_tokens, batch_size=batch_size, log=log)
-    else:
-        log(f"  [e2e] loading frozen M1 realizer <- {ck}")
-        rlz = RawLM.load_checkpoint(model_name, ck)
+    rlz = _get_realizer(model_name, f"{realizer_dir}/seed{seed}_trace", triples, tr,
+                        max_tokens, batch_size, smoke=smoke_realizer, log=log)
     recalls = np.zeros((len(he_eval), n_samples))          # None -> treated as 0 for ranking
     scoreable = np.zeros((len(he_eval), n_samples), dtype=bool)
     t0 = time.time()
