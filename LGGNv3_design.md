@@ -106,6 +106,11 @@ lesson (§5) preemptively instead of discovering it again.
 - **GB1** memory > off on DEPENDENCY sessions, ≥ +10pp (off structurally lacks the info).
 - **GB2** memory reaches ≥90% of ceiling's dependency solve-rate at ≤0.6× ceiling's payload
   tokens (the scale claim — real repos won't fit in a prompt, memory must approximate).
+- **GB3** Stage 1: why-query − spec-query DEP rate, same EVAL_SEEDS pool. PASS ≥ +0.03,
+  NO-REGRESSION ≥ −0.02 (spec is already fairly explicit by construction).
+- **GB4** Stage 2 (gated on GB3 PASS): GB4a hit-rate (refiner-query top-pick == ground-truth
+  source session, Δ ≥ +0.05 vs why-flat-query); GB4b refiner-query − why-query DEP rate,
+  PASS ≥ +0.03.
 
 ## 5. Progress log
 
@@ -293,16 +298,75 @@ only generation got failure feedback. Fixed: `memory.read()` now runs INSIDE the
 stays single-shot per session (re-authoring intent per retry costs an extra LM call; re-
 querying with the already-cheap obs signal is the low-cost fix). Selftest spies on
 `TotalMemory.read` to prove per-attempt re-invocation with the correct growing obs.
-Directly targets extend's remaining gap — not yet re-run on molab.
+Directly targets extend's remaining gap (see next entry for the molab result and the four
+further fixes it took to actually close it).
 
 **Pending:**
-- [ ] molab: rerun `--query-mode why` with task #22's obs-retry (no retrain needed — same
-  LoRA checkpoint) to check whether extend recovers
-- [ ] Stage 2 (gated, boundary now cleared): `source_session_idx` in `project_gen.py`,
-  `query_fn` in `memory.py`, new `memory_refiner.py` (refiner-as-ranker), GB4
+- [ ] Stage 2: `source_session_idx` in `project_gen.py`, `query_fn` in `memory.py`, new
+  `memory_refiner.py` (refiner-as-ranker), GB4
 - [ ] Greenfield/open-ended session kind (queued, orthogonal — task #23)
 - [ ] P5 channels (KV-prefix priming — directly relevant: repo memory paid once per session)
 - [ ] SWE-bench passive slice (later)
+
+**2026-07-08 — extend closed: GB3 = +0.300, all kinds at ceiling. Boundary checklist fully
+cleared, not just non-regressed (commits `6e00465`..`06fee53`, `cc39407`).**
+
+Five same-session fixes to `v5/memory/memory.py`, chasing extend's `36→20/40` regression
+from the previous entry. The first three were real, individually-verified bugs — and had
+**zero** measured effect on molab, three times in a row:
+
+1. `verified="fail"` records were never filtered from `read()`'s scoring (a failed final
+   attempt, written once per session, could poison a later same-chain query).
+2. `other_named` (the cross-file-mention gate that suppresses SAME_FILE_BOOST) scanned only
+   `goal` — under `query_mode="why"`, `goal` is model-generated and can drop or truncate the
+   other file's name; switched the scan to `goal + span` (span = harness-built spec text,
+   always literal).
+3. The ANN ranking pass itself only ever embedded `goal`, never `span` — added an independent
+   `span` search, merged by max score (not string-concatenated: concatenation collapses
+   cosine similarity to noise against every existing exact-match selftest).
+
+Zero movement on all three (`orders.py` delivered 20/20 times, unchanged) was itself the
+signal: this was never a close ranking call. Fourth fix found the real blocker directly in
+`graph_edits.py`'s poison gate — `MINT_CONF=0.35 < CONF_FLOOR=0.40`, and a file written
+**once** per chain (pricing.py: created, never revisited) never gets the second `observe()`
+that would STRENGTHEN it past the reuse floor. `concepts.retrieve()` excluded it forever;
+`orders.py`'s own record (a real, retrievable concept) kept `cand` non-empty, so the existing
+"cold concepts → flat fallback" escape hatch never fired either. Fixed: an UNCONDITIONAL
+ungated flat `search_ctx` pass, merged in alongside the concept-routed one — L2 confidence
+should gate routing, not raw L1 reachability.
+
+Still zero effect on the aggregate (still 20/40) — `pricing.py` was reachable now, but still
+lost the ranking fight. Stopped guessing against molab cycles at this point and reproduced
+the exact scenario **locally with the real mpnet embedder** (not the hash-fake selftest one).
+Real numbers: `orders.py` base_fit 0.746 vs `pricing.py` 0.471 — a 0.275 gap, bigger than
+`SAME_FILE_BOOST` itself, no boost involved. Genuine merit, not a bug: the why-query's
+dominant topic ("match orders.py's own order_id/order_line format") legitimately outweighs
+its secondary clause (the withheld tax rate) on both cosine and identifier overlap. **The
+actual bug: `read()` already had a `k_impl` param and already ranked multiple candidates into
+`top`, but only ever formatted `top[0]` into the payload — `top[1:]` was computed and
+silently discarded.** A single query can need two different records at once; top-1 forces a
+false choice. Fixed: concatenate every record in `top`, default `k_impl` 1→2. Verified
+end-to-end locally (real embeddings) before spending a 5th molab cycle — `pricing.py`'s
+`TAX_RATE` now rides alongside `orders.py`'s format in the payload for the exact failing case.
+
+Also landed same session: `run_arm` batches `generate_raw_batch` calls ACROSS chains at each
+session depth instead of `run_chain` looped per-instance (one prompt per call). Chains are
+independent of each other — only sessions WITHIN one chain are sequential — so this is pure
+throughput, zero semantic change (selftested: chunked reproduces unbounded row-for-row on
+real multi-chain data). `--gen-batch-size` (default 16) bounds peak VRAM. Molab-confirmed
+7-8x wall-time cut (913s → 133.8s on the run that also closed extend).
+
+Molab result after all six fixes:
+```
+              solve   DEP(n=80)  indep   why_tok  wall    by_kind
+memory_why    1.000   1.000      1.000   115      133.8s  create 60/60 cross 40/40 debug 40/40 extend 40/40
+
+GB1 +0.337 (unchanged, cached baseline)  |  GB3 +0.300 PASS  |  GB2 FAIL (known benchmark-scale artifact, task #13)
+```
+
+**Boundary checklist status: all 3 items cleared.** (1) GB3 ≥ +0.03 — blown past at +0.300.
+(2) why_text samples clean on eyeball (already confirmed prior entry). (3) cross/extend not
+regressed vs spec-query — not just non-regressed, at ceiling exactly. Stage 2 unblocked.
 
 ## 7. ADR — why RAG-critique → Stages 1+2, not a rewrite
 
