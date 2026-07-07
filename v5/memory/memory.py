@@ -74,6 +74,17 @@ class TotalMemory:
                 cand = self.impls.search_ctx(q, k=FLAT_POOL)
         else:                                              # flat
             cand = self.impls.search_ctx(q, k=FLAT_POOL)
+        # Same-file boost is a fallback, not a blanket bonus: a flat additive term can't tell
+        # apart "the file has no explicit cross-file cue -> trust its own history" (DEBUG:
+        # "fix parse_line" names nothing else) from "the goal explicitly names a DIFFERENT
+        # file's convention" (EXTEND: "the SAME tax rate that pricing uses") -- boosting the
+        # target file's own (irrelevant) history in the second case actively buries the
+        # needed cross-file record. Gate the boost on whether the goal names another file.
+        gl = (goal or "").lower()
+        other_named = any(
+            (rec.get("file_path") or "") != file_path and Path(rec["file_path"]).stem.lower() in gl
+            for rec in (self.impls.get(iid) for iid, _ in cand) if rec and rec.get("file_path")
+        )
         scored = []
         for impl_id, ctx_cos in cand:
             rec = self.impls.get(impl_id)
@@ -81,7 +92,7 @@ class TotalMemory:
                 continue
             fit = W_CTX * ctx_cos + W_IDENT * ident_overlap(
                 span or goal, (rec["old"] or "") + "\n" + (rec["new"] or ""))
-            if file_path and rec.get("file_path") == file_path:
+            if file_path and rec.get("file_path") == file_path and not other_named:
                 fit += SAME_FILE_BOOST
             scored.append((fit, rec))
         scored.sort(key=lambda x: -x[0])
@@ -102,19 +113,29 @@ class TotalMemory:
     def _read_symbols(self, q, goal: str, span: str, file_path: str = "",
                       k_syms: int = 2) -> str:
         """L0 delivery: own-repo symbols relevant to the task. A file whose NAME is mentioned
-        in the goal ('the same format as inventory receipts') gets a strong boost, and the
-        CURRENT target file (if known) gets the same boost — that own-file continuity is the
-        reliable signal when editing/debugging a file already in the repo. Same relevance-gate
-        philosophy: deliver nothing rather than junk."""
+        in the goal ('the same format as inventory receipts') gets a strong boost — that
+        explicit mention wins regardless of which file it names. The CURRENT target file
+        additionally gets the same boost when the goal names no OTHER file (own-file
+        continuity is the reliable default), but that fallback is suppressed when the goal
+        explicitly points elsewhere — else the target file's own symbols can bury the
+        correctly-named cross-file ones (the EXTEND regression: boosting orders.py's own
+        symbols over pricing.py's, despite the goal saying 'the SAME tax rate that pricing
+        uses'). Same relevance-gate philosophy throughout: deliver nothing rather than junk."""
         if len(self.syntax) == 0:
             return ""
         cands = self.syntax.search(q, k=12)
         gl = (goal or "").lower()
+        other_named = any(
+            Path(s.get("file", "")).stem.lower() in gl
+            for s in cands if s.get("file") and s["file"] != file_path
+        )
         scored = []
         for s in cands:
             file = s.get("file", "")
             stem = Path(file).stem.lower()
-            boost = 0.35 if (stem and stem in gl) or (file_path and file == file_path) else 0.0
+            named = bool(stem) and stem in gl
+            own_file = file_path and file == file_path and not other_named
+            boost = 0.35 if named or own_file else 0.0
             fit = 0.5 * s["score"] + 0.5 * ident_overlap(span or goal, s["text"]) + boost
             if fit >= MIN_FIT:
                 scored.append((fit, s))
@@ -192,6 +213,25 @@ def _selftest() -> bool:
         assert hit_pp.impls and hit_pp.impls[0].get("file_path") == "parser.py", \
             f"same-file boost picked {hit_pp.impls[0].get('file_path')!r}"
         print("  [2b] same-file continuity boost breaks ties -> PASS")
+
+        # EXTEND-shaped case: goal explicitly names a DIFFERENT file ('pricing') than the
+        # target being edited ('orders.py') -> the target's same-file boost must be
+        # SUPPRESSED so the correctly cross-file-named record still wins (the real
+        # regression this reproduces: orders.py's own irrelevant history outranking
+        # pricing.py's needed one). Same ctx_text on both -> IDENTICAL ctx embedding under
+        # the fake embedder, neutralizing ctx_cos into a clean tie; pricing's content shares
+        # the query's 'tax' vocabulary (higher ident_overlap) so it wins on merit alone —
+        # proving the target-file boost did NOT override a correctly-named cross-file match.
+        Q = "apply the SAME tax rate that pricing uses"
+        tm_flat.impls.add(Q, "x = a + b + tax", "x = a + b + tax + 1",
+                          "reuse pricing's tax", file_path="pricing.py")
+        tm_flat.impls.add(Q, "x = a + b", "x = a + b + 1",
+                          "bump the total", file_path="orders.py")
+        hit_cross = tm_flat.read(Q, span="x = a + b + tax", file_path="orders.py")
+        assert hit_cross.impls and hit_cross.impls[0].get("file_path") == "pricing.py", \
+            f"explicit cross-file mention should win over the target's same-file boost, " \
+            f"got {hit_cross.impls[0].get('file_path')!r}"
+        print("  [2c] explicit cross-file mention suppresses same-file boost -> PASS")
         hf = tm_flat.read("retry http call variant 2", span="x = _raw2(url)")
         assert hf.impls and hf.concepts == [], "flat mode skips concepts"
         tm_off = TotalMemory(td, mode="off", embed_fn=fe)
