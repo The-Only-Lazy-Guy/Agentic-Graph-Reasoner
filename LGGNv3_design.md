@@ -97,13 +97,45 @@ mutation generator; pools built: 1177 tasks, splits disjoint), agent_loop (wave-
 retries proven with stub LM: easy@1 / medium@2-with-obs / unsolvable never; write-back
 records both polarities; GM report). Selftests PASS.
 
+**2026-07-07 — MBPP grid v1 (empty-slot LoRA): GM2 "PASS" was poison-differential.**
+GM0 PASS 0.626. GM1 catastrophic FAIL with clear mechanism: empty-slot-trained proposer
+craters when the slot is filled (0.617 → 0.18, flat≈concept — payload PRESENCE, not
+retrieval mode). GM2 read +25.4pp (0.167→0.421 pool_b experienced-vs-fresh) — later
+reinterpreted: relevant payload poisons LESS than irrelevant, not positive lift (both far
+below the no-memory 0.583).
+
+**2026-07-07 — MBPP grid v2 (relevance gate `MIN_FIT=0.35` + slot-augmented LoRA, `3bbda6e`):**
+```
+dev:off 0.577 · pool_a off=flat=concept 0.543 (gate silences fable5 junk; mem_tok 0; GS +0.4% PASS)
+pool_b: off 0.583 · concept(fresh) 0.587 · concept_exp 0.567 (mem_tok 50) -> GM2 FAIL (-0.020)
+att/solve: exp 1.09 vs 1.12-1.14 (weak speed signal). Augmented LoRA cost the baseline
+-4/-7pp (payload pairs diluted empty-slot share 80%→36%).
+```
+**Structural verdict:** write-back stores what the model already SOLVED — self-experience
+memory consolidates ability, it does not extend the frontier on independent-task benchmarks
+where the model is competent and nothing non-re-derivable exists to remember. MBPP is the
+wrong habitat for TOTAL memory: no shared repo, no conventions, no prior decisions.
+
+**PIVOT B (user-selected): repo-continuity benchmark — the deployment habitat.**
+Parametric PROJECT CHAINS: one small codebase evolved over N ordered sessions
+(CREATE → EXTEND → DEBUG → CROSS). Later specs REFERENCE earlier choices without restating
+them ("apply the same tax rate as pricing") — the seeded values live only in the repo the
+agent built, and the agent's context is spec + CURRENT FILE only. Memory (L0 symbols of own
+repo + L1 own session implementations) supplies what a stateless agent cannot re-derive.
+Arms: off / memory / ceiling (whole repo in prompt). Gates:
+- **GB1** memory > off on dependency-bearing sessions (the frontier test — off lacks the info)
+- **GB2** memory tokens << ceiling tokens at ≥90% of ceiling's solve rate (the scale claim)
+Files: `v5/runtime/project_gen.py` (archetype templates, seeded params, gold chains,
+withholding verified by selftest), sandbox project mode (multi-file), TotalMemory.read
+gains L0 symbol payloads, `v5/runtime/project_loop.py` (chain harness, repo state owned by
+the agent, per-depth metrics).
+
 **Pending:**
-- [ ] local 0.5B smoke (loop end-to-end, arms off+concept)
-- [ ] molab: `--train-lora` then GM0 (`--run --arm off --pool dev`)
-- [ ] P3: GM1 + GS (pool_a, arms off/flat/concept)
-- [ ] P4: GM2 compounding
-- [ ] P5: KV-prefix session priming, OperatorInjector retry steering, constrained decode
-- [ ] SWE-bench passive slice (after GM2)
+- [ ] project_gen (2-3 archetypes) + sandbox project mode + selftests
+- [ ] project_loop + LoRA on train seeds + local smoke
+- [ ] molab GB1/GB2
+- [ ] P5 channels (KV-prefix priming — directly relevant: repo memory paid once per session)
+- [ ] SWE-bench passive slice (later)
 
 ## 6. Repro
 

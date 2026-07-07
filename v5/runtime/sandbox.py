@@ -28,6 +28,8 @@ def _harness(tests: list[str], setup: str = "") -> str:
     lines = [
         "",
         "if True:",
+        "    import sys as _sys, os as _os",
+        "    _sys.path.insert(0, _os.getcwd())",   # -I strips script dir; sibling imports need it
         "    import traceback as _tb",
         f"    _setup = {setup!r}",
         f"    _tests = {tests!r}",
@@ -78,6 +80,49 @@ def run(code: str, tests: list[str], setup: str = "", timeout: float = 5.0) -> d
         import ast
         res["first_fail"] = ast.literal_eval(ff_repr)
     except Exception:                                   # noqa: BLE001
+        res["first_fail"] = "sentinel parse error"
+        return res
+    res["passed"] = res["n_pass"] == res["n_total"] and res["n_total"] > 0 \
+        and not res["first_fail"]
+    return res
+
+
+def run_project(files: dict[str, str], tests: list[str], setup: str = "",
+                timeout: float = 5.0) -> dict:
+    """Multi-file variant: write the project's modules into the tmpdir and run tests that
+    import them (script dir is on sys.path, so sibling imports resolve). Same result schema."""
+    res = {"passed": False, "n_pass": 0, "n_total": len(tests), "first_fail": "",
+           "stderr_tail": "", "dur_ms": 0}
+    t0 = time.time()
+    with tempfile.TemporaryDirectory() as td:
+        for rel, content in files.items():
+            p = Path(td) / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content or "", encoding="utf-8")
+        runner = Path(td) / "_runner.py"
+        runner.write_text(_harness(tests, setup), encoding="utf-8")
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-I", str(runner)], cwd=td, capture_output=True,
+                text=True, encoding="utf-8", errors="replace", timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            res["first_fail"] = "timeout"
+            res["stderr_tail"] = (exc.stderr or "")[-400:] if isinstance(exc.stderr, str) else ""
+            res["dur_ms"] = int((time.time() - t0) * 1000)
+            return res
+    res["dur_ms"] = int((time.time() - t0) * 1000)
+    res["stderr_tail"] = (proc.stderr or "")[-400:]
+    line = next((ln for ln in reversed((proc.stdout or "").splitlines())
+                 if ln.startswith(SENTINEL)), "")
+    if not line:
+        res["first_fail"] = f"crash: exit {proc.returncode}"
+        return res
+    try:
+        import ast
+        _, p_, tot, ff_repr = line.split(" ", 3)
+        res["n_pass"], res["n_total"] = int(p_), int(tot)
+        res["first_fail"] = ast.literal_eval(ff_repr)
+    except Exception:                                       # noqa: BLE001
         res["first_fail"] = "sentinel parse error"
         return res
     res["passed"] = res["n_pass"] == res["n_total"] and res["n_total"] > 0 \
