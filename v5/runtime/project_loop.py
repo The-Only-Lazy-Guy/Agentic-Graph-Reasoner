@@ -132,7 +132,8 @@ def run_chain(lm, inst: dict, arm: str, budget: int = 2, max_new: int = 512,
             repo[target] = s["buggy"][target]
         current = repo.get(target, "")
         if arm == "memory" and memory is not None:
-            hit = memory.read(goal=s["spec"], span=session_data(s["spec"], current))
+            hit = memory.read(goal=s["spec"], span=session_data(s["spec"], current),
+                              file_path=target)
             payload, mem_tok = hit.trace_text, hit.tokens_est
         elif arm == "ceiling":
             others = {f: b for f, b in repo.items() if f != target}

@@ -31,6 +31,9 @@ W_CTX, W_IDENT = 0.6, 0.4          # local-fit blend
 FLAT_POOL = 16                     # candidates pulled before local-fit re-rank
 MIN_FIT = 0.35                     # relevance gate: below this, deliver NOTHING (GM1 lesson:
                                    # irrelevant payload craters an empty-slot-trained proposer)
+SAME_FILE_BOOST = 0.25             # GB1 lesson: small shared identifier vocab across sibling
+                                   # files (ts/level/msg in a logparse repo) lets ident_overlap
+                                   # pick the WRONG file's history; prefer this file's own past
 
 
 @dataclass
@@ -57,8 +60,8 @@ class TotalMemory:
         key = stable_id("q", text)
         return np.asarray(self.embed_fn({key: text})[key], dtype=np.float32)
 
-    def read(self, goal: str, span: str = "", obs: str = "", k_impl: int = 1,
-             min_fit: float = MIN_FIT) -> MemoryHit:
+    def read(self, goal: str, span: str = "", obs: str = "", file_path: str = "",
+             k_impl: int = 1, min_fit: float = MIN_FIT) -> MemoryHit:
         if self.mode == "off" or len(self.impls) == 0 or self.embed_fn is None:
             return MemoryHit()
         q = self._embed_one((goal or "")[:400] + ("\n" + obs[-200:] if obs else ""))
@@ -78,6 +81,8 @@ class TotalMemory:
                 continue
             fit = W_CTX * ctx_cos + W_IDENT * ident_overlap(
                 span or goal, (rec["old"] or "") + "\n" + (rec["new"] or ""))
+            if file_path and rec.get("file_path") == file_path:
+                fit += SAME_FILE_BOOST
             scored.append((fit, rec))
         scored.sort(key=lambda x: -x[0])
         scored = [(f, r) for f, r in scored if f >= min_fit]   # relevance gate
@@ -88,25 +93,28 @@ class TotalMemory:
             payload = (r["trace"] or "").strip()[:400]
             delta = (r["old"] or "")[:250] + "\n=>\n" + (r["new"] or "")[:350]
             payload = (payload + "\n" + delta).strip()
-        sym_block = self._read_symbols(q, goal, span)
+        sym_block = self._read_symbols(q, goal, span, file_path)
         if sym_block:
             payload = (sym_block + "\n" + payload).strip()
         return MemoryHit(impls=top, concepts=concepts_meta, trace_text=payload,
                          tokens_est=len(payload) // 4)
 
-    def _read_symbols(self, q, goal: str, span: str, k_syms: int = 2) -> str:
+    def _read_symbols(self, q, goal: str, span: str, file_path: str = "",
+                      k_syms: int = 2) -> str:
         """L0 delivery: own-repo symbols relevant to the task. A file whose NAME is mentioned
-        in the goal ('the same format as inventory receipts') gets a strong boost — that
-        mention is the reliable signal for convention lookups. Same relevance-gate philosophy:
-        deliver nothing rather than junk."""
+        in the goal ('the same format as inventory receipts') gets a strong boost, and the
+        CURRENT target file (if known) gets the same boost — that own-file continuity is the
+        reliable signal when editing/debugging a file already in the repo. Same relevance-gate
+        philosophy: deliver nothing rather than junk."""
         if len(self.syntax) == 0:
             return ""
         cands = self.syntax.search(q, k=12)
         gl = (goal or "").lower()
         scored = []
         for s in cands:
-            stem = Path(s.get("file", "")).stem.lower()
-            boost = 0.35 if stem and stem in gl else 0.0
+            file = s.get("file", "")
+            stem = Path(file).stem.lower()
+            boost = 0.35 if (stem and stem in gl) or (file_path and file == file_path) else 0.0
             fit = 0.5 * s["score"] + 0.5 * ident_overlap(span or goal, s["text"]) + boost
             if fit >= MIN_FIT:
                 scored.append((fit, s))
@@ -170,6 +178,20 @@ def _selftest() -> bool:
         print("  [2] two-hop read + local ident fit -> PASS")
 
         tm_flat = TotalMemory(td, mode="flat", embed_fn=fe)
+
+        # same-file boost: two impls with IDENTICAL identifiers/text shape (indistinguishable
+        # by ctx-cos or ident_overlap alone) in different files — file_path must break the tie
+        # toward the file actually being edited (the logparse debug regression: shared
+        # ts/level/msg vocab let a SIBLING file's history outrank the target file's own past).
+        # flat mode: no concept-membership gate, isolates the scoring mechanism itself.
+        tm_flat.impls.add("touch shared vars", "x = a + b  # p", "x = a + b + 1  # p",
+                          "bump the total", file_path="parser.py")
+        tm_flat.impls.add("touch shared vars", "x = a + b  # w", "x = a + b + 1  # w",
+                          "bump the total", file_path="writer.py")
+        hit_pp = tm_flat.read("touch shared vars", span="x = a + b", file_path="parser.py")
+        assert hit_pp.impls and hit_pp.impls[0].get("file_path") == "parser.py", \
+            f"same-file boost picked {hit_pp.impls[0].get('file_path')!r}"
+        print("  [2b] same-file continuity boost breaks ties -> PASS")
         hf = tm_flat.read("retry http call variant 2", span="x = _raw2(url)")
         assert hf.impls and hf.concepts == [], "flat mode skips concepts"
         tm_off = TotalMemory(td, mode="off", embed_fn=fe)
