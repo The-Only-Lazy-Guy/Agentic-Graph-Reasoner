@@ -206,13 +206,14 @@ def run_chain(lm, inst: dict, arm: str, budget: int = 2, max_new: int = 512,
         # obs signal, not re-authoring the intent.
         obs = ""
         passed, gen, attempts, tok = False, "", 0, 0
-        delivered_task_id = None
+        delivered_task_id, delivered_task_ids = None, []
         for _ in range(budget):
             if arm == "memory" and memory is not None:
                 hit = memory.read(goal=goal_for_query, span=session_data(s["spec"], current),
                                   obs=obs, file_path=target)
                 payload, mem_tok = hit.trace_text, hit.tokens_est
                 delivered_task_id = hit.impls[0].get("task_id") if hit.impls else None
+                delivered_task_ids = [i.get("task_id") for i in hit.impls]
                 if s.get("withheld"):     # dependency session -- which record actually landed?
                     delivered = hit.impls[0].get("file_path") if hit.impls else None
                     log(f"      [mem] {inst['instance_id']}/{s['sid']} kind={s['kind']} "
@@ -234,7 +235,8 @@ def run_chain(lm, inst: dict, arm: str, budget: int = 2, max_new: int = 512,
                      "passed": passed, "attempts": attempts, "prompt_tokens": tok,
                      "mem_tokens": mem_tok, "why_tokens": why_tok,
                      "why_text": why_text[:200] if why_text else "",
-                     "source_sid": source_sid, "delivered_task_id": delivered_task_id})
+                     "source_sid": source_sid, "delivered_task_id": delivered_task_id,
+                     "delivered_task_ids": delivered_task_ids})
         if memory is not None:
             memory.write(goal=s["spec"], old=current, new=gen,
                          trace=s["spec"][:400], verified=passed,
@@ -339,7 +341,7 @@ def run_arm(lm, insts: list[dict], arm: str, budget: int, max_new: int, heal: bo
                 st["payload"], st["mem_tok"] = "", 0
             st["obs"], st["passed"], st["gen"] = "", False, ""
             st["attempts"], st["tok"], st["_done"] = 0, 0, False
-            st["delivered_task_id"] = None
+            st["delivered_task_id"], st["delivered_task_ids"] = None, []
 
         for _attempt in range(budget):
             pending = [st for st in active if not st["_done"]]
@@ -353,6 +355,7 @@ def run_arm(lm, insts: list[dict], arm: str, budget: int, max_new: int, heal: bo
                                             obs=st["obs"], file_path=target)
                     st["payload"], st["mem_tok"] = hit.trace_text, hit.tokens_est
                     st["delivered_task_id"] = hit.impls[0].get("task_id") if hit.impls else None
+                    st["delivered_task_ids"] = [i.get("task_id") for i in hit.impls]
                     if s.get("withheld"):
                         delivered = hit.impls[0].get("file_path") if hit.impls else None
                         log(f"      [mem] {st['inst']['instance_id']}/{s['sid']} "
@@ -387,7 +390,8 @@ def run_arm(lm, insts: list[dict], arm: str, budget: int, max_new: int, heal: bo
                                "why_tokens": st["why_tok"],
                                "why_text": st["why_text"][:200] if st["why_text"] else "",
                                "source_sid": source_sid,
-                               "delivered_task_id": st.get("delivered_task_id")})
+                               "delivered_task_id": st.get("delivered_task_id"),
+                               "delivered_task_ids": st.get("delivered_task_ids", [])})
             if st["memory"] is not None:
                 st["memory"].write(goal=s["spec"], old=st["current"], new=st["gen"],
                                    trace=s["spec"][:400], verified=st["passed"],
@@ -464,14 +468,23 @@ def _report_gb3(results: dict, log=print) -> None:
     log(f"  GB3 why-query - spec-query DEP rate: {d:+.3f}  -> {verdict}")
 
 
-def _hit_rate_from_rows(rows: list[dict]) -> float:
-    """Fraction of dependency rows where the delivered record's task_id matches the ground-
-    truth source session (source_sid, task #18) -- did memory find the RIGHT record, not just
-    solve the session (a session can pass without the right record, or fail with it)."""
+def _hit_rate_from_rows(rows: list[dict], rank1: bool = False) -> float:
+    """Fraction of dependency rows where the correct source record (source_sid, task #18) was
+    delivered -- did memory find the RIGHT record, not just solve the session (a session can
+    pass without the right record, or fail with it).
+
+    rank1=False (default): correct record ANYWHERE in what got delivered. k_impl=2 means a
+    query's dominant topic can legitimately win rank-1 while the actually-needed record rides
+    at rank-2 and still reaches the prompt -- a rank1-only check reads 0.000 even on a
+    provably-correct, ceiling-solving run (confirmed: why-query's 40/40 extend run scored
+    0.000 rank-1 hit-rate, because orders.py's own record -- not pricing.py, the true source
+    -- consistently wins rank-1 there). rank1=True is the stricter, narrower question."""
     dep = [r for r in rows if r.get("source_sid") is not None]
     if not dep:
         return 0.0
-    return sum(1 for r in dep if r.get("delivered_task_id") == r["source_sid"]) / len(dep)
+    if rank1:
+        return sum(1 for r in dep if r.get("delivered_task_id") == r["source_sid"]) / len(dep)
+    return sum(1 for r in dep if r["source_sid"] in (r.get("delivered_task_ids") or [])) / len(dep)
 
 
 def _report_gb4(results: dict, log=print) -> None:
@@ -482,10 +495,14 @@ def _report_gb4(results: dict, log=print) -> None:
     why, ref = results.get("memory_why"), results.get("memory_refiner")
     if not (why and ref):
         return
-    hit_why, hit_ref = _hit_rate_from_rows(why.get("rows", [])), _hit_rate_from_rows(ref.get("rows", []))
+    why_rows, ref_rows = why.get("rows", []), ref.get("rows", [])
+    hit_why, hit_ref = _hit_rate_from_rows(why_rows), _hit_rate_from_rows(ref_rows)
     d_hit = hit_ref - hit_why
     log(f"  GB4a refiner hit-rate {hit_ref:.3f} vs why-query {hit_why:.3f}: {d_hit:+.3f}  -> "
         f"{'PASS' if d_hit >= 0.05 else 'FAIL'}")
+    r1_why = _hit_rate_from_rows(why_rows, rank1=True)
+    r1_ref = _hit_rate_from_rows(ref_rows, rank1=True)
+    log(f"    (rank-1-only, stricter: refiner {r1_ref:.3f} vs why {r1_why:.3f})")
     d_dep = ref["dep_rate"] - why["dep_rate"]
     log(f"  GB4b refiner-query - why-query DEP rate: {d_dep:+.3f}  -> "
         f"{'PASS' if d_dep >= 0.03 else 'FAIL'}")
@@ -625,6 +642,19 @@ def _selftest() -> bool:
             "every dependency row must carry a ground-truth source_sid (task #18)"
         hr = _hit_rate_from_rows(r_mem_why["rows"])
         assert 0.0 <= hr <= 1.0
+
+        # rank1=False (default) vs rank1=True: real molab bug this reproduces -- k_impl=2 can
+        # legitimately put the correct source record at rank 2 (the query's dominant topic
+        # wins rank 1), still reaches the prompt, session still solves -- but a rank1-only
+        # check reads that as a MISS. Confirmed on a real run: why-query's 40/40-solving
+        # extend chains scored 0.000 rank-1 hit-rate for exactly this reason.
+        fake_rows = [{"source_sid": "X", "delivered_task_id": "A",
+                     "delivered_task_ids": ["A", "X"]}]      # correct record at rank 2
+        assert _hit_rate_from_rows(fake_rows, rank1=False) == 1.0, \
+            "membership check must count a rank-2 hit"
+        assert _hit_rate_from_rows(fake_rows, rank1=True) == 0.0, \
+            "rank1 check must NOT count a rank-2 hit -- this is the exact distinction"
+        print("  [5c] hit-rate: membership (any rank) vs rank1-only give DIFFERENT answers -> PASS")
         rep3 = _save_results({"memory_why": r_mem_why, "memory_refiner": r_mem_why},
                              path=str(Path(td) / "r3.json"))
         _report_gb4(rep3, log=lambda *a: None)                # must not crash; keys present
