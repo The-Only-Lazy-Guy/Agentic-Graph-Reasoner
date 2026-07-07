@@ -261,13 +261,46 @@ memory-spec unaffected, reused as-is) before trusting GB3 as a real Stage 1 verd
   conventions — this isn't a debugging-only benchmark — but fully open-ended greenfield
   planning is a real, separate gap. Proposed as a 5th `project_gen.py` session kind.
 
+**2026-07-07 — GB3 v2 PASS on molab (`--epochs 4 --why-oversample 1.5`): Stage 1 boundary
+checklist cleared.**
+
+```
+              solve   DEP(n=80)  indep   why_tok  by_kind
+ceiling       0.961   1.000      0.930   0        create 53/60 cross 40/40 debug 40/40 extend 40/40
+memory(spec)  0.756   0.700      0.800   0        create 50/60 cross 20/40 debug 30/40 extend 36/40
+memory_why    0.889   0.750      1.000   116      create 60/60 cross 40/40 debug 40/40 extend 20/40
+off           0.656   0.362      0.890   0        create 49/60 cross 9/40  debug 40/40 extend 20/40
+
+GB1 PASS +0.337 (unchanged)  |  GB3 PASS +0.050  |  GB2 FAIL (known benchmark-scale artifact)
+```
+
+create/cross/debug all hit CEILING exactly (cross: 9/40 off → 40/40, matching whole-repo-in-
+prompt). indep_rate hit 1.000 (perfect). Overall solve 0.756→0.889. The `[why]` samples now
+show real content: debug paraphrases the actual symptom, cross correctly names the source
+format. Fix confirmed: undertraining, not a mechanism failure.
+
+**extend was the lone holdout — SAME regressed count in both runs, but a DIFFERENT failure
+mode this time:** run 1 hallucinated wrong numbers (`0.06` vs the real `0.12`); run 2's
+why_text correctly NAMED the source file (`import parser; parser.parse_line(...)`) but still
+missed — likely truncated by `WHY_MAX_NEW=64` before reaching the one specific fact needed
+(exact level-name spelling). Found the right file, missed the right detail.
+
+**Task #22 built same session (`7f47756`):** `TotalMemory.read()` already threaded `obs` into
+its query embedding (`memory.py`: `q = embed(goal + obs[-200:])`) but `run_chain` built
+`payload` once before the retry loop and never called it again — retrieval was single-shot;
+only generation got failure feedback. Fixed: `memory.read()` now runs INSIDE the retry loop
+(cheap — embed+cosine, no LM call), so a failed attempt's obs feeds the NEXT query. Call A
+stays single-shot per session (re-authoring intent per retry costs an extra LM call; re-
+querying with the already-cheap obs signal is the low-cost fix). Selftest spies on
+`TotalMemory.read` to prove per-attempt re-invocation with the correct growing obs.
+Directly targets extend's remaining gap — not yet re-run on molab.
+
 **Pending:**
-- [ ] molab: retrain (`--epochs 4 --why-oversample 1.5`) → `--run --query-mode why` → GB3 v2
-- [ ] Stage 1/2 boundary checklist re-check with real natural-language why_text
-- [ ] Stage 2 (gated): `source_session_idx` in `project_gen.py`, `query_fn` in `memory.py`,
-  new `memory_refiner.py` (refiner-as-ranker), GB4
-- [ ] Reasoning-loop: obs-informed re-query on retry (queued, orthogonal)
-- [ ] Greenfield/open-ended session kind (queued, orthogonal)
+- [ ] molab: rerun `--query-mode why` with task #22's obs-retry (no retrain needed — same
+  LoRA checkpoint) to check whether extend recovers
+- [ ] Stage 2 (gated, boundary now cleared): `source_session_idx` in `project_gen.py`,
+  `query_fn` in `memory.py`, new `memory_refiner.py` (refiner-as-ranker), GB4
+- [ ] Greenfield/open-ended session kind (queued, orthogonal — task #23)
 - [ ] P5 channels (KV-prefix priming — directly relevant: repo memory paid once per session)
 - [ ] SWE-bench passive slice (later)
 
