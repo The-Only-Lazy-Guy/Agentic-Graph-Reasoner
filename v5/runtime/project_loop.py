@@ -193,19 +193,25 @@ def run_chain(lm, inst: dict, arm: str, budget: int = 2, max_new: int = 512,
                 why_text = s["spec"]
             log(f"    [why] {inst['instance_id']}/{s['sid']}: {why_text[:160]}")
         goal_for_query = why_text if why_text else s["spec"]
-        if arm == "memory" and memory is not None:
-            hit = memory.read(goal=goal_for_query, span=session_data(s["spec"], current),
-                              file_path=target)
-            payload, mem_tok = hit.trace_text, hit.tokens_est
-        elif arm == "ceiling":
+        if arm == "ceiling":
             others = {f: b for f, b in repo.items() if f != target}
             payload = repo_dump(others)
             mem_tok = len(payload) // 4
-        else:
+        elif arm != "memory":
             payload, mem_tok = "", 0
+        # arm == "memory": payload is read PER ATTEMPT below (obs-informed retry, not a
+        # single pre-loop read) -- TotalMemory.read() already threads `obs` into its query
+        # embedding (memory.py: q = embed(goal + obs[-200:])), it was just never called with
+        # real obs. Call A (why_text) stays a single generation per session -- re-running it
+        # per retry would cost an extra LM call; the cheap win is re-QUERYING memory with the
+        # obs signal, not re-authoring the intent.
         obs = ""
         passed, gen, attempts, tok = False, "", 0, 0
         for _ in range(budget):
+            if arm == "memory" and memory is not None:
+                hit = memory.read(goal=goal_for_query, span=session_data(s["spec"], current),
+                                  obs=obs, file_path=target)
+                payload, mem_tok = hit.trace_text, hit.tokens_est
             slot = (payload + ("\n" + obs if obs else "")).strip()
             prompt = build_prompt(s["spec"], current, slot)
             gen = lm.generate_raw_batch([prompt], max_new_tokens=max_new)[0]
@@ -424,6 +430,44 @@ def _selftest() -> bool:
         assert len(one_five) == 15 and one_five[:10] == base, "1.5x = full copy + half sample"
         assert _oversample(base, 1.5, seed=0) == _oversample(base, 1.5, seed=0), "deterministic"
         print("  [6] _oversample -> PASS")
+
+        # obs-informed retry: memory.read() must be re-invoked EACH attempt with the growing
+        # obs (not a single pre-loop read whose payload is frozen for the whole session) --
+        # spy on TotalMemory.read to capture the per-call obs kwarg.
+        from v5.memory.memory import TotalMemory
+        calls: list[str] = []
+        orig_read = TotalMemory.read
+
+        def _spy_read(self, *a, **kw):
+            calls.append(kw.get("obs", ""))
+            return orig_read(self, *a, **kw)
+
+        TotalMemory.read = _spy_read
+        try:
+            mini = {"instance_id": "spy_0", "seed": 0, "archetype": "spy", "sessions": [{
+                "sid": "spy_0_s0", "kind": "create", "depth": 0, "target_file": "m.py",
+                "spec": "spy retry test", "tests": ["import m\nassert m.f() == 1"], "setup": "",
+                "gold": {"m.py": "def f(): return 1"}, "withheld": [],
+            }]}
+
+            class _FailOnceLM:
+                def __init__(self):
+                    self.n = 0
+
+                def generate_raw_batch(self, prompts, max_new_tokens=0, **kw):
+                    self.n += 1
+                    return ["def f(): return 1"] if self.n > 1 else ["def f(): return 2"]
+
+            rows = run_chain(_FailOnceLM(), mini, "memory", budget=2, max_new=0, heal=True,
+                             embed_fn=make_fake_embedder(), log=lambda *a: None)
+            assert rows[0]["passed"] and rows[0]["attempts"] == 2, rows[0]
+            assert len(calls) == 2, f"expected 2 read() calls (one per attempt), got {len(calls)}"
+            assert calls[0] == "", "attempt 1: no obs yet"
+            assert calls[1] != "" and "assert" in calls[1].lower() or "error" in calls[1].lower() \
+                or calls[1], f"attempt 2: obs from attempt 1's failure, got {calls[1]!r}"
+        finally:
+            TotalMemory.read = orig_read                        # always restore, even on failure
+        print("  [7] obs-informed retry: memory re-queried per attempt -> PASS")
     print("\n  PROJECT_LOOP SELFTEST -> PASS")
     return True
 
