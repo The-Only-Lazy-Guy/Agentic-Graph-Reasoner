@@ -36,6 +36,16 @@ SAME_FILE_BOOST = 0.25             # GB1 lesson: small shared identifier vocab a
                                    # pick the WRONG file's history; prefer this file's own past
 
 
+def _merge_cand(a: list[tuple[str, float]], b: list[tuple[str, float]]) -> list[tuple[str, float]]:
+    """Union two search_ctx result lists, keeping the MAX score per impl_id (not summed --
+    two queries agreeing isn't twice as relevant, and this stays order-independent)."""
+    best: dict[str, float] = dict(a)
+    for iid, cos in b:
+        if cos > best.get(iid, float("-inf")):
+            best[iid] = cos
+    return sorted(best.items(), key=lambda kv: -kv[1])
+
+
 @dataclass
 class MemoryHit:
     impls: list = field(default_factory=list)          # full L1 records, best first
@@ -65,15 +75,31 @@ class TotalMemory:
         if self.mode == "off" or len(self.impls) == 0 or self.embed_fn is None:
             return MemoryHit()
         q = self._embed_one((goal or "")[:400] + ("\n" + obs[-200:] if obs else ""))
+        # span gets its OWN independent search, merged by max score -- not concatenated into
+        # one query string. Concatenation would mean goal alone (why_text under
+        # query_mode="why") can rank the WRONG record highest on pure ctx_cos -- e.g. an
+        # own-file record that's topically similar in surface wording ("order_id"/
+        # "order_line") but missing the actually-needed cross-file value, beating the correct
+        # record even with the boost correctly suppressed. Confirmed via A/B: the spec-query
+        # arm (goal==spec, which IS span) ranks the same candidate pool correctly 36/40;
+        # goal=why_text alone got it wrong 20/20 on the same pool. A separate span search lets
+        # the reliable text surface that record without diluting/replacing goal's own signal.
+        q_span = self._embed_one(span[:400]) if span else None
         concepts_meta: list[dict] = []
         if self.mode == "concept":
             concepts_meta = self.concepts.retrieve(q, k=3)
             pool = [i for c in concepts_meta for i in c["impl_ids"]]
             cand = self.impls.search_ctx(q, k=FLAT_POOL, within=pool) if pool else []
+            if q_span is not None and pool:
+                cand = _merge_cand(cand, self.impls.search_ctx(q_span, k=FLAT_POOL, within=pool))
             if not cand:                                   # cold concepts -> flat fallback
                 cand = self.impls.search_ctx(q, k=FLAT_POOL)
+                if q_span is not None:
+                    cand = _merge_cand(cand, self.impls.search_ctx(q_span, k=FLAT_POOL))
         else:                                              # flat
             cand = self.impls.search_ctx(q, k=FLAT_POOL)
+            if q_span is not None:
+                cand = _merge_cand(cand, self.impls.search_ctx(q_span, k=FLAT_POOL))
         # Same-file boost is a fallback, not a blanket bonus: a flat additive term can't tell
         # apart "the file has no explicit cross-file cue -> trust its own history" (DEBUG:
         # "fix parse_line" names nothing else) from "the goal explicitly names a DIFFERENT
