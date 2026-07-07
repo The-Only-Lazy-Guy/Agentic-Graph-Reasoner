@@ -136,7 +136,7 @@ def order_total(price, qty):
                  f"import inventory\nassert inventory.receipt_line('apple', 3, 1.5) == "
                  f"{_fmt_apply(line_expr, name='apple', qty=3, price=1.5)!r}",
              ],
-             gold={"inventory.py": inv_gold}, withheld=[]),
+             gold={"inventory.py": inv_gold}, withheld=[], source_session_idx=None),
         dict(kind="create", target_file="pricing.py",
              spec=(f"Create pricing.py. Constant TAX_RATE = {tax}. {tax_fn}(amount) returns "
                    f"amount*(1+TAX_RATE) rounded to 2 decimals. {bulk_fn}(price, qty) returns "
@@ -147,7 +147,7 @@ def order_total(price, qty):
                  f"import pricing\nassert pricing.{bulk_fn}(2.0, {bulk_n}) == {round(2.0 * bulk_n * (1 - bulk_d), 2)}",
                  f"import pricing\nassert pricing.{bulk_fn}(2.0, {bulk_n - 1}) == {round(2.0 * (bulk_n - 1), 2)}",
              ],
-             gold={"pricing.py": pricing_gold}, withheld=[]),
+             gold={"pricing.py": pricing_gold}, withheld=[], source_session_idx=None),
         dict(kind="cross", target_file="orders.py",
              spec=("Create orders.py. order_id(n) returns 'ORD-' plus an id in the SAME id "
                    "scheme inventory item ids use. order_line(name, qty, price) returns one "
@@ -159,7 +159,8 @@ def order_total(price, qty):
              ],
              gold={"orders.py": orders_gold},
              withheld=[_fmt_apply(id_expr, n=7), _fmt_apply(line_expr, name='apple', qty=3, price=1.5),
-                       str(low)]),
+                       str(low)],
+             source_session_idx=0),                    # id/line/low all come from inventory.py (s0)
         dict(kind="debug", target_file="pricing.py",
              spec=("Order totals came out wrong after a recent change to pricing.py — taxed "
                    "amounts are LOWER than the base amount. Fix pricing.py so taxed totals are "
@@ -170,7 +171,7 @@ def order_total(price, qty):
                  f"import pricing\nassert pricing.{bulk_fn}(2.0, {bulk_n}) == {round(2.0 * bulk_n * (1 - bulk_d), 2)}",
              ],
              gold={"pricing.py": pricing_gold}, buggy={"pricing.py": pricing_buggy},
-             withheld=[]),
+             withheld=[], source_session_idx=None),
         dict(kind="extend", target_file="orders.py",
              spec=("Extend orders.py with order_total(price, qty): the order value with the "
                    "SAME bulk discount rule and the SAME tax rate that pricing uses (discount "
@@ -181,7 +182,8 @@ def order_total(price, qty):
                  f"import orders\nassert orders.order_total(10.0, 1) == {_bt(10.0, 1)}",
              ],
              gold={"orders.py": orders_gold_s5},
-             withheld=[str(tax), str(bulk_n), str(bulk_d), tax_fn, bulk_fn]),
+             withheld=[str(tax), str(bulk_n), str(bulk_d), tax_fn, bulk_fn],
+             source_session_idx=1),                    # tax/bulk vals+names come from pricing.py (s1)
     ]
     return dict(archetype="inventory", sessions=sessions,
                 params=dict(low=low, tax=tax, bulk_n=bulk_n, bulk_d=bulk_d,
@@ -246,7 +248,7 @@ def _logparse(rng: random.Random) -> dict:
                  f"import parser\nassert parser.parse_line({l1!r}) == ('10:00', {warn!r}, 'disk low')",
                  f"import parser\nassert parser.parse_line({bad!r}) is None",
              ],
-             gold={"parser.py": parser_gold}, withheld=[]),
+             gold={"parser.py": parser_gold}, withheld=[], source_session_idx=None),
         dict(kind="cross", target_file="writer.py",
              spec=("Create writer.py. format_line(ts, level, msg) renders one log line in the "
                    "SAME layout parser.parse_line reads (its exact inverse)."),
@@ -255,7 +257,8 @@ def _logparse(rng: random.Random) -> dict:
                  f"import writer, parser\nassert parser.parse_line(writer.format_line('10:01', "
                  f"{levels[3]!r}, 'boom')) == ('10:01', {levels[3]!r}, 'boom')",
              ],
-             gold={"writer.py": writer_gold}, withheld=[l1, layout]),
+             gold={"writer.py": writer_gold}, withheld=[l1, layout],
+             source_session_idx=0),                    # layout/sample line come from parser.py (s0)
         dict(kind="debug", target_file="parser.py",
              spec=("Downstream code says parsed records come out scrambled since the last "
                    "change to parser.py — fields are in the wrong order. Fix parse_line so "
@@ -264,7 +267,8 @@ def _logparse(rng: random.Random) -> dict:
                  f"import parser\nassert parser.parse_line({l1!r}) == ('10:00', {warn!r}, 'disk low')",
                  f"import parser\nassert parser.parse_line({l2!r}) == ('10:01', {levels[3]!r}, 'boom')",
              ],
-             gold={"parser.py": parser_gold}, buggy={"parser.py": parser_buggy}, withheld=[]),
+             gold={"parser.py": parser_gold}, buggy={"parser.py": parser_buggy}, withheld=[],
+             source_session_idx=None),
         dict(kind="extend", target_file="stats.py",
              spec=(f"Create stats.py with {count_fn}(lines): parse each line with the project's "
                    f"parser and return a dict counting records per level name (skip unparseable "
@@ -273,7 +277,8 @@ def _logparse(rng: random.Random) -> dict:
                  f"import stats\nassert stats.{count_fn}([{l1!r}, {l2!r}, {bad!r}]) == "
                  f"{{{warn!r}: 1, {levels[3]!r}: 1}}",
              ],
-             gold={"stats.py": stats_gold}, withheld=[warn]),
+             gold={"stats.py": stats_gold}, withheld=[warn],
+             source_session_idx=0),                    # warn level name comes from parser.py's LEVELS (s0)
     ]
     return dict(archetype="logparse", sessions=sessions,
                 params=dict(fmt_i=fmt_i, levels=levels, count_fn=count_fn))
@@ -331,6 +336,26 @@ def _selftest() -> bool:
             i2 = make_instance(arch, seed)
             assert i2["sessions"][0]["spec"] == inst["sessions"][0]["spec"], "determinism"
     print(f"  [1] gold chains pass, buggy states fail, {n_dep} withheld tokens verified -> PASS")
+
+    # source_session_idx (Stage 2 ground-truth label): invariant + static per-archetype shape.
+    # withheld <-> source_session_idx must move together (a session either has no dependency
+    # and no source, or both), and the source must be a REAL earlier session in the same chain.
+    for arch in ARCHETYPES:
+        inst = make_instance(arch, 0)
+        for s in inst["sessions"]:
+            idx = s.get("source_session_idx")
+            if s.get("withheld"):
+                assert idx is not None, f"{s['sid']}: withheld but no source_session_idx"
+                assert 0 <= idx < s["depth"], \
+                    f"{s['sid']}: source_session_idx {idx} must point to an earlier session"
+            else:
+                assert idx is None, f"{s['sid']}: no withheld but source_session_idx={idx}"
+    exp = {"inventory": {2: 0, 4: 1}, "logparse": {1: 0, 3: 0}}
+    for arch, want in exp.items():
+        got = {s["depth"]: s["source_session_idx"] for s in make_instance(arch, 0)["sessions"]
+              if s["source_session_idx"] is not None}
+        assert got == want, f"{arch}: source_session_idx map {got} != expected {want}"
+    print("  [1b] source_session_idx <-> withheld invariant + per-archetype map -> PASS")
 
     # cross-seed variation: conventions actually vary
     specs = {make_instance("inventory", s)["params"]["line_i"] for s in range(12)}
