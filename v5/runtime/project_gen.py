@@ -214,8 +214,17 @@ def _logparse(rng: random.Random) -> dict:
                    f"    if level not in LEVELS:\n        return None\n"
                    f"    return (ts, level, msg)\n")
     parser_buggy = parser_gold.replace("return (ts, level, msg)", "return (level, ts, msg)")
-    writer_gold = (f"def format_line(ts, level, msg):\n"
-                   f"    return {mk('{}', '{}', '{}')!r}.format(ts, level, msg)\n")
+    # writer template + matching .format() arg order per layout (mk's f-string POSITION
+    # encodes order only when called with distinct values — with identical placeholders
+    # "{}" for all three, that information collapses, so the template/arg-order pairing
+    # is spelled out explicitly here instead of derived from mk()).
+    _WRITER = {
+        0: ("[{}] {}: {}", "ts, level, msg"),
+        1: ("{} | {} | {}", "ts, level, msg"),
+        2: ("{} {} {}", "level, ts, msg"),
+    }
+    _tmpl, _args = _WRITER[fmt_i]
+    writer_gold = f"def format_line(ts, level, msg):\n    return {_tmpl!r}.format({_args})\n"
     # the seeded warn level name + tuple order are conventions for stats
     stats_gold = (f"def {count_fn}(lines):\n"
                   f"    import parser\n"

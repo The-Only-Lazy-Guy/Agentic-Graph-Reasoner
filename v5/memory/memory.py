@@ -88,8 +88,30 @@ class TotalMemory:
             payload = (r["trace"] or "").strip()[:400]
             delta = (r["old"] or "")[:250] + "\n=>\n" + (r["new"] or "")[:350]
             payload = (payload + "\n" + delta).strip()
+        sym_block = self._read_symbols(q, goal, span)
+        if sym_block:
+            payload = (sym_block + "\n" + payload).strip()
         return MemoryHit(impls=top, concepts=concepts_meta, trace_text=payload,
                          tokens_est=len(payload) // 4)
+
+    def _read_symbols(self, q, goal: str, span: str, k_syms: int = 2) -> str:
+        """L0 delivery: own-repo symbols relevant to the task. A file whose NAME is mentioned
+        in the goal ('the same format as inventory receipts') gets a strong boost — that
+        mention is the reliable signal for convention lookups. Same relevance-gate philosophy:
+        deliver nothing rather than junk."""
+        if len(self.syntax) == 0:
+            return ""
+        cands = self.syntax.search(q, k=12)
+        gl = (goal or "").lower()
+        scored = []
+        for s in cands:
+            stem = Path(s.get("file", "")).stem.lower()
+            boost = 0.35 if stem and stem in gl else 0.0
+            fit = 0.5 * s["score"] + 0.5 * ident_overlap(span or goal, s["text"]) + boost
+            if fit >= MIN_FIT:
+                scored.append((fit, s))
+        scored.sort(key=lambda x: -x[0])
+        return "\n".join(s["text"][:300] for _, s in scored[:k_syms])
 
     # ── write ────────────────────────────────────────────────────────────────
     def write(self, goal: str, old: str, new: str, trace: str, verified: bool,
