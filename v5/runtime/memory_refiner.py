@@ -197,7 +197,7 @@ def build_ranker_reprs(lm, insts: list[dict], embed_fn, chains_root: str = "data
             gold_body = s["gold"][target]
             impl_id = memory.write(goal=s["spec"], old=st["current"], new=gold_body,
                                    trace=s["spec"][:400], verified=True,
-                                   file_path=target, task_id=s["sid"])
+                                   file_path=target, task_id=s["sid"], kind=s["kind"])
             if impl_id:
                 st["sid_to_impl"][s["sid"]] = impl_id
             st["repo"][target] = gold_body

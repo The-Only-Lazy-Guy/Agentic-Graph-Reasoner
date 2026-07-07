@@ -240,7 +240,7 @@ def run_chain(lm, inst: dict, arm: str, budget: int = 2, max_new: int = 512,
         if memory is not None:
             memory.write(goal=s["spec"], old=current, new=gen,
                          trace=s["spec"][:400], verified=passed,
-                         file_path=target, task_id=s["sid"])
+                         file_path=target, task_id=s["sid"], kind=s["kind"])
         repo[target] = s["gold"][target] if (heal and not passed) else gen
         if not passed and not heal:
             pass                                            # broken state propagates (realism)
@@ -395,7 +395,7 @@ def run_arm(lm, insts: list[dict], arm: str, budget: int, max_new: int, heal: bo
             if st["memory"] is not None:
                 st["memory"].write(goal=s["spec"], old=st["current"], new=st["gen"],
                                    trace=s["spec"][:400], verified=st["passed"],
-                                   file_path=target, task_id=s["sid"])
+                                   file_path=target, task_id=s["sid"], kind=s["kind"])
             st["repo"][target] = s["gold"][target] if (heal and not st["passed"]) else st["gen"]
             if st["memory"] is not None:                      # L0 learns the repo truth
                 rdir = st["chain_dir"] / "repo"

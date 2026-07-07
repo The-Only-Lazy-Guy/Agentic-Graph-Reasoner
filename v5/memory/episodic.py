@@ -41,15 +41,18 @@ class ImplStore:
 
     def add(self, ctx_text: str, old: str, new: str, trace: str, file_path: str = "",
             outcome: str = "unknown", verified: str = "weak", task_id: str = "",
-            concept_id: str = "") -> str | None:
-        """Returns impl_id, or None if a duplicate (content-addressed on old+new+trace)."""
+            concept_id: str = "", kind: str = "") -> str | None:
+        """Returns impl_id, or None if a duplicate (content-addressed on old+new+trace).
+        kind (create/cross/debug/extend, project_gen.py's session kind): a structural signal
+        cosine similarity has no access to -- stored so a ranker can use it as a feature, not
+        just the record's semantic content."""
         impl_id = stable_id("impl", (old or "") + "\x00" + (new or "") + "\x00" + (trace or ""))
         if impl_id in self.records:
             return None
         rec = {"impl_id": impl_id, "ctx_text": (ctx_text or "")[:600], "old": old, "new": new,
                "trace": (trace or "")[:400], "file_path": file_path, "outcome": outcome,
                "verified": verified, "task_id": task_id, "concept_id": concept_id,
-               "ts": time.time()}
+               "kind": kind, "ts": time.time()}
         if self.embed_fn is not None:
             v_ctx = self.embed_fn({impl_id: rec["ctx_text"] or rec["trace"] or old})[impl_id]
             v_skel = self.embed_fn({impl_id: _skel(rec["trace"]) or rec["ctx_text"]})[impl_id]
@@ -92,14 +95,17 @@ def _selftest() -> bool:
     with tempfile.TemporaryDirectory() as td:
         st = ImplStore(td, embed_fn=make_fake_embedder())
         i1 = st.add("add retry to http client", "return _raw(url)", "return retry(3)(_raw)(url)",
-                    "wrap `_raw` in a retry decorator", outcome="pass", verified="strong")
+                    "wrap `_raw` in a retry decorator", outcome="pass", verified="strong",
+                    kind="extend")
         i2 = st.add("cap the stream rows", "rows = all()", "rows = all()[:cap]",
                     "slice the row list to `cap`")
         assert i1 and i2 and i1 != i2
         assert st.add("x", "return _raw(url)", "return retry(3)(_raw)(url)",
                       "wrap `_raw` in a retry decorator") is None, "content dedup"
         assert len(st) == 2 and len(st.emb_ctx) == 2 and len(st.emb_skel) == 2
-        print("  [1] add + dedup + dual embeddings -> PASS")
+        assert st.get(i1)["kind"] == "extend" and st.get(i2)["kind"] == "", \
+            "kind stored (structural feature cosine can't see) -- defaults to empty string"
+        print("  [1] add + dedup + dual embeddings + kind -> PASS")
 
         q = st.emb_ctx.get([i1])[0]
         top = st.search_ctx(q, k=1)

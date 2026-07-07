@@ -219,12 +219,12 @@ class TotalMemory:
 
     # ── write ────────────────────────────────────────────────────────────────
     def write(self, goal: str, old: str, new: str, trace: str, verified: bool,
-              file_path: str = "", task_id: str = "") -> str | None:
+              file_path: str = "", task_id: str = "", kind: str = "") -> str | None:
         """One loop outcome -> L1 record + L2 lifecycle. Returns impl_id (None = duplicate)."""
         impl_id = self.impls.add(
             ctx_text=goal[:400], old=old, new=new, trace=trace, file_path=file_path,
             outcome="pass" if verified else "fail",
-            verified="strong" if verified else "fail", task_id=task_id)
+            verified="strong" if verified else "fail", task_id=task_id, kind=kind)
         if impl_id is None or self.embed_fn is None:
             return impl_id
         ctx_vec = self.impls.emb_ctx.get([impl_id])[0]
