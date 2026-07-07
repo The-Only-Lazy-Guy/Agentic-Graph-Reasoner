@@ -36,6 +36,8 @@ CAVEAT = "<local-command-caveat>"
 # ── format: the ONLY scaffolding the LM ever sees (~5 tokens, zero instructions) ──
 SEP_T = "\n###T\n"          # trace follows
 SEP_N = "\n###N\n"          # new span follows
+SEP_W = "\n###W\n"          # why/intent follows (v3 Stage 1 — query formation, not a
+                            # z-conditioned generation target: see LGGNv3_design.md)
 
 
 def realizer_prompt(old: str, trace: str | None) -> str:
@@ -48,6 +50,15 @@ def realizer_prompt(old: str, trace: str | None) -> str:
 def tracer_prompt(old: str) -> str:
     """M2: strict prefix of realizer_prompt(old, trace) — leaves a future single-pass merge open."""
     return old + SEP_T
+
+
+def why_prompt(spec: str, current: str) -> str:
+    """v3 Stage 1 Call A: spec + current target file -> why/intent text. Zero instruction
+    text — SEP_W's role is taught entirely by training-data shape (why_pairs), same
+    philosophy as SEP_T/SEP_N. Mirrors project_loop.session_data's exact concatenation
+    shape (spec + '\\n' + current) but is defined HERE so this module stays independent of
+    the harness that consumes it."""
+    return spec + "\n" + (current or "") + SEP_W
 
 
 # ── data ────────────────────────────────────────────────────────────────────────
@@ -130,6 +141,15 @@ def load_triples(path: str = TRIPLES, trace_chars: int = 400, max_old_chars: int
             n_goals = len({_goal_key(t['goal']) for t in out})
             log(f"    unique goals: {n_goals} ({len(out)/max(1, n_goals):.1f} triples/goal)")
     return out
+
+
+def why_pairs(triples: list[dict]) -> list[tuple[str, str]]:
+    """v3 Stage 1 Call-A supervision: (goal, old, trace) -> spec_or_goal + old + SEP_W -> trace.
+    `trace` is the ORIGINAL Fable-5 agent's real recorded thinking (the same field M1 trains
+    SEP_T on) — genuine skill transfer from real reasoning data, not spec-echoing on a
+    synthetic benchmark. Callers pass whatever `load_triples(TRIPLES)` already produced for
+    M1 (same rows, same filter funnel) — no separate loading."""
+    return [(why_prompt(t["goal"], t["old"]), t["trace"]) for t in triples]
 
 
 def _goal_key(goal: str) -> str:
@@ -638,6 +658,15 @@ def _selftest() -> bool:
     assert len(trips) == 2, f"funnel: expected 2 survivors, got {len(trips)}"
     assert trips[0]["old"] == "a = 1" and trips[1]["new"] == "T = 30"
     print("  [1] filter funnel -> PASS")
+
+    # 1b. v3 Stage 1: SEP_W distinctness, why_prompt format, why_pairs construction
+    assert SEP_W not in (SEP_T, SEP_N) and SEP_T != SEP_N, "all three separators distinct"
+    assert why_prompt("S", "C") == "S\nC" + SEP_W
+    assert why_prompt("S", None) == "S\n" + SEP_W, "current=None -> empty body, not 'None'"
+    wp = why_pairs(trips)
+    assert wp[0] == (why_prompt(trips[0]["goal"], trips[0]["old"]), trips[0]["trace"])
+    assert len(wp) == len(trips), "one why-pair per surviving triple"
+    print("  [1b] SEP_W + why_prompt + why_pairs -> PASS")
 
     # 2. masking with fake tokenizer
     tok = _FakeTok()
