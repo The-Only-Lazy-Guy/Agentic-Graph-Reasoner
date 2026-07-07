@@ -1,10 +1,15 @@
 """TotalMemory — the single facade the agent loop talks to. Clear LM<->graph contract:
 
-  read(ctx)  -> MemoryHit: ONE short implementation payload (trace + capped old->new) chosen
-                by the two-hop path  ctx -> L2 concepts (conf-gated) -> member impls ->
-                LOCAL-FIT re-rank (0.6·ctx-cos + 0.4·ident_overlap with the code in front of
-                the model). Payload is DATA for the prompt's trace slot (~<=300 tokens);
-                steering/constraint channels come later (P5) and cost zero tokens.
+  read(ctx)  -> MemoryHit: up to k_impl (default 2) short implementation payloads (trace +
+                capped old->new each) chosen by the two-hop path  ctx -> L2 concepts (conf-
+                gated) -> member impls -> LOCAL-FIT re-rank (0.6·ctx-cos + 0.4·ident_overlap
+                with the code in front of the model). A single query can need two DIFFERENT
+                records at once (match file A's own convention AND file B's withheld value);
+                top-1 forces a pick and the query's dominant topic always wins on merit, so
+                every record that clears MIN_FIT on its own gets delivered, not just the best.
+                Payload is DATA for the prompt's trace slot; the caller (build_prompt's
+                PAYLOAD_CAP) is what actually bounds total tokens, not a fixed count here.
+                Steering/constraint channels come later (P5) and cost zero tokens.
   write(...) -> L1 append (verified strong on pass) + L2 lifecycle observe (+ caller feeds
                 touched files to L0 via syntax.scan_files).
 
