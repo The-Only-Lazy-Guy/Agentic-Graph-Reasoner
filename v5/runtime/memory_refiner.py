@@ -166,12 +166,16 @@ def build_ranker_reprs(lm, insts: list[dict], embed_fn, chains_root: str = "data
                     n_skipped_no_source += 1
                 else:
                     q = memory._embed_one(st["why_text"][:400])
+                    span = session_data(s["spec"], st["current"])
+                    q_span = memory._embed_one(span[:400]) if span else None
                     pool = []
                     if memory.mode == "concept":
                         meta = memory.concepts.retrieve(q, k=3)
                         p = [i for c in meta for i in c["impl_ids"]]
                         pool = memory.impls.search_ctx(q, k=pool_k, within=p) if p else []
                     pool = _merge_cand(pool, memory.impls.search_ctx(q, k=pool_k))
+                    if q_span is not None:
+                        pool = _merge_cand(pool, memory.impls.search_ctx(q_span, k=pool_k))
                     cand_ids = [iid for iid, _ in pool][:pool_k]
                     if correct_impl not in cand_ids:
                         n_injected += 1
@@ -213,10 +217,20 @@ def make_query_fn(net, ops, embed_fn, impl_store, K: int = 3, pool_k: int = FLAT
 
     impl_store must be the SAME chain's ImplStore the caller's TotalMemory uses — bind this
     AFTER TotalMemory construction (memory.query_fn = make_query_fn(..., memory.impls, ...)),
-    not passed into TotalMemory.__init__ (task #21 wiring). Does its own cheap flat search to
-    gather a candidate pool (same search_ctx primitive read() uses), then runs the refiner
-    over it — span/file_path are unused directly here (the refiner is trained to fold
-    relevance in via cross-attention over the pool, not via a second raw-text signal)."""
+    not passed into TotalMemory.__init__ (task #21 wiring). file_path is unused (the refiner
+    ranks by content, not by which file is being edited -- SAME_FILE_BOOST is a Stage-1-only
+    heuristic, deliberately not reproduced here).
+
+    span DOES feed pool construction (merged with goal via the same _merge_cand technique
+    Stage 1's read() uses), for consistency with how build_ranker_reprs builds TRAINING
+    pools -- a query_fn that gathers candidates differently at inference than the ranker was
+    trained on is a real distribution-shift risk. NOTE: at this benchmark's per-chain scale
+    (~3-5 records total by a chain's later sessions, well under pool_k), goal-alone vs
+    goal+span likely return the SAME candidate set regardless (search_ctx returns everything
+    when the store is smaller than k) -- so this fix is about correctness/consistency and
+    matters more as real repos scale past pool_k, not necessarily the explanation for any
+    specific small-benchmark result. Don't over-attribute a single eval regression to it
+    without checking pool sizes first."""
     import torch
 
     from v5.memory.store import stable_id
@@ -229,6 +243,8 @@ def make_query_fn(net, ops, embed_fn, impl_store, K: int = 3, pool_k: int = FLAT
     def query_fn(goal: str, span: str, file_path: str) -> np.ndarray:
         g = _embed((goal or "")[:400])
         cand = impl_store.search_ctx(g, k=pool_k)
+        if span:
+            cand = _merge_cand(cand, impl_store.search_ctx(_embed(span[:400]), k=pool_k))
         if not cand:
             return g                                          # cold store -- nothing to refine over
         ids = [iid for iid, _ in cand]
@@ -385,6 +401,13 @@ def main():
     ap.add_argument("--n-op", type=int, default=24)
     ap.add_argument("--epochs", type=int, default=400)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--n-seeds", type=int, default=30,
+                    help="TRAIN seed chains per archetype for --build-reprs (default 30, "
+                         "matching project_loop.TRAIN_SEEDS' width -- widen this first if "
+                         "the ranker's train hit-rate is low; build_ranker_reprs needs no "
+                         "generation/sandbox so more seeds is cheap. Always starts at 100, "
+                         "disjoint from EVAL_SEEDS=range(0,20) -- no train/eval leakage "
+                         "regardless of how wide this gets.")
     a = ap.parse_args()
     if a.selftest:
         raise SystemExit(0 if _selftest() else 1)
@@ -392,9 +415,8 @@ def main():
         from v5.memory.store import make_mpnet_embedder
         from v5.runtime.lggn_realizer import RawLM
         from v5.runtime.project_gen import make_split
-        from v5.runtime.project_loop import TRAIN_SEEDS
         lm = RawLM.load_checkpoint(a.model, a.lora)
-        insts = make_split(seeds=TRAIN_SEEDS)
+        insts = make_split(seeds=range(100, 100 + a.n_seeds))
         reprs = build_ranker_reprs(lm, insts, make_mpnet_embedder(), log=print)
         from pathlib import Path
         Path(a.reprs).parent.mkdir(parents=True, exist_ok=True)
