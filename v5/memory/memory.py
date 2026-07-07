@@ -29,6 +29,8 @@ from v5.memory.syntax import SyntaxStore, ident_overlap
 
 W_CTX, W_IDENT = 0.6, 0.4          # local-fit blend
 FLAT_POOL = 16                     # candidates pulled before local-fit re-rank
+MIN_FIT = 0.35                     # relevance gate: below this, deliver NOTHING (GM1 lesson:
+                                   # irrelevant payload craters an empty-slot-trained proposer)
 
 
 @dataclass
@@ -55,7 +57,8 @@ class TotalMemory:
         key = stable_id("q", text)
         return np.asarray(self.embed_fn({key: text})[key], dtype=np.float32)
 
-    def read(self, goal: str, span: str = "", obs: str = "", k_impl: int = 1) -> MemoryHit:
+    def read(self, goal: str, span: str = "", obs: str = "", k_impl: int = 1,
+             min_fit: float = MIN_FIT) -> MemoryHit:
         if self.mode == "off" or len(self.impls) == 0 or self.embed_fn is None:
             return MemoryHit()
         q = self._embed_one((goal or "")[:400] + ("\n" + obs[-200:] if obs else ""))
@@ -77,6 +80,7 @@ class TotalMemory:
                 span or goal, (rec["old"] or "") + "\n" + (rec["new"] or ""))
             scored.append((fit, rec))
         scored.sort(key=lambda x: -x[0])
+        scored = [(f, r) for f, r in scored if f >= min_fit]   # relevance gate
         top = [r for _, r in scored[:k_impl]]
         payload = ""
         if top:

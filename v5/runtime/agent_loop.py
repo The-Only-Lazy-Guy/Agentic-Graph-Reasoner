@@ -70,20 +70,50 @@ def _save_results(update: dict, path: str = RESULTS_PATH) -> dict:
 
 # ── proposer training ───────────────────────────────────────────────────────────
 
+def _neighbor_payload(task: dict) -> str:
+    """A neighbor task rendered exactly like a TotalMemory payload (trace + old=>new),
+    so train-time slots match eval-time retrieved slots."""
+    return (task["spec"] or "").strip()[:400] + "\n\n=>\n" + gold_of(task)[:350]
+
+
 def train_lora(model_name: str, pools: dict, out_dir: str = LORA_DIR, epochs: int = 2,
-               batch_size: int = 8, max_tokens: int = 1024, log=print) -> None:
-    """One shared task-format LoRA on the lora_train split, EMPTY slot + obs-conditioned
-    debug variant (matches retry-time distribution). Memory arms differ only in slot
-    content at eval — clean attribution."""
+               batch_size: int = 8, max_tokens: int = 1024, augment: bool = True,
+               log=print) -> None:
+    """One shared task-format LoRA on the lora_train split. Pair mixture:
+      empty slot            (1x/task)   — the off-arm distribution
+      obs-conditioned       (debug)     — the retry distribution
+      RELEVANT neighbor slot(1x/task)   — nearest OTHER train task's solution as payload:
+                                          learn to USE retrieved memory
+      JUNK slot             (~0.5x/task)— a far task's payload, target unchanged:
+                                          learn to IGNORE irrelevant memory
+    GM1 first run proved the empty-slot-only proposer craters when the slot is filled
+    (0.617 -> 0.18): slot content must be IN the training distribution."""
+    train = pools["lora_train"]
     pairs = []
-    for t in pools["lora_train"]:
+    for t in train:
         pairs.append((build_prompt(t, ""), gold_of(t)))
         if t["kind"] == "debug":
             res = sbx_run(t["code"], t["tests"], setup=t.get("setup", ""))
             o = obs_text(res)
             if o:
                 pairs.append((build_prompt(t, o), gold_of(t)))
-    log(f"  [lora] {len(pairs)} pairs from {len(pools['lora_train'])} tasks")
+    if augment:
+        import numpy as np
+        import random as _rng
+        from v5.memory.store import make_mpnet_embedder
+        embed = make_mpnet_embedder()
+        vecs = embed({str(i): t["spec"] for i, t in enumerate(train)})
+        M = np.asarray([vecs[str(i)] for i in range(len(train))], dtype=np.float32)
+        sims = M @ M.T
+        np.fill_diagonal(sims, -np.inf)
+        rng = _rng.Random(7)
+        for i, t in enumerate(train):
+            nbr = int(np.argmax(sims[i]))
+            pairs.append((build_prompt(t, _neighbor_payload(train[nbr])), gold_of(t)))
+            if rng.random() < 0.5:
+                far = int(np.argsort(sims[i])[len(train) // 10])   # bottom-decile similarity
+                pairs.append((build_prompt(t, _neighbor_payload(train[far])), gold_of(t)))
+    log(f"  [lora] {len(pairs)} pairs from {len(train)} tasks (augment={augment})")
     lm = RawLM(model_name)
     lm.train_on(pairs, epochs=epochs, batch_size=batch_size, max_tokens=max_tokens, log=log)
     lm.save_checkpoint(out_dir)
@@ -276,6 +306,7 @@ def main():
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--smoke", action="store_true", help="0.5B, 8 dev tasks, arms off+concept")
     ap.add_argument("--train-lora", action="store_true")
+    ap.add_argument("--no-augment", action="store_true", help="ablation: empty-slot-only LoRA")
     ap.add_argument("--run", action="store_true")
     ap.add_argument("--model", default="Qwen/Qwen2.5-3B")
     ap.add_argument("--lora", default=LORA_DIR)
@@ -299,7 +330,8 @@ def main():
 
     pools = load_pools()
     if a.train_lora:
-        train_lora(a.model, pools, out_dir=a.lora, epochs=a.epochs, batch_size=a.batch_size)
+        train_lora(a.model, pools, out_dir=a.lora, epochs=a.epochs, batch_size=a.batch_size,
+                   augment=not a.no_augment)
         return
 
     if a.smoke:
