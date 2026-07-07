@@ -284,7 +284,60 @@ def _logparse(rng: random.Random) -> dict:
                 params=dict(fmt_i=fmt_i, levels=levels, count_fn=count_fn))
 
 
-ARCHETYPES = {"inventory": _inventory, "logparse": _logparse}
+# ── archetype: INVENTORY_INFER (proposed extension, opt-in — see LGGNv3_design.md) ──────────
+#
+# Every existing dependency session hands the model a fully-specified plan: "the SAME tax
+# rate/id scheme/level names that X uses" NAMES the source and the exact rule to apply. The
+# model never has to recognize an unstated need or derive how facts combine -- it retrieves
+# a named fact and pastes it per explicit instructions. That's why flat cosine keeps winning
+# over a trained ranker (see memory_refiner.py's task #25 postmortem): when the task reduces
+# to "find the record matching this fully-specified need," similarity search IS the right
+# tool, and there's no reasoning residual left for a ranker to capture.
+#
+# This session tests something different: SELECTIVE composition, not lookup.
+#   - No filename cue ("pricing") in the spec -- "the standard bulk-quantity treatment
+#     already established in this project" must be recognized implicitly.
+#   - The correct answer requires ISOLATING one atomic fact (bulk_fn) from an ADJACENT one
+#     (tax) that appears ALONGSIDE it in an existing combined record (order_total, s4) --
+#     naively retrieving/copying the nearest-matching record over-includes tax, which this
+#     session explicitly requires excluding ("members are tax-exempt").
+#
+# Registered as a SEPARATE archetype key, not merged into "inventory" -- make_split()'s
+# default (archetypes=("inventory","logparse")) is completely unaffected; every existing
+# GB1-4 number stays comparable until this is explicitly opted into.
+
+def _inventory_infer(rng: random.Random) -> dict:
+    base = _inventory(rng)
+    p = base["params"]
+    bulk_n, bulk_d = p["bulk_n"], p["bulk_d"]
+    orders_gold_s5 = base["sessions"][4]["gold"]["orders.py"]      # s4 = extend (has order_total)
+    orders_gold_s6 = orders_gold_s5 + f'''
+def apply_member_discount(price, qty):
+    total = price * qty
+    if qty >= {bulk_n}:
+        total = total * (1 - {bulk_d})
+    return round(total, 2)
+'''
+    base["sessions"].append(dict(
+        kind="infer", target_file="orders.py",
+        spec=("Add apply_member_discount(price, qty) to orders.py: members get the standard "
+              "bulk-quantity treatment already established in this project, but NO tax is "
+              "applied (members are tax-exempt). Round to 2 decimals."),
+        tests=[
+            f"import orders\nassert orders.apply_member_discount(2.0, {bulk_n}) == "
+            f"{round(2.0 * bulk_n * (1 - bulk_d), 2)}",
+            f"import orders\nassert orders.apply_member_discount(2.0, {bulk_n - 1}) == "
+            f"{round(2.0 * (bulk_n - 1), 2)}",
+        ],
+        gold={"orders.py": orders_gold_s6},
+        withheld=[str(bulk_n), str(bulk_d)],
+        source_session_idx=1,        # bulk_fn's TRUE origin is pricing.py (s1) -- NOT s4's
+    ))                                # order_total, which combines it with tax (must be excluded)
+    base["archetype"] = "inventory_infer"
+    return base
+
+
+ARCHETYPES = {"inventory": _inventory, "logparse": _logparse, "inventory_infer": _inventory_infer}
 
 
 def make_instance(archetype: str, seed: int) -> dict:
@@ -350,7 +403,8 @@ def _selftest() -> bool:
                     f"{s['sid']}: source_session_idx {idx} must point to an earlier session"
             else:
                 assert idx is None, f"{s['sid']}: no withheld but source_session_idx={idx}"
-    exp = {"inventory": {2: 0, 4: 1}, "logparse": {1: 0, 3: 0}}
+    exp = {"inventory": {2: 0, 4: 1}, "logparse": {1: 0, 3: 0},
+           "inventory_infer": {2: 0, 4: 1, 5: 1}}
     for arch, want in exp.items():
         got = {s["depth"]: s["source_session_idx"] for s in make_instance(arch, 0)["sessions"]
               if s["source_session_idx"] is not None}
