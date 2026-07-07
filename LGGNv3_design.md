@@ -62,7 +62,7 @@ Storage (v5/memory/store.py): JSONL WALs + float16 .npy embedding shards, cosine
 with within-subset restriction; linear v1, ANN behind the same interface at >50k rows.
 mpnet-768 everywhere (RealEmbedder); embedders injected so all selftests run modelless.
 
-## 3. Benchmark (user-selected): MBPP + mutation-debug
+## 3. Benchmark A — MBPP + mutation-debug (superseded by B, kept as diagnostic; see §5)
 
 Local sandbox verification in ~100ms (no Docker) → fast episodes → memory actually
 accumulates → compounding measurable. DEBUG tasks: gold mutated by 12 operators
@@ -75,13 +75,37 @@ Prompt = DATA only (SEP format): BUILD `spec+assert ###T [memory|obs] ###N` → 
 DEBUG `spec+buggy ###T [memory|obs] ###N` → fixed code. One shared task LoRA (trained
 empty-slot + obs-conditioned debug pairs); memory arms differ ONLY in slot content.
 
+## 3b. Benchmark B — repo-continuity project chains (active; `v5/runtime/project_gen.py`)
+
+One instance = a small Python project evolved over an ordered session chain
+(CREATE → CROSS → DEBUG → EXTEND). Dependency sessions reference earlier CONVENTIONS
+without restating them ("the same line format as inventory receipts") — the seeded
+convention (one of several inline format strings / function names / id schemes / rates)
+exists only in the repo the agent itself built; a stateless agent must guess, an agent
+with L0 (own-repo symbols) + L1 (own past implementations) has it. 2 archetypes
+(inventory, logparse) × seeds → 4-5 sessions each; import-proof withholding verified
+by selftest (withheld tokens never appear in specs). Agent context per session = spec +
+CURRENT target file only.
+
+Arms: **off** (spec + file) / **memory** (+ TotalMemory payload, relevance-gated) /
+**ceiling** (+ whole repo dumped in prompt — what memory approximates). Prompt = data-only
+SEP format (unchanged from A). Gold-chain LoRA trained on 30 held-out train seeds with a
+three-way slot mixture (empty / memory-shaped / full-repo) — applies the MBPP interference
+lesson (§5) preemptively instead of discovering it again.
+
 ## 4. Gates
 
+**Benchmark A (MBPP, diagnostic):**
 - **GM0** loop sanity: arm=off dev solve-rate.
 - **GM1** memory earns: concept > flat > off on pool_a; concept − flat ≥ +3pp.
 - **GM2** compounding (the product claim): pool_a with write-back into a COPIED memory
   root → pool_b experienced-vs-fresh, same proposer; ≥ +3pp (or −0.3 attempts/solve).
 - **GS** speed: memory wall-clock overhead ≤ 15%; payload ≤ ~300 tok (logged per episode).
+
+**Benchmark B (repo-continuity, active):**
+- **GB1** memory > off on DEPENDENCY sessions, ≥ +10pp (off structurally lacks the info).
+- **GB2** memory reaches ≥90% of ceiling's dependency solve-rate at ≤0.6× ceiling's payload
+  tokens (the scale claim — real repos won't fit in a prompt, memory must approximate).
 
 ## 5. Progress log
 
@@ -130,10 +154,27 @@ withholding verified by selftest), sandbox project mode (multi-file), TotalMemor
 gains L0 symbol payloads, `v5/runtime/project_loop.py` (chain harness, repo state owned by
 the agent, per-depth metrics).
 
+**2026-07-07 — B built: project_gen + sandbox project mode + project_loop (`73a2049`, `248369e`).**
+2 archetypes (inventory, logparse), 4-5 session chains, import-proof withholding (33 tokens
+verified absent from specs). Bug the harness's own selftest caught in project_gen: writer_gold
+for logparse layout-2 built its code TEMPLATE by calling the format lambda with identical
+`'{}'` placeholder args for ts/level/msg — positional info collapsed, so the template's slot
+order silently diverged from the fixed `.format(ts, level, msg)` call; layout-2 gold failed
+its own tests. Fixed with an explicit per-layout (template, arg-order) table. `memory.py`
+gains L0 delivery (own-repo symbols, file-mention boost — a spec naming a prior file reliably
+retrieves it). `project_loop.py`: agent-owned repo state per chain, arms off/memory/ceiling,
+healing (default on, `--no-heal` for entangled realism), gold-chain LoRA (empty + memory-
+shaped + full-repo slot mixture — the MBPP interference lesson applied preemptively), GB1/GB2
+report. Selftest needed a real fix too: the stub LM originally checked whether the withheld
+TEST VALUE (evaluated output) appeared in the payload — but payloads carry source CODE
+(templates), not evaluated strings, so it always failed. Rewrote as `_shares_code`
+(verbatim-chunk overlap with earlier gold source) — the correct proxy for "is the convention
+actually visible." All selftests PASS (off dep=0.00, ceiling dep=1.00, memory dep=1.00 with a
+FAKE embedder on the file-mention boost alone).
+
 **Pending:**
-- [ ] project_gen (2-3 archetypes) + sandbox project mode + selftests
-- [ ] project_loop + LoRA on train seeds + local smoke
-- [ ] molab GB1/GB2
+- [ ] local 0.5B smoke (project_loop, arms off+memory)
+- [ ] molab: gold-chain `--train-lora`, then GB1/GB2
 - [ ] P5 channels (KV-prefix priming — directly relevant: repo memory paid once per session)
 - [ ] SWE-bench passive slice (later)
 
@@ -145,25 +186,30 @@ python -m v5.memory.store --selftest && python -m v5.memory.syntax --selftest
 python -m v5.memory.episodic --selftest && python -m v5.memory.semantic --selftest
 python -m v5.memory.memory --selftest
 python -m v5.runtime.sandbox --selftest && python -m v5.runtime.loop_tasks --selftest
+python -m v5.runtime.project_gen --selftest && python -m v5.runtime.project_loop --selftest
 python -m v5.runtime.agent_loop --selftest
 
-# data (once)
+## Benchmark A (MBPP) — diagnostic, kept for reference
 python -m v5.runtime.loop_tasks --fetch && python -m v5.runtime.loop_tasks --build-pools
 python -m v5.memory.memory --seed                    # fable5 -> L1, KMeans -> L2 (mpnet)
-
-# local end-to-end
 python -m v5.runtime.agent_loop --smoke
-
-# molab
 V5_LM_QUANT=4bit python -u -m v5.runtime.agent_loop --train-lora --batch-size 16
 V5_LM_QUANT=4bit python -u -m v5.runtime.agent_loop --run --arm off --pool dev --eval-batch 16       # GM0
 V5_LM_QUANT=4bit python -u -m v5.runtime.agent_loop --run --arm off --pool pool_a --eval-batch 16    # GM1 (x3 arms)
 V5_LM_QUANT=4bit python -u -m v5.runtime.agent_loop --run --arm flat --pool pool_a --eval-batch 16
 V5_LM_QUANT=4bit python -u -m v5.runtime.agent_loop --run --arm concept --pool pool_a --eval-batch 16
-# GM2: learn on A into a copy, then eval B fresh vs experienced
 V5_LM_QUANT=4bit python -u -m v5.runtime.agent_loop --run --arm concept --pool pool_a \
     --write-back --copy-memory-to data/memory_expA
-V5_LM_QUANT=4bit python -u -m v5.runtime.agent_loop --run --arm concept --pool pool_b   # fresh
+V5_LM_QUANT=4bit python -u -m v5.runtime.agent_loop --run --arm concept --pool pool_b
 V5_LM_QUANT=4bit python -u -m v5.runtime.agent_loop --run --arm concept --pool pool_b \
-    --memory-root data/memory_expA --result-key pool_b:concept_exp                       # experienced
+    --memory-root data/memory_expA --result-key pool_b:concept_exp
+
+## Benchmark B (repo-continuity) — active
+python -m v5.runtime.project_loop --smoke                          # 0.5B local end-to-end
+V5_LM_QUANT=4bit python -u -m v5.runtime.project_loop --train-lora --batch-size 16
+V5_LM_QUANT=4bit python -u -m v5.runtime.project_loop --run --arm off        # baseline
+V5_LM_QUANT=4bit python -u -m v5.runtime.project_loop --run --arm memory     # GB1
+V5_LM_QUANT=4bit python -u -m v5.runtime.project_loop --run --arm ceiling    # GB2
 ```
+(No cross-chain eval batching yet — `run_chain` generates one prompt at a time per session,
+since repo state and slot content differ per chain; the LoRA batches within `train_on`.)
