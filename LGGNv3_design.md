@@ -172,11 +172,62 @@ TEST VALUE (evaluated output) appeared in the payload — but payloads carry sou
 actually visible." All selftests PASS (off dep=0.00, ceiling dep=1.00, memory dep=1.00 with a
 FAKE embedder on the file-mention boost alone).
 
+**2026-07-07 — GB1 PASS on real molab data, then user challenge, then Stages 1+2 planned.**
+
+GB1 first real run (Qwen2.5-3B, 40 chains, 180 sessions): **+0.337** on dependency sessions
+(0.362 off → 0.700 memory, after two rounds of same-file-boost fixes — see `5440c90`,
+`b94c1f7` for the full debug→extend see-saw diagnosis). Core v3 claim validated on real
+repo-continuity data.
+
+User then challenged the architecture directly: *"why are we just in basic RAG + prompt
+engineering? I think this design won't last."* Fair, and traced precisely: `LGGN_DESIGN.md`
+entry 27's refiner (5-seed CI, ALL 4 pillars load-bearing, cos(h_K,gold)=0.70-0.74) is
+genuinely validated HRM-style latent computation — and is used NOWHERE in `v5/memory/*` or
+`project_loop.py` (confirmed by grep). What actually failed across v1/v2 was narrower:
+DECODING novel content from a compressed latent (MoLoRA ceiling 0.12-0.19, v2 M2 tracer's
+embedding inversion, oracle-best-of-8 still 0.027) — not latent computation itself. v3 threw
+out the refiner's working capability along with the dead decode step.
+
+**Answer: reuse both proven components for the job each is proven to do, not the job that
+failed.** v2 M1's trace-writing skill (validated 0.21) → query formation (Stage 1), not a
+z-conditioned generation target. v1's Refiner.Net convergence (validated cos 0.70-0.74) →
+candidate ranking (Stage 2), not FiLM/MoLoRA content conditioning. Full plan at
+`C:\Users\Ace\.claude\plans\buzzing-puzzling-sunrise.md` (also ADR'd here, §7 below).
+
+**Stage 1a+1b BUILT (`efd85c5`, `91cab62`), all selftests PASS:**
+- `lggn_realizer.py`: `SEP_W = "\n###W\n"`, `why_prompt(spec, current)`, `why_pairs(triples)`
+  — Call A supervision from REAL Fable-5 `(goal, old, trace)` triples (genuine skill
+  transfer, not spec-echo).
+- `project_loop.py`: `run_chain` gains `query_mode` (`"spec"` default = byte-identical to the
+  GB1-validated path; `"why"` = Call A + why_text as the memory query; `"refiner"` = Stage 2
+  stub, gated). `train_lora` mixes `why_pairs` into the one shared LoRA. `_report_gb3`.
+  Result-key scheme keeps `"memory"` literal for the default mode specifically so GB3 can
+  reuse the ALREADY-VALIDATED GB1 molab result as its baseline without a re-run.
+- Caught before running: `TotalMemory.__init__` doesn't accept `query_fn` yet (that's Stage
+  2, task-gated) — `run_chain` only passes it when actually set, so Stage 1 constructs
+  `TotalMemory` exactly as GB1 did.
+
 **Pending:**
-- [ ] local 0.5B smoke (project_loop, arms off+memory)
-- [ ] molab: gold-chain `--train-lora`, then GB1/GB2
+- [ ] local 0.5B smoke running (2-call flow, off+memory/spec+memory/why)
+- [ ] molab: `--train-lora` (mixed) → `--run --query-mode why` → GB3, then the Stage 1/2
+  boundary checklist (GB3 not a regression, why_text samples sane, cross/extend dep_rate
+  specifically checked against the same-file-boost mechanism)
+- [ ] Stage 2 (gated on the above): `source_session_idx` in `project_gen.py`, `query_fn` in
+  `memory.py`, new `memory_refiner.py` (refiner-as-ranker), GB4
 - [ ] P5 channels (KV-prefix priming — directly relevant: repo memory paid once per session)
 - [ ] SWE-bench passive slice (later)
+
+## 7. ADR — why RAG-critique → Stages 1+2, not a rewrite
+
+Recorded because it'll look like scope creep without the reasoning: the user's "this is just
+RAG" challenge could have been answered by defending the current design (delivery-as-text is
+proven, GB1 passed) or by a rewrite (bring z-conditioning back). Both were wrong. The right
+move was narrower: identify EXACTLY what v1/v2 proved (refiner convergence: yes; latent
+decode: no) and EXACTLY what v3 was missing as a result (any use of the refiner at all), then
+re-point the validated piece at a job that doesn't require decode. Two falsifiable stages,
+strictly sequential (Stage 2's query input IS Stage 1's output), each with its own gate and
+an explicit "what a FAIL means" so a negative result still teaches something instead of just
+being scope creep that didn't pan out.
 
 ## 6. Repro
 
