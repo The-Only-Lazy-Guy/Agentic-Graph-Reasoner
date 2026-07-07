@@ -71,7 +71,7 @@ class TotalMemory:
         return np.asarray(self.embed_fn({key: text})[key], dtype=np.float32)
 
     def read(self, goal: str, span: str = "", obs: str = "", file_path: str = "",
-             k_impl: int = 1, min_fit: float = MIN_FIT) -> MemoryHit:
+             k_impl: int = 2, min_fit: float = MIN_FIT) -> MemoryHit:
         if self.mode == "off" or len(self.impls) == 0 or self.embed_fn is None:
             return MemoryHit()
         q = self._embed_one((goal or "")[:400] + ("\n" + obs[-200:] if obs else ""))
@@ -137,12 +137,19 @@ class TotalMemory:
         scored.sort(key=lambda x: -x[0])
         scored = [(f, r) for f, r in scored if f >= min_fit]   # relevance gate
         top = [r for _, r in scored[:k_impl]]
+        # A query can genuinely need TWO different records at once (EXTEND: "match orders.py's
+        # own order_id format" AND "use pricing.py's tax rate") -- top-1 forces a pick between
+        # two unrelated needs, and the query's DOMINANT topic (format-matching, here) will
+        # always outrank a secondary clause (the withheld tax rate) on pure cosine/ident_overlap
+        # merit, no boost involved (confirmed with real mpnet embeddings: orders.py's own
+        # record out-fit pricing.py's 0.746 to 0.471, a gap bigger than SAME_FILE_BOOST itself).
+        # Deliver every record that clears MIN_FIT on its own merit, not just the single best.
         payload = ""
-        if top:
-            r = top[0]
-            payload = (r["trace"] or "").strip()[:400]
+        for r in top:
+            trace = (r["trace"] or "").strip()[:400]
             delta = (r["old"] or "")[:250] + "\n=>\n" + (r["new"] or "")[:350]
-            payload = (payload + "\n" + delta).strip()
+            entry = (trace + "\n" + delta).strip()
+            payload = (payload + "\n\n" + entry).strip() if payload else entry
         sym_block = self._read_symbols(q, goal, span, file_path)
         if sym_block:
             payload = (sym_block + "\n" + payload).strip()
@@ -278,6 +285,25 @@ def _selftest() -> bool:
                 f"starved concept's impl should still surface via the flat supplement, " \
                 f"got {[i.get('file_path') for i in hit_cold.impls]}"
         print("  [2f] poison-gate-starved concept still reachable via flat supplement -> PASS")
+
+        # A query can need TWO different records at once -- top-1 forces a pick between them,
+        # and the dominant topic always wins on merit (real molab EXTEND finding, real mpnet
+        # embeddings: orders.py's own record out-fit pricing.py's 0.746 to 0.471, no boost
+        # involved -- not a close call, not a gating bug). k_impl now defaults to 2: both
+        # records that clear MIN_FIT on their own merit should ride along, not just the best.
+        tm_multi = TotalMemory(td, mode="flat", embed_fn=fe)
+        QM = "shared ctx text for both records"
+        tm_multi.impls.add(QM, "x = 1", "x = order_id(n)", "orders own record",
+                           file_path="orders_multi.py")
+        tm_multi.impls.add(QM, "y = 1", "y = TAX_RATE", "pricing tax record",
+                           file_path="pricing_multi.py")
+        hit_multi = tm_multi.read(QM, span="order_id TAX_RATE", file_path="orders_multi.py")
+        delivered_files = {i["file_path"] for i in hit_multi.impls}
+        assert delivered_files == {"orders_multi.py", "pricing_multi.py"}, \
+            f"expected both records delivered, got {delivered_files}"
+        assert "order_id" in hit_multi.trace_text and "TAX_RATE" in hit_multi.trace_text, \
+            f"both records' content should be in the payload, got {hit_multi.trace_text!r}"
+        print("  [2h] k_impl=2 delivers both merit-qualifying records, not just the top -> PASS")
 
         # EXTEND-shaped case: goal explicitly names a DIFFERENT file ('pricing') than the
         # target being edited ('orders.py') -> the target's same-file boost must be
