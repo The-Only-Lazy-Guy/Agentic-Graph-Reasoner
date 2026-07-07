@@ -212,6 +212,10 @@ def run_chain(lm, inst: dict, arm: str, budget: int = 2, max_new: int = 512,
                 hit = memory.read(goal=goal_for_query, span=session_data(s["spec"], current),
                                   obs=obs, file_path=target)
                 payload, mem_tok = hit.trace_text, hit.tokens_est
+                if s.get("withheld"):     # dependency session -- which record actually landed?
+                    delivered = hit.impls[0].get("file_path") if hit.impls else None
+                    log(f"      [mem] {inst['instance_id']}/{s['sid']} kind={s['kind']} "
+                        f"target={target!r} delivered={delivered!r} n_impls={len(hit.impls)}")
             slot = (payload + ("\n" + obs if obs else "")).strip()
             prompt = build_prompt(s["spec"], current, slot)
             gen = lm.generate_raw_batch([prompt], max_new_tokens=max_new)[0]
