@@ -247,16 +247,154 @@ def run_chain(lm, inst: dict, arm: str, budget: int = 2, max_new: int = 512,
     return rows
 
 
+def _gen_chunked(lm, prompts: list[str], max_new_tokens: int, gen_batch: int) -> list[str]:
+    """generate_raw_batch, chunked to bound peak VRAM (KV cache scales with batch x context) --
+    same purpose as train_lora's batch_size, just at inference time."""
+    if not prompts:
+        return []
+    if gen_batch <= 0 or len(prompts) <= gen_batch:
+        return lm.generate_raw_batch(prompts, max_new_tokens=max_new_tokens)
+    outs = []
+    for i in range(0, len(prompts), gen_batch):
+        outs.extend(lm.generate_raw_batch(prompts[i:i + gen_batch], max_new_tokens=max_new_tokens))
+    return outs
+
+
 def run_arm(lm, insts: list[dict], arm: str, budget: int, max_new: int, heal: bool,
-            embed_fn=None, query_mode: str = "spec", ranker=None, log=print) -> dict:
+            embed_fn=None, query_mode: str = "spec", ranker=None,
+            chains_root: str = CHAINS_ROOT, gen_batch: int = 16, log=print) -> dict:
+    """Batches generate_raw_batch calls ACROSS chains at each session depth, instead of
+    running run_chain per instance (one prompt per generate call, 40x more forward passes
+    than necessary). Chains are independent of each other -- only sessions WITHIN one chain
+    are sequential (session N's repo/memory state depends on session N-1's outcome) -- so
+    depth d's Call A / Call B / retry-attempt prompts across ALL still-active chains go into
+    ONE generate_raw_batch call each (chunked by gen_batch to bound peak VRAM). Per-chain
+    state lives in `states`; each chain's own session order and memory instance stay exactly
+    as isolated as run_chain's, only the LM calls are batched. Same row schema/semantics as
+    run_chain (verified: --selftest exercises both paths)."""
     t0 = time.time()
+    query_fn = None
+    if arm == "memory" and query_mode == "refiner" and ranker is not None:
+        from v5.runtime.memory_refiner import make_query_fn
+        net, ops, K_r = ranker
+        query_fn = make_query_fn(net, ops, embed_fn, K_r)
+    memory_cls = None
+    if arm == "memory":
+        from v5.memory.memory import TotalMemory
+        memory_cls = TotalMemory
+
+    states = []
+    for inst in insts:
+        chain_dir = Path(chains_root) / inst["instance_id"]
+        memory = None
+        if memory_cls is not None:
+            if chain_dir.exists():
+                shutil.rmtree(chain_dir)
+            mem_kwargs = {"query_fn": query_fn} if query_fn is not None else {}
+            memory = memory_cls(chain_dir / "mem", mode="concept", embed_fn=embed_fn,
+                                **mem_kwargs)
+        states.append({"inst": inst, "memory": memory, "repo": {}, "rows": [],
+                       "chain_dir": chain_dir})
+
+    max_depth = max((len(st["inst"]["sessions"]) for st in states), default=0)
+    for depth in range(max_depth):
+        active = [st for st in states if depth < len(st["inst"]["sessions"])]
+        if not active:
+            continue
+        for st in active:
+            s = st["inst"]["sessions"][depth]
+            target = s["target_file"]
+            if s.get("buggy"):
+                st["repo"][target] = s["buggy"][target]
+            st["s"], st["target"] = s, target
+            st["current"] = st["repo"].get(target, "")
+
+        # Call A: one batched why-text generation across every active chain at this depth
+        if arm == "memory" and query_mode in ("why", "refiner"):
+            wps = [why_prompt(st["s"]["spec"], st["current"]) for st in active]
+            outs = _gen_chunked(lm, wps, WHY_MAX_NEW, gen_batch)
+            for st, wp, out in zip(active, wps, outs):
+                why_text = (out or "").strip() or st["s"]["spec"]
+                st["why_text"], st["why_tok"] = why_text, (len(wp) + len(why_text)) // 4
+                log(f"    [why] {st['inst']['instance_id']}/{st['s']['sid']}: {why_text[:160]}")
+        else:
+            for st in active:
+                st["why_text"], st["why_tok"] = "", 0
+
+        for st in active:
+            s, target = st["s"], st["target"]
+            st["goal_for_query"] = st["why_text"] or s["spec"]
+            if arm == "ceiling":
+                others = {f: b for f, b in st["repo"].items() if f != target}
+                st["payload"] = repo_dump(others)
+                st["mem_tok"] = len(st["payload"]) // 4
+            elif arm != "memory":
+                st["payload"], st["mem_tok"] = "", 0
+            st["obs"], st["passed"], st["gen"] = "", False, ""
+            st["attempts"], st["tok"], st["_done"] = 0, 0, False
+
+        for _attempt in range(budget):
+            pending = [st for st in active if not st["_done"]]
+            if not pending:
+                break
+            for st in pending:
+                s, target = st["s"], st["target"]
+                if arm == "memory" and st["memory"] is not None:
+                    hit = st["memory"].read(goal=st["goal_for_query"],
+                                            span=session_data(s["spec"], st["current"]),
+                                            obs=st["obs"], file_path=target)
+                    st["payload"], st["mem_tok"] = hit.trace_text, hit.tokens_est
+                    if s.get("withheld"):
+                        delivered = hit.impls[0].get("file_path") if hit.impls else None
+                        log(f"      [mem] {st['inst']['instance_id']}/{s['sid']} "
+                            f"kind={s['kind']} target={target!r} delivered={delivered!r} "
+                            f"n_impls={len(hit.impls)}")
+                slot = (st["payload"] + ("\n" + st["obs"] if st["obs"] else "")).strip()
+                st["prompt"] = build_prompt(s["spec"], st["current"], slot)
+
+            prompts = [st["prompt"] for st in pending]
+            outs = _gen_chunked(lm, prompts, max_new, gen_batch)
+            for st, prompt, gen in zip(pending, prompts, outs):
+                s, target = st["s"], st["target"]
+                st["gen"] = gen
+                st["attempts"] += 1
+                st["tok"] += len(prompt) // 4
+                res = run_project({**st["repo"], target: gen}, s["tests"])
+                st["passed"] = res["passed"]
+                if st["passed"]:
+                    st["_done"] = True
+                else:
+                    st["obs"] = obs_text(res)
+
+        for st in active:
+            s, target = st["s"], st["target"]
+            st["rows"].append({"iid": st["inst"]["instance_id"], "sid": s["sid"],
+                               "kind": s["kind"], "depth": s["depth"],
+                               "dependency": bool(s.get("withheld")),
+                               "passed": st["passed"], "attempts": st["attempts"],
+                               "prompt_tokens": st["tok"], "mem_tokens": st["mem_tok"],
+                               "why_tokens": st["why_tok"],
+                               "why_text": st["why_text"][:200] if st["why_text"] else ""})
+            if st["memory"] is not None:
+                st["memory"].write(goal=s["spec"], old=st["current"], new=st["gen"],
+                                   trace=s["spec"][:400], verified=st["passed"],
+                                   file_path=target, task_id=s["sid"])
+            st["repo"][target] = s["gold"][target] if (heal and not st["passed"]) else st["gen"]
+            if st["memory"] is not None:                      # L0 learns the repo truth
+                rdir = st["chain_dir"] / "repo"
+                rdir.mkdir(parents=True, exist_ok=True)
+                for f, b in st["repo"].items():
+                    (rdir / f).write_text(b, encoding="utf-8")
+                st["memory"].syntax.scan_files(str(rdir), list(st["repo"].keys()),
+                                               repo=st["inst"]["instance_id"])
+        done_ct = sum(1 for st in states for r in st["rows"] if r["passed"])
+        total_ct = sum(len(st["rows"]) for st in states)
+        log(f"    [{arm}] depth {depth+1}/{max_depth} ({len(active)} chains): "
+            f"cum {done_ct}/{total_ct}")
+
     rows = []
-    for i, inst in enumerate(insts):
-        rows.extend(run_chain(lm, inst, arm, budget=budget, max_new=max_new, heal=heal,
-                              embed_fn=embed_fn, query_mode=query_mode, ranker=ranker, log=log))
-        done = [r for r in rows if r["passed"]]
-        log(f"    [{arm}] chain {i+1}/{len(insts)} ({inst['instance_id']}): "
-            f"cum {len(done)}/{len(rows)}")
+    for st in states:
+        rows.extend(st["rows"])
     dep = [r for r in rows if r["dependency"]]
     ind = [r for r in rows if not r["dependency"]]
 
@@ -395,6 +533,18 @@ def _selftest() -> bool:
         print(f"  [2] memory dep={r_mem['dep_rate']:.2f} >= off, mem_tok "
               f"{r_mem['mean_mem_tokens']:.0f} -> PASS")
 
+        # gen_batch is a VRAM cap, not a semantic knob: forcing full chunk-serialization
+        # (gen_batch=1, one prompt per generate call, same as pre-batching behavior) across
+        # MULTIPLE real chains must reproduce gen_batch=0's (unbounded, all-active-in-one-call)
+        # rows exactly -- proves cross-chain batching didn't change per-chain outcomes.
+        r_mem_chunked = run_arm(lm, insts, "memory", budget=1, max_new=0, heal=True,
+                                embed_fn=make_fake_embedder(), gen_batch=1,
+                                log=lambda *a: None)
+        key = lambda r: (r["iid"], r["sid"])
+        assert sorted(r_mem["rows"], key=key) == sorted(r_mem_chunked["rows"], key=key), \
+            "gen_batch=1 (chunked) must match gen_batch=0 (unbounded) row-for-row"
+        print("  [2g] gen_batch is VRAM-cap only, chunked == unbounded -> PASS")
+
         rep = _save_results({"off": r_off, "memory": r_mem, "ceiling": r_ceil},
                             path=str(Path(td) / "r.json"))
         _report(rep, log=lambda *a: None)
@@ -434,6 +584,22 @@ def _selftest() -> bool:
         assert len(one_five) == 15 and one_five[:10] == base, "1.5x = full copy + half sample"
         assert _oversample(base, 1.5, seed=0) == _oversample(base, 1.5, seed=0), "deterministic"
         print("  [6] _oversample -> PASS")
+
+        # _gen_chunked: cross-chain batching (run_arm's speedup) must be order-preserving and
+        # content-identical to one big unchunked call -- chunking is a VRAM cap, not a
+        # semantic change (greedy decoding: same prompt -> same output regardless of what
+        # else shares its batch).
+        class _EchoLM:
+            def generate_raw_batch(self, prompts, max_new_tokens=0, **kw):
+                return [f"out:{p}" for p in prompts]
+
+        echo = _EchoLM()
+        ps = [f"p{i}" for i in range(10)]
+        whole = _gen_chunked(echo, ps, 8, gen_batch=0)
+        chunked = _gen_chunked(echo, ps, 8, gen_batch=3)
+        assert whole == chunked == [f"out:p{i}" for i in range(10)], (whole, chunked)
+        assert _gen_chunked(echo, [], 8, gen_batch=3) == []
+        print("  [6b] _gen_chunked matches unchunked, order-preserving -> PASS")
 
         # obs-informed retry: memory.read() must be re-invoked EACH attempt with the growing
         # obs (not a single pre-loop read whose payload is frozen for the whole session) --
@@ -496,6 +662,11 @@ def main():
     ap.add_argument("--budget", type=int, default=2)
     ap.add_argument("--max-new", type=int, default=512)
     ap.add_argument("--batch-size", type=int, default=8)
+    ap.add_argument("--gen-batch-size", type=int, default=16,
+                    help="max chains' prompts per generate_raw_batch call during --run/--smoke "
+                         "(0=unbounded -- all active chains in one call). Chains are batched "
+                         "ACROSS at each session depth; this caps peak VRAM, doesn't change "
+                         "results (greedy decoding).")
     ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--why-oversample", type=float, default=1.0,
                     help="repeat Fable-5 why-pairs Nx during --train-lora (see train_lora "
@@ -534,7 +705,8 @@ def main():
         embed = make_mpnet_embedder()
         for arm, qm in (("off", "spec"), ("memory", "spec"), ("memory", "why")):
             r = run_arm(lm, insts, arm, budget=1, max_new=384, heal=True,
-                        embed_fn=embed if arm == "memory" else None, query_mode=qm, log=print)
+                        embed_fn=embed if arm == "memory" else None, query_mode=qm,
+                        gen_batch=a.gen_batch_size, log=print)
             print(f"  [smoke:{arm}/{qm}] {r['solved']}/{r['n']} dep={r['dep_rate']:.2f} "
                   f"mem_tok={r['mean_mem_tokens']:.0f} why_tok={r['mean_why_tokens']:.0f}")
         lm.cleanup()
@@ -559,7 +731,7 @@ def main():
             print(f"  [ranker] loaded <- {a.ranker}")
         res = run_arm(lm, insts, a.arm, budget=a.budget, max_new=a.max_new,
                       heal=not a.no_heal, embed_fn=embed_fn, query_mode=a.query_mode,
-                      ranker=ranker, log=print)
+                      ranker=ranker, gen_batch=a.gen_batch_size, log=print)
         res_slim = {k: v for k, v in res.items() if k != "rows"}
         # key "memory" (query_mode=spec, the default) stays literal — backward compatible with
         # the already-validated GB1/GB2 molab result, and lets GB3 reuse it as the baseline
