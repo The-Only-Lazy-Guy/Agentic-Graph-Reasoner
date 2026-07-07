@@ -368,6 +368,87 @@ GB1 +0.337 (unchanged, cached baseline)  |  GB3 +0.300 PASS  |  GB2 FAIL (known 
 (2) why_text samples clean on eyeball (already confirmed prior entry). (3) cross/extend not
 regressed vs spec-query — not just non-regressed, at ceiling exactly. Stage 2 unblocked.
 
+**2026-07-08 — Stage 2 built (tasks #18-21), first GB4 result negative, root-caused, feature-
+fusion fix built + selftested + locally smoke-tested. Composition-benchmark gap identified.**
+
+Built in order: `source_session_idx` (task #18, ground truth — which earlier session
+established the withheld convention), `query_fn` injection point in `memory.py` (task #19 —
+overrides the RANKING query only, concept routing stays on plain `embed(goal)`, a deliberate
+departure from the original plan's single-`q` sketch since this session's read() redesign
+split routing from ranking), new `memory_refiner.py` (task #20 — `Refiner.Net` reused
+UNCHANGED, repurposed for ranking: `g`=why_text, `ctx`=the actual candidate pool the refiner
+attends over, contrastive loss against the hardest REAL in-pool negative), wiring (task #21 —
+caught a real bug in the process: `query_fn` was being built ONCE and shared across all 40
+chains, when each chain has its own isolated `ImplStore`; fixed to bind per-chain).
+
+First molab GB4 run: negative. `memory_refiner` DEP 0.750 vs `memory_why` baseline's 1.000,
+extend specifically 20/40 vs 40/40. Widened training data 5x (`--n-seeds 150`) expecting
+underfitting — got WORSE instead (DEP 0.675, cross/debug/create all slipped too). More data
+making results worse, not better, is the overfitting-to-a-repeated-shortcut signature, not
+underfitting — confirmed directly: the refiner delivered the same wrong file for the same
+wrong reason on 20/20 chains, zero variance across different random tax rates/thresholds.
+
+Root cause, arrived at through direct user challenge (external review caught this, not
+internal diagnosis): the un-fused ranker's `ctx` input was JUST the candidate pool's own
+mpnet embeddings — the SAME substrate cosine similarity already optimally uses. No amount of
+supervision teaches a model something cosine didn't already structurally have access to; the
+refiner was trying to re-derive semantic similarity, an unwinnable fight against a pretrained
+encoder, instead of adding orthogonal information. (Along the way, also fixed a real GB4a
+metric bug: hit-rate checked `hit.impls[0]` — rank 1 only — but `k_impl=2` can legitimately
+put the correct source at rank 2 while rank 1 goes to the query's dominant topic; both still
+reach the prompt and the session still solves. Confirmed on real data: why-query's 40/40-
+solving extend run scored 0.000 rank-1 hit-rate for exactly this reason. `_hit_rate_from_rows`
+now defaults to membership-any-rank, `rank1=True` kept as the stricter diagnostic.)
+
+**Fix (tasks #24-27): feature fusion — give the ranker information cosine structurally
+cannot see.** `_candidate_features` (same_file, name_mentioned via goal/span substring match,
+session kind one-hot — task #24 added `kind` to L1 records for this, L2 concept confidence
+from `graph_edits.py`'s `BehaviorNode`, already computed by the poison-gate machinery from
+earlier this session, never previously exposed to the ranker). Fused additively into `ctx`
+via a small `Linear(N_FEAT, d, bias=False)` adapter (`feat_proj`) BEFORE `Refiner.Net`'s
+cross-attention sees it — `Net` itself stays byte-for-byte unchanged (the v1-validated
+mechanism), new capability lives entirely in the adapter. Loss targets stay the RAW unfused
+embeddings, not fused ones — `read()`'s downstream re-ranking compares `h_K` against what's
+actually sitting in `ImplStore`'s index via plain cosine, so training toward a fused
+representation that doesn't exist in storage would silently break inference.
+
+Selftested with a scenario where embeddings carry ZERO signal (query and candidates are
+mutually unrelated random vectors — true chance baseline, not just "hard to tell apart") and
+only a feature marks the correct one: same trained net/feat_proj, 0.78 hit-rate with real
+features vs 0.23 (chance) with features zeroed out at eval time — isolates the adapter's
+causal contribution from the net's own capacity. Then validated the FULL pipeline locally
+with `Qwen2.5-0.5B` (no molab spend) before committing to a re-run: `build_ranker_reprs` →
+train → save/load → `make_query_fn` against a REAL chain's `ImplStore`/`ConceptStore` (not
+mocks) → `read()` delivering real content through the refiner path, end to end, 307s total.
+
+**A deeper, separate finding surfaced by direct user challenge, upstream of the fix above:**
+checked whether ANY existing dependency session requires the model to recognize an unstated
+need or derive how facts combine, versus just retrieve a NAMED fact and paste it per an
+explicitly stated rule. Checked the actual spec text rather than assuming: every single one
+names the source AND the exact combination rule ("the SAME tax rate that pricing uses",
+"discount before tax", "the SAME id scheme inventory uses"). Zero composition tasks exist —
+every "dependency" reduces to fully-specified retrieval, which is likely the deeper reason
+cosine keeps winning regardless of ranker quality: there's no reasoning residual for ANY
+ranker to capture when the task is "find the record matching this fully-specified need."
+
+Built one concrete counter-example: `inventory_infer` (`project_gen.py`, a NEW opt-in
+archetype key, `make_split()`'s default untouched, zero effect on existing GB1-4 numbers
+until explicitly selected). No filename cue in the spec ("the standard bulk-quantity
+treatment already established in this project" — implicit). Requires SELECTIVE composition:
+isolating bulk_fn from an ADJACENT fact (tax) that appears alongside it in an existing
+combined record (`order_total`), where naively copying the nearest-matching record wholesale
+over-includes tax — which this session explicitly requires excluding. Gold chain verified via
+real sandboxed test execution. Not yet run through Stage 1/2 — proposed and ready, not
+validated.
+
+**Pending:**
+- [ ] molab: rerun `--query-mode refiner` with the feature-fusion ranker (rebuild reprs,
+  retrain, GB4) — local smoke proved the pipeline runs, not that it wins
+- [ ] Decide whether `inventory_infer` becomes part of the default benchmark split (would
+  change every existing GB1-4 baseline — needs deliberate opt-in, not silent)
+- [ ] If adopted, extend `KIND_ORDER` in `memory_refiner.py` (currently 4 kinds, `"infer"`
+  would zero-hot until added — 1-line change)
+
 ## 7. ADR — why RAG-critique → Stages 1+2, not a rewrite
 
 Recorded because it'll look like scope creep without the reasoning: the user's "this is just
