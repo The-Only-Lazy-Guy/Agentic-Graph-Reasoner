@@ -207,13 +207,67 @@ candidate ranking (Stage 2), not FiLM/MoLoRA content conditioning. Full plan at
   2, task-gated) — `run_chain` only passes it when actually set, so Stage 1 constructs
   `TotalMemory` exactly as GB1 did.
 
+**2026-07-07 — Stage 1 local smoke PASS, molab GB3 run: flat headline, real story underneath.**
+
+Local 0.5B smoke: clean, exit 0, no crashes (`why_tok`/`mem_tok` both non-zero, flowing
+correctly). Real molab (Qwen2.5-3B, `--train-lora` mixed, then `--run --query-mode why`):
+
+```
+              solve   DEP(n=80)  indep   mem_tok  why_tok  by_kind
+ceiling       0.961   1.000      0.930   80       0        create 53/60 cross 40/40 debug 40/40 extend 40/40
+memory(spec)  0.756   0.700      0.800   109      0        create 50/60 cross 20/40 debug 30/40 extend 36/40
+memory_why    0.833   0.700      0.940   113      120      create 54/60 cross 36/40 debug 40/40 extend 20/40
+off           0.656   0.362      0.890   0        0        create 49/60 cross 9/40  debug 40/40 extend 20/40
+
+GB1 PASS +0.337 (unchanged, reused from the original run — no re-run needed)
+GB3 +0.000 NO-REGRESSION (headline) — but by_kind: cross +16 (+40pp), extend -16 (-40pp),
+                                        EXACT cancellation, not noise
+```
+
+**Diagnosis (from eyeballing `[why]` log samples — boundary checklist item 2):** SEP_W's
+completion habit is an implicit ANSWER-GUESS (code), not natural-language intent —
+`def order_id(n): return "ORD-" + "ITEM-{:03d}".format(n)`, not "I need inventory's id
+format." For `cross` (copy an id/format string) the guess is usually right, so it works
+great as a retrieval query by accident. For `extend` (reuse pricing's SPECIFIC tax
+rate/bulk threshold) the guess hallucinates plausible-but-WRONG numbers from OTHER chains'
+training distribution — this chain's actual seeded value is structurally unknowable
+(`TRAIN_SEEDS`/`EVAL_SEEDS` disjoint) — and that wrong-but-specific guess actively misleads
+retrieval away from `pricing.py`, worse than the raw spec text would have.
+
+Root cause traced further: pooled training loss plateaued at **~1.2** vs the code-only
+baseline's **0.041** at the same 2 epochs. Not a mix-ratio problem (why-pairs were already
+the majority by count, 936 vs 690) — a converged-vs-not gap: repetitive synthetic code
+converges almost immediately, so most of the 2-epoch gradient budget was already going to
+the harder, still-learning why-pairs; they just hadn't converged.
+
+**Fix built (`3ff0177`):** `_oversample(pairs, factor, seed)` + `train_lora`'s
+`why_oversample` param / `--why-oversample` CLI — gives the under-converged class more full
+passes per epoch. Selftest covers identity/2x/1.5x-split/determinism. **Boundary checklist
+verdict: FAIL on item 2 (not real natural language) — do not advance to Stage 2 yet.**
+Retrain with `--epochs 4 --why-oversample 1.5`, rerun `--query-mode why` only (off/ceiling/
+memory-spec unaffected, reused as-is) before trusting GB3 as a real Stage 1 verdict.
+
+**Two follow-ups queued (not blocking the retrain), both surfaced by this run:**
+- **Reasoning loop gap (user-caught):** `memory.read()` already accepts `obs` and threads it
+  into the query embedding, but `run_chain` builds `payload` ONCE before the retry loop and
+  never re-reads memory on failure — retrieval is single-shot per session, only generation
+  gets the obs feedback. `extend`'s hallucinated-wrong-number failure is exactly the case
+  this would fix: fail → obs reveals the guess was wrong → re-query with that signal →
+  second attempt gets a chance at the right L1 record. Orthogonal to Stages 1/2.
+- **Coverage gap (user-caught):** the 4 session kinds all hand the model a pre-specified
+  target file + signature + tests — none test open-ended "here's a vague request, decide the
+  structure yourself" work, which is what a real deployed agent's user query looks like.
+  `create`/`cross` (100/180 sessions, 56%) DO test from-scratch coding respecting project
+  conventions — this isn't a debugging-only benchmark — but fully open-ended greenfield
+  planning is a real, separate gap. Proposed as a 5th `project_gen.py` session kind.
+
 **Pending:**
-- [ ] local 0.5B smoke running (2-call flow, off+memory/spec+memory/why)
-- [ ] molab: `--train-lora` (mixed) → `--run --query-mode why` → GB3, then the Stage 1/2
-  boundary checklist (GB3 not a regression, why_text samples sane, cross/extend dep_rate
-  specifically checked against the same-file-boost mechanism)
-- [ ] Stage 2 (gated on the above): `source_session_idx` in `project_gen.py`, `query_fn` in
-  `memory.py`, new `memory_refiner.py` (refiner-as-ranker), GB4
+- [ ] molab: retrain (`--epochs 4 --why-oversample 1.5`) → `--run --query-mode why` → GB3 v2
+- [ ] Stage 1/2 boundary checklist re-check with real natural-language why_text
+- [ ] Stage 2 (gated): `source_session_idx` in `project_gen.py`, `query_fn` in `memory.py`,
+  new `memory_refiner.py` (refiner-as-ranker), GB4
+- [ ] Reasoning-loop: obs-informed re-query on retry (queued, orthogonal)
+- [ ] Greenfield/open-ended session kind (queued, orthogonal)
 - [ ] P5 channels (KV-prefix priming — directly relevant: repo memory paid once per session)
 - [ ] SWE-bench passive slice (later)
 
