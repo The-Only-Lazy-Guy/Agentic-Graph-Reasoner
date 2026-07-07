@@ -24,9 +24,26 @@ query_fn's chicken-and-egg problem: `query_fn(goal, span, file_path)` (memory.py
 runs BEFORE any candidate pool exists — that pool is normally the OUTPUT of a search using
 the query. Resolved as a two-stage retrieve-then-rerank: `make_query_fn`'s closure does its
 OWN cheap flat search (same `search_ctx` primitive read() uses) to gather a pool, THEN runs
-the refiner over it. This means `make_query_fn` needs the chain's `ImplStore`, which doesn't
-exist until `TotalMemory` is constructed — callers must attach query_fn AFTER construction
-(`memory.query_fn = make_query_fn(...)`), not pass it into `__init__`. Wiring is task #21.
+the refiner over it. This means `make_query_fn` needs the chain's `ImplStore`/`ConceptStore`,
+which don't exist until `TotalMemory` is constructed — callers must attach query_fn AFTER
+construction (`memory.query_fn = make_query_fn(...)`), not pass it into `__init__`. Wiring
+is task #21.
+
+FEATURE FUSION (task #25, added after the first real GB4 run): the un-fused ranker's `ctx`
+was JUST the candidates' own mpnet embeddings — the SAME substrate cosine similarity already
+optimally uses. No amount of training data could teach it anything cosine didn't already
+know (confirmed empirically: 5x more training data made results WORSE, not better — the
+overfitting-to-a-repeated-shortcut signature). `_candidate_features` computes a small
+structural vector (same_file, name_mentioned, session kind, L2 concept confidence) that
+cosine has NO access to — genuinely new information, not a re-derivation of embedding
+similarity. Fused additively into `ctx` via a small `Linear(N_FEAT, d, bias=False)` adapter
+(`feat_proj`) BEFORE `Refiner.Net`'s cross-attention sees it — `Net` itself stays completely
+unchanged (the v1-validated mechanism), the new capability lives entirely in the adapter.
+Loss TARGETS (fidelity/contrastive) stay the RAW unfused embeddings, not the fused ones —
+`read()`'s downstream re-ranking (`memory.py`) compares `h_K` against the RAW vectors
+actually sitting in `ImplStore`'s index via plain cosine, so training `h_K` to match a fused
+representation that doesn't exist in storage would silently break inference, not just leave
+it unhelped.
 
   python -m v5.runtime.memory_refiner --selftest                  # synthetic data, no GPU
   python -m v5.runtime.memory_refiner --build-reprs --model ...    # molab: real why_text
@@ -38,45 +55,101 @@ import numpy as np
 
 from v5.memory.memory import FLAT_POOL, _merge_cand
 
+# ── structural features (task #25): information cosine similarity has NO access to, since
+# it only ever sees embedding geometry. Fused additively into ctx before Refiner.Net's cross-
+# attention sees it -- Net itself stays byte-for-byte the v1-validated mechanism (no forward()
+# changes); the new capability lives entirely in this small separate adapter. Diagnosis this
+# targets: the un-fused ranker's ctx was JUST the candidates' own mpnet embeddings -- same
+# substrate cosine already optimally uses, so no amount of training data could have taught it
+# anything cosine didn't already know (confirmed empirically: 5x training data made results
+# WORSE, the overfitting-to-a-repeated-shortcut signature, not the underfitting one).
+
+KIND_ORDER = ("create", "cross", "debug", "extend")
+N_FEAT = 2 + len(KIND_ORDER) + 1     # same_file, name_mentioned, kind-onehot(4), concept_confidence
+
+
+def _candidate_features(rec: dict | None, concepts, goal: str, span: str,
+                        file_path: str) -> np.ndarray:
+    """One candidate's structural feature vector [N_FEAT]. All derived from fields already on
+    the L1 record (file_path, kind — task #24, concept_id) or the L2 concept graph
+    (graph_edits.py's BehaviorNode.confidence) — nothing here is text content, so nothing
+    here is something a text embedder could have encoded."""
+    from pathlib import Path
+    feat = np.zeros(N_FEAT, dtype=np.float32)
+    if rec is None:
+        return feat
+    rfp = rec.get("file_path") or ""
+    feat[0] = 1.0 if (file_path and rfp == file_path) else 0.0
+    stem = Path(rfp).stem.lower() if rfp else ""
+    gl = ((goal or "") + " " + (span or "")).lower()
+    feat[1] = 1.0 if (stem and stem in gl) else 0.0
+    kind = rec.get("kind") or ""
+    if kind in KIND_ORDER:
+        feat[2 + KIND_ORDER.index(kind)] = 1.0
+    cid = rec.get("concept_id") or ""
+    if cid and concepts is not None:
+        node = concepts.graph.nodes.get(cid)
+        if node is not None:
+            feat[6] = float(node.confidence)
+    return feat
+
+
 # ── training ───────────────────────────────────────────────────────────────────────
 
 def _train_ranker(g: np.ndarray, ctx: np.ndarray, cmask: np.ndarray, pos_idx: np.ndarray,
-                  ops: np.ndarray, K: int = 3, r: int = 128, n_op: int | None = None,
-                  epochs: int = 400, seed: int = 0, contrastive: float = 0.3,
-                  margin: float = 0.2, k_warmup: float = 0.5, log=print):
-    """g:[N,d] query embeddings, ctx:[N,T,d] candidate pool per example, cmask:[N,T] bool,
-    pos_idx:[N] int index into ctx of the correct candidate, ops:[n_op,d] operator basis.
-    Returns the trained net (eval mode, on CPU).
+                  ops: np.ndarray, feats: np.ndarray | None = None, K: int = 3, r: int = 128,
+                  n_op: int | None = None, epochs: int = 400, seed: int = 0,
+                  contrastive: float = 0.3, margin: float = 0.2, k_warmup: float = 0.5,
+                  log=print):
+    """g:[N,d] query embeddings, ctx:[N,T,d] candidate pool per example (RAW stored
+    embeddings), cmask:[N,T] bool, pos_idx:[N] int index into ctx of the correct candidate,
+    ops:[n_op,d] operator basis, feats:[N,T,F] structural features (task #25) or None (zero-
+    feature, degrades to the embedding-only ranker). Returns (net, feat_proj), both eval
+    mode on CPU.
 
-    Loss = fidelity (h_K -> the correct candidate's own embedding) + a contrastive margin
+    feat_proj (Linear(F,d), no bias) fuses feats additively into ctx BEFORE it's Net's cross-
+    attention input -- but loss targets (f_pos, negatives) stay the RAW ctx embeddings, not
+    the fused ones. This has to be true: read()'s downstream re-ranking (memory.py) compares
+    h_K against the RAW embeddings actually sitting in ImplStore's index via plain cosine --
+    training h_K to match a fused representation that doesn't exist in storage would silently
+    break inference-time re-ranking, not just leave it unhelped.
+
+    Loss = fidelity (h_K -> the correct candidate's own RAW embedding) + a contrastive margin
     against the HARDEST real negative in the same pool (highest cos(h_K, wrong_candidate)),
     masked out for examples with < 2 real candidates (nothing to contrast against)."""
     import time
 
     import torch
+    import torch.nn as nn
 
     from v5.runtime.lggn_refine import Refiner
     torch.manual_seed(seed)
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     N, T, d = ctx.shape
+    if feats is None:
+        feats = np.zeros((N, T, N_FEAT), dtype=np.float32)
+    F = feats.shape[-1]
     net = Refiner.Net(d, r=r, n_op=ops.shape[0], max_K=max(K, 8)).to(dev)
+    feat_proj = nn.Linear(F, d, bias=False).to(dev)
     T_ = lambda x, dt=torch.float32: torch.as_tensor(x, dtype=dt).to(dev)
-    gt, ct, ot = T_(g), T_(ctx), T_(ops)
+    gt, ct_raw, ot, ft = T_(g), T_(ctx), T_(ops), T_(feats)
     cm = torch.as_tensor(cmask).to(dev)
     pos = torch.as_tensor(pos_idx, dtype=torch.long).to(dev)
     n_real = cm.sum(1)
     has_neg = n_real > 1
-    opt = torch.optim.Adam(net.parameters(), lr=1e-3, weight_decay=1e-4)
+    opt = torch.optim.Adam(list(net.parameters()) + list(feat_proj.parameters()),
+                           lr=1e-3, weight_decay=1e-4)
     Fn = torch.nn.functional.cosine_similarity
     t0 = time.time()
     for ep in range(epochs):
         K_cur = 1 + int((K - 1) * min(1.0, ep / max(1, epochs * k_warmup - 1)))
-        net.train(); opt.zero_grad()
-        h = net(gt, ct, cm, ot, K_cur, True, True)              # [N, d]
-        f_pos = ct[torch.arange(N, device=dev), pos]             # [N, d]
+        net.train(); feat_proj.train(); opt.zero_grad()
+        ct_in = ct_raw + feat_proj(ft)                            # fused, Net's INPUT only
+        h = net(gt, ct_in, cm, ot, K_cur, True, True)             # [N, d]
+        f_pos = ct_raw[torch.arange(N, device=dev), pos]          # target: RAW, matches storage
         loss = (1 - Fn(h, f_pos)).mean()
         if contrastive > 0 and has_neg.any():
-            sims = Fn(h.unsqueeze(1), ct, dim=-1)                 # [N, T]
+            sims = Fn(h.unsqueeze(1), ct_raw, dim=-1)              # [N, T] -- also RAW
             sims = sims.masked_fill(~cm, -1e9)
             sims = sims.scatter(1, pos.unsqueeze(1), -1e9)        # exclude the positive itself
             hard_neg_sim, _ = sims.max(1)                          # [N] hardest wrong candidate
@@ -85,18 +158,22 @@ def _train_ranker(g: np.ndarray, ctx: np.ndarray, cmask: np.ndarray, pos_idx: np
         loss.backward(); opt.step()
         if (ep + 1) % 100 == 0 or ep == epochs - 1:
             log(f"      ep {ep+1}/{epochs} loss={loss.item():.4f} ({time.time()-t0:.0f}s)")
-    net.eval()
-    net.cpu()
-    return net
+    net.eval(); feat_proj.eval()
+    net.cpu(); feat_proj.cpu()
+    return net, feat_proj
 
 
-def _hit_rate(net, g, ctx, cmask, pos_idx, ops, K=3) -> float:
-    """Fraction of examples where argmax cos(h_K, ctx) over REAL slots == pos_idx."""
+def _hit_rate(net, feat_proj, g, ctx, cmask, pos_idx, feats, ops, K=3) -> float:
+    """Fraction of examples where argmax cos(h_K, ctx) over REAL slots == pos_idx. ctx fed to
+    Net is fused (feat_proj(feats)); the scoring comparison stays RAW ctx, mirroring how
+    read()'s downstream search_ctx actually compares h_K against stored (unfused) vectors."""
     import torch
     T_ = lambda x, dt=torch.float32: torch.as_tensor(x, dtype=dt)
     with torch.no_grad():
-        h = net(T_(g), T_(ctx), torch.as_tensor(cmask), T_(ops), K, True, True)
-        sims = torch.nn.functional.cosine_similarity(h.unsqueeze(1), T_(ctx), dim=-1)
+        ctx_t = T_(ctx)
+        ct_in = ctx_t + feat_proj(T_(feats))
+        h = net(T_(g), ct_in, torch.as_tensor(cmask), T_(ops), K, True, True)
+        sims = torch.nn.functional.cosine_similarity(h.unsqueeze(1), ctx_t, dim=-1)
         sims = sims.masked_fill(~torch.as_tensor(cmask), -1e9)
         pred = sims.argmax(1).numpy()
     return float((pred == pos_idx).mean())
@@ -119,7 +196,7 @@ def build_ranker_reprs(lm, insts: list[dict], embed_fn, chains_root: str = "data
     answer isn't even reachable teaches the ranker nothing about ranking. How often this
     happens is logged — a high rate would mean the pools being trained on aren't realistic.
 
-    Returns {g, ctx, cmask, pos_idx} ready for _train_ranker."""
+    Returns {g, ctx, feats, cmask, pos_idx} ready for _train_ranker."""
     import shutil
     from pathlib import Path
 
@@ -135,7 +212,7 @@ def build_ranker_reprs(lm, insts: list[dict], embed_fn, chains_root: str = "data
         memory = TotalMemory(chain_dir / "mem", mode="concept", embed_fn=embed_fn)
         states.append({"inst": inst, "memory": memory, "repo": {}, "sid_to_impl": {}})
 
-    G, CTX, CMASK, POS = [], [], [], []
+    G, CTX, FEATS, CMASK, POS = [], [], [], [], []
     n_dep = n_kept = n_injected = n_skipped_no_source = 0
 
     max_depth = max((len(st["inst"]["sessions"]) for st in states), default=0)
@@ -185,12 +262,18 @@ def build_ranker_reprs(lm, insts: list[dict], embed_fn, chains_root: str = "data
                             cand_ids.append(correct_impl)
                     pos_i = cand_ids.index(correct_impl)
                     ctx_vecs = memory.impls.emb_ctx.get(cand_ids)
+                    feat_vecs = np.stack([
+                        _candidate_features(memory.impls.get(iid), memory.concepts,
+                                           st["why_text"], span, target)
+                        for iid in cand_ids])
                     T = len(cand_ids)
                     pad = pool_k - T
                     if pad > 0:
                         ctx_vecs = np.concatenate(
                             [ctx_vecs, np.zeros((pad, ctx_vecs.shape[1]), ctx_vecs.dtype)], 0)
-                    G.append(q); CTX.append(ctx_vecs)
+                        feat_vecs = np.concatenate(
+                            [feat_vecs, np.zeros((pad, feat_vecs.shape[1]), feat_vecs.dtype)], 0)
+                    G.append(q); CTX.append(ctx_vecs); FEATS.append(feat_vecs)
                     CMASK.append([True] * T + [False] * pad); POS.append(pos_i)
                     n_kept += 1
 
@@ -207,34 +290,29 @@ def build_ranker_reprs(lm, insts: list[dict], embed_fn, chains_root: str = "data
         f"({n_skipped_no_source} skipped: source impl never written, {n_injected} needed "
         f"force-injection into the pool)")
     return {"g": np.asarray(G, dtype=np.float32), "ctx": np.asarray(CTX, dtype=np.float32),
+            "feats": np.asarray(FEATS, dtype=np.float32),
             "cmask": np.asarray(CMASK, dtype=bool), "pos_idx": np.asarray(POS, dtype=np.int64)}
 
 
 # ── inference-time closure + checkpoint I/O ───────────────────────────────────────────
 
-def make_query_fn(net, ops, embed_fn, impl_store, K: int = 3, pool_k: int = FLAT_POOL):
+def make_query_fn(net, feat_proj, ops, embed_fn, impl_store, concepts, K: int = 3,
+                  pool_k: int = FLAT_POOL):
     """(goal, span, file_path) -> refined 768-d vector, for TotalMemory.query_fn.
 
-    impl_store must be the SAME chain's ImplStore the caller's TotalMemory uses — bind this
-    AFTER TotalMemory construction (memory.query_fn = make_query_fn(..., memory.impls, ...)),
-    not passed into TotalMemory.__init__ (task #21 wiring). file_path is unused (the refiner
-    ranks by content, not by which file is being edited -- SAME_FILE_BOOST is a Stage-1-only
-    heuristic, deliberately not reproduced here).
+    impl_store/concepts must be the SAME chain's ImplStore/ConceptStore the caller's
+    TotalMemory uses — bind this AFTER TotalMemory construction
+    (memory.query_fn = make_query_fn(..., memory.impls, memory.concepts, ...)), not passed
+    into TotalMemory.__init__ (task #21 wiring).
 
-    span DOES feed pool construction (merged with goal via the same _merge_cand technique
-    Stage 1's read() uses), for consistency with how build_ranker_reprs builds TRAINING
-    pools -- a query_fn that gathers candidates differently at inference than the ranker was
-    trained on is a real distribution-shift risk. NOTE: at this benchmark's per-chain scale
-    (~3-5 records total by a chain's later sessions, well under pool_k), goal-alone vs
-    goal+span likely return the SAME candidate set regardless (search_ctx returns everything
-    when the store is smaller than k) -- so this fix is about correctness/consistency and
-    matters more as real repos scale past pool_k, not necessarily the explanation for any
-    specific small-benchmark result. Don't over-attribute a single eval regression to it
-    without checking pool sizes first."""
+    span feeds pool construction (merged with goal via the same _merge_cand technique Stage
+    1's read() uses), for consistency with how build_ranker_reprs builds TRAINING pools.
+    file_path DOES matter here (unlike the pre-feature-fusion version): it's one of the
+    structural features (same_file, task #25) fused into ctx before the refiner ranks it."""
     import torch
 
     from v5.memory.store import stable_id
-    net.eval()
+    net.eval(); feat_proj.eval()
 
     def _embed(text: str) -> np.ndarray:
         key = stable_id("q", text)
@@ -249,14 +327,18 @@ def make_query_fn(net, ops, embed_fn, impl_store, K: int = 3, pool_k: int = FLAT
             return g                                          # cold store -- nothing to refine over
         ids = [iid for iid, _ in cand]
         ctx = impl_store.emb_ctx.get(ids)
+        feats = np.stack([_candidate_features(impl_store.get(iid), concepts, goal, span,
+                                              file_path) for iid in ids])
         T = len(ids)
         pad = pool_k - T
         if pad > 0:
             ctx = np.concatenate([ctx, np.zeros((pad, ctx.shape[1]), ctx.dtype)], 0)
+            feats = np.concatenate([feats, np.zeros((pad, feats.shape[1]), feats.dtype)], 0)
         cmask = np.array([True] * T + [False] * pad)
         with torch.no_grad():
-            h = net(torch.as_tensor(g[None], dtype=torch.float32),
-                    torch.as_tensor(ctx[None], dtype=torch.float32),
+            ctx_t = torch.as_tensor(ctx[None], dtype=torch.float32)
+            ct_in = ctx_t + feat_proj(torch.as_tensor(feats[None], dtype=torch.float32))
+            h = net(torch.as_tensor(g[None], dtype=torch.float32), ct_in,
                     torch.as_tensor(cmask[None]),
                     torch.as_tensor(ops, dtype=torch.float32), K, True, True)
         return h[0].numpy()
@@ -264,21 +346,25 @@ def make_query_fn(net, ops, embed_fn, impl_store, K: int = 3, pool_k: int = FLAT
     return query_fn
 
 
-def save_ranker(net, ops: np.ndarray, K: int, r: int, out_dir: str) -> None:
+def save_ranker(net, feat_proj, ops: np.ndarray, K: int, r: int, out_dir: str) -> None:
     from pathlib import Path
 
     import torch
     d = Path(out_dir)
     d.mkdir(parents=True, exist_ok=True)
     torch.save(net.state_dict(), str(d / "ranker.pt"))
-    np.savez(str(d / "ranker_meta.npz"), ops=ops, K=K, r=r, d=ops.shape[1], n_op=ops.shape[0])
+    torch.save(feat_proj.state_dict(), str(d / "feat_proj.pt"))
+    np.savez(str(d / "ranker_meta.npz"), ops=ops, K=K, r=r, d=ops.shape[1], n_op=ops.shape[0],
+             n_feat=N_FEAT)
 
 
 def load_ranker(path: str):
-    """-> (net, ops, K), matching project_loop.py's `net, ops, K_r = ranker` unpack."""
+    """-> (net, feat_proj, ops, K), matching project_loop.py's
+    `net, feat_proj, ops, K_r = ranker` unpack."""
     from pathlib import Path
 
     import torch
+    import torch.nn as nn
 
     from v5.runtime.lggn_refine import Refiner
     d = Path(path)
@@ -287,7 +373,10 @@ def load_ranker(path: str):
     net = Refiner.Net(int(meta["d"]), r=r, n_op=int(meta["n_op"]), max_K=max(K, 8))
     net.load_state_dict(torch.load(str(d / "ranker.pt"), map_location="cpu"))
     net.eval()
-    return net, ops, K
+    feat_proj = nn.Linear(int(meta["n_feat"]), int(meta["d"]), bias=False)
+    feat_proj.load_state_dict(torch.load(str(d / "feat_proj.pt"), map_location="cpu"))
+    feat_proj.eval()
+    return net, feat_proj, ops, K
 
 
 # ── selftest (synthetic data, no GPU/network) ─────────────────────────────────────────
@@ -326,14 +415,45 @@ def _synth_pool(N=400, T=6, d=32, n_op=8, seed=0):
             np.asarray(CMASK, bool), np.asarray(POS, "int64"), ops)
 
 
+def _synth_pool_features(N=400, T=5, d=16, seed=0):
+    """Task #25's dedicated test: g is UNRELATED to ANY candidate (true chance baseline
+    without features -- not just "hard to tell apart", genuinely zero embedding signal), and
+    candidates are DISTINCT (not clustered) so a correctly-guided h_K can cleanly separate on
+    cosine once it converges toward the right one. Only a FEATURE (mimicking same_file) marks
+    which candidate is correct. Isolates the fusion adapter's contribution from _synth_pool's
+    embedding-based mechanism (already proven above) -- a ranker with no working feature path
+    cannot beat chance here, no matter how good its embedding-side attention is."""
+    rng = np.random.RandomState(seed)
+    G, CTX, FEATS, CMASK, POS = [], [], [], [], []
+    for _ in range(N):
+        n_real = rng.randint(3, T + 1)
+        g = rng.randn(d).astype("float32")
+        ctx = rng.randn(n_real, d).astype("float32")
+        ctx /= np.linalg.norm(ctx, axis=1, keepdims=True) + 1e-9
+        pos_i = rng.randint(n_real)
+        feats = np.zeros((n_real, N_FEAT), dtype=np.float32)
+        feats[pos_i, 0] = 1.0                                 # only this bit marks the answer
+        pad = T - n_real
+        if pad:
+            ctx = np.concatenate([ctx, np.zeros((pad, d), "float32")], 0)
+            feats = np.concatenate([feats, np.zeros((pad, N_FEAT), "float32")], 0)
+        G.append(g); CTX.append(ctx); FEATS.append(feats)
+        CMASK.append([True] * n_real + [False] * pad); POS.append(pos_i)
+    ops = rng.randn(8, d).astype("float32")
+    ops /= np.linalg.norm(ops, axis=1, keepdims=True)
+    return (np.asarray(G, "float32"), np.asarray(CTX, "float32"), np.asarray(FEATS, "float32"),
+            np.asarray(CMASK, bool), np.asarray(POS, "int64"), ops)
+
+
 def _selftest() -> bool:
-    print("memory_refiner --selftest: synthetic ranking task, contrastive loss, save/load, "
-          "query_fn wiring (no GPU/network)\n")
+    print("memory_refiner --selftest: synthetic ranking task, contrastive loss, feature "
+          "fusion, save/load, query_fn wiring (no GPU/network)\n")
     g, ctx, cmask, pos_idx, ops = _synth_pool(seed=0)
     n_tr = 320
-    net = _train_ranker(g[:n_tr], ctx[:n_tr], cmask[:n_tr], pos_idx[:n_tr], ops,
-                        K=3, r=64, epochs=150, log=lambda *a: None)
-    hit = _hit_rate(net, g[n_tr:], ctx[n_tr:], cmask[n_tr:], pos_idx[n_tr:], ops, K=3)
+    net, feat_proj = _train_ranker(g[:n_tr], ctx[:n_tr], cmask[:n_tr], pos_idx[:n_tr], ops,
+                                   K=3, r=64, epochs=150, log=lambda *a: None)
+    feats0 = np.zeros((len(g) - n_tr, ctx.shape[1], N_FEAT), dtype=np.float32)
+    hit = _hit_rate(net, feat_proj, g[n_tr:], ctx[n_tr:], cmask[n_tr:], pos_idx[n_tr:], feats0, ops, K=3)
     # baseline: nearest-neighbor of g itself (no refinement) -- must be WORSE, since g is
     # constructed as a displacement AWAY from the correct candidate
     import torch
@@ -344,22 +464,61 @@ def _selftest() -> bool:
     assert hit > base_hit + 0.15, f"trained ranker ({hit:.2f}) should beat raw NN ({base_hit:.2f})"
     print(f"  [1] trained hit-rate {hit:.2f} > raw-NN baseline {base_hit:.2f} -> PASS")
 
+    # Task #25: feature fusion carries a signal embeddings structurally cannot. SAME trained
+    # net/feat_proj, only difference is whether real features are supplied at eval time --
+    # isolates the fusion adapter's causal contribution from the net's own capacity.
+    g2, ctx2, feats2, cmask2, pos2, ops2 = _synth_pool_features(seed=1)
+    n_tr2 = 320
+    net2, feat_proj2 = _train_ranker(g2[:n_tr2], ctx2[:n_tr2], cmask2[:n_tr2], pos2[:n_tr2],
+                                     ops2, feats=feats2[:n_tr2], K=2, r=32, epochs=150,
+                                     log=lambda *a: None)
+    hit_with = _hit_rate(net2, feat_proj2, g2[n_tr2:], ctx2[n_tr2:], cmask2[n_tr2:],
+                         pos2[n_tr2:], feats2[n_tr2:], ops2, K=2)
+    zeroed = np.zeros_like(feats2[n_tr2:])
+    hit_without = _hit_rate(net2, feat_proj2, g2[n_tr2:], ctx2[n_tr2:], cmask2[n_tr2:],
+                            pos2[n_tr2:], zeroed, ops2, K=2)
+    assert hit_with > hit_without + 0.3, \
+        f"feature fusion should carry the signal: with={hit_with:.2f} without={hit_without:.2f}"
+    print(f"  [2] feature fusion: with-features {hit_with:.2f} vs zeroed-out {hit_without:.2f} -> PASS")
+
+    # _candidate_features itself: direct check of each bit (same_file, name_mentioned, kind-
+    # onehot, concept_confidence), not just through the indirect synthetic task above.
+    class _FakeNode:
+        def __init__(self, conf): self.confidence = conf
+    class _FakeConcepts:
+        def __init__(self): self.graph = type("G", (), {"nodes": {"c1": _FakeNode(0.77)}})()
+    rec = {"file_path": "pricing.py", "kind": "extend", "concept_id": "c1"}
+    f = _candidate_features(rec, _FakeConcepts(), "goal mentions pricing.py", "", "orders.py")
+    assert f[0] == 0.0, "same_file: pricing.py != orders.py (target)"
+    assert f[1] == 1.0, "name_mentioned: 'pricing' stem is in the goal text"
+    assert f[2 + KIND_ORDER.index("extend")] == 1.0, "kind one-hot: extend"
+    assert abs(f[6] - 0.77) < 1e-6, "concept_confidence pulled from the L2 graph node"
+    rec_same = {"file_path": "orders.py", "kind": "create", "concept_id": ""}
+    f2 = _candidate_features(rec_same, _FakeConcepts(), "no mention", "", "orders.py")
+    assert f2[0] == 1.0, "same_file: orders.py == orders.py (target)"
+    assert f2[6] == 0.0, "no concept_id -> confidence defaults to 0"
+    assert _candidate_features(None, None, "g", "s", "f").sum() == 0.0, "missing record -> zeros"
+    print("  [3] _candidate_features: same_file/name_mentioned/kind/confidence bits -> PASS")
+
     import tempfile
     with tempfile.TemporaryDirectory() as td:
-        save_ranker(net, ops, K=3, r=64, out_dir=td)
-        net2, ops2, K2 = load_ranker(td)
-        assert K2 == 3 and np.allclose(ops2, ops)
-        hit2 = _hit_rate(net2, g[n_tr:], ctx[n_tr:], cmask[n_tr:], pos_idx[n_tr:], ops2, K=K2)
-        assert abs(hit2 - hit) < 1e-6, f"save/load roundtrip changed hit-rate: {hit} vs {hit2}"
-    print("  [2] save/load roundtrip -> PASS")
+        save_ranker(net, feat_proj, ops, K=3, r=64, out_dir=td)
+        net3, feat_proj3, ops3, K3 = load_ranker(td)
+        assert K3 == 3 and np.allclose(ops3, ops)
+        hit3 = _hit_rate(net3, feat_proj3, g[n_tr:], ctx[n_tr:], cmask[n_tr:], pos_idx[n_tr:],
+                         feats0, ops3, K=K3)
+        assert abs(hit3 - hit) < 1e-6, f"save/load roundtrip changed hit-rate: {hit} vs {hit3}"
+    print("  [4] save/load roundtrip (net + feat_proj) -> PASS")
 
-    # query_fn wiring: a fake ImplStore-like object exposing search_ctx/emb_ctx.get, proving
-    # make_query_fn's closure reaches the pool and returns a same-shape vector.
+    # query_fn wiring: a fake ImplStore-like object exposing search_ctx/emb_ctx.get/get(iid),
+    # proving make_query_fn's closure reaches the pool, fuses features, returns a valid vector.
     class _FakeImplStore:
         def __init__(self, vecs):
             self._vecs = vecs
         def search_ctx(self, q, k=8):
             return [(str(i), 0.5) for i in range(min(k, len(self._vecs)))]
+        def get(self, iid):
+            return {"file_path": "f.py", "kind": "create", "concept_id": ""}
         class _Emb:
             def __init__(self, outer):
                 self._outer = outer
@@ -374,14 +533,15 @@ def _selftest() -> bool:
                for k, v in texts.items()}
 
     store = _FakeImplStore(ctx[0])
-    qfn = make_query_fn(net, ops, fake_embed, store, K=3, pool_k=6)
+    qfn = make_query_fn(net, feat_proj, ops, fake_embed, store, None, K=3, pool_k=6)
     out = qfn("some goal", "some span", "f.py")
     assert out.shape == (32,), f"query_fn output shape {out.shape}"
     empty_store = _FakeImplStore(np.zeros((0, 32), "float32"))
     empty_store.search_ctx = lambda q, k=8: []
-    out2 = make_query_fn(net, ops, fake_embed, empty_store, K=3)("g", "s", "f.py")
+    out2 = make_query_fn(net, feat_proj, ops, fake_embed, empty_store, None, K=3)("g", "s", "f.py")
     assert out2.shape == (32,), "cold store falls back to plain embed, still a valid vector"
-    print("  [3] make_query_fn: pool search -> refine -> vector, cold-store fallback -> PASS")
+    print("  [5] make_query_fn: pool search -> feature fusion -> refine -> vector, "
+          "cold-store fallback -> PASS")
     print("\n  MEMORY_REFINER SELFTEST -> PASS")
     return True
 
@@ -427,13 +587,16 @@ def main():
         from v5.runtime.lggn_refine import _random_ops
         d = np.load(a.reprs)
         g, ctx, cmask, pos_idx = d["g"], d["ctx"], d["cmask"], d["pos_idx"]
+        feats = d["feats"] if "feats" in d.files else None
         disp = ctx[np.arange(len(g)), pos_idx] - g
         ops = _random_ops(disp, a.n_op, a.seed)
-        net = _train_ranker(g, ctx, cmask, pos_idx, ops, K=a.k, r=a.r,
-                            epochs=a.epochs, seed=a.seed, log=print)
-        hit = _hit_rate(net, g, ctx, cmask, pos_idx, ops, K=a.k)
+        net, feat_proj = _train_ranker(g, ctx, cmask, pos_idx, ops, feats=feats, K=a.k, r=a.r,
+                                       epochs=a.epochs, seed=a.seed, log=print)
+        hit = _hit_rate(net, feat_proj, g, ctx, cmask, pos_idx,
+                        feats if feats is not None else np.zeros((*ctx.shape[:2], N_FEAT), "float32"),
+                        ops, K=a.k)
         print(f"  [train] train-set hit-rate {hit:.3f} (n={len(g)})")
-        save_ranker(net, ops, K=a.k, r=a.r, out_dir=a.out)
+        save_ranker(net, feat_proj, ops, K=a.k, r=a.r, out_dir=a.out)
         print(f"  [train] checkpoint -> {a.out}")
         return
     ap.print_help()

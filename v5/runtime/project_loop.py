@@ -173,9 +173,10 @@ def run_chain(lm, inst: dict, arm: str, budget: int = 2, max_new: int = 512,
         # search before refining -- that store doesn't exist until TotalMemory is built.
         if query_mode == "refiner" and ranker is not None:
             from v5.runtime.memory_refiner import make_query_fn   # deferred: avoids a
-            net, ops, K_r = ranker                                 # module cycle (memory_
-            memory.query_fn = make_query_fn(net, ops, embed_fn,     # refiner imports nothing
-                                            memory.impls, K=K_r)     # from here at module level)
+            net, feat_proj, ops, K_r = ranker                      # module cycle (memory_
+            memory.query_fn = make_query_fn(net, feat_proj, ops, embed_fn, memory.impls,
+                                            memory.concepts, K=K_r)  # refiner imports nothing
+                                                                     # from here at module level
     repo: dict[str, str] = {}
     rows = []
     for s in inst["sessions"]:
@@ -282,8 +283,9 @@ def run_arm(lm, insts: list[dict], arm: str, budget: int, max_new: int, heal: bo
     make_qfn = None
     if arm == "memory" and query_mode == "refiner" and ranker is not None:
         from v5.runtime.memory_refiner import make_query_fn
-        net, ops, K_r = ranker
-        make_qfn = lambda impls: make_query_fn(net, ops, embed_fn, impls, K=K_r)
+        net, feat_proj, ops, K_r = ranker
+        make_qfn = lambda impls, concepts: make_query_fn(net, feat_proj, ops, embed_fn,
+                                                          impls, concepts, K=K_r)
     memory_cls = None
     if arm == "memory":
         from v5.memory.memory import TotalMemory
@@ -298,10 +300,10 @@ def run_arm(lm, insts: list[dict], arm: str, budget: int, max_new: int, heal: bo
                 shutil.rmtree(chain_dir)
             memory = memory_cls(chain_dir / "mem", mode="concept", embed_fn=embed_fn)
             # query_fn is bound PER CHAIN, after construction: each chain has its own
-            # isolated ImplStore (fresh rmtree'd above), and make_query_fn's pool search
-            # needs THAT specific store, not one shared across all 40 chains.
+            # isolated ImplStore/ConceptStore (fresh rmtree'd above), and make_query_fn's
+            # pool search needs THAT specific store, not one shared across all 40 chains.
             if make_qfn is not None:
-                memory.query_fn = make_qfn(memory.impls)
+                memory.query_fn = make_qfn(memory.impls, memory.concepts)
         states.append({"inst": inst, "memory": memory, "repo": {}, "rows": [],
                        "chain_dir": chain_dir})
 
@@ -696,20 +698,23 @@ def _selftest() -> bool:
         seen_stores = []
         orig_make_query_fn = _mr.make_query_fn
 
-        def _spy_make_query_fn(net, ops, embed_fn, impl_store, K=3, pool_k=16):
+        def _spy_make_query_fn(net, feat_proj, ops, embed_fn, impl_store, concepts, K=3, pool_k=16):
             seen_stores.append(impl_store)
-            return orig_make_query_fn(net, ops, embed_fn, impl_store, K=K, pool_k=pool_k)
+            return orig_make_query_fn(net, feat_proj, ops, embed_fn, impl_store, concepts,
+                                      K=K, pool_k=pool_k)
 
         _mr.make_query_fn = _spy_make_query_fn
         try:
             import numpy as np
+            import torch.nn as nn
 
             from v5.runtime.lggn_refine import Refiner
             net = Refiner.Net(768, r=32, n_op=4, max_K=4)
+            feat_proj = nn.Linear(_mr.N_FEAT, 768, bias=False)
             ops = np.random.RandomState(0).randn(4, 768).astype("float32")
             r_refiner = run_arm(lm, insts, "memory", budget=1, max_new=0, heal=True,
                                 embed_fn=make_fake_embedder(), query_mode="refiner",
-                                ranker=(net, ops, 3), log=lambda *a: None)
+                                ranker=(net, feat_proj, ops, 3), log=lambda *a: None)
             assert r_refiner["n"] > 0, "refiner arm produced no rows"
             assert len(seen_stores) == len(insts), \
                 f"expected one query_fn built per chain ({len(insts)}), got {len(seen_stores)}"
