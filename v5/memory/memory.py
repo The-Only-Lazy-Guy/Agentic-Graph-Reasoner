@@ -61,11 +61,19 @@ class MemoryHit:
 
 class TotalMemory:
     def __init__(self, root: str | Path = "data/memory", mode: str = "concept",
-                 embed_fn=None):
+                 embed_fn=None, query_fn=None):
+        """query_fn: optional (goal, span, file_path) -> 768-d vector (Stage 2, gated on
+        Stage 1's boundary checklist). Overrides the RANKING query only -- concept ROUTING
+        (concepts.retrieve, which decides which impl pool is even in play) stays on the plain
+        embed(goal) it always used. When set, it replaces both the flat q-based ranking search
+        AND the separate span search (see read()) -- the refiner is expected to already fold
+        span/context in via its own cross-attention, so a second raw-text span search would be
+        redundant, not additive."""
         assert mode in ("off", "flat", "concept"), mode
         self.root = Path(root)
         self.mode = mode
         self.embed_fn = embed_fn
+        self.query_fn = query_fn
         self.impls = ImplStore(self.root, embed_fn=embed_fn)
         self.concepts = ConceptStore(self.root)
         self.syntax = SyntaxStore(self.root, embed_fn=embed_fn)
@@ -80,21 +88,36 @@ class TotalMemory:
         if self.mode == "off" or len(self.impls) == 0 or self.embed_fn is None:
             return MemoryHit()
         q = self._embed_one((goal or "")[:400] + ("\n" + obs[-200:] if obs else ""))
-        # span gets its OWN independent search, merged by max score -- not concatenated into
-        # one query string. Concatenation would mean goal alone (why_text under
-        # query_mode="why") can rank the WRONG record highest on pure ctx_cos -- e.g. an
-        # own-file record that's topically similar in surface wording ("order_id"/
-        # "order_line") but missing the actually-needed cross-file value, beating the correct
-        # record even with the boost correctly suppressed. Confirmed via A/B: the spec-query
-        # arm (goal==spec, which IS span) ranks the same candidate pool correctly 36/40;
-        # goal=why_text alone got it wrong 20/20 on the same pool. A separate span search lets
-        # the reliable text surface that record without diluting/replacing goal's own signal.
-        q_span = self._embed_one(span[:400]) if span else None
+        # `q` (plain embed(goal)) drives concept ROUTING only, below, and stays that way
+        # whether or not query_fn is set -- routing picks WHICH pool of impls is in play,
+        # and that mechanism is independently validated (poison-gate fix, GB3); Stage 2 only
+        # replaces how candidates WITHIN that pool get ranked.
+        #
+        # `qr` (ranking query) is query_fn's output when set (Stage 2 — a K-step refined
+        # vector expected to already fold span/context in via learned cross-attention, so no
+        # separate span search is added alongside it), else `q` merged with an independent
+        # span search (Stage 1 — see the note below on why span isn't concatenated into `q`).
+        if self.query_fn is not None:
+            qr = np.asarray(self.query_fn(goal, span, file_path), dtype=np.float32)
+            q_span = None
+        else:
+            qr = q
+            # span gets its OWN independent search, merged by max score -- not concatenated
+            # into one query string. Concatenation would mean goal alone (why_text under
+            # query_mode="why") can rank the WRONG record highest on pure ctx_cos -- e.g. an
+            # own-file record that's topically similar in surface wording ("order_id"/
+            # "order_line") but missing the actually-needed cross-file value, beating the
+            # correct record even with the boost correctly suppressed. Confirmed via A/B: the
+            # spec-query arm (goal==spec, which IS span) ranks the same candidate pool
+            # correctly 36/40; goal=why_text alone got it wrong 20/20 on the same pool. A
+            # separate span search lets the reliable text surface that record without
+            # diluting/replacing goal's own signal.
+            q_span = self._embed_one(span[:400]) if span else None
         concepts_meta: list[dict] = []
         if self.mode == "concept":
             concepts_meta = self.concepts.retrieve(q, k=3)
             pool = [i for c in concepts_meta for i in c["impl_ids"]]
-            cand = self.impls.search_ctx(q, k=FLAT_POOL, within=pool) if pool else []
+            cand = self.impls.search_ctx(qr, k=FLAT_POOL, within=pool) if pool else []
             if q_span is not None and pool:
                 cand = _merge_cand(cand, self.impls.search_ctx(q_span, k=FLAT_POOL, within=pool))
             # L2 confidence gates ROUTING, not raw reachability: a record whose concept never
@@ -108,11 +131,11 @@ class TotalMemory:
             # an UNGATED flat pass (same merge-by-max as q_span) so L1's raw record of what
             # actually happened stays reachable even before L2's understanding of it catches
             # up; MIN_FIT below still does the real quality filtering.
-            cand = _merge_cand(cand, self.impls.search_ctx(q, k=FLAT_POOL))
+            cand = _merge_cand(cand, self.impls.search_ctx(qr, k=FLAT_POOL))
             if q_span is not None:
                 cand = _merge_cand(cand, self.impls.search_ctx(q_span, k=FLAT_POOL))
         else:                                              # flat
-            cand = self.impls.search_ctx(q, k=FLAT_POOL)
+            cand = self.impls.search_ctx(qr, k=FLAT_POOL)
             if q_span is not None:
                 cand = _merge_cand(cand, self.impls.search_ctx(q_span, k=FLAT_POOL))
         # Same-file boost is a fallback, not a blanket bonus: a flat additive term can't tell
@@ -309,6 +332,51 @@ def _selftest() -> bool:
         assert "order_id" in hit_multi.trace_text and "TAX_RATE" in hit_multi.trace_text, \
             f"both records' content should be in the payload, got {hit_multi.trace_text!r}"
         print("  [2h] k_impl=2 delivers both merit-qualifying records, not just the top -> PASS")
+
+        # query_fn (Stage 2, task #19): overrides the RANKING query only. Default (no
+        # query_fn) goal exact-matches record A's ctx_text -> A wins. A stub query_fn that
+        # returns record B's exact embedding instead must flip the pick to B -- proving the
+        # override actually reaches the ranking search, not just gets silently ignored.
+        tm_qfn = TotalMemory(td, mode="flat", embed_fn=fe)
+        tm_qfn.impls.add("topic A description", "a_old", "a_new", "record A", file_path="a.py")
+        tm_qfn.impls.add("topic B description", "b_old", "b_new", "record B", file_path="b.py")
+        hit_noqfn = tm_qfn.read("topic A description", file_path="neutral.py")
+        assert hit_noqfn.impls and hit_noqfn.impls[0]["file_path"] == "a.py", \
+            f"sanity: without query_fn, goal-matched A should win, got {hit_noqfn.impls}"
+
+        def _qfn(goal, span, file_path):
+            return tm_qfn._embed_one("topic B description")
+
+        tm_qfn2 = TotalMemory(td, mode="flat", embed_fn=fe, query_fn=_qfn)
+        hit_qfn = tm_qfn2.read("topic A description", file_path="neutral.py")
+        assert hit_qfn.impls and hit_qfn.impls[0]["file_path"] == "b.py", \
+            f"query_fn should override ranking to B, got {hit_qfn.impls}"
+        print("  [2i] query_fn overrides the ranking query -> PASS")
+
+        # Concept ROUTING must stay on plain embed(goal) regardless of query_fn -- Stage 2
+        # only replaces which candidate wins WITHIN a pool, not which pool concepts.retrieve()
+        # selects. Two concepts (bootstrap-separated); confirm the SAME pool comes back with
+        # query_fn returning something totally unrelated to either family.
+        tm_route = TotalMemory(td, mode="concept", embed_fn=fe)
+        for i in range(5):
+            tm_route.impls.add("alpha family", f"a{i}_old", f"a{i}_new", "alpha record",
+                               file_path=f"alpha{i}.py")
+        for i in range(5):
+            tm_route.impls.add("beta family", f"b{i}_old", f"b{i}_new", "beta record",
+                               file_path=f"beta{i}.py")
+        tm_route.concepts.bootstrap(tm_route.impls, k=2, log=lambda *a: None)
+        hit_r0 = tm_route.read("alpha family", span="a2_old", file_path="neutral.py")
+
+        def _unrelated_qfn(goal, span, file_path):
+            return tm_route._embed_one("completely unrelated text xyz")
+
+        tm_route2 = TotalMemory(td, mode="concept", embed_fn=fe, query_fn=_unrelated_qfn)
+        hit_r1 = tm_route2.read("alpha family", span="a2_old", file_path="neutral.py")
+        pool0 = sorted(c["concept_id"] for c in hit_r0.concepts)
+        pool1 = sorted(c["concept_id"] for c in hit_r1.concepts)
+        assert pool0 and pool0 == pool1, \
+            f"concept routing changed under query_fn: {pool0} vs {pool1}"
+        print("  [2j] query_fn does not affect concept routing -> PASS")
 
         # EXTEND-shaped case: goal explicitly names a DIFFERENT file ('pricing') than the
         # target being edited ('orders.py') -> the target's same-file boost must be
