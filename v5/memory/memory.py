@@ -88,7 +88,7 @@ class TotalMemory:
         scored = []
         for impl_id, ctx_cos in cand:
             rec = self.impls.get(impl_id)
-            if rec is None:
+            if rec is None or rec.get("verified") == "fail":  # don't deliver known-bad code
                 continue
             fit = W_CTX * ctx_cos + W_IDENT * ident_overlap(
                 span or goal, (rec["old"] or "") + "\n" + (rec["new"] or ""))
@@ -232,6 +232,24 @@ def _selftest() -> bool:
             f"explicit cross-file mention should win over the target's same-file boost, " \
             f"got {hit_cross.impls[0].get('file_path')!r}"
         print("  [2c] explicit cross-file mention suppresses same-file boost -> PASS")
+
+        # verified="fail" must never be delivered, even when it would otherwise win on
+        # fit alone (a later session in the SAME chain can see an earlier attempt's known-
+        # bad code if it isn't filtered -- write() is per-session/final-attempt-only, so a
+        # failed record CAN exist and must not poison retrieval for it).
+        Qf = "normalize the timestamp field"
+        tm_flat.impls.add(Qf, "t = raw_ts", "t = raw_ts.strip().lower()",
+                          "lowercase and strip the timestamp", file_path="feed.py",
+                          verified="fail")
+        tm_flat.impls.add(Qf, "t = raw_ts", "t = normalize(raw_ts)",
+                          "route through the shared normalize() helper", file_path="feed.py",
+                          verified="strong")
+        hit_v = tm_flat.read(Qf, span="t = raw_ts", file_path="feed.py")
+        assert hit_v.impls and hit_v.impls[0]["verified"] != "fail", \
+            f"delivered a verified=fail record: {hit_v.impls[0]}"
+        assert "normalize(raw_ts)" in hit_v.impls[0]["new"]
+        print("  [2d] verified=fail records excluded from delivery -> PASS")
+
         hf = tm_flat.read("retry http call variant 2", span="x = _raw2(url)")
         assert hf.impls and hf.concepts == [], "flat mode skips concepts"
         tm_off = TotalMemory(td, mode="off", embed_fn=fe)
