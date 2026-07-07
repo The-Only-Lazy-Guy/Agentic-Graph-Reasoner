@@ -92,10 +92,20 @@ class TotalMemory:
             cand = self.impls.search_ctx(q, k=FLAT_POOL, within=pool) if pool else []
             if q_span is not None and pool:
                 cand = _merge_cand(cand, self.impls.search_ctx(q_span, k=FLAT_POOL, within=pool))
-            if not cand:                                   # cold concepts -> flat fallback
-                cand = self.impls.search_ctx(q, k=FLAT_POOL)
-                if q_span is not None:
-                    cand = _merge_cand(cand, self.impls.search_ctx(q_span, k=FLAT_POOL))
+            # L2 confidence gates ROUTING, not raw reachability: a record whose concept never
+            # crossed the poison-gate reuse floor (MINT_CONF=0.35 < CONF_FLOOR=0.40, graph_
+            # edits.py) is invisible to concepts.retrieve() until STRENGTHENed -- but a file
+            # written ONCE in a short chain (never revisited) never gets that second observe,
+            # so its concept stays unproven FOREVER even though it's correct. Confirmed via
+            # molab: pricing.py's record was unreachable in 20/20 chains, unmoved by two
+            # different ranking-formula fixes -- because it never entered `cand` at all, no
+            # matter how candidates already inside `cand` get ranked. Always supplement with
+            # an UNGATED flat pass (same merge-by-max as q_span) so L1's raw record of what
+            # actually happened stays reachable even before L2's understanding of it catches
+            # up; MIN_FIT below still does the real quality filtering.
+            cand = _merge_cand(cand, self.impls.search_ctx(q, k=FLAT_POOL))
+            if q_span is not None:
+                cand = _merge_cand(cand, self.impls.search_ctx(q_span, k=FLAT_POOL))
         else:                                              # flat
             cand = self.impls.search_ctx(q, k=FLAT_POOL)
             if q_span is not None:
@@ -243,6 +253,31 @@ def _selftest() -> bool:
         assert hit_pp.impls and hit_pp.impls[0].get("file_path") == "parser.py", \
             f"same-file boost picked {hit_pp.impls[0].get('file_path')!r}"
         print("  [2b] same-file continuity boost breaks ties -> PASS")
+
+        # Poison-gate starvation: a concept minted from a file written ONCE (never
+        # revisited/STRENGTHENed in-chain) stays below CONF_FLOOR forever -- concepts.retrieve
+        # excludes it, so its member impl can never enter `cand` via the pool-restricted path,
+        # no matter how candidates ALREADY in `cand` get ranked (the real molab EXTEND bug:
+        # pricing.py's record, 20/20 chains, unmoved by two ranking-formula fixes). read() must
+        # still reach it via the ungated flat supplement. Isolated store -- must not perturb
+        # `tm`'s impl count, which [4] below asserts on.
+        with tempfile.TemporaryDirectory() as td2:
+            tm2 = TotalMemory(td2, mode="concept", embed_fn=fe)
+            cold_id = tm2.write("cold concept goal xyz", "cold_old", "cold_new_fix",
+                                "trace for the cold concept", verified=True,
+                                file_path="cold.py", task_id="coldtest")
+            cold_cid = tm2.impls.get(cold_id)["concept_id"]
+            assert cold_cid, "write joined/minted a concept"
+            tm2.concepts.graph.nodes[cold_cid].confidence = 0.1   # force below CONF_FLOOR
+            tm2.concepts.save()
+            gated = tm2.concepts.retrieve(tm2._embed_one("cold concept goal xyz"), k=3)
+            assert not any(c["concept_id"] == cold_cid for c in gated), \
+                "sanity: the starved concept really is conf-gated out of retrieve()"
+            hit_cold = tm2.read("cold concept goal xyz", span="cold_old")
+            assert hit_cold.impls and hit_cold.impls[0]["file_path"] == "cold.py", \
+                f"starved concept's impl should still surface via the flat supplement, " \
+                f"got {[i.get('file_path') for i in hit_cold.impls]}"
+        print("  [2f] poison-gate-starved concept still reachable via flat supplement -> PASS")
 
         # EXTEND-shaped case: goal explicitly names a DIFFERENT file ('pricing') than the
         # target being edited ('orders.py') -> the target's same-file boost must be
