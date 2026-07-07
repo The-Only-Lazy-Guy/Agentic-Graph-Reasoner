@@ -80,7 +80,10 @@ class TotalMemory:
         # file's convention" (EXTEND: "the SAME tax rate that pricing uses") -- boosting the
         # target file's own (irrelevant) history in the second case actively buries the
         # needed cross-file record. Gate the boost on whether the goal names another file.
-        gl = (goal or "").lower()
+        # scan goal + span, not goal alone: under query_mode="why" goal is a MODEL-GENERATED
+        # why_text that can drop/truncate the other file's name (echoes code, runs out of
+        # budget); span is the harness-built spec+current text and always carries it verbatim.
+        gl = ((goal or "") + " " + (span or "")).lower()
         other_named = any(
             (rec.get("file_path") or "") != file_path and Path(rec["file_path"]).stem.lower() in gl
             for rec in (self.impls.get(iid) for iid, _ in cand) if rec and rec.get("file_path")
@@ -124,7 +127,8 @@ class TotalMemory:
         if len(self.syntax) == 0:
             return ""
         cands = self.syntax.search(q, k=12)
-        gl = (goal or "").lower()
+        # see read()'s same-scan note: goal alone is unreliable under query_mode="why"
+        gl = ((goal or "") + " " + (span or "")).lower()
         other_named = any(
             Path(s.get("file", "")).stem.lower() in gl
             for s in cands if s.get("file") and s["file"] != file_path
@@ -232,6 +236,25 @@ def _selftest() -> bool:
             f"explicit cross-file mention should win over the target's same-file boost, " \
             f"got {hit_cross.impls[0].get('file_path')!r}"
         print("  [2c] explicit cross-file mention suppresses same-file boost -> PASS")
+
+        # Stage-1 "why" queries can be DEGENERATE (code-echo / truncated, drops the other
+        # file's name entirely -- the real molab EXTEND regression this reproduces: why_text
+        # lost 'pricing', other_named went False, the boost re-buried the correct record).
+        # goal (Q2) carries no filename cue at all here; only span does. Same ctx_text on
+        # both records + goal==Q2 exactly -> ctx_cos ties (fake embedder is hash-exact), so
+        # the outcome is decided purely by ident_overlap(span, ...) + the boost -- isolating
+        # the gate itself, same technique as [2b]/[2c].
+        Q2 = "reuse the discount computation forward"
+        tm_flat.impls.add(Q2, "y = c + d", "y = c + d + tax", "carry tax through",
+                          file_path="pricing.py")
+        tm_flat.impls.add(Q2, "y = c + d", "y = c + d + 1", "bump total",
+                          file_path="orders.py")
+        hit_why = tm_flat.read(Q2, span="apply the SAME tax rate that pricing uses",
+                              file_path="orders.py")
+        assert hit_why.impls and hit_why.impls[0].get("file_path") == "pricing.py", \
+            f"span-only filename cue should still suppress the same-file boost, " \
+            f"got {hit_why.impls[0].get('file_path')!r}"
+        print("  [2e] filename cue in span alone (degenerate why-query) still wins -> PASS")
 
         # verified="fail" must never be delivered, even when it would otherwise win on
         # fit alone (a later session in the SAME chain can see an earlier attempt's known-
