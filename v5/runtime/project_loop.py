@@ -164,19 +164,18 @@ def run_chain(lm, inst: dict, arm: str, budget: int = 2, max_new: int = 512,
     memory = None
     chain_dir = Path(chains_root) / inst["instance_id"]
     if arm == "memory":
-        query_fn = None
-        if query_mode == "refiner" and ranker is not None:
-            from v5.runtime.memory_refiner import make_query_fn   # deferred: mirrors the
-            net, ops, K_r = ranker                                 # TotalMemory import below;
-            query_fn = make_query_fn(net, ops, embed_fn, K_r)       # avoids a module cycle
         from v5.memory.memory import TotalMemory
         if chain_dir.exists():
             shutil.rmtree(chain_dir)
-        # query_fn only passed when set (Stage 2/query_mode="refiner"): TotalMemory.__init__
-        # doesn't accept it yet (that's task #19, gated on Stage 1's boundary checklist) --
-        # Stage 1 (spec/why) must call TotalMemory exactly as it does today.
-        mem_kwargs = {"query_fn": query_fn} if query_fn is not None else {}
-        memory = TotalMemory(chain_dir / "mem", mode="concept", embed_fn=embed_fn, **mem_kwargs)
+        memory = TotalMemory(chain_dir / "mem", mode="concept", embed_fn=embed_fn)
+        # query_fn is attached AFTER construction, not passed into __init__: make_query_fn
+        # (memory_refiner.py, task #20) needs THIS chain's ImplStore to do its own pool
+        # search before refining -- that store doesn't exist until TotalMemory is built.
+        if query_mode == "refiner" and ranker is not None:
+            from v5.runtime.memory_refiner import make_query_fn   # deferred: avoids a
+            net, ops, K_r = ranker                                 # module cycle (memory_
+            memory.query_fn = make_query_fn(net, ops, embed_fn,     # refiner imports nothing
+                                            memory.impls, K=K_r)     # from here at module level)
     repo: dict[str, str] = {}
     rows = []
     for s in inst["sessions"]:
@@ -207,11 +206,13 @@ def run_chain(lm, inst: dict, arm: str, budget: int = 2, max_new: int = 512,
         # obs signal, not re-authoring the intent.
         obs = ""
         passed, gen, attempts, tok = False, "", 0, 0
+        delivered_task_id = None
         for _ in range(budget):
             if arm == "memory" and memory is not None:
                 hit = memory.read(goal=goal_for_query, span=session_data(s["spec"], current),
                                   obs=obs, file_path=target)
                 payload, mem_tok = hit.trace_text, hit.tokens_est
+                delivered_task_id = hit.impls[0].get("task_id") if hit.impls else None
                 if s.get("withheld"):     # dependency session -- which record actually landed?
                     delivered = hit.impls[0].get("file_path") if hit.impls else None
                     log(f"      [mem] {inst['instance_id']}/{s['sid']} kind={s['kind']} "
@@ -226,11 +227,14 @@ def run_chain(lm, inst: dict, arm: str, budget: int = 2, max_new: int = 512,
             if passed:
                 break
             obs = obs_text(res)
+        src_idx = s.get("source_session_idx")
+        source_sid = inst["sessions"][src_idx]["sid"] if src_idx is not None else None
         rows.append({"iid": inst["instance_id"], "sid": s["sid"], "kind": s["kind"],
                      "depth": s["depth"], "dependency": bool(s.get("withheld")),
                      "passed": passed, "attempts": attempts, "prompt_tokens": tok,
                      "mem_tokens": mem_tok, "why_tokens": why_tok,
-                     "why_text": why_text[:200] if why_text else ""})
+                     "why_text": why_text[:200] if why_text else "",
+                     "source_sid": source_sid, "delivered_task_id": delivered_task_id})
         if memory is not None:
             memory.write(goal=s["spec"], old=current, new=gen,
                          trace=s["spec"][:400], verified=passed,
@@ -273,11 +277,11 @@ def run_arm(lm, insts: list[dict], arm: str, budget: int, max_new: int, heal: bo
     as isolated as run_chain's, only the LM calls are batched. Same row schema/semantics as
     run_chain (verified: --selftest exercises both paths)."""
     t0 = time.time()
-    query_fn = None
+    make_qfn = None
     if arm == "memory" and query_mode == "refiner" and ranker is not None:
         from v5.runtime.memory_refiner import make_query_fn
         net, ops, K_r = ranker
-        query_fn = make_query_fn(net, ops, embed_fn, K_r)
+        make_qfn = lambda impls: make_query_fn(net, ops, embed_fn, impls, K=K_r)
     memory_cls = None
     if arm == "memory":
         from v5.memory.memory import TotalMemory
@@ -290,9 +294,12 @@ def run_arm(lm, insts: list[dict], arm: str, budget: int, max_new: int, heal: bo
         if memory_cls is not None:
             if chain_dir.exists():
                 shutil.rmtree(chain_dir)
-            mem_kwargs = {"query_fn": query_fn} if query_fn is not None else {}
-            memory = memory_cls(chain_dir / "mem", mode="concept", embed_fn=embed_fn,
-                                **mem_kwargs)
+            memory = memory_cls(chain_dir / "mem", mode="concept", embed_fn=embed_fn)
+            # query_fn is bound PER CHAIN, after construction: each chain has its own
+            # isolated ImplStore (fresh rmtree'd above), and make_query_fn's pool search
+            # needs THAT specific store, not one shared across all 40 chains.
+            if make_qfn is not None:
+                memory.query_fn = make_qfn(memory.impls)
         states.append({"inst": inst, "memory": memory, "repo": {}, "rows": [],
                        "chain_dir": chain_dir})
 
@@ -332,6 +339,7 @@ def run_arm(lm, insts: list[dict], arm: str, budget: int, max_new: int, heal: bo
                 st["payload"], st["mem_tok"] = "", 0
             st["obs"], st["passed"], st["gen"] = "", False, ""
             st["attempts"], st["tok"], st["_done"] = 0, 0, False
+            st["delivered_task_id"] = None
 
         for _attempt in range(budget):
             pending = [st for st in active if not st["_done"]]
@@ -344,6 +352,7 @@ def run_arm(lm, insts: list[dict], arm: str, budget: int, max_new: int, heal: bo
                                             span=session_data(s["spec"], st["current"]),
                                             obs=st["obs"], file_path=target)
                     st["payload"], st["mem_tok"] = hit.trace_text, hit.tokens_est
+                    st["delivered_task_id"] = hit.impls[0].get("task_id") if hit.impls else None
                     if s.get("withheld"):
                         delivered = hit.impls[0].get("file_path") if hit.impls else None
                         log(f"      [mem] {st['inst']['instance_id']}/{s['sid']} "
@@ -368,13 +377,17 @@ def run_arm(lm, insts: list[dict], arm: str, budget: int, max_new: int, heal: bo
 
         for st in active:
             s, target = st["s"], st["target"]
+            src_idx = s.get("source_session_idx")
+            source_sid = st["inst"]["sessions"][src_idx]["sid"] if src_idx is not None else None
             st["rows"].append({"iid": st["inst"]["instance_id"], "sid": s["sid"],
                                "kind": s["kind"], "depth": s["depth"],
                                "dependency": bool(s.get("withheld")),
                                "passed": st["passed"], "attempts": st["attempts"],
                                "prompt_tokens": st["tok"], "mem_tokens": st["mem_tok"],
                                "why_tokens": st["why_tok"],
-                               "why_text": st["why_text"][:200] if st["why_text"] else ""})
+                               "why_text": st["why_text"][:200] if st["why_text"] else "",
+                               "source_sid": source_sid,
+                               "delivered_task_id": st.get("delivered_task_id")})
             if st["memory"] is not None:
                 st["memory"].write(goal=s["spec"], old=st["current"], new=st["gen"],
                                    trace=s["spec"][:400], verified=st["passed"],
@@ -435,6 +448,7 @@ def _report(results: dict, log=print) -> None:
         log(f"  GB2 memory/ceiling DEP rate = {frac:.2f} at {tok_ratio:.2f}x ceiling tokens "
             f"-> {'PASS' if frac >= 0.90 and tok_ratio <= 0.6 else 'FAIL'}")
     _report_gb3(results, log)
+    _report_gb4(results, log)
 
 
 def _report_gb3(results: dict, log=print) -> None:
@@ -448,6 +462,33 @@ def _report_gb3(results: dict, log=print) -> None:
     d = why["dep_rate"] - spec["dep_rate"]
     verdict = "PASS" if d >= 0.03 else ("NO-REGRESSION" if d >= -0.02 else "FAIL")
     log(f"  GB3 why-query - spec-query DEP rate: {d:+.3f}  -> {verdict}")
+
+
+def _hit_rate_from_rows(rows: list[dict]) -> float:
+    """Fraction of dependency rows where the delivered record's task_id matches the ground-
+    truth source session (source_sid, task #18) -- did memory find the RIGHT record, not just
+    solve the session (a session can pass without the right record, or fail with it)."""
+    dep = [r for r in rows if r.get("source_sid") is not None]
+    if not dep:
+        return 0.0
+    return sum(1 for r in dep if r.get("delivered_task_id") == r["source_sid"]) / len(dep)
+
+
+def _report_gb4(results: dict, log=print) -> None:
+    """v3 Stage 2: does the refiner-ranked query (query_mode="refiner") beat the flat why-
+    query at finding the RIGHT source record (GB4a) and at solving dependency sessions
+    (GB4b)? results["memory_why"] (baseline) vs results["memory_refiner"] — same EVAL_SEEDS
+    chains as GB1/GB3."""
+    why, ref = results.get("memory_why"), results.get("memory_refiner")
+    if not (why and ref):
+        return
+    hit_why, hit_ref = _hit_rate_from_rows(why.get("rows", [])), _hit_rate_from_rows(ref.get("rows", []))
+    d_hit = hit_ref - hit_why
+    log(f"  GB4a refiner hit-rate {hit_ref:.3f} vs why-query {hit_why:.3f}: {d_hit:+.3f}  -> "
+        f"{'PASS' if d_hit >= 0.05 else 'FAIL'}")
+    d_dep = ref["dep_rate"] - why["dep_rate"]
+    log(f"  GB4b refiner-query - why-query DEP rate: {d_dep:+.3f}  -> "
+        f"{'PASS' if d_dep >= 0.03 else 'FAIL'}")
 
 
 # ── selftest (no model) ─────────────────────────────────────────────────────────
@@ -574,6 +615,22 @@ def _selftest() -> bool:
         _report_gb3({}, log=lambda *a: None)                  # must not crash; keys absent
         print("  [5] GB3 report -> PASS")
 
+        # GB4 (Stage 2): source_sid (task #18's ground-truth label) must reach every
+        # dependency row, hit-rate is computable, report doesn't crash on missing/present
+        # keys. Real refiner-vs-why deltas only come from a real molab run (query_mode=
+        # "refiner" needs a trained ranker); here just prove the plumbing, same technique as
+        # GB3's smoke test above (comparing a result against itself -> deltas should be ~0).
+        dep_rows = [r for r in r_mem_why["rows"] if r["dependency"]]
+        assert dep_rows and all(r["source_sid"] is not None for r in dep_rows), \
+            "every dependency row must carry a ground-truth source_sid (task #18)"
+        hr = _hit_rate_from_rows(r_mem_why["rows"])
+        assert 0.0 <= hr <= 1.0
+        rep3 = _save_results({"memory_why": r_mem_why, "memory_refiner": r_mem_why},
+                             path=str(Path(td) / "r3.json"))
+        _report_gb4(rep3, log=lambda *a: None)                # must not crash; keys present
+        _report_gb4({}, log=lambda *a: None)                  # must not crash; keys absent
+        print("  [5b] GB4 report + source_sid plumbing -> PASS")
+
         # _oversample: diagnosed fix for the ~1.2 loss plateau (harder Fable-5 why-pairs
         # under-converged relative to the near-deterministic synthetic code pairs)
         base = list(range(10))
@@ -600,6 +657,37 @@ def _selftest() -> bool:
         assert whole == chunked == [f"out:p{i}" for i in range(10)], (whole, chunked)
         assert _gen_chunked(echo, [], 8, gen_batch=3) == []
         print("  [6b] _gen_chunked matches unchunked, order-preserving -> PASS")
+
+        # query_mode="refiner" wiring (task #21): each chain must get its OWN query_fn, bound
+        # to that chain's isolated ImplStore -- not one shared closure built once outside the
+        # per-chain loop (the bug this fix targeted: chains are rmtree'd/rebuilt individually,
+        # a shared closure would silently bind to whichever chain constructed it last).
+        from v5.runtime import memory_refiner as _mr
+        seen_stores = []
+        orig_make_query_fn = _mr.make_query_fn
+
+        def _spy_make_query_fn(net, ops, embed_fn, impl_store, K=3, pool_k=16):
+            seen_stores.append(impl_store)
+            return orig_make_query_fn(net, ops, embed_fn, impl_store, K=K, pool_k=pool_k)
+
+        _mr.make_query_fn = _spy_make_query_fn
+        try:
+            import numpy as np
+
+            from v5.runtime.lggn_refine import Refiner
+            net = Refiner.Net(768, r=32, n_op=4, max_K=4)
+            ops = np.random.RandomState(0).randn(4, 768).astype("float32")
+            r_refiner = run_arm(lm, insts, "memory", budget=1, max_new=0, heal=True,
+                                embed_fn=make_fake_embedder(), query_mode="refiner",
+                                ranker=(net, ops, 3), log=lambda *a: None)
+            assert r_refiner["n"] > 0, "refiner arm produced no rows"
+            assert len(seen_stores) == len(insts), \
+                f"expected one query_fn built per chain ({len(insts)}), got {len(seen_stores)}"
+            assert len(set(id(s) for s in seen_stores)) == len(insts), \
+                "chains shared the SAME ImplStore -- per-chain binding regressed"
+        finally:
+            _mr.make_query_fn = orig_make_query_fn
+        print("  [6c] query_mode=refiner: query_fn bound per-chain, not shared -> PASS")
 
         # obs-informed retry: memory.read() must be re-invoked EACH attempt with the growing
         # obs (not a single pre-loop read whose payload is frozen for the whole session) --
