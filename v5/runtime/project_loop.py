@@ -89,9 +89,32 @@ def _memoryish_payload(inst: dict, upto: int) -> str:
     return "\n".join(parts[-4:])[:PAYLOAD_CAP]
 
 
+def _oversample(pairs: list, factor: float, seed: int = 0) -> list:
+    """Repeat `pairs` `factor` times (fractional part = a deterministic random sample of
+    that fraction, no duplicates within the fractional slice). factor=1.0 -> pairs unchanged
+    (new list, same contents)."""
+    if factor <= 0:
+        return []
+    n_reps, frac = int(factor), factor - int(factor)
+    out = list(pairs) * n_reps
+    if frac > 0 and pairs:
+        import random
+        out += random.Random(seed).sample(pairs, min(len(pairs), round(len(pairs) * frac)))
+    return out
+
+
 def train_lora(model_name: str, out_dir: str = LORA_DIR, epochs: int = 2,
                batch_size: int = 8, max_tokens: int = 1600, fable5_triples: str = TRIPLES,
-               log=print) -> None:
+               why_oversample: float = 1.0, seed: int = 0, log=print) -> None:
+    """why_oversample: repeat the Fable-5 why-pairs this many times (default 1.0 = off,
+    unchanged behavior). Diagnosed need (2026-07-07 molab run): pooled loss plateaued at
+    ~1.2 vs the code-only baseline's 0.041 at the same 2 epochs -- the repetitive synthetic
+    code pairs converge almost immediately, so most of that 2-epoch budget's useful gradient
+    was ALREADY going to the harder, more diverse real why-pairs; they just hadn't converged
+    in 2 passes. This wasn't a mix-RATIO problem (why-pairs were already the majority by
+    count, 936 vs 690) -- it's a converged-vs-not gap. Oversampling gives the still-learning
+    class more full passes without proportionally slowing the already-converged one; combine
+    with a higher --epochs on the actual retrain (already an exposed CLI flag)."""
     insts = make_split(seeds=TRAIN_SEEDS)
     pairs = []
     for inst in insts:
@@ -113,8 +136,10 @@ def train_lora(model_name: str, out_dir: str = LORA_DIR, epochs: int = 2,
     # one pairs list) extended to a second job (query formation) via a distinct separator.
     triples = load_triples(fable5_triples, log=log)
     why_p = why_pairs(triples)
-    pairs += why_p
-    log(f"  [lora] +{len(why_p)} Call-A why-pairs from Fable-5 ({fable5_triples})")
+    oversampled = _oversample(why_p, why_oversample, seed=seed)
+    pairs += oversampled
+    log(f"  [lora] +{len(oversampled)} Call-A why-pairs from Fable-5 ({fable5_triples}), "
+        f"oversample={why_oversample}x (base {len(why_p)})")
     lm = RawLM(model_name)
     lm.train_on(pairs, epochs=epochs, batch_size=batch_size, max_tokens=max_tokens, log=log)
     lm.save_checkpoint(out_dir)
@@ -388,6 +413,17 @@ def _selftest() -> bool:
         _report_gb3(rep2, log=lambda *a: None)                # must not crash; keys present
         _report_gb3({}, log=lambda *a: None)                  # must not crash; keys absent
         print("  [5] GB3 report -> PASS")
+
+        # _oversample: diagnosed fix for the ~1.2 loss plateau (harder Fable-5 why-pairs
+        # under-converged relative to the near-deterministic synthetic code pairs)
+        base = list(range(10))
+        assert _oversample(base, 1.0) == base and _oversample(base, 1.0) is not base
+        assert _oversample(base, 2.0) == base * 2
+        assert _oversample(base, 0.0) == []
+        one_five = _oversample(base, 1.5, seed=0)
+        assert len(one_five) == 15 and one_five[:10] == base, "1.5x = full copy + half sample"
+        assert _oversample(base, 1.5, seed=0) == _oversample(base, 1.5, seed=0), "deterministic"
+        print("  [6] _oversample -> PASS")
     print("\n  PROJECT_LOOP SELFTEST -> PASS")
     return True
 
@@ -413,6 +449,9 @@ def main():
     ap.add_argument("--max-new", type=int, default=512)
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--epochs", type=int, default=2)
+    ap.add_argument("--why-oversample", type=float, default=1.0,
+                    help="repeat Fable-5 why-pairs Nx during --train-lora (see train_lora "
+                         "docstring; diagnosed fix for the ~1.2 loss plateau)")
     ap.add_argument("--no-heal", action="store_true")
     ap.add_argument("--query-mode", choices=["spec", "why", "refiner"], default="spec",
                     help="v3 Stage 1/2: 'spec' = current GB1-validated path (unchanged), "
@@ -427,7 +466,8 @@ def main():
     if a.selftest:
         raise SystemExit(0 if _selftest() else 1)
     if a.train_lora:
-        train_lora(a.model, out_dir=a.lora, epochs=a.epochs, batch_size=a.batch_size)
+        train_lora(a.model, out_dir=a.lora, epochs=a.epochs, batch_size=a.batch_size,
+                  why_oversample=a.why_oversample)
         return
     if a.smoke:
         a.model = "Qwen/Qwen2.5-0.5B" if a.model == "Qwen/Qwen2.5-3B" else a.model
