@@ -368,18 +368,29 @@ class RawLM:
             min(32, sum(1 for k, _ in encs if not is_why(pairs[k][0]))))]
 
         def _probe_loss(probe_encs) -> float | None:
+            # CHUNK the probe forward at batch_size (the length-sorted size training already
+            # runs safely) -- padding all 32 examples into ONE batch OOM'd once compose added
+            # long repo_dump code pairs (23.9 GiB spike, 2026-07-08). Length-sort first so each
+            # chunk pads tight; weight the per-chunk loss by example count. no_grad throughout,
+            # so this stays purely diagnostic and never touches the training gradient.
             if not probe_encs:
                 return None
             was_training = self.model.training
             self.model.eval()
-            ids_l, lbl_l, mask_l = _pad_batch(probe_encs, pad)
+            ordered = sorted(probe_encs, key=lambda e: len(e[0]))
+            total, n = 0.0, 0
             with torch.no_grad():
-                out = self.model(torch.tensor(ids_l, device=self.dev),
-                                 attention_mask=torch.tensor(mask_l, device=self.dev),
-                                 labels=torch.tensor(lbl_l, device=self.dev))
+                for i in range(0, len(ordered), batch_size):
+                    chunk = ordered[i:i + batch_size]
+                    ids_l, lbl_l, mask_l = _pad_batch(chunk, pad)
+                    out = self.model(torch.tensor(ids_l, device=self.dev),
+                                     attention_mask=torch.tensor(mask_l, device=self.dev),
+                                     labels=torch.tensor(lbl_l, device=self.dev))
+                    total += float(out.loss) * len(chunk)
+                    n += len(chunk)
             if was_training:
                 self.model.train()
-            return float(out.loss)
+            return total / max(1, n)
 
         # length-sorted batches: uniform lengths -> minimal padding, bounded peak memory.
         # Batch ORDER is shuffled per epoch so sorting doesn't become a length curriculum.
