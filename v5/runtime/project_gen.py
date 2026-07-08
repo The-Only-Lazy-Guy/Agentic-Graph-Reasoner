@@ -38,6 +38,7 @@ ID_FMTS = [
 TAX_NAMES = ["with_tax", "apply_tax", "add_tax", "taxed_total"]
 BULK_NAMES = ["bulk_price", "discounted_price", "apply_bulk", "bulk_total"]
 TAXES = [0.05, 0.06, 0.07, 0.08, 0.09, 0.11, 0.12]
+FEE_RATES = [0.02, 0.03, 0.04, 0.10, 0.15]   # service/handling surcharge — compose's 2nd fact
 
 LOG_FMTS = [                      # parse_line input layouts (inline parsing, no constants)
     ("[{ts}] {level}: {msg}", '"[10:00] WARN: disk low"'),
@@ -337,7 +338,114 @@ def apply_member_discount(price, qty):
     return base
 
 
-ARCHETYPES = {"inventory": _inventory, "logparse": _logparse, "inventory_infer": _inventory_infer}
+# ── archetype: COMPOSE (2-hop derivation, opt-in — the Stage 2 payoff case) ─────────────────
+#
+# Every OTHER archetype withholds a RAW LITERAL that sits verbatim in one earlier gold file:
+# the "dependency" is retrieve-the-token-and-paste. Nothing is ever DERIVED, so a task can be
+# solved the instant the one source record is delivered -- which is why a better ranker
+# (GB4a +0.25 over cosine) produced ZERO solve-rate gain (GB4b flat, 2026-07-08): retrieval
+# quality doesn't gate solving when solving is a copy.
+#
+# COMPOSE breaks that. The answer -- final_price's applied total and the combined rate
+# (tax+fee) -- is written in NO file anywhere. It only comes into existence when the model
+# retrieves TWO atomic facts from TWO separate files (tax.py's rate, fees.py's rate) and
+# COMBINES them by the rule the spec states. New knowledge formed from atomic knowledge --
+# exactly the "model derives something that isn't in the graph" property.
+#
+# Why this finally lets the ranker win: solving now needs BOTH sources AND-ed. The ranker's
+# per-source retrieval edge over cosine compounds on a 2-of-N pick (cosine ~0.75/src -> ~0.56
+# both; ranker ~1.0/src -> ~1.0 both), so better retrieval FINALLY converts to a solve-rate
+# gap (GB4b). Distractor s2 (catalog.py) keeps the pool > 2 so it's a real pick, not 2-of-2.
+#
+# Opt-in like inventory_infer: NOT in make_split()'s default -- GB1-4 numbers stay comparable.
+# source_session_idxs (LIST) is the new multi-hop label; source_session_idx stays as the
+# primary (first) source for backward compat with the single-source GB4a path.
+
+def _compose(rng: random.Random) -> dict:
+    tax = rng.choice(TAXES)
+    fee = rng.choice(FEE_RATES)
+    while fee == tax:                          # keep the two atomic facts numerically distinct
+        fee = rng.choice(FEE_RATES)
+    low = rng.randint(2, 9)
+    id_i = rng.randrange(len(ID_FMTS))
+    id_expr, id_hint = ID_FMTS[id_i]
+
+    tax_gold = f'''TAX_RATE = {tax}
+
+def taxed(amount):
+    return round(amount * (1 + TAX_RATE), 2)
+'''
+    fees_gold = f'''FEE_RATE = {fee}
+
+def service_fee(amount):
+    return round(amount * FEE_RATE, 2)
+'''
+    catalog_gold = f'''def make_sku(n):
+    return {id_expr}
+
+def is_low(stock, name):
+    return stock.get(name, 0) < {low}
+'''
+    # the DERIVED answer: p*(1+tax+fee). the combined rate (tax+fee) and every result below
+    # exist in NO earlier file -- must be computed by composing tax.py's fact with fees.py's.
+    checkout_gold = f'''def final_price(p):
+    return round(p * (1 + {tax} + {fee}), 2)
+'''
+
+    def _fp(p):                               # test oracle -- SAME arithmetic as checkout_gold
+        return round(p * (1 + tax + fee), 2)
+
+    sessions = [
+        dict(kind="create", target_file="tax.py",
+             spec=(f"Create tax.py. Constant TAX_RATE = {tax}. taxed(amount) returns "
+                   f"amount*(1+TAX_RATE) rounded to 2 decimals."),
+             tests=[
+                 f"import tax\nassert tax.taxed(100) == {round(100 * (1 + tax), 2)}",
+                 f"import tax\nassert tax.TAX_RATE == {tax}",
+             ],
+             gold={"tax.py": tax_gold}, withheld=[], source_session_idx=None,
+             source_session_idxs=[]),
+        dict(kind="create", target_file="fees.py",
+             spec=(f"Create fees.py. Constant FEE_RATE = {fee}. service_fee(amount) returns "
+                   f"amount*FEE_RATE rounded to 2 decimals."),
+             tests=[
+                 f"import fees\nassert fees.service_fee(100) == {round(100 * fee, 2)}",
+                 f"import fees\nassert fees.FEE_RATE == {fee}",
+             ],
+             gold={"fees.py": fees_gold}, withheld=[], source_session_idx=None,
+             source_session_idxs=[]),
+        dict(kind="create", target_file="catalog.py",
+             spec=(f"Create catalog.py. make_sku(n) returns an id string {id_hint}. "
+                   f"is_low(stock, name) is True when the stock is strictly below {low}."),
+             tests=[
+                 f"import catalog\nassert catalog.make_sku(7) == {_fmt_apply(id_expr, n=7)!r}",
+                 f"import catalog\nassert catalog.is_low({{'a': {low - 1}}}, 'a') is True",
+             ],
+             gold={"catalog.py": catalog_gold}, withheld=[], source_session_idx=None,
+             source_session_idxs=[]),
+        dict(kind="compose", target_file="checkout.py",
+             spec=("Create checkout.py. final_price(p) returns p plus this project's tax "
+                   "charged on p plus this project's service fee charged on p — that is, the "
+                   "base price with BOTH established rates applied to it and summed (base + "
+                   "tax-on-base + fee-on-base), rounded to 2 decimals. Do NOT restate the "
+                   "rates; use the two values this project already established. Write it "
+                   "self-contained in checkout.py."),
+             tests=[
+                 f"import checkout\nassert checkout.final_price(100) == {_fp(100)}",
+                 f"import checkout\nassert checkout.final_price(50) == {_fp(50)}",
+                 f"import checkout\nassert checkout.final_price(8) == {_fp(8)}",
+             ],
+             gold={"checkout.py": checkout_gold},
+             withheld=[str(tax), str(fee)],
+             source_session_idx=0,             # primary = tax.py (s0); full set below
+             source_session_idxs=[0, 1]),      # BOTH tax.py (s0) AND fees.py (s1) are required
+    ]
+    return dict(archetype="compose", sessions=sessions,
+                params=dict(tax=tax, fee=fee, low=low, id_i=id_i))
+
+
+ARCHETYPES = {"inventory": _inventory, "logparse": _logparse,
+              "inventory_infer": _inventory_infer, "compose": _compose}
 
 
 def make_instance(archetype: str, seed: int) -> dict:
@@ -403,13 +511,48 @@ def _selftest() -> bool:
                     f"{s['sid']}: source_session_idx {idx} must point to an earlier session"
             else:
                 assert idx is None, f"{s['sid']}: no withheld but source_session_idx={idx}"
+            # multi-hop label (source_session_idxs, LIST): first entry mirrors the singular
+            # source_session_idx; every entry must be a real earlier session.
+            idxs = s.get("source_session_idxs")
+            if idxs:
+                assert idxs[0] == idx, f"{s['sid']}: source_session_idxs[0] != source_session_idx"
+                assert all(0 <= j < s["depth"] for j in idxs), \
+                    f"{s['sid']}: source_session_idxs {idxs} must all point earlier"
     exp = {"inventory": {2: 0, 4: 1}, "logparse": {1: 0, 3: 0},
-           "inventory_infer": {2: 0, 4: 1, 5: 1}}
+           "inventory_infer": {2: 0, 4: 1, 5: 1}, "compose": {3: 0}}
     for arch, want in exp.items():
         got = {s["depth"]: s["source_session_idx"] for s in make_instance(arch, 0)["sessions"]
               if s["source_session_idx"] is not None}
         assert got == want, f"{arch}: source_session_idx map {got} != expected {want}"
     print("  [1b] source_session_idx <-> withheld invariant + per-archetype map -> PASS")
+
+    # compose (2-hop): the model must DERIVE the answer by combining two atomic facts from two
+    # separate files -- the derived value must exist in NO earlier gold file (else it's just
+    # retrieval, not composition). This is the "derive something that isn't in the graph"
+    # requirement, asserted mechanically.
+    import re as _re
+    for seed in (0, 1, 2, 7):
+        inst = make_instance("compose", seed)
+        ss = inst["sessions"]
+        comp = ss[3]
+        tax, fee = inst["params"]["tax"], inst["params"]["fee"]
+        # the two atomic facts genuinely live in their (separate) source files
+        assert str(tax) in ss[0]["gold"]["tax.py"], "tax fact must be in tax.py"
+        assert str(fee) in ss[1]["gold"]["fees.py"], "fee fact must be in fees.py"
+        # neither restated in the compose spec (withholding holds -- forces retrieval)
+        assert str(tax) not in comp["spec"] and str(fee) not in comp["spec"], \
+            "compose spec must not restate either rate"
+        # the DERIVED results (test-asserted values) appear in NO earlier gold file -> the
+        # answer cannot be retrieved verbatim, only COMPUTED from the two facts.
+        earlier_src = "".join(v for s in ss[:3] for v in s["gold"].values())
+        derived = _re.findall(r"==\s*([\d.]+)", "\n".join(comp["tests"]))
+        assert len(derived) >= 3, "compose must assert concrete derived values"
+        for d in derived:
+            assert d not in earlier_src, \
+                f"compose seed {seed}: derived value {d} leaks into the graph -- not composition"
+        # both sources labelled for the multi-hop ranker
+        assert comp["source_session_idxs"] == [0, 1] and comp["source_session_idx"] == 0
+    print("  [1c] compose: 2 atomic facts -> answer DERIVED, absent from graph -> PASS")
 
     # cross-seed variation: conventions actually vary
     specs = {make_instance("inventory", s)["params"]["line_i"] for s in range(12)}
