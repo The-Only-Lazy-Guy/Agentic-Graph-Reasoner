@@ -64,6 +64,28 @@ def repo_dump(repo: dict[str, str], cap: int = CEILING_CAP) -> str:
     return "\n".join(parts)[:cap]
 
 
+def _clear_results(path: str = RESULTS_PATH, rows_dir: str = ROWS_DIR, log=print) -> None:
+    """Wipe results.json + the row sidecars so a NEW comparison campaign doesn't inherit stale
+    keys. The GB reports read whatever keys sit in results.json; switching archetype sets
+    (e.g. inventory/logparse -> compose) reuses the SAME keys (memory_why/memory_refiner), so a
+    half-updated file makes GB4 compare a fresh arm against a stale one (observed 2026-07-08:
+    compose's first run reported GB4b +0.612 against a leftover inventory/logparse refiner).
+    Pass --fresh-results on the FIRST run of a campaign only; later runs append to the clean
+    file so GB3/GB4 still see every arm they need."""
+    p = Path(path)
+    if p.exists():
+        p.unlink()
+        log(f"  [fresh] removed {path}")
+    rd = Path(rows_dir)
+    if rd.exists():
+        n = 0
+        for f in rd.glob("*.jsonl"):
+            f.unlink()
+            n += 1
+        if n:
+            log(f"  [fresh] removed {n} row sidecar(s) in {rows_dir}")
+
+
 def _save_results(update: dict, path: str = RESULTS_PATH) -> dict:
     p = Path(path)
     merged = {}
@@ -751,6 +773,20 @@ def _selftest() -> bool:
             "single-source rows -> None (GB4c doesn't apply to them)"
         print("  [5e] GB4c all-sources-hit: AND over multi-source, single-source excluded -> PASS")
 
+        # [5f] --fresh-results: wipes results.json + row sidecars so a new campaign doesn't
+        # inherit stale keys (the confound that made compose's first run report GB4b against a
+        # leftover inventory/logparse refiner).
+        fr_json = Path(td) / "fr.json"
+        fr_rows = Path(td) / "fr_rows"
+        fr_rows.mkdir()
+        fr_json.write_text('{"memory_refiner": {"dep_rate": 0.9}}', encoding="utf-8")
+        (fr_rows / "memory_refiner.jsonl").write_text('{"x": 1}\n', encoding="utf-8")
+        _clear_results(path=str(fr_json), rows_dir=str(fr_rows), log=lambda *a: None)
+        assert not fr_json.exists(), "--fresh-results must remove results.json"
+        assert not list(fr_rows.glob("*.jsonl")), "--fresh-results must remove row sidecars"
+        _clear_results(path=str(fr_json), rows_dir=str(fr_rows), log=lambda *a: None)  # idempotent
+        print("  [5f] --fresh-results wipes results.json + sidecars (idempotent) -> PASS")
+
         # _oversample: diagnosed fix for the ~1.2 loss plateau (harder Fable-5 why-pairs
         # under-converged relative to the near-deterministic synthetic code pairs)
         base = list(range(10))
@@ -903,6 +939,10 @@ def main():
                     help="comma-separated archetypes for --run/--train-lora (default: the "
                          "GB1-validated inventory,logparse split). Use 'compose' for the 2-hop "
                          "derivation benchmark (GB4c), e.g. --archetypes compose")
+    ap.add_argument("--fresh-results", action="store_true",
+                    help="wipe results.json + row sidecars before this --run (start of a new "
+                         "comparison campaign, e.g. switching to --archetypes compose). Pass on "
+                         "the FIRST run only; later arms append so GB3/GB4 still see every key.")
     a = ap.parse_args()
     archetypes = tuple(x.strip() for x in a.archetypes.split(",") if x.strip())
 
@@ -939,6 +979,8 @@ def main():
     if a.run:
         if a.query_mode == "refiner" and not a.ranker:
             raise SystemExit("--query-mode refiner needs --ranker <memory_refiner checkpoint dir>")
+        if a.fresh_results:
+            _clear_results(log=print)
         insts = make_split(archetypes=archetypes, seeds=EVAL_SEEDS)
         if a.n_chains:
             insts = insts[:a.n_chains]
