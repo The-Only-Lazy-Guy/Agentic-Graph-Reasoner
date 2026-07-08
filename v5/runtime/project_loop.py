@@ -41,6 +41,7 @@ from v5.runtime.sandbox import obs_text, run_project
 
 LORA_DIR = "artifacts/project_lora"
 RESULTS_PATH = "artifacts/project_results.json"
+ROWS_DIR = "artifacts/project_rows"
 CHAINS_ROOT = "data/memory_chains"
 PAYLOAD_CAP = 1400
 CEILING_CAP = 4000
@@ -491,6 +492,21 @@ def _hit_rate_from_rows(rows: list[dict], rank1: bool = False) -> float:
     return sum(1 for r in dep if r["source_sid"] in (r.get("delivered_task_ids") or [])) / len(dep)
 
 
+def _rows_for(key: str, results: dict, rows_dir: str = ROWS_DIR) -> list[dict]:
+    """Rows for a results key. The --run path STRIPS rows before writing results.json (they'd
+    bloat it) and dumps them to {rows_dir}/{key}.jsonl instead -- so results[key]["rows"] is
+    absent on a persisted report and GB4a's hit-rate would read [] -> 0.000 (the bug that hid
+    a real +0.25 refiner retrieval win, 2026-07-08). Prefer in-dict rows (selftest passes them
+    live); fall back to the sidecar jsonl."""
+    r = (results.get(key) or {}).get("rows")
+    if r:
+        return r
+    p = Path(rows_dir) / f"{key}.jsonl"
+    if p.exists():
+        return [json.loads(line) for line in p.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return []
+
+
 def _report_gb4(results: dict, log=print) -> None:
     """v3 Stage 2: does the refiner-ranked query (query_mode="refiner") beat the flat why-
     query at finding the RIGHT source record (GB4a) and at solving dependency sessions
@@ -499,7 +515,7 @@ def _report_gb4(results: dict, log=print) -> None:
     why, ref = results.get("memory_why"), results.get("memory_refiner")
     if not (why and ref):
         return
-    why_rows, ref_rows = why.get("rows", []), ref.get("rows", [])
+    why_rows, ref_rows = _rows_for("memory_why", results), _rows_for("memory_refiner", results)
     hit_why, hit_ref = _hit_rate_from_rows(why_rows), _hit_rate_from_rows(ref_rows)
     d_hit = hit_ref - hit_why
     log(f"  GB4a refiner hit-rate {hit_ref:.3f} vs why-query {hit_why:.3f}: {d_hit:+.3f}  -> "
@@ -664,6 +680,24 @@ def _selftest() -> bool:
         _report_gb4(rep3, log=lambda *a: None)                # must not crash; keys present
         _report_gb4({}, log=lambda *a: None)                  # must not crash; keys absent
         print("  [5b] GB4 report + source_sid plumbing -> PASS")
+
+        # [5d] regression guard for the 2026-07-08 GB4a bug: --run STRIPS rows from
+        # results.json and writes them to {ROWS_DIR}/{key}.jsonl; _report_gb4 must reload them
+        # via _rows_for or GB4a hit-rate reads [] -> 0.000 (which is exactly how a real +0.25
+        # refiner win was hidden). Simulate the strip+sidecar, assert the hit-rate SURVIVES.
+        rows_dir = Path(td) / "rows"
+        rows_dir.mkdir()
+        with open(rows_dir / "memory_why.jsonl", "w", encoding="utf-8") as w:
+            for r in r_mem_why["rows"]:
+                w.write(json.dumps(r) + "\n")
+        stripped = {"memory_why": {k: v for k, v in r_mem_why.items() if k != "rows"}}
+        recovered = _rows_for("memory_why", stripped, rows_dir=str(rows_dir))
+        assert recovered, "sidecar reload must recover the stripped rows, not return []"
+        assert _hit_rate_from_rows(recovered) == _hit_rate_from_rows(r_mem_why["rows"]), \
+            "GB4a hit-rate must be identical whether rows are in-dict or reloaded from sidecar"
+        assert _rows_for("memory_why", stripped, rows_dir=str(Path(td) / "nope")) == [], \
+            "missing sidecar -> [] (graceful), not a crash"
+        print("  [5d] GB4a rows survive results.json stripping (sidecar reload) -> PASS")
 
         # _oversample: diagnosed fix for the ~1.2 loss plateau (harder Fable-5 why-pairs
         # under-converged relative to the near-deterministic synthetic code pairs)
