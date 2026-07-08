@@ -491,21 +491,45 @@ in `project_loop` (GB4c); `--archetypes` flag on `--run`/`--train-lora`/`--build
 every source). Local 0.5B smoke confirmed the data path: 2 compose chains → 4 training examples
 (2 sources each), 0 skipped, both sources naturally in-pool. Not yet run on molab.
 
-**Pending:**
-- [ ] molab: build compose reprs + train ranker + `--query-mode refiner --archetypes compose`,
-  read GB4c — the first real test of whether the ranker's retrieval edge converts to solve-rate
-  now that solving genuinely needs both sources. Needs a LoRA that saw compose too
-  (`--train-lora --archetypes inventory,logparse,compose`).
-- [ ] molab: rerun `--query-mode refiner` with the feature-fusion ranker (rebuild reprs,
-  retrain, GB4) — local smoke proved the pipeline runs, not that it wins
-- [ ] Decide whether `inventory_infer`/`compose` join the default benchmark split (would
-  change every existing GB1-4 baseline — needs deliberate opt-in, not silent)
-- [ ] If adopted, extend `KIND_ORDER` in `memory_refiner.py` (currently 4 kinds; `"infer"` and
-  `"compose"` zero-hot until added — 1-line change)
-- [ ] If GB4c still flat despite both sources delivered: the single-point `h_K` converging to
-  the source midpoint is the ceiling — escalate to the dynamic-pool / K-step traversal design
-  (the latent VISITS each source across K steps) the user sketched, now unblocked by a real
-  multi-hop benchmark to train/test it on.
+**2026-07-08 — Stage 2 PROVEN: ranker beats cosine +0.95 on all gates under hard retrieval
+(`compose_pool`, commits `972a00f`→`e9b5a06`).** The compose run (3-record pool) solved the
+2-hop derivation (why DEP 0.80, refiner DEP 0.90, indep ~1.0) but GB4c was 1.000 vs 1.000 —
+cosine already delivered both sources 100% on a tiny pool, so the ranker had no room (masked,
+not failed). `compose_pool` pads the chain with 8 rate-like distractor modules (discount/
+shipping/vat/handling/…) so retrieving the two true sources among ~11 is a hard pick. Local
+mpnet check first: flat why-query got both sources into the delivered top-2 in only 1/10 seeds
+(tax.py crowded to ~4th). Then molab:
+
+    memory_refiner  solve 0.996  DEP 0.950  indep 1.000  create 220/220  GB4c 1.000
+    memory_why      solve 0.912  DEP 0.000  indep 0.995  create 219/220  GB4c 0.050
+    GB4a/GB4b/GB4c  ALL +0.950 -> PASS
+
+Flat cosine solves ZERO dependency sessions; the ranker recovers both crowded-out sources via
+structural features cosine cannot see (`name_mentioned` — the spec literally says "tax" — plus
+`kind`/`same_file`) and solves 19/20. indep ~1.0 on both arms → no reasoning confound, retrieval
+is the only variable. This is the complete thesis: **the refiner-as-ranker adds value exactly
+when cosine is insufficient — when the needed record is not the most textually-similar one.**
+Every prior "ranker fails" was cosine already optimal on an easy pool, not the mechanism failing.
+
+En-route fixes (all committed): GB4a read the row-less `results.json` and printed 0.000 (hid a
+real +0.25 single-source win) → `_rows_for` sidecar reload; the per-group loss probe OOM'd the
+retrain at ep7 (unbatched 32-example forward) → chunk at `batch_size`; `--fresh-results` wipes
+stale keys so an archetype-set switch can't compare against a leftover arm.
+
+**Pending / next:**
+- [ ] Caveat to close honestly: `compose_pool`'s distractors are CONSTRUCTED rate-like, so the
+  hard retrieval is engineered. Proven: the MECHANISM works under hard retrieval. Open: do REAL
+  tasks have this property? → motivates a reasoning-domain benchmark (game theory / logic: the
+  needed principle ≠ the textually-similar fact = naturally hard retrieval; physics weaker,
+  formulas are universal not project-invented). Any new domain passes the ceiling/indep check
+  FIRST (3B reasoning ceiling confounds otherwise — witnessed as indep 0.333 pre-retrain).
+- [ ] Decide whether `compose`/`compose_pool`/`inventory_infer` join the default split (would
+  move every GB1-4 baseline — deliberate opt-in, not silent).
+- [ ] If adopted, extend `KIND_ORDER` in `memory_refiner.py` (`"infer"`/`"compose"` zero-hot
+  until added — 1-line change).
+- [ ] Optional: the dynamic-pool / K-step traversal design (latent VISITS each source across K
+  steps) — no longer NEEDED for a win (single-vector `h_K` already recovers both sources here),
+  but the natural escalation if a future domain needs >2 hops the midpoint can't span.
 
 ## 7. ADR — why RAG-critique → Stages 1+2, not a rewrite
 
