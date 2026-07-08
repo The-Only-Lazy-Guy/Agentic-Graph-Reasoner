@@ -105,7 +105,8 @@ def _oversample(pairs: list, factor: float, seed: int = 0) -> list:
 
 def train_lora(model_name: str, out_dir: str = LORA_DIR, epochs: int = 2,
                batch_size: int = 8, max_tokens: int = 1600, fable5_triples: str = TRIPLES,
-               why_oversample: float = 1.0, seed: int = 0, log=print) -> None:
+               why_oversample: float = 1.0, seed: int = 0, push_to_hub: str | None = None,
+               log=print) -> None:
     """why_oversample: repeat the Fable-5 why-pairs this many times (default 1.0 = off,
     unchanged behavior). Diagnosed need (2026-07-07 molab run): pooled loss plateaued at
     ~1.2 vs the code-only baseline's 0.041 at the same 2 epochs -- the repetitive synthetic
@@ -142,8 +143,9 @@ def train_lora(model_name: str, out_dir: str = LORA_DIR, epochs: int = 2,
         f"oversample={why_oversample}x (base {len(why_p)})")
     lm = RawLM(model_name)
     lm.train_on(pairs, epochs=epochs, batch_size=batch_size, max_tokens=max_tokens, log=log)
-    lm.save_checkpoint(out_dir)
-    log(f"  [lora] checkpoint -> {out_dir}")
+    lm.save_checkpoint(out_dir, push_to_hub=push_to_hub)
+    log(f"  [lora] checkpoint -> {out_dir}"
+        + (f" (pushed -> {push_to_hub})" if push_to_hub else ""))
     lm.cleanup()
 
 
@@ -794,6 +796,14 @@ def main():
     ap.add_argument("--why-oversample", type=float, default=1.0,
                     help="repeat Fable-5 why-pairs Nx during --train-lora (see train_lora "
                          "docstring; diagnosed fix for the ~1.2 loss plateau)")
+    ap.add_argument("--push-hub", default="",
+                    help="--train-lora: also push the checkpoint to this HF Hub repo "
+                         "(namespace/repo_name, needs a write-scoped HF_TOKEN in the "
+                         "environment) so it survives past this molab box. Every fresh "
+                         "retrain is a new random draw -- diagnosed 2026-07-08: same recipe, "
+                         "one run hit ceiling, a later run's why-query DEP rate cratered from "
+                         "1.000 to 0.487 purely from training variance. --lora then accepts "
+                         "this same repo_id in place of a local path to reload it anywhere.")
     ap.add_argument("--no-heal", action="store_true")
     ap.add_argument("--query-mode", choices=["spec", "why", "refiner"], default="spec",
                     help="v3 Stage 1/2: 'spec' = current GB1-validated path (unchanged), "
@@ -809,7 +819,7 @@ def main():
         raise SystemExit(0 if _selftest() else 1)
     if a.train_lora:
         train_lora(a.model, out_dir=a.lora, epochs=a.epochs, batch_size=a.batch_size,
-                  why_oversample=a.why_oversample)
+                  why_oversample=a.why_oversample, push_to_hub=a.push_hub or None)
         return
     if a.smoke:
         a.model = "Qwen/Qwen2.5-0.5B" if a.model == "Qwen/Qwen2.5-3B" else a.model

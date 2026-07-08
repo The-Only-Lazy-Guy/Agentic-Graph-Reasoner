@@ -346,6 +346,41 @@ class RawLM:
             encs.append((k, e))
         if n_skip:
             log(f"      [skipped {n_skip} over-budget pairs (> {max_tokens} tok)]")
+
+        # per-group (code vs why) probe loss, logged once per epoch: code pairs and why-pairs
+        # converge at very different rates (diagnosed 2026-07-07 -- code near-zero in ~1
+        # epoch, why-pairs plateau much higher, needed the oversample fix), and the single
+        # POOLED loss this file already logged can't tell "both fine" apart from "code
+        # converged, why-pairs still stuck" -- exactly the ambiguity a later molab run hit
+        # (pooled loss 0.8, degraded why-text, no way to tell from that number alone which
+        # group was actually the problem). Fixed 32-example held-out-ish sample per group,
+        # sampled ONCE so the curve is comparable epoch to epoch; a SEPARATE no_grad forward
+        # pass, so this cannot affect the actual training gradient -- backward() below still
+        # uses out.loss exactly as before, untouched.
+        is_why = lambda p: SEP_W in p and SEP_T not in p
+        enc_by_k = dict(encs)
+        probe_rng = random.Random(44)
+        probe_why = [enc_by_k[k] for k in probe_rng.sample(
+            [k for k, _ in encs if is_why(pairs[k][0])],
+            min(32, sum(1 for k, _ in encs if is_why(pairs[k][0]))))]
+        probe_code = [enc_by_k[k] for k in probe_rng.sample(
+            [k for k, _ in encs if not is_why(pairs[k][0])],
+            min(32, sum(1 for k, _ in encs if not is_why(pairs[k][0]))))]
+
+        def _probe_loss(probe_encs) -> float | None:
+            if not probe_encs:
+                return None
+            was_training = self.model.training
+            self.model.eval()
+            ids_l, lbl_l, mask_l = _pad_batch(probe_encs, pad)
+            with torch.no_grad():
+                out = self.model(torch.tensor(ids_l, device=self.dev),
+                                 attention_mask=torch.tensor(mask_l, device=self.dev),
+                                 labels=torch.tensor(lbl_l, device=self.dev))
+            if was_training:
+                self.model.train()
+            return float(out.loss)
+
         # length-sorted batches: uniform lengths -> minimal padding, bounded peak memory.
         # Batch ORDER is shuffled per epoch so sorting doesn't become a length curriculum.
         encs.sort(key=lambda ke: len(ke[1][0]))
@@ -391,7 +426,11 @@ class RawLM:
                     log(f"      ep {ep+1} batch {bi+1}/{len(batches)}: loss {tot/max(1, n_used):.3f} "
                         f"({time.time()-t0:.0f}s)")
             drop = f" (z_drop={n_dropped})" if n_dropped else ""
-            log(f"      epoch {ep+1}/{epochs}: loss {tot/max(1, n_used):.3f} on {n_used} pairs{drop}")
+            wl, cl = _probe_loss(probe_why), _probe_loss(probe_code)
+            probe_s = (f"  [probe] why={wl:.3f} code={cl:.3f}" if wl is not None and cl is not None
+                      else f"  [probe] why={wl} code={cl}")
+            log(f"      epoch {ep+1}/{epochs}: loss {tot/max(1, n_used):.3f} on {n_used} pairs{drop}"
+                f"{probe_s}")
         if self.molora is not None:
             for p in self.molora.parameters():
                 p.requires_grad_(True)
@@ -443,9 +482,23 @@ class RawLM:
         return [self.tok.decode(out[i, width:], skip_special_tokens=True)
                 for i in range(len(prompts))]
 
-    def save_checkpoint(self, path: str):
+    def save_checkpoint(self, path: str, push_to_hub: str | None = None):
+        """push_to_hub: optional "namespace/repo_name" -- ALSO pushes the LoRA adapter to HF
+        Hub (uses the ambient HF_TOKEN, same auth the environment already needs for model
+        downloads; this repo doesn't manage that token). Persisting the checkpoint matters
+        because artifacts/ doesn't survive a fresh molab box -- every retrain introduces real
+        training variance (diagnosed 2026-07-08: same recipe, same code, one run hit ceiling,
+        a later run scored a 0.8 pooled loss and cratered why-query's DEP rate) that has
+        nothing to do with whatever's actually being tested (memory/ranker quality) and
+        everything to do with which random LoRA draw a given molab box happened to land on.
+        load_checkpoint's `path` already transparently accepts a HF repo_id in place of a
+        local directory (PeftModel.from_pretrained resolves both the same way) -- no change
+        needed on the load side."""
         Path(path).mkdir(parents=True, exist_ok=True)
         self.model.save_pretrained(str(Path(path) / "lora"))
+        if push_to_hub:
+            self.model.push_to_hub(push_to_hub)
+            self.tok.push_to_hub(push_to_hub)
         if self.molora is not None:
             self.torch.save(self.molora.state_dict(), str(Path(path) / "molora.pt"))
 
