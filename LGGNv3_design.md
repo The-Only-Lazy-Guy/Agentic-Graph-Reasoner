@@ -108,9 +108,16 @@ lesson (§5) preemptively instead of discovering it again.
   tokens (the scale claim — real repos won't fit in a prompt, memory must approximate).
 - **GB3** Stage 1: why-query − spec-query DEP rate, same EVAL_SEEDS pool. PASS ≥ +0.03,
   NO-REGRESSION ≥ −0.02 (spec is already fairly explicit by construction).
-- **GB4** Stage 2 (gated on GB3 PASS): GB4a hit-rate (refiner-query top-pick == ground-truth
-  source session, Δ ≥ +0.05 vs why-flat-query); GB4b refiner-query − why-query DEP rate,
-  PASS ≥ +0.03.
+- **GB4** Stage 2 (gated on GB3 PASS): GB4a hit-rate (correct source record delivered at ANY
+  rank, membership — the rank-1-only variant is logged as a stricter sub-line), Δ ≥ +0.05 vs
+  why-flat-query; GB4b refiner-query − why-query DEP rate, PASS ≥ +0.03. GB4a/GB4b read `rows`
+  via `_rows_for` (results.json strips them to a sidecar jsonl — reading the stripped dict is
+  the bug fixed 2026-07-08 that hid a real +0.25 GB4a win).
+- **GB4c** Stage 2, MULTI-source (`compose` 2-hop only): all-sources-hit delta — fraction of
+  dependency sessions where EVERY required source (`source_session_idxs`) was delivered, refiner
+  vs why, PASS ≥ +0.05. This is the gate that can actually MOVE: solving a derived answer needs
+  all sources AND-ed, so the ranker's per-source edge compounds (GB4a passed but GB4b stayed
+  flat precisely because single-source solving never needed the retrieved record).
 
 ## 5. Progress log
 
@@ -441,13 +448,64 @@ over-includes tax — which this session explicitly requires excluding. Gold cha
 real sandboxed test execution. Not yet run through Stage 1/2 — proposed and ready, not
 validated.
 
+**2026-07-08 — GB4a metric bug fixed (real +0.25 refiner win was hidden), then compose 2-hop
+built to convert it into solve-rate (`7223572`, `ee0caed`, + loop/refiner wiring).**
+
+Two things happened, in order.
+
+*GB4a was reading 0.000 for BOTH arms — a metric bug, not the truth.* `--run` STRIPS `rows`
+from `project_results.json` (they bloat it) and writes them to a sidecar
+`artifacts/project_rows/{key}.jsonl`. `_report_gb4` read the row-less results dict, so
+`_hit_rate_from_rows` always saw `[]` → 0.000, regardless of actual delivery. Inspecting the
+sidecar jsonl directly: on the 8-epoch-LoRA molab run the refiner delivered the ground-truth
+source record **80/80 = 1.000** vs the flat why-query's **60/80 = 0.750** — GB4a is actually
+**+0.250, a strong PASS**, not the +0.000 FAIL the report claimed. Fix: `_rows_for(key)` falls
+back to the sidecar when in-dict rows are absent; selftest `[5d]` now simulates the strip +
+sidecar and asserts the hit-rate SURVIVES (the old selftest only checked "doesn't crash",
+never the value — which is exactly how this slipped). We nearly abandoned Stage 2 on a bug.
+
+*The corrected verdict reframed the whole problem.* The refiner's retrieval mechanism WORKS
+(+0.25 per-source). But GB4b (DEP-rate delta) was still flat (+0.012), and solve was even
+slightly lower (0.867 vs 0.889). GB4a and GB4b are DECOUPLED: perfect source retrieval → zero
+solve gain. That's the composition-gap proof in its sharpest form — the source is found
+perfectly and STILL isn't needed, because every existing "dependency" withholds a RAW LITERAL
+that sits verbatim in one earlier file, so solving is a copy, not a derivation.
+
+*So: `compose` archetype (opt-in, like `inventory_infer`).* s0 `tax.py` (`TAX_RATE`), s1
+`fees.py` (`FEE_RATE`) — two atomic facts in two separate files; s2 `catalog.py` distractor
+(keeps the pool > 2); s3 `compose` `checkout.py`: `final_price(p)=round(p*(1+tax+fee),2)`.
+The combined rate (tax+fee) and every test result exist in NO file — the model DERIVES them by
+retrieving BOTH facts and composing per the spec's rule. selftest `[1c]` asserts this
+mechanically: the test-asserted values appear in no earlier gold file ("derive, don't
+retrieve"), both facts DO live in their separate sources, neither is restated in the spec.
+Why it finally lets the ranker win: solving now needs BOTH sources AND-ed, so the ranker's
+per-source edge (+0.25) compounds on a 2-of-N pick (cosine ~0.75/src → ~0.56 both; ranker
+~1.0/src → ~1.0 both) and converts to a solve-rate gap. New gate **GB4c** = all-sources-hit
+delta (every required source delivered), refiner vs why, PASS ≥ +0.05.
+
+Wiring: `source_session_idxs` (LIST) multi-hop label in `project_gen` (primary
+`source_session_idx` kept for the single-source path); `source_sids` + `_all_sources_hit_rate`
+in `project_loop` (GB4c); `--archetypes` flag on `--run`/`--train-lora`/`--build-reprs`;
+`build_ranker_reprs` emits ONE training example PER source over the shared pool (multi-positive
+— teaches the ranker both records matter for one query, so `h_K` spans them and top-k delivers
+every source). Local 0.5B smoke confirmed the data path: 2 compose chains → 4 training examples
+(2 sources each), 0 skipped, both sources naturally in-pool. Not yet run on molab.
+
 **Pending:**
+- [ ] molab: build compose reprs + train ranker + `--query-mode refiner --archetypes compose`,
+  read GB4c — the first real test of whether the ranker's retrieval edge converts to solve-rate
+  now that solving genuinely needs both sources. Needs a LoRA that saw compose too
+  (`--train-lora --archetypes inventory,logparse,compose`).
 - [ ] molab: rerun `--query-mode refiner` with the feature-fusion ranker (rebuild reprs,
   retrain, GB4) — local smoke proved the pipeline runs, not that it wins
-- [ ] Decide whether `inventory_infer` becomes part of the default benchmark split (would
+- [ ] Decide whether `inventory_infer`/`compose` join the default benchmark split (would
   change every existing GB1-4 baseline — needs deliberate opt-in, not silent)
-- [ ] If adopted, extend `KIND_ORDER` in `memory_refiner.py` (currently 4 kinds, `"infer"`
-  would zero-hot until added — 1-line change)
+- [ ] If adopted, extend `KIND_ORDER` in `memory_refiner.py` (currently 4 kinds; `"infer"` and
+  `"compose"` zero-hot until added — 1-line change)
+- [ ] If GB4c still flat despite both sources delivered: the single-point `h_K` converging to
+  the source midpoint is the ceiling — escalate to the dynamic-pool / K-step traversal design
+  (the latent VISITS each source across K steps) the user sketched, now unblocked by a real
+  multi-hop benchmark to train/test it on.
 
 ## 7. ADR — why RAG-critique → Stages 1+2, not a rewrite
 

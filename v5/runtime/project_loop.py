@@ -107,7 +107,7 @@ def _oversample(pairs: list, factor: float, seed: int = 0) -> list:
 def train_lora(model_name: str, out_dir: str = LORA_DIR, epochs: int = 2,
                batch_size: int = 8, max_tokens: int = 1600, fable5_triples: str = TRIPLES,
                why_oversample: float = 1.0, seed: int = 0, push_to_hub: str | None = None,
-               log=print) -> None:
+               archetypes: tuple = ("inventory", "logparse"), log=print) -> None:
     """why_oversample: repeat the Fable-5 why-pairs this many times (default 1.0 = off,
     unchanged behavior). Diagnosed need (2026-07-07 molab run): pooled loss plateaued at
     ~1.2 vs the code-only baseline's 0.041 at the same 2 epochs -- the repetitive synthetic
@@ -117,7 +117,7 @@ def train_lora(model_name: str, out_dir: str = LORA_DIR, epochs: int = 2,
     count, 936 vs 690) -- it's a converged-vs-not gap. Oversampling gives the still-learning
     class more full passes without proportionally slowing the already-converged one; combine
     with a higher --epochs on the actual retrain (already an exposed CLI flag)."""
-    insts = make_split(seeds=TRAIN_SEEDS)
+    insts = make_split(archetypes=archetypes, seeds=TRAIN_SEEDS)
     pairs = []
     for inst in insts:
         repo: dict[str, str] = {}
@@ -234,12 +234,14 @@ def run_chain(lm, inst: dict, arm: str, budget: int = 2, max_new: int = 512,
             obs = obs_text(res)
         src_idx = s.get("source_session_idx")
         source_sid = inst["sessions"][src_idx]["sid"] if src_idx is not None else None
+        source_sids = _source_sids(inst, s)      # multi-hop: ALL required sources (compose)
         rows.append({"iid": inst["instance_id"], "sid": s["sid"], "kind": s["kind"],
                      "depth": s["depth"], "dependency": bool(s.get("withheld")),
                      "passed": passed, "attempts": attempts, "prompt_tokens": tok,
                      "mem_tokens": mem_tok, "why_tokens": why_tok,
                      "why_text": why_text[:200] if why_text else "",
-                     "source_sid": source_sid, "delivered_task_id": delivered_task_id,
+                     "source_sid": source_sid, "source_sids": source_sids,
+                     "delivered_task_id": delivered_task_id,
                      "delivered_task_ids": delivered_task_ids})
         if memory is not None:
             memory.write(goal=s["spec"], old=current, new=gen,
@@ -387,6 +389,7 @@ def run_arm(lm, insts: list[dict], arm: str, budget: int, max_new: int, heal: bo
             s, target = st["s"], st["target"]
             src_idx = s.get("source_session_idx")
             source_sid = st["inst"]["sessions"][src_idx]["sid"] if src_idx is not None else None
+            source_sids = _source_sids(st["inst"], s)     # multi-hop: ALL required sources
             st["rows"].append({"iid": st["inst"]["instance_id"], "sid": s["sid"],
                                "kind": s["kind"], "depth": s["depth"],
                                "dependency": bool(s.get("withheld")),
@@ -394,7 +397,7 @@ def run_arm(lm, insts: list[dict], arm: str, budget: int, max_new: int, heal: bo
                                "prompt_tokens": st["tok"], "mem_tokens": st["mem_tok"],
                                "why_tokens": st["why_tok"],
                                "why_text": st["why_text"][:200] if st["why_text"] else "",
-                               "source_sid": source_sid,
+                               "source_sid": source_sid, "source_sids": source_sids,
                                "delivered_task_id": st.get("delivered_task_id"),
                                "delivered_task_ids": st.get("delivered_task_ids", [])})
             if st["memory"] is not None:
@@ -473,6 +476,30 @@ def _report_gb3(results: dict, log=print) -> None:
     log(f"  GB3 why-query - spec-query DEP rate: {d:+.3f}  -> {verdict}")
 
 
+def _source_sids(inst: dict, s: dict) -> list[str]:
+    """All source-session sids a dependency session needs. Single-hop archetypes have one
+    (source_session_idx); compose (2-hop) has several (source_session_idxs) -- the answer only
+    exists once ALL of them are combined, so retrieval must land every one."""
+    idxs = s.get("source_session_idxs")
+    if not idxs:
+        idx = s.get("source_session_idx")
+        idxs = [idx] if idx is not None else []
+    return [inst["sessions"][j]["sid"] for j in idxs]
+
+
+def _all_sources_hit_rate(rows: list[dict]) -> float | None:
+    """GB4c (2-hop): fraction of MULTI-source dependency rows where EVERY required source
+    record was delivered. This is the metric compose was built for -- solving needs all sources
+    AND-ed, so a ranker's per-source edge only shows up here, not in single-source GB4a. Rows
+    with <=1 source are excluded (they'd trivially pass and dilute the signal); returns None
+    when the run has no multi-source rows at all (e.g. default inventory/logparse split)."""
+    multi = [r for r in rows if len(r.get("source_sids") or []) > 1]
+    if not multi:
+        return None
+    return sum(1 for r in multi
+               if set(r["source_sids"]) <= set(r.get("delivered_task_ids") or [])) / len(multi)
+
+
 def _hit_rate_from_rows(rows: list[dict], rank1: bool = False) -> float:
     """Fraction of dependency rows where the correct source record (source_sid, task #18) was
     delivered -- did memory find the RIGHT record, not just solve the session (a session can
@@ -526,6 +553,13 @@ def _report_gb4(results: dict, log=print) -> None:
     d_dep = ref["dep_rate"] - why["dep_rate"]
     log(f"  GB4b refiner-query - why-query DEP rate: {d_dep:+.3f}  -> "
         f"{'PASS' if d_dep >= 0.03 else 'FAIL'}")
+    # GB4c (2-hop / compose): did the ranker deliver EVERY required source, not just the
+    # primary? Only prints when the run actually contains multi-source rows.
+    ac_why, ac_ref = _all_sources_hit_rate(why_rows), _all_sources_hit_rate(ref_rows)
+    if ac_why is not None and ac_ref is not None:
+        d_ac = ac_ref - ac_why
+        log(f"  GB4c refiner all-sources-hit {ac_ref:.3f} vs why-query {ac_why:.3f}: {d_ac:+.3f}"
+            f"  -> {'PASS' if d_ac >= 0.05 else 'FAIL'}")
 
 
 # ── selftest (no model) ─────────────────────────────────────────────────────────
@@ -699,6 +733,24 @@ def _selftest() -> bool:
             "missing sidecar -> [] (graceful), not a crash"
         print("  [5d] GB4a rows survive results.json stripping (sidecar reload) -> PASS")
 
+        # [5e] GB4c multi-source (compose 2-hop): all-sources-hit counts a row ONLY when EVERY
+        # required source was delivered; a partial 1-of-2 must NOT count (that's the whole point
+        # -- solving needs both). Single-source rows are excluded (metric returns None).
+        from v5.runtime.project_gen import make_instance as _mi
+        cinst = _mi("compose", 0)
+        csess = cinst["sessions"][3]
+        s0, s1 = cinst["sessions"][0]["sid"], cinst["sessions"][1]["sid"]
+        assert _source_sids(cinst, csess) == [s0, s1], "compose row must carry BOTH source sids"
+        assert _all_sources_hit_rate([{"source_sids": [s0, s1],
+                                       "delivered_task_ids": [s0, s1]}]) == 1.0
+        assert _all_sources_hit_rate([{"source_sids": [s0, s1],
+                                       "delivered_task_ids": [s0]}]) == 0.0, \
+            "partial delivery (1 of 2) must NOT count as an all-sources hit"
+        assert _all_sources_hit_rate([{"source_sids": [s0],
+                                       "delivered_task_ids": []}]) is None, \
+            "single-source rows -> None (GB4c doesn't apply to them)"
+        print("  [5e] GB4c all-sources-hit: AND over multi-source, single-source excluded -> PASS")
+
         # _oversample: diagnosed fix for the ~1.2 loss plateau (harder Fable-5 why-pairs
         # under-converged relative to the near-deterministic synthetic code pairs)
         base = list(range(10))
@@ -847,13 +899,19 @@ def main():
                     "(required when --query-mode refiner)")
     ap.add_argument("--result-key", default="", help="override the results.json key "
                     "(default: arm, or f'{arm}_{query_mode}' when arm=memory)")
+    ap.add_argument("--archetypes", default="inventory,logparse",
+                    help="comma-separated archetypes for --run/--train-lora (default: the "
+                         "GB1-validated inventory,logparse split). Use 'compose' for the 2-hop "
+                         "derivation benchmark (GB4c), e.g. --archetypes compose")
     a = ap.parse_args()
+    archetypes = tuple(x.strip() for x in a.archetypes.split(",") if x.strip())
 
     if a.selftest:
         raise SystemExit(0 if _selftest() else 1)
     if a.train_lora:
         train_lora(a.model, out_dir=a.lora, epochs=a.epochs, batch_size=a.batch_size,
-                  why_oversample=a.why_oversample, push_to_hub=a.push_hub or None)
+                  why_oversample=a.why_oversample, push_to_hub=a.push_hub or None,
+                  archetypes=archetypes)
         return
     if a.smoke:
         a.model = "Qwen/Qwen2.5-0.5B" if a.model == "Qwen/Qwen2.5-3B" else a.model
@@ -881,7 +939,7 @@ def main():
     if a.run:
         if a.query_mode == "refiner" and not a.ranker:
             raise SystemExit("--query-mode refiner needs --ranker <memory_refiner checkpoint dir>")
-        insts = make_split(seeds=EVAL_SEEDS)
+        insts = make_split(archetypes=archetypes, seeds=EVAL_SEEDS)
         if a.n_chains:
             insts = insts[:a.n_chains]
         print(f"[project-loop] model={a.model} arm={a.arm} query_mode={a.query_mode} "

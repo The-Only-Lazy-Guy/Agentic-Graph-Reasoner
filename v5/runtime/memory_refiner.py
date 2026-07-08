@@ -235,11 +235,22 @@ def build_ranker_reprs(lm, insts: list[dict], embed_fn, chains_root: str = "data
 
         for st in active:
             s, target, memory = st["s"], st["target"], st["memory"]
-            if s.get("source_session_idx") is not None:
+            # multi-hop (compose): source_session_idxs is a LIST of every required source; the
+            # answer only exists once ALL are combined. Single-hop archetypes fall back to the
+            # singular source_session_idx. We emit ONE training example PER source over the
+            # SHARED pool -- teaching the ranker that BOTH records matter for this one query, so
+            # h_K converges to the region spanning them and read()'s top-k delivers every source
+            # (that AND-of-retrievals is what compose's GB4c measures).
+            src_idxs = s.get("source_session_idxs")
+            if not src_idxs:
+                idx = s.get("source_session_idx")
+                src_idxs = [idx] if idx is not None else []
+            if src_idxs:
                 n_dep += 1
-                correct_sid = st["inst"]["sessions"][s["source_session_idx"]]["sid"]
-                correct_impl = st["sid_to_impl"].get(correct_sid)
-                if correct_impl is None:
+                correct_sids = [st["inst"]["sessions"][j]["sid"] for j in src_idxs]
+                correct_impls = [ci for ci in (st["sid_to_impl"].get(sid) for sid in correct_sids)
+                                 if ci is not None]
+                if not correct_impls:
                     n_skipped_no_source += 1
                 else:
                     q = memory._embed_one(st["why_text"][:400])
@@ -254,13 +265,22 @@ def build_ranker_reprs(lm, insts: list[dict], embed_fn, chains_root: str = "data
                     if q_span is not None:
                         pool = _merge_cand(pool, memory.impls.search_ctx(q_span, k=pool_k))
                     cand_ids = [iid for iid, _ in pool][:pool_k]
-                    if correct_impl not in cand_ids:
+                    # ensure EVERY required source is in the pool -- inject missing ones by
+                    # overwriting non-source tail slots (a source the ranker can't even see
+                    # teaches nothing about ranking it).
+                    for ci in correct_impls:
+                        if ci in cand_ids:
+                            continue
                         n_injected += 1
-                        if len(cand_ids) >= pool_k:
-                            cand_ids[-1] = correct_impl
+                        if len(cand_ids) < pool_k:
+                            cand_ids.append(ci)
                         else:
-                            cand_ids.append(correct_impl)
-                    pos_i = cand_ids.index(correct_impl)
+                            for r in range(len(cand_ids) - 1, -1, -1):
+                                if cand_ids[r] not in correct_impls:
+                                    cand_ids[r] = ci
+                                    break
+                            else:
+                                cand_ids[-1] = ci
                     ctx_vecs = memory.impls.emb_ctx.get(cand_ids)
                     feat_vecs = np.stack([
                         _candidate_features(memory.impls.get(iid), memory.concepts,
@@ -273,9 +293,13 @@ def build_ranker_reprs(lm, insts: list[dict], embed_fn, chains_root: str = "data
                             [ctx_vecs, np.zeros((pad, ctx_vecs.shape[1]), ctx_vecs.dtype)], 0)
                         feat_vecs = np.concatenate(
                             [feat_vecs, np.zeros((pad, feat_vecs.shape[1]), feat_vecs.dtype)], 0)
-                    G.append(q); CTX.append(ctx_vecs); FEATS.append(feat_vecs)
-                    CMASK.append([True] * T + [False] * pad); POS.append(pos_i)
-                    n_kept += 1
+                    cmask_row = [True] * T + [False] * pad
+                    for ci in correct_impls:                     # one example per source
+                        if ci not in cand_ids:                   # couldn't fit -> skip that one
+                            continue
+                        G.append(q); CTX.append(ctx_vecs); FEATS.append(feat_vecs)
+                        CMASK.append(cmask_row); POS.append(cand_ids.index(ci))
+                        n_kept += 1
 
             gold_body = s["gold"][target]
             impl_id = memory.write(goal=s["spec"], old=st["current"], new=gold_body,
@@ -556,6 +580,10 @@ def main():
     ap.add_argument("--lora", default="artifacts/project_lora")
     ap.add_argument("--reprs", default="artifacts/ranker_reprs.npz")
     ap.add_argument("--out", default="artifacts/memory_ranker")
+    ap.add_argument("--archetypes", default="inventory,logparse",
+                    help="comma-separated archetypes for --build-reprs (default: the "
+                         "GB1-validated split). Use 'compose' for the 2-hop ranker (multi-"
+                         "source positives), e.g. --archetypes compose")
     ap.add_argument("--k", type=int, default=3)
     ap.add_argument("--r", type=int, default=128)
     ap.add_argument("--n-op", type=int, default=24)
@@ -576,7 +604,8 @@ def main():
         from v5.runtime.lggn_realizer import RawLM
         from v5.runtime.project_gen import make_split
         lm = RawLM.load_checkpoint(a.model, a.lora)
-        insts = make_split(seeds=range(100, 100 + a.n_seeds))
+        archetypes = tuple(x.strip() for x in a.archetypes.split(",") if x.strip())
+        insts = make_split(archetypes=archetypes, seeds=range(100, 100 + a.n_seeds))
         reprs = build_ranker_reprs(lm, insts, make_mpnet_embedder(), log=print)
         from pathlib import Path
         Path(a.reprs).parent.mkdir(parents=True, exist_ok=True)
