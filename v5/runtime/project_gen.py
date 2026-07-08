@@ -481,18 +481,22 @@ def is_low(stock, name):
                             n_distractors=n_distractors))
 
 
-def _compose_pool(rng: random.Random) -> dict:
-    """compose with 8 rate-like distractor modules crowding the candidate pool -- the hard-
-    retrieval variant built to give the ranker a fair shot at beating cosine (LGGNv3_design.md
-    2026-07-08). Same derived answer + labels as compose; only the pool size changes."""
-    inst = _compose(rng, n_distractors=8)
-    inst["archetype"] = "compose_pool"
-    return inst
+def _compose_pool_n(n: int):
+    """compose with n rate-like distractor modules crowding the candidate pool -- the hard-
+    retrieval variant that lets the ranker beat cosine (LGGNv3_design.md 2026-07-08). Same
+    derived answer + labels as compose; only pool size changes. Varying n gives a hardness
+    CURVE (n=0 compose easy -> n=8 hard): the ranker's margin over cosine should scale with n,
+    which is what proves the win is retrieval-difficulty-driven, not a fluke of one pool."""
+    def _f(rng: random.Random) -> dict:
+        inst = _compose(rng, n_distractors=n)
+        inst["archetype"] = f"compose_pool{'' if n == 8 else n}"
+        return inst
+    return _f
 
 
 ARCHETYPES = {"inventory": _inventory, "logparse": _logparse,
               "inventory_infer": _inventory_infer, "compose": _compose,
-              "compose_pool": _compose_pool}
+              "compose_pool4": _compose_pool_n(4), "compose_pool": _compose_pool_n(8)}
 
 
 def make_instance(archetype: str, seed: int) -> dict:
@@ -567,7 +571,8 @@ def _selftest() -> bool:
                     f"{s['sid']}: source_session_idxs {idxs} must all point earlier"
     exp = {"inventory": {2: 0, 4: 1}, "logparse": {1: 0, 3: 0},
            "inventory_infer": {2: 0, 4: 1, 5: 1}, "compose": {3: 0},
-           "compose_pool": {11: 0}}      # compose at depth 3 + 8 distractors = 11
+           "compose_pool4": {7: 0},       # compose at depth 3 + 4 distractors = 7
+           "compose_pool": {11: 0}}       # compose at depth 3 + 8 distractors = 11
     for arch, want in exp.items():
         got = {s["depth"]: s["source_session_idx"] for s in make_instance(arch, 0)["sessions"]
               if s["source_session_idx"] is not None}
@@ -579,7 +584,7 @@ def _selftest() -> bool:
     # retrieval, not composition). This is the "derive something that isn't in the graph"
     # requirement, asserted mechanically.
     import re as _re
-    for arch in ("compose", "compose_pool"):
+    for arch in ("compose", "compose_pool4", "compose_pool"):
         for seed in (0, 1, 2, 7):
             inst = make_instance(arch, seed)
             ss = inst["sessions"]
@@ -606,9 +611,10 @@ def _selftest() -> bool:
             # distractors are non-dependency create sessions; only compose carries withheld
             deps = [s for s in ss if s.get("withheld")]
             assert deps == [comp], f"{arch}: only the compose session may be a dependency"
-        if arch == "compose_pool":
-            assert len(make_instance(arch, 0)["sessions"]) == 12, "compose_pool = 3 + 8 + 1"
-    print("  [1c] compose(+pool): 2 atomic facts -> DERIVED answer, absent from graph -> PASS")
+            # session count = tax+fees+catalog (3) + n distractors + compose (1)
+            assert len(ss) == 4 + inst["params"]["n_distractors"], \
+                f"{arch}: expected {4 + inst['params']['n_distractors']} sessions, got {len(ss)}"
+    print("  [1c] compose(+pool4/pool): 2 atomic facts -> DERIVED answer, absent from graph -> PASS")
 
     # cross-seed variation: conventions actually vary
     specs = {make_instance("inventory", s)["params"]["line_i"] for s in range(12)}
