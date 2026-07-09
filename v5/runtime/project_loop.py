@@ -38,6 +38,7 @@ from v5.runtime.lggn_realizer import (SEP_N, SEP_T, SEP_W, TRIPLES, RawLM, load_
                                       why_pairs, why_prompt)
 from v5.runtime.project_gen import gold_state_after, make_split
 from v5.runtime.sandbox import obs_text, run_project
+from v5.runtime.traversal_ranker import TraversalRanker
 
 LORA_DIR = "artifacts/project_lora"
 RESULTS_PATH = "artifacts/project_results.json"
@@ -176,7 +177,8 @@ def train_lora(model_name: str, out_dir: str = LORA_DIR, epochs: int = 2,
 
 def run_chain(lm, inst: dict, arm: str, budget: int = 2, max_new: int = 512,
               heal: bool = True, chains_root: str = CHAINS_ROOT, embed_fn=None,
-              query_mode: str = "spec", ranker=None, log=print) -> list[dict]:
+              query_mode: str = "spec", ranker=None, gap_detector=None,
+              log=print) -> list[dict]:
     """query_mode (only matters when arm == "memory"):
       "spec"    (default, unchanged) — memory.read(goal=spec, ...), current GB1-validated path.
       "why"     — v3 Stage 1: Call A first (spec+current -> why_text via SEP_W), then
@@ -185,8 +187,12 @@ def run_chain(lm, inst: dict, arm: str, budget: int = 2, max_new: int = 512,
                   LM call per session.
       "refiner" — v3 Stage 2 (gated on Stage 1): same Call A, but query_fn (built from
                   `ranker`) overrides TotalMemory's flat-embed query with a K-step refined one.
+      "traversal" — v4: latent multi-hop traversal via TraversalRanker. Uses same
+                  Refiner.Net + feat_proj as "refiner", but runs sequential hops with
+                  changing pools (excl already-found). gap_detector optional early-stop.
     """
     memory = None
+    traversal = None
     chain_dir = Path(chains_root) / inst["instance_id"]
     if arm == "memory":
         from v5.memory.memory import TotalMemory
@@ -201,7 +207,12 @@ def run_chain(lm, inst: dict, arm: str, budget: int = 2, max_new: int = 512,
             net, feat_proj, ops, K_r = ranker                      # module cycle (memory_
             memory.query_fn = make_query_fn(net, feat_proj, ops, embed_fn, memory.impls,
                                             memory.concepts, K=K_r)  # refiner imports nothing
-                                                                     # from here at module level
+                                                                      # from here at module level
+        if query_mode == "traversal" and ranker is not None:
+            net, feat_proj, ops, K_r = ranker
+            traversal = TraversalRanker(memory.impls, memory.concepts, embed_fn,
+                                        net, feat_proj, ops,
+                                        gap_detector=gap_detector)
     repo: dict[str, str] = {}
     rows = []
     for s in inst["sessions"]:
@@ -233,17 +244,53 @@ def run_chain(lm, inst: dict, arm: str, budget: int = 2, max_new: int = 512,
         obs = ""
         passed, gen, attempts, tok = False, "", 0, 0
         delivered_task_id, delivered_task_ids = None, []
+        ranker_hit = 0.0; gap_correct = 0; gold_stop = 0
         for _ in range(budget):
             if arm == "memory" and memory is not None:
-                hit = memory.read(goal=goal_for_query, span=session_data(s["spec"], current),
-                                  obs=obs, file_path=target)
-                payload, mem_tok = hit.trace_text, hit.tokens_est
-                delivered_task_id = hit.impls[0].get("task_id") if hit.impls else None
-                delivered_task_ids = [i.get("task_id") for i in hit.impls]
-                if s.get("withheld"):     # dependency session -- which record actually landed?
-                    delivered = hit.impls[0].get("file_path") if hit.impls else None
-                    log(f"      [mem] {inst['instance_id']}/{s['sid']} kind={s['kind']} "
-                        f"target={target!r} delivered={delivered!r} n_impls={len(hit.impls)}")
+                if query_mode == "traversal" and traversal is not None:
+                    t_result = traversal.retrieve(
+                        goal=goal_for_query, span=session_data(s["spec"], current),
+                        file_path=target)
+                    payload = " ;; ".join(
+                        str(r.get("file_path", "")) for r in t_result.records)
+                    mem_tok = len(payload) // 4
+                    delivered_task_id = (t_result.records[0].get("task_id")
+                                         if t_result.records else None)
+                    delivered_task_ids = [r.get("task_id") for r in t_result.records
+                                          if r.get("task_id")]
+                    # Per-subsystem rewards: ranker hit-rate per hop
+                    gold_src_sids = _source_sids(inst, s)
+                    gold_stop = len(gold_src_sids)
+                    if t_result.hop_records and gold_src_sids:
+                        hits = sum(
+                            1 for hr in t_result.hop_records
+                            if any(r.get("task_id") in gold_src_sids for r in hr))
+                        ranker_hit = hits / len(t_result.hop_records)
+                    # Gap correctness: final h's P(stop) if gap detector active
+                    if gap_detector is not None and t_result.final_h is not None:
+                        import torch
+                        h_t = torch.as_tensor(t_result.final_h[None], dtype=torch.float32)
+                        hop_t = torch.tensor([t_result.hops - 1], dtype=torch.float32)
+                        mh_t = torch.tensor([t_result.hops], dtype=torch.float32)
+                        p_stop = gap_detector.forward(h_t, hop_t, mh_t).item()
+                        gap_correct = 1 if p_stop >= 0.5 else -1
+                    if s.get("withheld"):
+                        delivered = (t_result.records[0].get("file_path")
+                                     if t_result.records else None)
+                        log(f"      [trav] {inst['instance_id']}/{s['sid']} "
+                            f"kind={s['kind']} target={target!r} delivered={delivered!r} "
+                            f"hops={t_result.hops} ranker_hit={ranker_hit:.2f}")
+                else:
+                    hit = memory.read(goal=goal_for_query,
+                                      span=session_data(s["spec"], current),
+                                      obs=obs, file_path=target)
+                    payload, mem_tok = hit.trace_text, hit.tokens_est
+                    delivered_task_id = hit.impls[0].get("task_id") if hit.impls else None
+                    delivered_task_ids = [i.get("task_id") for i in hit.impls]
+                    if s.get("withheld"):
+                        delivered = hit.impls[0].get("file_path") if hit.impls else None
+                        log(f"      [mem] {inst['instance_id']}/{s['sid']} kind={s['kind']} "
+                            f"target={target!r} delivered={delivered!r} n_impls={len(hit.impls)}")
             slot = (payload + ("\n" + obs if obs else "")).strip()
             prompt = build_prompt(s["spec"], current, slot)
             gen = lm.generate_raw_batch([prompt], max_new_tokens=max_new)[0]
@@ -264,7 +311,11 @@ def run_chain(lm, inst: dict, arm: str, budget: int = 2, max_new: int = 512,
                      "why_text": why_text[:200] if why_text else "",
                      "source_sid": source_sid, "source_sids": source_sids,
                      "delivered_task_id": delivered_task_id,
-                     "delivered_task_ids": delivered_task_ids})
+                     "delivered_task_ids": delivered_task_ids,
+                     "hop_count": t_result.hops if query_mode == "traversal" and traversal is not None else 0,
+                     "ranker_hit_rate": ranker_hit,
+                     "gap_correctness": gap_correct,
+                     "gold_stop_hop": gold_stop})
         if memory is not None:
             memory.write(goal=s["spec"], old=current, new=gen,
                          trace=s["spec"][:400], verified=passed,
@@ -295,7 +346,7 @@ def _gen_chunked(lm, prompts: list[str], max_new_tokens: int, gen_batch: int) ->
 
 
 def run_arm(lm, insts: list[dict], arm: str, budget: int, max_new: int, heal: bool,
-            embed_fn=None, query_mode: str = "spec", ranker=None,
+            embed_fn=None, query_mode: str = "spec", ranker=None, gap_detector=None,
             chains_root: str = CHAINS_ROOT, gen_batch: int = 16, log=print) -> dict:
     """Batches generate_raw_batch calls ACROSS chains at each session depth, instead of
     running run_chain per instance (one prompt per generate call, 40x more forward passes
@@ -331,8 +382,14 @@ def run_arm(lm, insts: list[dict], arm: str, budget: int, max_new: int, heal: bo
             # pool search needs THAT specific store, not one shared across all 40 chains.
             if make_qfn is not None:
                 memory.query_fn = make_qfn(memory.impls, memory.concepts)
-        states.append({"inst": inst, "memory": memory, "repo": {}, "rows": [],
-                       "chain_dir": chain_dir})
+        traversal = None
+        if arm == "memory" and query_mode == "traversal" and ranker is not None:
+            net, feat_proj, ops, K_r = ranker
+            traversal = TraversalRanker(memory.impls, memory.concepts, embed_fn,
+                                        net, feat_proj, ops,
+                                        gap_detector=gap_detector)
+        states.append({"inst": inst, "memory": memory, "traversal": traversal,
+                       "repo": {}, "rows": [], "chain_dir": chain_dir})
 
     max_depth = max((len(st["inst"]["sessions"]) for st in states), default=0)
     for depth in range(max_depth):
@@ -379,17 +436,55 @@ def run_arm(lm, insts: list[dict], arm: str, budget: int, max_new: int, heal: bo
             for st in pending:
                 s, target = st["s"], st["target"]
                 if arm == "memory" and st["memory"] is not None:
-                    hit = st["memory"].read(goal=st["goal_for_query"],
-                                            span=session_data(s["spec"], st["current"]),
-                                            obs=st["obs"], file_path=target)
-                    st["payload"], st["mem_tok"] = hit.trace_text, hit.tokens_est
-                    st["delivered_task_id"] = hit.impls[0].get("task_id") if hit.impls else None
-                    st["delivered_task_ids"] = [i.get("task_id") for i in hit.impls]
-                    if s.get("withheld"):
-                        delivered = hit.impls[0].get("file_path") if hit.impls else None
-                        log(f"      [mem] {st['inst']['instance_id']}/{s['sid']} "
-                            f"kind={s['kind']} target={target!r} delivered={delivered!r} "
-                            f"n_impls={len(hit.impls)}")
+                    if query_mode == "traversal" and st.get("traversal") is not None:
+                        t_result = st["traversal"].retrieve(
+                            goal=st["goal_for_query"],
+                            span=session_data(s["spec"], st["current"]),
+                            file_path=target)
+                        st["payload"] = " ;; ".join(
+                            str(r.get("file_path", "")) for r in t_result.records)
+                        st["mem_tok"] = len(st["payload"]) // 4
+                        st["delivered_task_id"] = (t_result.records[0].get("task_id")
+                                                    if t_result.records else None)
+                        st["delivered_task_ids"] = [r.get("task_id") for r in t_result.records
+                                                     if r.get("task_id")]
+                        gold_src_sids = _source_sids(st["inst"], s)
+                        st["gold_stop"] = len(gold_src_sids)
+                        if t_result.hop_records and gold_src_sids:
+                            hits = sum(
+                                1 for hr in t_result.hop_records
+                                if any(r.get("task_id") in gold_src_sids for r in hr))
+                            st["ranker_hit"] = hits / len(t_result.hop_records)
+                        else:
+                            st["ranker_hit"] = 0.0
+                        if gap_detector is not None and t_result.final_h is not None:
+                            import torch
+                            h_t = torch.as_tensor(t_result.final_h[None], dtype=torch.float32)
+                            hop_t = torch.tensor([t_result.hops - 1], dtype=torch.float32)
+                            mh_t = torch.tensor([t_result.hops], dtype=torch.float32)
+                            p_stop = gap_detector.forward(h_t, hop_t, mh_t).item()
+                            st["gap_correctness"] = 1 if p_stop >= 0.5 else -1
+                        else:
+                            st["gap_correctness"] = 0
+                        st["hop_count"] = t_result.hops
+                        if s.get("withheld"):
+                            delivered = (t_result.records[0].get("file_path")
+                                         if t_result.records else None)
+                            log(f"      [trav] {st['inst']['instance_id']}/{s['sid']} "
+                                f"kind={s['kind']} target={target!r} delivered={delivered!r} "
+                                f"hops={t_result.hops} ranker_hit={st['ranker_hit']:.2f}")
+                    else:
+                        hit = st["memory"].read(goal=st["goal_for_query"],
+                                                span=session_data(s["spec"], st["current"]),
+                                                obs=st["obs"], file_path=target)
+                        st["payload"], st["mem_tok"] = hit.trace_text, hit.tokens_est
+                        st["delivered_task_id"] = hit.impls[0].get("task_id") if hit.impls else None
+                        st["delivered_task_ids"] = [i.get("task_id") for i in hit.impls]
+                        if s.get("withheld"):
+                            delivered = hit.impls[0].get("file_path") if hit.impls else None
+                            log(f"      [mem] {st['inst']['instance_id']}/{s['sid']} "
+                                f"kind={s['kind']} target={target!r} delivered={delivered!r} "
+                                f"n_impls={len(hit.impls)}")
                 slot = (st["payload"] + ("\n" + st["obs"] if st["obs"] else "")).strip()
                 st["prompt"] = build_prompt(s["spec"], st["current"], slot)
 
@@ -421,7 +516,11 @@ def run_arm(lm, insts: list[dict], arm: str, budget: int, max_new: int, heal: bo
                                "why_text": st["why_text"][:200] if st["why_text"] else "",
                                "source_sid": source_sid, "source_sids": source_sids,
                                "delivered_task_id": st.get("delivered_task_id"),
-                               "delivered_task_ids": st.get("delivered_task_ids", [])})
+                               "delivered_task_ids": st.get("delivered_task_ids", []),
+                               "hop_count": st.get("hop_count", 0),
+                               "ranker_hit_rate": st.get("ranker_hit", 0.0),
+                               "gap_correctness": st.get("gap_correctness", 0),
+                               "gold_stop_hop": st.get("gold_stop", 0)})
             if st["memory"] is not None:
                 st["memory"].write(goal=s["spec"], old=st["current"], new=st["gen"],
                                    trace=s["spec"][:400], verified=st["passed"],
@@ -927,10 +1026,12 @@ def main():
                          "1.000 to 0.487 purely from training variance. --lora then accepts "
                          "this same repo_id in place of a local path to reload it anywhere.")
     ap.add_argument("--no-heal", action="store_true")
-    ap.add_argument("--query-mode", choices=["spec", "why", "refiner"], default="spec",
+    ap.add_argument("--query-mode", choices=["spec", "why", "refiner", "traversal"],
+                    default="spec",
                     help="v3 Stage 1/2: 'spec' = current GB1-validated path (unchanged), "
                          "'why' = self-authored query (Call A + SEP_W, GB3), "
-                         "'refiner' = ranker-sourced query (Stage 2, GB4)")
+                         "'refiner' = ranker-sourced query (Stage 2, GB4), "
+                         "'traversal' = v4 latent multi-hop (needs --ranker + gap detector)")
     ap.add_argument("--ranker", default="", help="Stage 2: memory_refiner checkpoint dir "
                     "(required when --query-mode refiner)")
     ap.add_argument("--result-key", default="", help="override the results.json key "
@@ -986,19 +1087,38 @@ def main():
             insts = insts[:a.n_chains]
         print(f"[project-loop] model={a.model} arm={a.arm} query_mode={a.query_mode} "
               f"chains={len(insts)} budget={a.budget} heal={not a.no_heal}")
-        lm = RawLM.load_checkpoint(a.model, a.lora)
+        try:
+            lm = RawLM.load_checkpoint(a.model, a.lora)
+        except RuntimeError as _lora_err:
+            print(f"  [warn] LoRA load failed ({_lora_err!s:.100}), falling back to base model")
+            lm = RawLM(a.model)
         embed_fn = None
         if a.arm == "memory":
             from v5.memory.store import make_mpnet_embedder
             embed_fn = make_mpnet_embedder()
         ranker = None
-        if a.query_mode == "refiner":
+        if a.query_mode in ("refiner", "traversal"):
             from v5.runtime.memory_refiner import load_ranker
             ranker = load_ranker(a.ranker)
             print(f"  [ranker] loaded <- {a.ranker}")
+        gap_detector = None
+        if a.query_mode == "traversal" and a.ranker:
+            from v5.runtime.gap_detector import GapDetector
+            import torch
+            import os
+            gap_path = os.path.join(a.ranker, "gap.pt")
+            if os.path.exists(gap_path):
+                gap_detector = GapDetector(d_hidden=256, d_in=768)
+                gap_detector.load_state_dict(
+                    torch.load(gap_path, weights_only=True, map_location="cpu"))
+                gap_detector.eval()
+                print(f"  [gap] loaded <- {gap_path}")
+            else:
+                print(f"  [gap] not found at {gap_path}, proceeding without early-stop")
         res = run_arm(lm, insts, a.arm, budget=a.budget, max_new=a.max_new,
                       heal=not a.no_heal, embed_fn=embed_fn, query_mode=a.query_mode,
-                      ranker=ranker, gen_batch=a.gen_batch_size, log=print)
+                      ranker=ranker, gap_detector=gap_detector,
+                      gen_batch=a.gen_batch_size, log=print)
         res_slim = {k: v for k, v in res.items() if k != "rows"}
         # key "memory" (query_mode=spec, the default) stays literal — backward compatible with
         # the already-validated GB1/GB2 molab result, and lets GB3 reuse it as the baseline

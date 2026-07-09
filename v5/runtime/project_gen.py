@@ -39,6 +39,7 @@ TAX_NAMES = ["with_tax", "apply_tax", "add_tax", "taxed_total"]
 BULK_NAMES = ["bulk_price", "discounted_price", "apply_bulk", "bulk_total"]
 TAXES = [0.05, 0.06, 0.07, 0.08, 0.09, 0.11, 0.12]
 FEE_RATES = [0.02, 0.03, 0.04, 0.10, 0.15]   # service/handling surcharge — compose's 2nd fact
+STRATEGIES = ["nash", "maxmin"]              # game-theory solution concepts — v4 preference
 # compose_pool distractors: same "RATE = float + fn(amount)" shape as tax.py/fees.py, so flat
 # cosine can't separate the TWO true sources from the crowd on surface similarity -- this is the
 # ONLY condition under which a smarter ranker could beat cosine (see LGGNv3_design.md 2026-07-08:
@@ -494,9 +495,162 @@ def _compose_pool_n(n: int):
     return _f
 
 
+# ── archetype: PREFERENCE (conditional multi-hop, v4 traversal benchmark) ──────────────
+#
+# Every existing archetype retrieves independent parallel facts. compose is 2 independent
+# hops (tax + fee). There is no benchmark where you CAN'T know what to retrieve next until
+# you've retrieved the first thing — i.e. a CONDITIONAL dependency.
+#
+# This benchmark fills that gap. Structure:
+#   s0: config.py — PREFERRED_STRATEGY = "nash" (or "maxmin"), get_strategy()
+#   s1: nash.py   — nash_equilibrium(payoffs) implementation
+#   s2: maxmin.py — maxmin_solution(payoffs) implementation
+#   s3: utils.py  — helper functions (distractor)
+#   s4: solver.py — solve(payoffs) using the project's preferred strategy
+#
+# The spec for s4 says only "this project's established strategy preference" — does NOT
+# name nash or maxmin. The ONLY way to know which solver to use is to retrieve config.py
+# first, discover PREFERRED_STRATEGY, then retrieve the matching solver.
+#
+# For latent traversal (v4 Option B): config.py contains the keyword "nash" or "maxmin",
+# which naturally correlates with the matching solver file in mpnet space. h_1 refined
+# toward config_emb carries the keyword signal; search_ctx(h_1) at hop 2 retrieves the
+# matching solver by cosine similarity.
+
+def _preference(rng: random.Random) -> dict:
+    strategy = rng.choice(STRATEGIES)
+    utils_i = rng.randrange(len(ID_FMTS))
+    id_expr, id_hint = ID_FMTS[utils_i]
+
+    config_gold = f'''PREFERRED_STRATEGY = "{strategy}"
+
+def get_strategy():
+    return PREFERRED_STRATEGY
+'''
+    nash_gold = '''def nash_equilibrium(payoffs):
+    """Compute pure-strategy Nash equilibrium for a 2x2 game.
+    Both players use the SAME payoff matrix. Returns (row, col) or None."""
+    a, b, c, d = payoffs[0][0], payoffs[0][1], payoffs[1][0], payoffs[1][1]
+    for r, cj in [(0, 0), (0, 1), (1, 0), (1, 1)]:
+        row_pay = payoffs[r][cj]
+        col_pay = payoffs[r][cj]
+        if row_pay >= payoffs[1 - r][cj] and col_pay >= payoffs[r][1 - cj]:
+            return (r, cj)
+    return None
+'''
+    maxmin_gold = '''def maxmin_solution(payoffs):
+    """Compute maxmin strategy for a 2x2 game.
+    Returns (row_choice, col_choice) guaranteeing the maxmin payoff."""
+    a, b, c, d = payoffs[0][0], payoffs[0][1], payoffs[1][0], payoffs[1][1]
+    row_min0 = min(a, b)
+    row_min1 = min(c, d)
+    row_best = 0 if row_min0 >= row_min1 else 1
+    col_min0 = min(a, c)
+    col_min1 = min(b, d)
+    col_best = 0 if col_min0 >= col_min1 else 1
+    return (row_best, col_best)
+'''
+    solver_gold = f'''from config import get_strategy
+
+def solve(payoffs):
+    strat = get_strategy()
+    if strat == "nash":
+        from nash import nash_equilibrium
+        return nash_equilibrium(payoffs)
+    elif strat == "maxmin":
+        from maxmin import maxmin_solution
+        return maxmin_solution(payoffs)
+    return None
+'''
+    utils_gold = f'''def make_game_id(n):
+    return {id_expr}
+
+def is_valid_payoff(v):
+    return isinstance(v, (int, float))
+'''
+
+    def _solver_outcome(payoffs, strat):
+        if strat == "nash":
+            for r, cj in [(0, 0), (0, 1), (1, 0), (1, 1)]:
+                if payoffs[r][cj] >= payoffs[1 - r][cj] and payoffs[r][cj] >= payoffs[r][1 - cj]:
+                    return (r, cj)
+            return None
+        else:
+            a, b, c, d = payoffs[0][0], payoffs[0][1], payoffs[1][0], payoffs[1][1]
+            row_min0 = min(a, b)
+            row_min1 = min(c, d)
+            row_best = 0 if row_min0 >= row_min1 else 1
+            col_min0 = min(a, c)
+            col_min1 = min(b, d)
+            col_best = 0 if col_min0 >= col_min1 else 1
+            return (row_best, col_best)
+
+    payoffs = [[3, 1], [0, 2]] if strategy == "nash" else [[2, 0], [1, 3]]
+    gold_out = _solver_outcome(payoffs, strategy)
+
+    # Determine which solver session is the conditional target
+    solver_idx = 1 if strategy == "nash" else 2
+
+    sessions = [
+        dict(kind="create", target_file="config.py",
+             spec=("Create config.py. A constant PREFERRED_STRATEGY (a string naming this "
+                   "project's chosen game-theory solution concept). get_strategy() returns it."),
+             tests=[
+                 "import config\nassert isinstance(config.PREFERRED_STRATEGY, str)",
+                 "import config\nassert config.get_strategy() == config.PREFERRED_STRATEGY",
+             ],
+             gold={"config.py": config_gold}, withheld=[], source_session_idx=None,
+             source_session_idxs=[]),
+        dict(kind="create", target_file="nash.py",
+             spec=("Create nash.py. nash_equilibrium(payoffs) computes the pure-strategy Nash "
+                   "equilibrium for a 2x2 payoff matrix [[a,b],[c,d]]. Returns (row_choice, "
+                   "col_choice) if a pure NE exists, else None."),
+             tests=[
+                 "import nash\nassert nash.nash_equilibrium([[3,1],[0,2]]) == (0, 0)",
+                 "import nash\nassert nash.nash_equilibrium([[1,3],[2,0]]) == (0, 1)",
+                 "import nash\nassert nash.nash_equilibrium([[3,0],[0,2]]) == (0, 0)",
+             ],
+             gold={"nash.py": nash_gold}, withheld=[], source_session_idx=None,
+             source_session_idxs=[]),
+        dict(kind="create", target_file="maxmin.py",
+             spec=("Create maxmin.py. maxmin_solution(payoffs) computes the maxmin strategy for "
+                   "a 2x2 payoff matrix [[a,b],[c,d]]. Returns (row_choice, col_choice)."),
+             tests=[
+                 "import maxmin\nassert maxmin.maxmin_solution([[2,0],[1,3]]) == (1, 0)",
+                 "import maxmin\nassert maxmin.maxmin_solution([[0,2],[3,1]]) == (1, 1)",
+             ],
+             gold={"maxmin.py": maxmin_gold}, withheld=[], source_session_idx=None,
+             source_session_idxs=[]),
+        dict(kind="create", target_file="utils.py",
+             spec=(f"Create utils.py. make_game_id(n) returns an id string {id_hint}. "
+                   f"is_valid_payoff(v) checks if v is an int or float."),
+             tests=[
+                 f"import utils\nassert utils.make_game_id(7) == {_fmt_apply(id_expr, n=7)!r}",
+                 "import utils\nassert utils.is_valid_payoff(5) is True",
+                 "import utils\nassert utils.is_valid_payoff('x') is False",
+             ],
+             gold={"utils.py": utils_gold}, withheld=[], source_session_idx=None,
+             source_session_idxs=[]),
+        dict(kind="compose", target_file="solver.py",
+             spec=("Create solver.py. solve(payoffs) returns the game outcome using the "
+                   "strategy preference this project has already established. Import and use "
+                   "the matching solver. Return the result directly."),
+             tests=[
+                 f"import solver\nassert solver.solve({payoffs!r}) == {gold_out!r}",
+             ],
+             gold={"solver.py": solver_gold},
+             withheld=[strategy],
+             source_session_idx=0,
+             source_session_idxs=[0, solver_idx]),
+    ]
+    return dict(archetype="preference", sessions=sessions,
+                params=dict(strategy=strategy, utils_i=utils_i, payoffs=payoffs))
+
+
 ARCHETYPES = {"inventory": _inventory, "logparse": _logparse,
               "inventory_infer": _inventory_infer, "compose": _compose,
-              "compose_pool4": _compose_pool_n(4), "compose_pool": _compose_pool_n(8)}
+              "compose_pool4": _compose_pool_n(4), "compose_pool": _compose_pool_n(8),
+              "preference": _preference}
 
 
 def make_instance(archetype: str, seed: int) -> dict:
@@ -569,6 +723,8 @@ def _selftest() -> bool:
                 assert idxs[0] == idx, f"{s['sid']}: source_session_idxs[0] != source_session_idx"
                 assert all(0 <= j < s["depth"] for j in idxs), \
                     f"{s['sid']}: source_session_idxs {idxs} must all point earlier"
+    # For preference, source_session_idx is 0 (config) at depth 4 (solver). The conditional
+    # source_session_idxs depends on the seed (nash→[0,1] or maxmin→[0,2]) — checked below.
     exp = {"inventory": {2: 0, 4: 1}, "logparse": {1: 0, 3: 0},
            "inventory_infer": {2: 0, 4: 1, 5: 1}, "compose": {3: 0},
            "compose_pool4": {7: 0},       # compose at depth 3 + 4 distractors = 7
@@ -615,6 +771,30 @@ def _selftest() -> bool:
             assert len(ss) == 4 + inst["params"]["n_distractors"], \
                 f"{arch}: expected {4 + inst['params']['n_distractors']} sessions, got {len(ss)}"
     print("  [1c] compose(+pool4/pool): 2 atomic facts -> DERIVED answer, absent from graph -> PASS")
+
+    # preference (v4 traversal benchmark): conditional multi-hop. Config contains the
+    # keyword; the compose spec does NOT; the correct solver is determined by config.
+    for seed in (0, 1, 3, 7, 11):
+        inst = make_instance("preference", seed)
+        ss = inst["sessions"]
+        solver = ss[4]
+        strat = inst["params"]["strategy"]
+        assert strat in ("nash", "maxmin"), f"strategy must be nash or maxmin, got {strat}"
+        assert solver["kind"] == "compose", f"solver session must be compose-kind"
+        assert strat not in solver["spec"], f"strategy keyword {strat} leaked into the spec"
+        assert solver["source_session_idx"] == 0, "primary source must be config.py (s0)"
+        # conditional source list: config + the matching solver
+        want_idxs = [0, 1] if strat == "nash" else [0, 2]
+        assert solver["source_session_idxs"] == want_idxs, \
+            f"seed {seed} strat={strat}: idxs {solver['source_session_idxs']} != {want_idxs}"
+        # the derived answer must be genuinely DERIVED: the gold code calls a solver function,
+        # not just returns a hardcoded value. Check the gold body for import + function call.
+        gold_body = solver["gold"]["solver.py"]
+        assert "from config import get_strategy" in gold_body
+        assert "from nash import nash_equilibrium" in gold_body
+        assert "from maxmin import maxmin_solution" in gold_body
+        assert "solve(payoffs)" in gold_body
+    print("  [1d] preference: conditional multi-hop, strategy keyword withheld, derived answer absent -> PASS")
 
     # cross-seed variation: conventions actually vary
     specs = {make_instance("inventory", s)["params"]["line_i"] for s in range(12)}
