@@ -34,11 +34,16 @@ import shutil
 import time
 from pathlib import Path
 
+from v5.runtime.latent_projector import LatentProjector, project_lm_hidden
 from v5.runtime.lggn_realizer import (SEP_N, SEP_T, SEP_W, TRIPLES, RawLM, load_triples,
                                       why_pairs, why_prompt)
 from v5.runtime.project_gen import gold_state_after, make_split
 from v5.runtime.sandbox import obs_text, run_project
 from v5.runtime.traversal_ranker import TraversalRanker
+
+PROJECTOR_DATA = "artifacts/projection_data.npz"
+PROJECTOR_OUT = "artifacts/latent_projector.pt"
+PROJECTOR_LAYER = -1
 
 LORA_DIR = "artifacts/project_lora"
 RESULTS_PATH = "artifacts/project_results.json"
@@ -173,11 +178,84 @@ def train_lora(model_name: str, out_dir: str = LORA_DIR, epochs: int = 2,
     lm.cleanup()
 
 
+# ── latent projector ──────────────────────────────────────────────────────────────
+
+def build_projector_data(model_name: str, triples_path: str = TRIPLES,
+                         out_path: str = PROJECTOR_DATA,
+                         layer: int = PROJECTOR_LAYER,
+                         max_examples: int = 0, log=print) -> None:
+    """Extract (LM hidden → mpnet trace) pairs from Fable-5 triples.
+    One forward LM pass per triple (no autoregressive decode)."""
+    import numpy as np
+    triples = load_triples(triples_path, log=log)
+    if max_examples:
+        triples = triples[:max_examples]
+    lm = RawLM(model_name)
+    from v5.memory.store import make_mpnet_embedder
+    mpnet = make_mpnet_embedder()
+    lm_hidden, target_emb = [], []
+    log(f"  [proj-data] building {len(triples)} pairs from {triples_path} (layer {layer})...")
+    for k, t in enumerate(triples):
+        spec = why_prompt(t["goal"], t["old"])
+        h = project_lm_hidden(lm.model, lm.tok, spec, layer, lm.dev).numpy()
+        tgt = mpnet({"trace": t["trace"]})["trace"]
+        lm_hidden.append(h)
+        target_emb.append(tgt)
+        if (k + 1) % 200 == 0:
+            log(f"    {k+1}/{len(triples)}")
+    lm.cleanup()
+    np.savez(out_path, lm_hidden=np.asarray(lm_hidden),
+             target_emb=np.asarray(target_emb))
+    log(f"  [proj-data] saved {len(lm_hidden)} pairs -> {out_path}")
+
+
+def train_projector(data_path: str = PROJECTOR_DATA,
+                    out_path: str = PROJECTOR_OUT,
+                    d_lm: int = 0, d_proj: int = 768,
+                    epochs: int = 200, batch_size: int = 64,
+                    lr: float = 3e-4, log=print) -> None:
+    """Train LatentProjector to mimic mpnet trace embeddings from LM hidden states.
+    d_lm is inferred from the data's hidden dim when left at 0 (model-agnostic)."""
+    import numpy as np
+    import torch
+    from torch.utils.data import DataLoader, TensorDataset
+    data = np.load(data_path)
+    lm_h = torch.tensor(data["lm_hidden"])
+    target = torch.tensor(data["target_emb"])
+    n = len(lm_h)
+    if d_lm <= 0:
+        d_lm = lm_h.shape[1]
+    split = int(n * 0.9)
+    train_ds = TensorDataset(lm_h[:split], target[:split])
+    test_ds = TensorDataset(lm_h[split:], target[split:])
+    projector = LatentProjector(d_lm=d_lm, d_proj=d_proj)
+    opt = torch.optim.AdamW(projector.parameters(), lr=lr)
+    log(f"  [proj-train] {n} pairs, {split} train / {n-split} test, {epochs} epochs")
+    for ep in range(1, epochs + 1):
+        projector.train()
+        total_loss = 0.0
+        for x, y in DataLoader(train_ds, batch_size=batch_size, shuffle=True):
+            proj = projector(x)
+            loss = (1 - (proj * y).sum(dim=-1)).mean()
+            opt.zero_grad(); loss.backward(); opt.step()
+            total_loss += float(loss) * len(x)
+        projector.eval()
+        with torch.no_grad():
+            te_x, te_y = test_ds.tensors
+            te_proj = projector(te_x)
+            test_cos = (te_proj * te_y).sum(dim=-1).mean().item()
+        if ep % 50 == 0 or ep == 1:
+            log(f"    ep {ep:4d}/{epochs} train_loss={total_loss/split:.4f} test_cos={test_cos:.4f}")
+    torch.save(projector.state_dict(), out_path)
+    log(f"  [proj-train] saved -> {out_path} (test_cos={test_cos:.4f})")
+
+
 # ── chain runner ─────────────────────────────────────────────────────────────────
 
 def run_chain(lm, inst: dict, arm: str, budget: int = 2, max_new: int = 512,
               heal: bool = True, chains_root: str = CHAINS_ROOT, embed_fn=None,
               query_mode: str = "spec", ranker=None, gap_detector=None,
+              projector=None, latent_query: bool = False,
               log=print) -> list[dict]:
     """query_mode (only matters when arm == "memory"):
       "spec"    (default, unchanged) — memory.read(goal=spec, ...), current GB1-validated path.
@@ -190,6 +268,9 @@ def run_chain(lm, inst: dict, arm: str, budget: int = 2, max_new: int = 512,
       "traversal" — v4: latent multi-hop traversal via TraversalRanker. Uses same
                   Refiner.Net + feat_proj as "refiner", but runs sequential hops with
                   changing pools (excl already-found). gap_detector optional early-stop.
+      "traversal+latent" — same as "traversal", but skips Call A decode; initial_h is
+                  the LatentProjector output from a single LM hidden-state forward pass
+                  (projector arg must be provided; latent_query=True enables the path).
     """
     memory = None
     traversal = None
@@ -248,9 +329,14 @@ def run_chain(lm, inst: dict, arm: str, budget: int = 2, max_new: int = 512,
         for _ in range(budget):
             if arm == "memory" and memory is not None:
                 if query_mode == "traversal" and traversal is not None:
+                    initial_h = None
+                    if latent_query and projector is not None:
+                        hs = lm.get_pooled_hidden(goal_for_query,
+                                                  layer=PROJECTOR_LAYER)
+                        initial_h = projector(hs[None])[0].numpy()
                     t_result = traversal.retrieve(
                         goal=goal_for_query, span=session_data(s["spec"], current),
-                        file_path=target)
+                        file_path=target, initial_h=initial_h)
                     payload = " ;; ".join(
                         str(r.get("file_path", "")) for r in t_result.records)
                     mem_tok = len(payload) // 4
@@ -347,6 +433,7 @@ def _gen_chunked(lm, prompts: list[str], max_new_tokens: int, gen_batch: int) ->
 
 def run_arm(lm, insts: list[dict], arm: str, budget: int, max_new: int, heal: bool,
             embed_fn=None, query_mode: str = "spec", ranker=None, gap_detector=None,
+            projector=None, latent_query: bool = False,
             chains_root: str = CHAINS_ROOT, gen_batch: int = 16, log=print) -> dict:
     """Batches generate_raw_batch calls ACROSS chains at each session depth, instead of
     running run_chain per instance (one prompt per generate call, 40x more forward passes
@@ -419,6 +506,11 @@ def run_arm(lm, insts: list[dict], arm: str, budget: int, max_new: int, heal: bo
         for st in active:
             s, target = st["s"], st["target"]
             st["goal_for_query"] = st["why_text"] or s["spec"]
+            if latent_query and projector is not None:
+                hs = lm.get_pooled_hidden(st["goal_for_query"], layer=PROJECTOR_LAYER)
+                st["initial_h"] = projector(hs[None])[0].numpy()
+            else:
+                st["initial_h"] = None
             if arm == "ceiling":
                 others = {f: b for f, b in st["repo"].items() if f != target}
                 st["payload"] = repo_dump(others)
@@ -440,7 +532,8 @@ def run_arm(lm, insts: list[dict], arm: str, budget: int, max_new: int, heal: bo
                         t_result = st["traversal"].retrieve(
                             goal=st["goal_for_query"],
                             span=session_data(s["spec"], st["current"]),
-                            file_path=target)
+                            file_path=target,
+                            initial_h=st.get("initial_h"))
                         st["payload"] = " ;; ".join(
                             str(r.get("file_path", "")) for r in t_result.records)
                         st["mem_tok"] = len(st["payload"]) // 4
@@ -1000,6 +1093,15 @@ def main():
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--smoke", action="store_true", help="0.5B, 2 chains, arms off+memory")
     ap.add_argument("--train-lora", action="store_true")
+    ap.add_argument("--build-projector-data", action="store_true",
+                    help="extract LM hidden → mpnet trace pairs from Fable-5 triples "
+                         "(--projector-data specifies output)")
+    ap.add_argument("--train-projector", action="store_true",
+                    help="train LatentProjector on pre-built .npz data "
+                         "(--projector-data input, --projector-out output)")
+    ap.add_argument("--latent-query", action="store_true",
+                    help="use LatentProjector instead of explicit why-text decode for traversal "
+                         "query (works with --query-mode traversal)")
     ap.add_argument("--run", action="store_true")
     ap.add_argument("--model", default="Qwen/Qwen2.5-3B")
     ap.add_argument("--lora", default=LORA_DIR)
@@ -1026,12 +1128,14 @@ def main():
                          "1.000 to 0.487 purely from training variance. --lora then accepts "
                          "this same repo_id in place of a local path to reload it anywhere.")
     ap.add_argument("--no-heal", action="store_true")
-    ap.add_argument("--query-mode", choices=["spec", "why", "refiner", "traversal"],
+    ap.add_argument("--query-mode", choices=["spec", "why", "refiner", "traversal",
+                                             "traversal+latent"],
                     default="spec",
                     help="v3 Stage 1/2: 'spec' = current GB1-validated path (unchanged), "
                          "'why' = self-authored query (Call A + SEP_W, GB3), "
                          "'refiner' = ranker-sourced query (Stage 2, GB4), "
-                         "'traversal' = v4 latent multi-hop (needs --ranker + gap detector)")
+                         "'traversal' = v4 latent multi-hop (needs --ranker + gap detector), "
+                         "'traversal+latent' = traversal with LatentProjector instead of Call A")
     ap.add_argument("--ranker", default="", help="Stage 2: memory_refiner checkpoint dir "
                     "(required when --query-mode refiner)")
     ap.add_argument("--result-key", default="", help="override the results.json key "
@@ -1044,6 +1148,12 @@ def main():
                     help="wipe results.json + row sidecars before this --run (start of a new "
                          "comparison campaign, e.g. switching to --archetypes compose). Pass on "
                          "the FIRST run only; later arms append so GB3/GB4 still see every key.")
+    ap.add_argument("--projector-data", default=PROJECTOR_DATA,
+                    help="path for .npz (build-projector-data writes, train-projector reads)")
+    ap.add_argument("--projector-out", default=PROJECTOR_OUT,
+                    help="path to save trained LatentProjector weights (.pt)")
+    ap.add_argument("--projector-layer", type=int, default=PROJECTOR_LAYER,
+                    help="LM hidden layer index to extract (default -1 = last layer)")
     a = ap.parse_args()
     archetypes = tuple(x.strip() for x in a.archetypes.split(",") if x.strip())
 
@@ -1053,6 +1163,12 @@ def main():
         train_lora(a.model, out_dir=a.lora, epochs=a.epochs, batch_size=a.batch_size,
                   why_oversample=a.why_oversample, push_to_hub=a.push_hub or None,
                   archetypes=archetypes)
+        return
+    if a.build_projector_data:
+        build_projector_data(a.model, out_path=a.projector_data, layer=a.projector_layer)
+        return
+    if a.train_projector:
+        train_projector(data_path=a.projector_data, out_path=a.projector_out)
         return
     if a.smoke:
         a.model = "Qwen/Qwen2.5-0.5B" if a.model == "Qwen/Qwen2.5-3B" else a.model
@@ -1078,15 +1194,21 @@ def main():
         lm.cleanup()
         return
     if a.run:
-        if a.query_mode == "refiner" and not a.ranker:
+        latent_query = a.latent_query or a.query_mode == "traversal+latent"
+        qm = "traversal" if a.query_mode == "traversal+latent" else a.query_mode
+        if qm == "refiner" and not a.ranker:
             raise SystemExit("--query-mode refiner needs --ranker <memory_refiner checkpoint dir>")
+        if qm == "traversal" and latent_query and not a.ranker:
+            raise SystemExit("traversal+latent also needs --ranker (for the refiner net, even "
+                             "though the query comes from the projector)")
         if a.fresh_results:
             _clear_results(log=print)
         insts = make_split(archetypes=archetypes, seeds=EVAL_SEEDS)
         if a.n_chains:
             insts = insts[:a.n_chains]
-        print(f"[project-loop] model={a.model} arm={a.arm} query_mode={a.query_mode} "
-              f"chains={len(insts)} budget={a.budget} heal={not a.no_heal}")
+        print(f"[project-loop] model={a.model} arm={a.arm} query_mode={qm} "
+              f"latent_query={latent_query} chains={len(insts)} budget={a.budget} "
+              f"heal={not a.no_heal}")
         try:
             lm = RawLM.load_checkpoint(a.model, a.lora)
         except RuntimeError as _lora_err:
@@ -1097,12 +1219,12 @@ def main():
             from v5.memory.store import make_mpnet_embedder
             embed_fn = make_mpnet_embedder()
         ranker = None
-        if a.query_mode in ("refiner", "traversal"):
+        if qm in ("refiner", "traversal"):
             from v5.runtime.memory_refiner import load_ranker
             ranker = load_ranker(a.ranker)
             print(f"  [ranker] loaded <- {a.ranker}")
         gap_detector = None
-        if a.query_mode == "traversal" and a.ranker:
+        if qm == "traversal" and a.ranker:
             from v5.runtime.gap_detector import GapDetector
             import torch
             import os
@@ -1115,15 +1237,26 @@ def main():
                 print(f"  [gap] loaded <- {gap_path}")
             else:
                 print(f"  [gap] not found at {gap_path}, proceeding without early-stop")
+        projector = None
+        if latent_query:
+            if not Path(a.projector_out).exists():
+                print(f"  [warn] projector not found at {a.projector_out}, "
+                      f"run --train-projector first")
+            else:
+                import torch
+                sd = torch.load(a.projector_out, weights_only=True)
+                d_lm = sd["net.0.weight"].shape[1]
+                projector = LatentProjector(d_lm=d_lm)
+                projector.load_state_dict(sd)
+                projector.eval()
+                print(f"  [projector] loaded <- {a.projector_out} (d_lm={d_lm})")
         res = run_arm(lm, insts, a.arm, budget=a.budget, max_new=a.max_new,
-                      heal=not a.no_heal, embed_fn=embed_fn, query_mode=a.query_mode,
+                      heal=not a.no_heal, embed_fn=embed_fn, query_mode=qm,
                       ranker=ranker, gap_detector=gap_detector,
+                      projector=projector, latent_query=latent_query,
                       gen_batch=a.gen_batch_size, log=print)
         res_slim = {k: v for k, v in res.items() if k != "rows"}
-        # key "memory" (query_mode=spec, the default) stays literal — backward compatible with
-        # the already-validated GB1/GB2 molab result, and lets GB3 reuse it as the baseline
-        # without a re-run. Only "why"/"refiner" get namespaced (GB3/GB4 read these + "memory").
-        key = a.result_key or (a.arm if a.query_mode == "spec" else f"{a.arm}_{a.query_mode}")
+        key = a.result_key or (a.arm if qm == "spec" else f"{a.arm}_{a.query_mode}")
         merged = _save_results({key: res_slim})
         Path("artifacts/project_rows").mkdir(parents=True, exist_ok=True)
         with open(f"artifacts/project_rows/{key}.jsonl", "w", encoding="utf-8") as w:

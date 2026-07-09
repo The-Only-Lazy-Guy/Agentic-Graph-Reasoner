@@ -493,6 +493,23 @@ class RawLM:
         return [self.tok.decode(out[i, width:], skip_special_tokens=True)
                 for i in range(len(prompts))]
 
+    def get_pooled_hidden(self, text: str, max_tokens: int = 512,
+                          layer_idx: int = -1):
+        """Single forward pass -> mean-pooled last hidden state at layer_idx.
+        No autoregressive decode - ~1ms vs ~200ms for generate_raw of same length.
+        layer_idx=-1 uses the output hidden state (last layer before lm_head)."""
+        torch = self.torch
+        self.model.eval()
+        if self.molora is not None:
+            self.molora.eval()
+        self._set_z(None)
+        enc = self.tok(text[:2000], return_tensors="pt", truncation=True,
+                       max_length=max_tokens).to(self.dev)
+        with torch.no_grad():
+            out = self.model(**enc, output_hidden_states=True)
+        hs = out.hidden_states[layer_idx][0]
+        return hs.mean(dim=0).float().cpu()
+
     def save_checkpoint(self, path: str, push_to_hub: str | None = None):
         """push_to_hub: optional "namespace/repo_name" -- ALSO pushes the LoRA adapter to HF
         Hub (uses the ambient HF_TOKEN, same auth the environment already needs for model
