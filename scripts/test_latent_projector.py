@@ -49,6 +49,11 @@ def main():
     proj.load_state_dict(sd)
     proj.eval()
     lm = RawLM(MODEL)
+    # regression: get_pooled_hidden must accept layer= kwarg (the inference hook in
+    # run_arm/run_chain calls it as lm.get_pooled_hidden(goal, layer=PROJECTOR_LAYER)).
+    h_reg = lm.get_pooled_hidden("regression check", layer=PROJECTOR_LAYER)
+    assert h_reg.shape == (896,), h_reg.shape
+    print(f"  OK get_pooled_hidden(layer={PROJECTOR_LAYER}) -> {tuple(h_reg.shape)}")
     triples = load_triples("data/fable5/realizer_triples.jsonl")[:8]
     from v5.memory.store import make_mpnet_embedder
     mpnet = make_mpnet_embedder()
