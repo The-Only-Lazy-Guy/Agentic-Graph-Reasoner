@@ -238,7 +238,7 @@ def train_projector(data_path: str = PROJECTOR_DATA,
             proj = projector(x)
             loss = (1 - (proj * y).sum(dim=-1)).mean()
             opt.zero_grad(); loss.backward(); opt.step()
-            total_loss += float(loss) * len(x)
+            total_loss += loss.item() * len(x)
         projector.eval()
         with torch.no_grad():
             te_x, te_y = test_ds.tensors
