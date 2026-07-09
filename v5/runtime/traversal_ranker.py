@@ -128,14 +128,23 @@ class TraversalRanker:
         return h_out[0].numpy()
 
     def _top_k(self, h: np.ndarray, cand: list[tuple[str, float]],
-               ctx: np.ndarray) -> list[dict]:
-        """Select top-k records from candidates by cosine(h, ctx)."""
+                ctx: np.ndarray) -> list[dict]:
+        """Select top-k records from candidates by cosine(h, ctx).
+
+        NOTE: do NOT filter by sims[i] > 0. mpnet cosine between distinct-but-relevant
+        texts is routinely small or slightly negative; after hop 0 refines h toward the
+        first source, the *next* needed source often has cosine ~0 or negative and would
+        be wrongly discarded — collapsing multi-hop traversal to a single record (this was
+        the root cause of DEP=0.000 on `compose`). `search_ctx` already returns the top
+        pool_k most-similar candidates, so returning the top-k_impl of those by similarity
+        is the correct readout.
+        """
         ids = [iid for iid, _ in cand]
         if not ids or len(ctx) == 0:
             return []
         sims = np.dot(h, ctx.T) / (np.linalg.norm(h) * np.linalg.norm(ctx, axis=1) + 1e-9)
         top_indices = np.argsort(-sims)[:self.k_impl]
-        return [self.impl_store.get(ids[i]) for i in top_indices if i < len(ids) and sims[i] > 0]
+        return [self.impl_store.get(ids[i]) for i in top_indices if i < len(ids)]
 
     def retrieve(self, goal: str, span: str = "", file_path: str = "",
                  initial_h: np.ndarray | None = None) -> TraversalResult:

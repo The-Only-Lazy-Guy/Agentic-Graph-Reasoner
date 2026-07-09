@@ -208,7 +208,7 @@ These cost several push/fix cycles; recorded so a re-run does not repeat them.
 | LP2 | latent-query DEP == flat-start DEP (parity, no regression) | **PASS** (both 0.000 on `compose`) |
 | LP3 | cloud: test_cos > ~0.5 (full-precision hidden states) | **not yet** (0.18 @4bit) |
 | LP4 | end-to-end solves `compose` dep sessions (either mode) | **not yet** (DEP 0.000 for both) |
-| LP5 | traversal retrieves BOTH sources for `compose` (not 1) | **not yet** — root blocker |
+| LP5 | traversal retrieves BOTH sources for `compose` (not 1) | **RESOLVED** — `_top_k` `>0` filter bug fixed (see §7.3) |
 | LP6 | test whether a *decoded why-text* query beats flat start | **not yet** — traversal never runs Call A |
 
 ### 7.1 Where the actual problem is
@@ -244,6 +244,22 @@ V5_LM_QUANT=4bit python -m v5.runtime.project_loop --run --arm memory \
 
 # LP6 — decoded-why baseline (requires adding a traversal+why mode, see 7.1)
 ```
+
+### 7.3 Bug found & fixed: `_top_k` `sims[i] > 0` filter (root cause of DEP 0.000)
+
+`TraversalRanker._top_k` filtered candidates by `sims[i] > 0`. mpnet cosine between
+distinct-but-relevant texts is routinely small or slightly negative; after hop 0 refines
+`h` toward the first source, the *next* needed source (e.g. the 2nd `compose` input) gets
+cosine ≈ 0 / negative and was discarded. With `pool_k=16` the candidate pool is already
+the top-16 most-similar, so the extra `>0` gate collapsed multi-hop traversal to a single
+record — `compose` delivered only `fees.py`, never the 2nd source, DEP = 0.000 (both
+`traversal` and `traversal+latent` modes, since it is unrelated to the query method).
+
+Fix: return the top-`k_impl` candidates by similarity without the sign gate. Verified with
+`scripts/diag_traversal.py` on a 4-record compose-like store: `retrieve()` went from
+`['config.py','fees.py']` (2 records, 2nd source dropped at hop 1) to
+`['config.py','fees.py','utils.py','checkout.py']` (all 4, 2nd source retrieved at hop 1).
+`traversal_ranker --selftest` [3] "3 hops, 6 records" still passes.
 
 
 
