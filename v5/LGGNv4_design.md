@@ -146,25 +146,45 @@ latent-vs-mpnet cosine > 0; also regression-checks `get_pooled_hidden(layer=)` a
 Per-session logs: every `compose_*_s3` delivered `fees.py` (one of the two *source*
 files) instead of the target `checkout.py`, `hops=3`, `ranker_hit=0.50`.
 
-**Interpretation:** the speed win is real (`why_tok 0`, 35s), but the latent query is
-currently too weak for this benchmark — DEP 0.000 means the 2-hop derivation never
-completes because the traversal retrieves only one of the two required sources.
+### 4.1 Baseline comparison (`--query-mode traversal`, latent_query=False)
+
+The explicit-start baseline was run on the same 20 `compose` chains:
+
+| Mode | solve | DEP | indep | mem_tok | why_tok | wall |
+|------|-------|-----|-------|---------|---------|------|
+| `traversal` (flat `embed(goal)` start) | 0.500 | **0.000** | 0.667 | 3 | 0 | 29.4s |
+| `traversal+latent` (projector start) | 0.500 | **0.000** | 0.667 | 3 | 0 | 35.1s |
+
+The two are **identical**. The latent projector is at parity with the flat-embed start:
+it introduces no quality regression, but also no improvement (consistent with its
+`test_cos ≈ 0.18` — the learned vector is barely distinguishable from the spec embedding).
+
+**Important caveat:** `query_mode=traversal` does **not** run Call A in the current code
+(`run_arm` gates Call A on `query_mode in ("why", "refiner")`). So this "baseline" uses a
+flat `embed(goal)` start, NOT a decoded why-text. The original hypothesis — that a
+decoded-why query beats a flat spec query — was therefore **not actually tested**; both
+modes here start from essentially the same flat/weak vector.
 
 ## 5. Diagnosis — why DEP collapsed
 
-The projector's `test_cos ≈ 0.18` is the root cause. Under `V5_LM_QUANT=4bit`, the
-layer-`-1` hidden states are quantized/noisy, so the projection target (clean mpnet) is
-hard to regress and `initial_h` lands in the wrong region of mpnet space → the traversal
-starts from a bad vector and retrieves the wrong file (`fees.py`).
+**The blocker is the traversal/ranker on `compose`, not the query method.** Both the
+flat-start and latent-start traversals retrieve only **one** source (`fees.py`) and never
+acquire the second source needed for the 2-hop derivation, so `checkout.py` can never be
+produced (DEP 0.000 for both). This is independent of how `initial_h` is formed.
 
-Evidence the projection *can* work: the offline smoke test (Qwen2.5-0.5B, **full
-precision**) reached **mean cosine(latent, mpnet) = 0.83** on 8 held-out samples. The
-drop to 0.18 on the 3B/4bit cloud run is consistent with quantization-degraded hidden
-states, not with the architecture being unsound.
-
-Note also the test_cos *decreased* from ep1 (0.33) to ep200 (0.18): with 936 train pairs
-the MLP overfits the train split (loss 0.70→0.04) while test generalization degrades.
-This is a secondary issue; the dominant one is hidden-state quality.
+Secondary observations:
+- The projector's `test_cos ≈ 0.18` means it learned almost nothing beyond the spec
+  embedding — so even a *perfect* latent query would at best match the flat start, not
+  beat it. Under `V5_LM_QUANT=4bit` the layer-`-1` hidden states are quantized/noisy,
+  hurting regression. Evidence the architecture works: the offline smoke test
+  (Qwen2.5-0.5B, **full precision**) reached mean cosine(latent, mpnet) = **0.83** on 8
+  held-out samples.
+- test_cos *decreased* from ep1 (0.33) to ep200 (0.18): with 936 train pairs the MLP
+  overfits the train split (loss 0.70→0.04) while test generalization degrades.
+- The `compose` failure is likely a retrieval-depth issue: the gap detector may stop
+  after hop 1, or `k_impl`/`_top_k` returns only 1 record, so the payload never contains
+  both required sources. `mem_tok 3` (≈1 file path) confirms only one record reaches the
+  payload.
 
 ## 6. Bugs found & fixed during cloud bring-up
 
@@ -185,24 +205,47 @@ These cost several push/fix cycles; recorded so a re-run does not repeat them.
 | Gate | Condition | Status |
 |------|-----------|--------|
 | LP1 | smoke test: latent-vs-mpnet cosine > 0 (tiny data) | PASS (0.83 @0.5B full-prec) |
-| LP2 | cloud: latent-query DEP within X% of explicit-decode baseline | **not yet** — blocked by LP3 |
+| LP2 | latent-query DEP == flat-start DEP (parity, no regression) | **PASS** (both 0.000 on `compose`) |
 | LP3 | cloud: test_cos > ~0.5 (full-precision hidden states) | **not yet** (0.18 @4bit) |
-| LP4 | end-to-end solves `compose` dep sessions with latent query | **not yet** (DEP 0.000) |
+| LP4 | end-to-end solves `compose` dep sessions (either mode) | **not yet** (DEP 0.000 for both) |
+| LP5 | traversal retrieves BOTH sources for `compose` (not 1) | **not yet** — root blocker |
+| LP6 | test whether a *decoded why-text* query beats flat start | **not yet** — traversal never runs Call A |
 
-Immediate actions:
-1. **Baseline isolation** — run explicit-decode traversal to see if traversal itself is
-   sound on `compose` (independent of latent quality):
-   ```bash
-   V5_LM_QUANT=4bit python -m v5.runtime.project_loop --run --arm memory \
-     --query-mode traversal --ranker artifacts/traversal_ranker \
-     --lora artifacts/project_lora --archetypes compose
-   ```
-   If baseline DEP > 0, the issue is purely latent-query quality → step 2.
-   If baseline DEP is also 0, the ranker/traversal is broken on `compose` regardless.
-2. **Full-precision projector** — re-run Phase 1 **without** `V5_LM_QUANT=4bit` so
-   `get_pooled_hidden` sees clean hidden states; expect test_cos to rise toward the
-   0.83 seen in the smoke test, and DEP to recover. Projector training stays tiny, so
-   only the data-build forward passes get more expensive.
+### 7.1 Where the actual problem is
+
+The latent projector is **done and at parity** — re-training at full precision (LP3)
+would at best match the flat start, not unblock `compose`. The real work is the
+traversal/ranker on `compose`:
+
+- **LP5 — retrieval depth.** Both modes retrieve only `fees.py` (1 record, `mem_tok 3`).
+  The 2-hop derivation needs ≥2 sources in the payload. Investigate: is the gap detector
+  stopping after hop 1? Is `k_impl` / `_top_k` returning only 1 record? Does the payload
+  assembly (`" ;; ".join(r.file_path for r in records)`) get ≥2 sources when available?
+- **LP6 — does decode even help?** The original premise (decoded-why query > flat spec
+  query) is untested: `query_mode=traversal` skips Call A. To test it, seed the traversal
+  `initial_h` from `mpnet(why_text)` where `why_text = lm.generate_raw(why_prompt(...))`
+  (the "why" mode's Call A) — i.e. add a `traversal+why` mode that runs Call A then feeds
+  the decoded query into `traversal.retrieve(initial_h=mpnet(why_text))`. If that lifts
+  DEP, the projector's training target should be `mpnet(why_text)`, not `mpnet(trace)`.
+
+### 7.2 Commands
+
+```bash
+# LP3 — full-precision projector (clean hidden states; expect higher test_cos)
+python -m v5.runtime.project_loop --build-projector-data --model Qwen/Qwen2.5-3B \
+  --projector-data artifacts/projection_data.npz --projector-layer -1
+python -m v5.runtime.project_loop --train-projector \
+  --projector-data artifacts/projection_data.npz --projector-out artifacts/latent_projector.pt --epochs 200
+
+# LP5 — inspect retrieval depth on compose (already produces the trav logs above)
+V5_LM_QUANT=4bit python -m v5.runtime.project_loop --run --arm memory \
+  --query-mode traversal --ranker artifacts/traversal_ranker \
+  --lora artifacts/project_lora --archetypes compose
+
+# LP6 — decoded-why baseline (requires adding a traversal+why mode, see 7.1)
+```
+
+
 
 ## 8. Files
 
