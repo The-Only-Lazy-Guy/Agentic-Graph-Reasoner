@@ -64,6 +64,8 @@ def main():
             h = project_lm_hidden(lm.model, lm.tok, spec, PROJECTOR_LAYER, lm.dev)
             q = proj(h[None])[0]
             assert q.shape == (768,), q.shape
+            q_np = q.detach().numpy()          # regression: inference path calls .numpy()
+            assert q_np.shape == (768,), q_np.shape
             assert abs(q.norm().item() - 1.0) < 1e-4, q.norm().item()
             tgt = torch.tensor(mpnet({"trace": t["trace"]})["trace"])
             cos = float((q * tgt).sum().item())

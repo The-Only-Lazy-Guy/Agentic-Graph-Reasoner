@@ -333,7 +333,7 @@ def run_chain(lm, inst: dict, arm: str, budget: int = 2, max_new: int = 512,
                     if latent_query and projector is not None:
                         hs = lm.get_pooled_hidden(goal_for_query,
                                                   layer=PROJECTOR_LAYER)
-                        initial_h = projector(hs[None])[0].numpy()
+                        initial_h = projector(hs[None])[0].detach().numpy()
                     t_result = traversal.retrieve(
                         goal=goal_for_query, span=session_data(s["spec"], current),
                         file_path=target, initial_h=initial_h)
@@ -508,7 +508,7 @@ def run_arm(lm, insts: list[dict], arm: str, budget: int, max_new: int, heal: bo
             st["goal_for_query"] = st["why_text"] or s["spec"]
             if latent_query and projector is not None:
                 hs = lm.get_pooled_hidden(st["goal_for_query"], layer=PROJECTOR_LAYER)
-                st["initial_h"] = projector(hs[None])[0].numpy()
+                st["initial_h"] = projector(hs[None])[0].detach().numpy()
             else:
                 st["initial_h"] = None
             if arm == "ceiling":
