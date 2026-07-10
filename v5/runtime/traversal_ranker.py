@@ -144,7 +144,19 @@ class TraversalRanker:
             return []
         sims = np.dot(h, ctx.T) / (np.linalg.norm(h) * np.linalg.norm(ctx, axis=1) + 1e-9)
         top_indices = np.argsort(-sims)[:self.k_impl]
-        return [self.impl_store.get(ids[i]) for i in top_indices if i < len(ids)]
+        # ═══ INTEGRITY CHECK ═══
+        # If this assertion fires, Python is running stale bytecode from __pycache__
+        # where the return line still had `and sims[i] > 0`. The source is fixed; the
+        # .pyc must be purged (rm -rf __pycache__; python -B ...)
+        result = [self.impl_store.get(ids[i]) for i in top_indices if i < len(ids)]
+        n_real = len([r for r in result if r is not None])
+        expected = min(self.k_impl, len(ids))
+        assert n_real >= expected, (
+            f"_top_k: returned {n_real}/{expected} records (k_impl={self.k_impl}, "
+            f"cand={len(ids)}). Stale __pycache__ has `sims[i] > 0` filter active. "
+            f"Run: find . -name __pycache__ -type d -exec rm -rf {{}} + && python -B ..."
+        )
+        return result
 
     def retrieve(self, goal: str, span: str = "", file_path: str = "",
                  initial_h: np.ndarray | None = None) -> TraversalResult:
@@ -179,8 +191,17 @@ class TraversalRanker:
             hop_hs.append(h.copy())
 
             records = self._top_k(h, cand, ctx)
+            # DEBUG: log per-hop count
+            if len(records) < self.k_impl and len(cand) >= self.k_impl:
+                fps = [r.get("file_path","?") for r in records if r]
+                print(f"  [trav-debug] hop {hop}: cand={len(cand)} k_impl={self.k_impl} "
+                      f"returned={len(records)} files={fps}  <-- STALE BYTECODE")
             hop_records.append(records)
             for rec in records:
+                if rec is None:
+                    print(f"  [trav-debug] hop {hop}: _top_k returned None record! "
+                          f"impl_id missing from store")
+                    continue
                 rid = rec.get("impl_id", "") or id(rec)
                 if rid not in seen_ids:
                     seen_ids.add(rid)
@@ -188,6 +209,7 @@ class TraversalRanker:
 
             if self.gap_detector is not None:
                 if self.gap_detector.should_stop(h, hop, self.max_hops):
+                    print(f"  [trav-debug] gap detector stopped at hop {hop}")
                     break
 
         return TraversalResult(
