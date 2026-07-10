@@ -32,8 +32,13 @@ import random
 import re
 from pathlib import Path
 
-from v5.runtime.project_gen import make_split
 from v5.runtime.sandbox import run_project
+
+
+def _lazy_lazy_make_split(*args, **kw):
+    """Lazy import of project_gen.make_split — the module may not exist on all branches."""
+    from v5.runtime.project_gen import make_split
+    return make_split(*args, **kw)
 
 
 # ── constants ────────────────────────────────────────────────────────────────────
@@ -150,7 +155,7 @@ def run_baseline_eval(model_name: str, n: int, use_retrieval: bool = False,
     tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=trust)
     dev = next(model.parameters()).device
 
-    insts = make_split(archetypes=("compose",), seeds=range(100, 100 + n))
+    insts = _lazy_make_split(archetypes=("compose",), seeds=range(100, 100 + n))
     print(f"FROZEN baseline on {len(insts)} compose instances (model={model_name})\n")
 
     retrieval = _make_retrieval(ranker_path) if use_retrieval else None
@@ -297,7 +302,7 @@ def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every, ent_coef,
           f"trainable params={sum(p.numel() for p in trainable):,}", flush=True)
 
     rng = random.Random(seed)
-    held = make_split(archetypes=("compose",), seeds=EVAL_SEEDS)
+    held = _lazy_make_split(archetypes=("compose",), seeds=EVAL_SEEDS)
     train_seed_list = list(TRAIN_SEEDS)
 
     retrieval = _make_retrieval(ranker_path) if use_retrieval else None
@@ -358,7 +363,7 @@ def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every, ent_coef,
         ce = torch.nn.CrossEntropyLoss()
         for s in range(1, sft_steps + 1):
             seed_i = rng.choice(train_seed_list)
-            inst = make_split(archetypes=("compose",), seeds=range(seed_i, seed_i + 1))[0]
+            inst = _lazy_make_split(archetypes=("compose",), seeds=range(seed_i, seed_i + 1))[0]
             sess = inst["sessions"][COMPOSE_SESSION_DEPTH]
             target = sess["target_file"]
             gold_code = sess["gold"][target]
@@ -389,7 +394,7 @@ def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every, ent_coef,
     zero_var = 0
     for step in range(1, steps + 1):
         seed_i = rng.choice(train_seed_list)
-        inst = make_split(archetypes=("compose",), seeds=range(seed_i, seed_i + 1))[0]
+        inst = _lazy_make_split(archetypes=("compose",), seeds=range(seed_i, seed_i + 1))[0]
         sess = inst["sessions"][COMPOSE_SESSION_DEPTH]
         repo = _repo_before_compose(inst)
         tests = sess["tests"]
@@ -464,7 +469,7 @@ def _selftest() -> bool:
     print("compose_rl --selftest: prove RL math (gen + reward + advantage), no model.\n")
 
     # 1. Compose instances are valid
-    insts = make_split(archetypes=("compose",), seeds=range(100, 103))
+    insts = _lazy_lazy_make_split(archetypes=("compose",), seeds=range(100, 103))
     assert len(insts) == 3, f"expected 3 compose instances, got {len(insts)}"
     ok_gen = True
     for inst in insts:
