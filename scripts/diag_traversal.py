@@ -1,5 +1,7 @@
-"""Diagnostic: inspect TraversalRanker per-hop behavior on a small compose-like store.
-Specifically checks whether the `sims[i] > 0` filter in _top_k discards the 2nd source.
+"""Faithful reproduction of a compose chain's memory at the retrieval point of the
+compose session (s3). Store has 3 impls: tax.py, fees.py, catalog.py (the distractor).
+The compose spec withholds both rates. We run the REAL ranker's retrieve and print
+how many records come back + their file_paths.
 """
 import shutil
 import numpy as np
@@ -14,38 +16,45 @@ net, feat_proj, ops, K_r = load_ranker("artifacts/traversal_ranker")
 ROOT = "data/diag_store"
 shutil.rmtree(ROOT, ignore_errors=True)
 st = ImplStore(ROOT, embed_fn=embed)
-st.add(ctx_text="fee calculation per item using RATE", old="",
-       new="def fee(items): return sum(i.price * RATE for i in items)",
-       trace="compute fee from items", file_path="fees.py", task_id="src_fees", kind="create")
-st.add(ctx_text="config holds TAX and RATE constants", old="",
-       new="TAX = 0.1\nRATE = 0.05",
-       trace="config constants", file_path="config.py", task_id="src_config", kind="create")
-st.add(ctx_text="checkout totals cart then adds fee", old="",
-       new="def checkout(cart): return cart.total + fee(cart.items)",
-       trace="checkout combines total and fee", file_path="checkout.py",
-       task_id="src_checkout", kind="create")
-st.add(ctx_text="clamp helper utility", old="",
-       new="def clamp(x): return max(0, min(1, x))",
-       trace="clamp utility", file_path="utils.py", task_id="src_utils", kind="create")
 
-spec = "Implement checkout(cart) that returns the total using this project's fee logic."
+tax, fee, low = 0.10, 0.04, 5
+# Real memory.write stores ctx_text = goal[:400] (the SESSION SPEC), NOT the code.
+tax_spec = "Create tax.py. Constant TAX_RATE = 0.1. taxed(amount) returns amount*(1+TAX_RATE) rounded to 2 decimals."
+fee_spec = "Create fees.py. Constant FEE_RATE = 0.04. service_fee(amount) returns amount*FEE_RATE rounded to 2 decimals."
+cat_spec = "Create catalog.py. make_sku(n) returns an id string. is_low(stock, name) is True when the stock is strictly below 5."
+st.add(ctx_text=tax_spec[:400], old="",
+       new="TAX_RATE = 0.1\n\ndef taxed(amount):\n    return round(amount * (1 + TAX_RATE), 2)\n",
+       trace=tax_spec[:400], file_path="tax.py", task_id="src_tax", kind="create")
+st.add(ctx_text=fee_spec[:400], old="",
+       new="FEE_RATE = 0.04\n\ndef service_fee(amount):\n    return round(amount * FEE_RATE, 2)\n",
+       trace=fee_spec[:400], file_path="fees.py", task_id="src_fees", kind="create")
+st.add(ctx_text=cat_spec[:400], old="",
+       new="def make_sku(n):\n    return f'SKU-{n:03d}'\n\ndef is_low(stock, name):\n    return stock.get(name, 0) < 5\n",
+       trace=cat_spec[:400], file_path="catalog.py", task_id="src_catalog", kind="create")
+
+spec = ("Create checkout.py. final_price(p) returns p plus this project's tax charged on p "
+        "plus this project's service fee charged on p -- that is, the base price with BOTH "
+        "established rates applied to it and summed (base + tax-on-base + fee-on-base), rounded "
+        "to 2 decimals. Do NOT restate the rates; use the two values this project already "
+        "established. Write it self-contained in checkout.py.")
+
+import torch
+from v5.runtime.gap_detector import GapDetector
+gap = GapDetector(d_hidden=256, d_in=768)
+gap.load_state_dict(torch.load("artifacts/traversal_ranker/gap.pt", weights_only=True, map_location="cpu"))
+gap.eval()
+
 tr = TraversalRanker(st, concepts=None, embed_fn=embed, refiner_net=net,
-                      feat_proj=feat_proj, ops=ops, gap_detector=None, K_steps=K_r)
-
-# Monkeypatch _top_k to log full sim distribution per hop
-orig_topk = tr._top_k
-def logged_topk(h, cand, ctx):
-    ids = [iid for iid, _ in cand]
-    sims = np.dot(h, ctx.T) / (np.linalg.norm(h) * np.linalg.norm(ctx, axis=1) + 1e-9)
-    order = np.argsort(-sims)
-    top2 = [(ids[i], round(float(sims[i]), 3)) for i in order[:2]]
-    kept = [(ids[i], round(float(sims[i]), 3)) for i in order[:2] if sims[i] > 0]
-    print(f"    _top_k: top2={top2}  kept(>0)={kept}")
-    return orig_topk(h, cand, ctx)
-tr._top_k = logged_topk
-
-print(f"[diag] {len(st)} impls; spec='{spec[:50]}...'")
+                      feat_proj=feat_proj, ops=ops, gap_detector=gap, K_steps=K_r)
 res = tr.retrieve(goal=spec, span=spec, file_path="checkout.py")
-print("\n[diag] retrieve() records:", [r.get("file_path") for r in res.records])
+print("[diag] GAP-DETECTOR ON")
+print("[diag] records:", [(r.get("file_path"), r.get("task_id")) for r in res.records])
+print("[diag] n_records:", len(res.records), " hops:", res.hops)
 print("[diag] hop_records:", [[r.get("file_path") for r in hr] for hr in res.hop_records])
-print("[diag] all_records:", len(res.records), "hop_count:", res.hops)
+
+# Sanity: even a GARBAGE (random) initial_h must return >=2 records with the fix
+# (the >0 filter is gone). If a run returns 1 record, it is running PRE-FIX code.
+rng_h = np.random.RandomState(0).randn(768).astype(np.float32)
+res2 = tr.retrieve(goal=spec, span=spec, file_path="checkout.py", initial_h=rng_h)
+print("[diag] RANDOM initial_h -> n_records:", len(res2.records),
+      "files:", [r.get("file_path") for r in res2.records])
