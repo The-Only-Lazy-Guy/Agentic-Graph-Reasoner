@@ -361,8 +361,8 @@ def run_chain(lm, inst: dict, arm: str, budget: int = 2, max_new: int = 512,
                         p_stop = gap_detector.forward(h_t, hop_t, mh_t).item()
                         gap_correct = 1 if p_stop >= 0.5 else -1
                     if s.get("withheld"):
-                        delivered = (t_result.records[0].get("file_path")
-                                     if t_result.records else None)
+                        delivered = " ;; ".join(
+                            str(r.get("file_path", "")) for r in t_result.records)
                         log(f"      [trav] {inst['instance_id']}/{s['sid']} "
                             f"kind={s['kind']} target={target!r} delivered={delivered!r} "
                             f"hops={t_result.hops} ranker_hit={ranker_hit:.2f}")
@@ -561,8 +561,8 @@ def run_arm(lm, insts: list[dict], arm: str, budget: int, max_new: int, heal: bo
                             st["gap_correctness"] = 0
                         st["hop_count"] = t_result.hops
                         if s.get("withheld"):
-                            delivered = (t_result.records[0].get("file_path")
-                                         if t_result.records else None)
+                            delivered = " ;; ".join(
+                                str(r.get("file_path", "")) for r in t_result.records)
                             log(f"      [trav] {st['inst']['instance_id']}/{s['sid']} "
                                 f"kind={s['kind']} target={target!r} delivered={delivered!r} "
                                 f"hops={t_result.hops} ranker_hit={st['ranker_hit']:.2f}")
