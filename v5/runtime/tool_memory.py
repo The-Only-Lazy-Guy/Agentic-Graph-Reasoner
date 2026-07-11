@@ -140,9 +140,11 @@ def run_tool_induction(model_name: str, rounds: int, size: int, verify_n: int, e
     from v5.lm_loader import load_frozen_lm
 
     trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
+    print("  [tool] loading model...", flush=True)
     model = load_frozen_lm(model_name); model.eval()
     tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=trust)
     dev = next(model.parameters()).device
+    print("  [tool] model ready, building games...", flush=True)
 
     verify_games = [make_game(s, size=size) for s in list(TRAIN_SEEDS)[:verify_n]]
     eval_games = [make_game(s, size=size) for s in list(EVAL_SEEDS)[:eval_n]]
@@ -156,12 +158,16 @@ def run_tool_induction(model_name: str, rounds: int, size: int, verify_n: int, e
     for rnd in range(rounds):
         prompt = write_tool_prompt(examples, best_code, best_fails, best_acc)
         # SAMPLE several candidate tools this round (the model proposes; verification selects)
+        print(f"[round {rnd}] generating {samples} candidate tool(s)...", flush=True)
+        t0 = time.time()
         gens = batch_generate(model, tok, [prompt] * samples, dev, max_new=420,
                               sample=(samples > 1), temperature=0.8, chunk=chunk)
+        print(f"[round {rnd}] generated in {time.time()-t0:.0f}s, verifying...", flush=True)
         round_best = None
-        for gen in gens:
+        for ci, gen in enumerate(gens):
             code = _extract_code(gen)
             acc, fails, err = verify_solver(code, verify_games)
+            print(f"    cand {ci}: verify {acc:.0%}" + (f"  [{err}]" if err else ""), flush=True)
             if round_best is None or acc > round_best[0]:
                 round_best = (acc, code, fails, err)
         acc, code, fails, err = round_best
