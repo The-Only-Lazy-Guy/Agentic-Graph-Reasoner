@@ -11,6 +11,7 @@ pluggable: arithmetic now (recompute from upstream), verifier/entailment later f
 """
 from __future__ import annotations
 
+import ast
 import itertools
 import operator
 import re
@@ -112,6 +113,92 @@ def derive_reward(value, upstream_values: Sequence[str], gold=None, op: str = "+
                  "verdict": "zero (grounded but does not solve = copy/partial)"}
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# CODE derive reward — the SWE/code analog of the arithmetic reward above. "Grounded" here =
+# the solution COMPOSED from a stored graph node (called it, did NOT re-implement it inline);
+# "solves" = passes execution verification (the pluggable solves_fn, wired to tool_compose.verify_fn
+# in the run loop — kept out of this module so it stays no-model/no-subprocess for offline validation).
+#
+# Same philosophy as the arithmetic reward: verification is the GATE (a solution that fails — incl. a
+# pass-the-test overfit that fails the HARDENED cases — is PUNISHED, the code analog of lucky
+# hallucination), then COMPOSITION (reuse) and NOVELTY (authored a reusable atom) shape the positive
+# reward so RL is pushed off monolithic inlining toward composing the graph. Inline-but-correct is not
+# negative (don't punish solving) but LOWEST-positive, so GRPO's group-relative advantage demotes it
+# whenever a composer appears in the same group (the reward-select signal the gate measured).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _def_names(code: str) -> set[str]:
+    """Every function name DEFINED anywhere in `code` (top-level or nested) — so a locally
+    re-implemented shadow of a stored node's name is NOT counted as composing it."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return set()
+    return {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+
+
+def grounded_code(solution_code: str, stored_names: Sequence[str]) -> tuple[bool, list]:
+    """Grounded-by-COMPOSITION: the solution CALLS a stored node and does NOT redefine it inline.
+    Returns (composed, used_names). This is the static half; the run loop confirms causality by
+    counterfactual verify (remove the dep -> does it break) exactly as the gate did."""
+    defined = _def_names(solution_code)
+    used = sorted(n for n in stored_names
+                  if n not in defined and re.search(rf"\b{re.escape(n)}\s*\(", solution_code or ""))
+    return bool(used), used
+
+
+def code_reward(verified: bool, composed_used: Sequence[str] = (), authored_new_verified: int = 0,
+                base: float = 1.0, compose_bonus: float = 0.6, novelty_bonus: float = 0.3,
+                fail_penalty: float = 1.0) -> tuple[float, dict]:
+    """Reward one code solution. `verified` = solves_fn(code) (execution on HARDENED cases).
+    `composed_used` = grounded_code()'s causally-confirmed reused nodes. `authored_new_verified` =
+    count of NEW reusable atoms the solution added that themselves verify. Ordering (validated
+    offline): compose > compose (many) ; novelty > bare-solve > 0 ; fail < 0."""
+    if not verified:
+        return -fail_penalty, {"verified": False, "verdict": "PUNISH (fails / pass-the-test-hack)"}
+    r = base + compose_bonus * len(composed_used) + novelty_bonus * max(0, authored_new_verified)
+    verdict = "REWARD" + ("+compose" if composed_used else "") + \
+              ("+novel" if authored_new_verified else ("" if composed_used else " (bare solve)"))
+    return r, {"verified": True, "composed": list(composed_used),
+               "authored_new": authored_new_verified, "verdict": verdict}
+
+
+def _validate_code() -> bool:
+    """Offline (no model, no subprocess): grounded_code detects composition-not-inline, and
+    code_reward's ordering is correct. Mirrors _validate()'s discipline for the code path."""
+    print("\nCODE DERIVE REWARD validation (no model) — compose > novelty > bare-solve, punish fail.\n")
+    # grounded_code: calling a stored node = composed; redefining it inline = NOT composed
+    comp, used = grounded_code("def solve(R):\n    return build_adj(R)", ["build_adj", "payoff"])
+    inline, _ = grounded_code("def solve(R):\n    def build_adj(x):\n        return x\n    return build_adj(R)",
+                              ["build_adj"])
+    assert comp and used == ["build_adj"], f"call-a-stored-node must be composed: {used}"
+    assert not inline, "re-implementing a stored node inline is NOT composition"
+    print(f"  grounded_code: call->composed {used} | inline-redefine->not-composed -> "
+          f"{'PASS' if comp and not inline else 'FAIL'}")
+    # code_reward ordering
+    r_comp, _ = code_reward(True, composed_used=["build_adj"])
+    r_comp2, _ = code_reward(True, composed_used=["build_adj", "heap"])
+    r_novel, _ = code_reward(True, composed_used=[], authored_new_verified=1)
+    r_bare, _ = code_reward(True, composed_used=[])
+    r_fail, b_fail = code_reward(False)
+    checks = {
+        "compose > bare": r_comp > r_bare,
+        "more-compose > compose": r_comp2 > r_comp,
+        "novelty > bare": r_novel > r_bare,
+        "bare-solve > 0 (don't punish solving)": r_bare > 0,
+        "fail < 0 (punish hallucination/hack)": r_fail < 0,
+    }
+    for name, ok in checks.items():
+        print(f"  [{'PASS' if ok else 'FAIL'}] {name}")
+    print(f"  values: compose {r_comp:+.2f} · compose×2 {r_comp2:+.2f} · novel {r_novel:+.2f} · "
+          f"bare {r_bare:+.2f} · fail {r_fail:+.2f} ({b_fail['verdict']})")
+    ok = comp and not inline and all(checks.values())
+    print(f"\n=== CODE DERIVE REWARD: {'PASS' if ok else 'FAIL'} ===")
+    print("  verification is the gate (fail<0); composition + novelty shape the positive reward;")
+    print("  inline-but-correct is lowest-positive -> GRPO group-advantage demotes it vs a composer.")
+    return ok
+
+
 # ── validate the reward on KNOWN derive cases (no model). The reward MUST reward grounded+solves+
 # unique and PUNISH the hallucinated boundary case — else RL would optimize the wrong signal. ──
 def _validate():
@@ -146,4 +233,4 @@ def _validate():
 
 if __name__ == "__main__":
     import sys
-    sys.exit(0 if _validate() else 1)
+    sys.exit(0 if (_validate() and _validate_code()) else 1)
