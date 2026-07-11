@@ -1,0 +1,1 @@
+{"code": "def payoff(R, C, cell):\n    i, j = cell\n    return (R[i][j], C[i][j])", "acc": 1.0, "sig": "payoff(R, C, cell)", "desc": "the (row_payoff, col_payoff) at cell=(i, j)", "calls": []}

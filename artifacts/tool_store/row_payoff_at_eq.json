@@ -1,0 +1,1 @@
+{"code": "def row_payoff_at_eq(R, C):\n    equilibrium_cell = nash_solver(R, C)\n    row, col = equilibrium_cell\n    return payoff(R, C, (row, col))[0]", "acc": 1.0, "sig": "row_payoff_at_eq(R, C)", "desc": "Write `row_payoff_at_eq(R, C)`: the ROW player's p", "calls": ["nash_solver", "payoff"]}
