@@ -34,7 +34,7 @@ from collections import deque
 from dataclasses import dataclass
 
 from v5.runtime.artifact_graph import (ArtifactGraph, _author_prompt, _calls_in, _causal_credit,
-                                        _defs_in, _fingerprint)
+                                        _defnames, _defs_in, _fingerprint)
 from v5.runtime.tool_compose import verify_fn
 from v5.runtime.tool_memory import _extract_code
 
@@ -339,8 +339,9 @@ def reward(verified: bool, amorts: list, compress_lines: int, good_helpers: int,
 def score_rollout(graph: ArtifactGraph, task: Task, code: str, adv_names: list, ecases: list):
     """Compute (reward, breakdown, verified, causal_reused, sol_defs) for one solution."""
     sol_defs = _defs_in(code)
+    defined = _defnames(code)                          # nested-aware: a shadow is NOT reuse
     called = [a for a in adv_names
-              if a not in sol_defs and re.search(rf"\b{re.escape(a)}\s*\(", code)]
+              if a not in defined and re.search(rf"\b{re.escape(a)}\s*\(", code)]
     acc, _, _ = verify_fn(code, task.name, ecases, graph.deps_code(called))
     if acc < 0.999:
         R, bd = reward(False, [], 0, 0, 0, len(code))
@@ -674,6 +675,17 @@ def _selftest() -> bool:
     assert r_rw["causal"] == ["build_adj"], f"reward-select must pick the reuse candidate: {r_rw}"
     assert r_vf["causal"] == [], f"verify-select has no reuse preference: {r_vf}"
     print("  [10] best-of-N: select='reward' surfaces reuse, select='verify' does not -> PASS")
+
+    # [11] pipeline correctness (from the 3B trace): BFS and DFS must NOT fingerprint-merge (distinct
+    # algorithms -> distinct nodes), and a solution that RE-DEFINES an atom inline must not record it
+    # as a library call-edge
+    gm = ArtifactGraph(); gm.register("build_adj", _BUILD_ADJ, "adjacency", 0, [])
+    kb = gm.register("bfs_order", _STUB_BODY["bfs_order"][1], "bfs", 1, ["build_adj"])
+    kd = gm.register("dfs_order", _STUB_BODY["dfs_order"][1], "dfs", 2, ["build_adj"])
+    assert kb == "bfs_order" and kd == "dfs_order" and kb != kd, "BFS and DFS must stay distinct nodes"
+    shadow = ("def t(n, edges):\n    def build_adj(n, e):\n        return {}\n    return build_adj(n, edges)")
+    assert _calls_in(shadow, {"build_adj", "t"}, "t") == [], "inline redefinition is not a library call"
+    print("  [11] bfs!=dfs (no false merge) + inline-redefine != call-edge -> PASS")
 
     print("\n  ALGO_CURRICULUM SELFTEST -> PASS")
     return True

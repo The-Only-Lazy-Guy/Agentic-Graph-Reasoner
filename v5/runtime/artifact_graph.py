@@ -91,7 +91,12 @@ _FP_ARGS = [(0,), (1,), (2,), (3,), (4,), (5,), (7,), (9,), (10,), (17,), (19,),
             ([],), ([2],), ([1, 2, 3, 4],), ([4, 6, 8, 9],), ([2, 3, 5, 7, 11],), ("aba",), ("abc",),
             (3, [(0, 1, 2), (1, 2, 3)]),                                    # (n, edges)
             (4, [(0, 1, 2), (0, 2, 5), (1, 2, 1), (2, 3, 3)], 0),           # (n, edges, s)
-            (4, [(0, 1, 2), (0, 2, 5), (1, 2, 1), (2, 3, 3)], 0, 3)]        # (n, edges, s, t)
+            (4, [(0, 1, 2), (0, 2, 5), (1, 2, 1), (2, 3, 3)], 0, 3),        # (n, edges, s, t)
+            # graphs where BFS order != DFS order != topo, so order-sensitive traversals do NOT
+            # fingerprint-collide (fixes MERGE dfs_order==bfs_order — distinct algos, distinct fp):
+            (4, [(0, 1, 1), (1, 2, 1), (0, 3, 1)], 0),                      # bfs [0,1,3,2] dfs [0,1,2,3]
+            (5, [(0, 1, 1), (0, 2, 1), (1, 3, 1), (2, 4, 1)], 0),           # bfs≠dfs on a wider tree
+            (6, [(0, 1, 1), (0, 2, 1), (1, 3, 1), (2, 4, 1), (3, 5, 1)], 0)]
 
 
 def _fingerprint(full_code: str, fn_name: str, timeout: float = 6.0) -> str | None:
@@ -151,9 +156,22 @@ def _sig_of(src: str, name: str) -> str:
     return f"{name}({m.group(1).strip()})" if m else f"{name}(...)"
 
 
+def _defnames(code: str) -> set[str]:
+    """Every function name DEFINED anywhere in `code` (top-level or nested). Used to distinguish a
+    genuine library CALL from a locally re-implemented shadow of the same name."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return set()
+    return {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+
+
 def _calls_in(src: str, universe: set[str], self_name: str) -> list[str]:
-    """Names from `universe` that `src` calls (excluding itself)."""
-    return sorted(n for n in universe if n != self_name and re.search(rf"\b{re.escape(n)}\s*\(", src))
+    """Names from `universe` that `src` genuinely CALLS — excluding itself AND any name `src`
+    DEFINES locally (nested/inline), so a re-implemented shadow isn't recorded as a library edge."""
+    local = _defnames(src)
+    return sorted(n for n in universe if n != self_name and n not in local
+                  and re.search(rf"\b{re.escape(n)}\s*\(", src))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
