@@ -219,12 +219,16 @@ class TotalMemory:
 
     # ── write ────────────────────────────────────────────────────────────────
     def write(self, goal: str, old: str, new: str, trace: str, verified: bool,
-              file_path: str = "", task_id: str = "", kind: str = "") -> str | None:
-        """One loop outcome -> L1 record + L2 lifecycle. Returns impl_id (None = duplicate)."""
+              file_path: str = "", task_id: str = "", kind: str = "",
+              form: str = "", content: str = "") -> str | None:
+        """One loop outcome -> L1 record + L2 lifecycle. Returns impl_id (None = duplicate).
+        form/content (representation-open): the model's chosen node form (code|nl|latent|lora|ref)
+        and free payload for non-`new` forms -- threaded to L1; L2 lifecycle is form-agnostic."""
         impl_id = self.impls.add(
             ctx_text=goal[:400], old=old, new=new, trace=trace, file_path=file_path,
             outcome="pass" if verified else "fail",
-            verified="strong" if verified else "fail", task_id=task_id, kind=kind)
+            verified="strong" if verified else "fail", task_id=task_id, kind=kind,
+            form=form, content=content)
         if impl_id is None or self.embed_fn is None:
             return impl_id
         ctx_vec = self.impls.emb_ctx.get([impl_id])[0]

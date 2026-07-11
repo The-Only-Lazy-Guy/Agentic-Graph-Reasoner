@@ -41,18 +41,25 @@ class ImplStore:
 
     def add(self, ctx_text: str, old: str, new: str, trace: str, file_path: str = "",
             outcome: str = "unknown", verified: str = "weak", task_id: str = "",
-            concept_id: str = "", kind: str = "") -> str | None:
+            concept_id: str = "", kind: str = "", form: str = "", content: str = "") -> str | None:
         """Returns impl_id, or None if a duplicate (content-addressed on old+new+trace).
         kind (create/cross/debug/extend, project_gen.py's session kind): a structural signal
         cosine similarity has no access to -- stored so a ranker can use it as a feature, not
-        just the record's semantic content."""
+        just the record's semantic content.
+
+        form/content make the record REPRESENTATION-OPEN (the model chooses what to store, not us):
+          form in {"" (SWE edit, default), "code", "nl", "latent", "lora", "ref"} -- a model-tagged
+          label for HOW to use the payload; `content` is the free payload for non-`new` forms (a
+          latent/adapter reference, an NL note). Text forms (code/nl) keep the payload in `new` so
+          retrieval/dedup are unchanged; content is additive + defaults empty (back-compat). Credit
+          (graph_edits) is representation-agnostic, so no lifecycle change is needed per form."""
         impl_id = stable_id("impl", (old or "") + "\x00" + (new or "") + "\x00" + (trace or ""))
         if impl_id in self.records:
             return None
         rec = {"impl_id": impl_id, "ctx_text": (ctx_text or "")[:600], "old": old, "new": new,
                "trace": (trace or "")[:400], "file_path": file_path, "outcome": outcome,
                "verified": verified, "task_id": task_id, "concept_id": concept_id,
-               "kind": kind, "ts": time.time()}
+               "kind": kind, "form": form, "content": (content or "")[:2000], "ts": time.time()}
         if self.embed_fn is not None:
             v_ctx = self.embed_fn({impl_id: rec["ctx_text"] or rec["trace"] or old})[impl_id]
             v_skel = self.embed_fn({impl_id: _skel(rec["trace"]) or rec["ctx_text"]})[impl_id]
@@ -126,6 +133,17 @@ def _selftest() -> bool:
         s1, s3 = st.emb_skel.get([i1])[0], st.emb_skel.get([i3])[0]
         assert float(np.dot(s1, s3)) > 0.99, "masked skeletons collapse to same strategy"
         print("  [4] skeleton strategy-space -> PASS")
+
+        # representation-open: the model chooses the FORM (code / nl / ...) — stored + persisted.
+        ic = st.add("store a reusable helper", "", "def is_prime(n):\n    ...", "reusable primality",
+                    form="code")
+        inl = st.add("store a strategy note", "", "", "prefer Dijkstra when weights vary",
+                     form="nl", content="when edge weights differ, use Dijkstra not BFS")
+        assert st.get(ic)["form"] == "code" and st.get(inl)["form"] == "nl"
+        assert st.get(inl)["content"].startswith("when edge weights"), "nl payload in content"
+        st4 = ImplStore(td, embed_fn=make_fake_embedder())          # reload from disk
+        assert st4.get(ic)["form"] == "code" and st4.get(inl)["content"], "form/content persist"
+        print("  [5] representation-open form+content roundtrip (code + nl) -> PASS")
     print("\n  MEMORY.EPISODIC SELFTEST -> PASS")
     return True
 
