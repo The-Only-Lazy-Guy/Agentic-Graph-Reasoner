@@ -137,8 +137,10 @@ class ToolStore:
     def __init__(self):
         self.tools: dict[str, dict] = {}     # name -> {code, acc, sig, desc, calls}
 
+    REUSE_THRESH = 0.8      # reuse a primitive that's good-enough rather than re-induce from scratch
+
     def has(self, name):
-        return name in self.tools and self.tools[name]["acc"] >= 0.999
+        return name in self.tools and self.tools[name]["acc"] >= self.REUSE_THRESH
 
     def add(self, name, code, acc, sig, desc, calls=None):
         self.tools[name] = dict(code=code, acc=acc, sig=sig, desc=desc, calls=calls or [])
@@ -211,12 +213,13 @@ def run_library(model_name, size, rounds, samples, chunk, verify_n, eval_n):
                 store.add(r, code, acc, spec["sig"], spec["desc"])
                 n_induced += 1
 
-        # 3. COMPOSE + VERIFY: induce the task's composite with the referenced tools as deps
+        # 3. COMPOSE + VERIFY: induce the composite, SEEDED FROM THE DRAFT (which already calls the
+        # tools) so the loop refines a tool-calling version instead of re-deriving one that doesn't.
         deps = store.deps_for([r for r in refs if store.has(r)])
         avail = [(PRIMS[r]["sig"], PRIMS[r]["desc"]) for r in refs if store.has(r)]
         code, acc = induce(model, tok, dev, name, task_text, t["cases"](vg), _generic_diag,
                            avail=avail, deps_code=deps, rounds=rounds, samples=samples,
-                           chunk=chunk, eval_cases=t["cases"](eg))
+                           chunk=chunk, eval_cases=t["cases"](eg), seed_code=draft_code)
         calls = [r for r in PRIMS if code and (r + "(") in code]
         ev, _, _ = verify_fn(code, name, t["cases"](eg), store.deps_for(calls)) if code else (0.0, [], "")
         if acc >= 0.999:
@@ -227,13 +230,15 @@ def run_library(model_name, size, rounds, samples, chunk, verify_n, eval_n):
     # ── report: did the library COMPOUND? ───────────────────────────────────────
     _log("\n" + "=" * 60 + "\n=== SELF-EXTENDING LIBRARY RESULT ===")
     prims_in_store = [n for n in store.tools if n in PRIMS]
+    n_distinct = len(prims_in_store)
     _log(f"  tasks solved (100%): {sum(1 for _, ev, _ in results if ev >= 0.999)}/{len(TASKS)}")
-    _log(f"  primitives INDUCED (distinct): {n_induced}  -> {prims_in_store}")
+    _log(f"  primitives INDUCED (distinct): {n_distinct}  -> {prims_in_store}  "
+         f"({n_induced} induction events)")
     _log(f"  primitive REUSES across tasks: {n_reused}")
-    _log(f"  library grew to {len(store.tools)} tools ({len(prims_in_store)} primitives + "
-         f"{len(store.tools)-len(prims_in_store)} composites)")
-    _log(f"  COMPOUNDING: {n_reused} reuses on {n_induced} induced primitives "
-         f"(=> {'the library pays off — build once, reuse many' if n_reused > n_induced else 'little reuse'})")
+    _log(f"  library grew to {len(store.tools)} tools ({n_distinct} primitives + "
+         f"{len(store.tools)-n_distinct} composites)")
+    _log(f"  COMPOUNDING: {n_reused} reuses on {n_distinct} distinct primitives "
+         f"(=> {'the library pays off — build once, reuse many' if n_reused > n_distinct else 'little reuse'})")
     for name, ev, calls in results:
         _log(f"    {name:22} {ev:.0%}  calls={calls}")
     return results

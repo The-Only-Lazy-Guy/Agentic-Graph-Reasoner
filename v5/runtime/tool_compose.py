@@ -156,13 +156,24 @@ def _write_prompt(task: str, fn_name: str, avail: list[tuple[str, str]],
 
 def induce(model, tok, dev, fn_name: str, task: str, cases: list, diag, *, avail=None,
            deps_code: str = "", rounds: int = 8, samples: int = 4, chunk: int = 8,
-           eval_cases: list | None = None) -> tuple[str, float]:
+           eval_cases: list | None = None, seed_code: str | None = None) -> tuple[str, float]:
     """Induce ONE tool (primitive or composite). avail = [(sig, desc)] of callable stored tools;
-    deps_code = their source, prepended at verify-time so the tool can call them."""
+    deps_code = their source, prepended at verify-time so the tool can call them. seed_code = an
+    initial draft to refine from round 0 (e.g. a composite that already CALLS the right tools) so
+    the loop doesn't re-derive a non-calling version."""
     avail = avail or []
     best_code, best_acc = None, 0.0
     cur_code, cur_fails, cur_acc = None, [], 0.0
-    _log(f"\n── inducing {fn_name} ──")
+    if seed_code and f"def {fn_name}" in seed_code:
+        a, f, _ = verify_fn(seed_code, fn_name, cases, deps_code)
+        cur_code, cur_fails, cur_acc = seed_code, f, a
+        best_code, best_acc = seed_code, a
+        _log(f"\n── inducing {fn_name} (seeded from draft @ {a:.0%}) ──")
+    else:
+        _log(f"\n── inducing {fn_name} ──")
+    if best_acc >= 0.999:
+        _log(f"  [{fn_name}] seed already correct, stop")
+        return best_code, best_acc
     for rnd in range(rounds):
         prompt = _write_prompt(task, fn_name, avail, cur_code, cur_fails, cur_acc, diag)
         gens = batch_generate(model, tok, [prompt] * samples, dev, max_new=380,
