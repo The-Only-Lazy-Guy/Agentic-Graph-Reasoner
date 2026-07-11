@@ -151,6 +151,28 @@ class ToolStore:
     def signatures(self):
         return [(t["sig"], t["desc"]) for t in self.tools.values()]
 
+    def save(self, path):
+        """Persist verified tools to disk — the library is a MEMORY: a tool verified once (even
+        in a prior run) is loaded and reused, never re-induced (dodges induction variance)."""
+        import json
+        from pathlib import Path
+        d = Path(path); d.mkdir(parents=True, exist_ok=True)
+        for name, t in self.tools.items():
+            if t["acc"] >= self.REUSE_THRESH:      # only persist tools worth reusing (not junk)
+                (d / f"{name}.json").write_text(json.dumps(t), encoding="utf-8")
+
+    def load(self, path):
+        import json
+        from pathlib import Path
+        d = Path(path)
+        if not d.exists():
+            return
+        for f in d.glob("*.json"):
+            try:
+                self.tools[f.stem] = json.loads(f.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+
 
 def _compose_prompt(task_text, fn_name, catalog, built):
     """Advertise the CATALOG of tools the library can provide (the registry) — not just what's
@@ -171,7 +193,8 @@ def _compose_prompt(task_text, fn_name, catalog, built):
 # THE LIBRARY LOOP
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def run_library(model_name, size, rounds, samples, chunk, verify_n, eval_n):
+def run_library(model_name, size, rounds, samples, chunk, verify_n, eval_n,
+                store_dir="artifacts/tool_store", fresh=False):
     from transformers import AutoTokenizer
     from v5.lm_loader import load_frozen_lm
 
@@ -182,9 +205,16 @@ def run_library(model_name, size, rounds, samples, chunk, verify_n, eval_n):
     dev = next(model.parameters()).device
     vg = [make_game(s, size=size) for s in list(TRAIN_SEEDS)[:verify_n]]
     eg = [make_game(s, size=size) for s in list(EVAL_SEEDS)[:eval_n]]
-    _log(f"SELF-EXTENDING LIBRARY on {size}x{size} | model={model_name} | {len(TASKS)} tasks\n")
 
     store = ToolStore()
+    if not fresh:
+        store.load(store_dir)
+        if store.tools:
+            _log(f"  [lib] loaded {len(store.tools)} tool(s) from {store_dir}: "
+                 + ", ".join(f"{n}@{t['acc']:.0%}" for n, t in store.tools.items()))
+    _log(f"SELF-EXTENDING LIBRARY on {size}x{size} | model={model_name} | {len(TASKS)} tasks "
+         f"| store={store_dir}\n")
+
     catalog = [(n, PRIMS[n]["sig"], PRIMS[n]["desc"]) for n in PRIMS]   # tools the library CAN provide
     n_induced, n_reused, results = 0, 0, []
 
@@ -211,6 +241,7 @@ def run_library(model_name, size, rounds, samples, chunk, verify_n, eval_n):
                                    spec["diag"], rounds=rounds, samples=samples, chunk=chunk,
                                    eval_cases=spec["cases"](eg))
                 store.add(r, code, acc, spec["sig"], spec["desc"])
+                store.save(store_dir)             # persist immediately — build once, reuse forever
                 n_induced += 1
 
         # 3. COMPOSE + VERIFY: induce the composite, SEEDED FROM THE DRAFT (which already calls the
@@ -224,6 +255,7 @@ def run_library(model_name, size, rounds, samples, chunk, verify_n, eval_n):
         ev, _, _ = verify_fn(code, name, t["cases"](eg), store.deps_for(calls)) if code else (0.0, [], "")
         if acc >= 0.999:
             store.add(name, code, acc, f"{name}(R, C)", task_text[:50], calls=calls)
+            store.save(store_dir)
         results.append((name, ev, calls))
         _log(f"  => {name}: held-out {ev:.0%}, calls {calls or 'NOTHING (re-implemented)'}")
 
@@ -311,10 +343,14 @@ def main():
     ap.add_argument("--chunk", type=int, default=8)
     ap.add_argument("--verify-n", type=int, default=40)
     ap.add_argument("--eval-n", type=int, default=40)
+    ap.add_argument("--store-dir", default="artifacts/tool_store",
+                    help="persist verified tools here; a later run loads + reuses them (the memory)")
+    ap.add_argument("--fresh", action="store_true", help="ignore any persisted tools, start empty")
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
-    run_library(a.model, a.size, a.rounds, a.samples, a.chunk, a.verify_n, a.eval_n)
+    run_library(a.model, a.size, a.rounds, a.samples, a.chunk, a.verify_n, a.eval_n,
+                a.store_dir, a.fresh)
 
 
 if __name__ == "__main__":

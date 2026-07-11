@@ -51,12 +51,31 @@ def _log(*a):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _extract_code(gen: str) -> str:
-    """Pull the solver code out of a model generation (fenced block, or from `def solve_game`)."""
+    """Pull code out of a model generation. Prefer a fenced ```python block; else cut from the
+    first `def `. ALWAYS strip stray ``` fence lines and any `import X`/`from X import` of a
+    bare (dotless) name — the referenced tools are defined IN THE SAME script (prepended deps),
+    so importing them raises ModuleNotFoundError."""
+    gen = gen or ""
     m = re.search(r"```(?:python)?\s*(.*?)```", gen, flags=re.DOTALL)
-    if m:
-        return m.group(1).strip()
-    i = gen.find("def solve_game")
-    return gen[i:].strip() if i >= 0 else gen.strip()
+    code = m.group(1) if m else gen
+    if not m:
+        i = code.find("def ")
+        if i >= 0:
+            code = code[i:]
+    out = []
+    for ln in code.splitlines():
+        s = ln.strip()
+        if s in ("```", "```python"):
+            continue
+        # drop `import foo` / `from foo import ...` for a bare local name (no dot) — those are the
+        # in-scope helper tools, not real modules. Keep dotted stdlib imports (itertools, etc.).
+        im = re.match(r"(?:from|import)\s+([A-Za-z_][A-Za-z0-9_]*)\b", s)
+        if im and "." not in s.split("import")[0] and im.group(1) not in ("itertools", "math",
+                                                                          "functools", "collections"):
+            if s.startswith("from ") or (s.startswith("import ") and "," not in s):
+                continue
+        out.append(ln)
+    return "\n".join(out).strip()
 
 
 def verify_solver(code: str, games: list[dict], timeout: float = 8.0,
