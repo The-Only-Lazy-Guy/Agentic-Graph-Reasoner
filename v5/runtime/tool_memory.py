@@ -41,6 +41,11 @@ from v5.runtime.reason_rl import make_game, pure_ne, EVAL_SEEDS, TRAIN_SEEDS, ba
 _SENTINEL = "TOOLRESULT"
 
 
+def _log(*a):
+    """Write to STDERR (molab shows stderr live; this script's stdout was being swallowed)."""
+    print(*a, file=sys.stderr, flush=True)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERIFY-BY-EXECUTION  — run the model's candidate tool against the oracle
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -140,34 +145,34 @@ def run_tool_induction(model_name: str, rounds: int, size: int, verify_n: int, e
     from v5.lm_loader import load_frozen_lm
 
     trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
-    print("  [tool] loading model...", flush=True)
+    _log("  [tool] loading model...")
     model = load_frozen_lm(model_name); model.eval()
     tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=trust)
     dev = next(model.parameters()).device
-    print("  [tool] model ready, building games...", flush=True)
+    _log("  [tool] model ready, building games...")
 
     verify_games = [make_game(s, size=size) for s in list(TRAIN_SEEDS)[:verify_n]]
     eval_games = [make_game(s, size=size) for s in list(EVAL_SEEDS)[:eval_n]]
     examples = [make_game(s, size=size) for s in list(TRAIN_SEEDS)[verify_n:verify_n + 3]]
 
-    print(f"TOOL-INDUCTION on {size}x{size} Nash | model={model_name} | rounds={rounds} "
-          f"samples/round={samples} verify={verify_n} eval={eval_n}\n", flush=True)
+    _log(f"TOOL-INDUCTION on {size}x{size} Nash | model={model_name} | rounds={rounds} "
+          f"samples/round={samples} verify={verify_n} eval={eval_n}\n")
 
     tool_bank: list[dict] = []          # verified tools: {code, acc, round, parent}
     best_code, best_acc, best_fails = None, 0.0, []
     for rnd in range(rounds):
         prompt = write_tool_prompt(examples, best_code, best_fails, best_acc)
         # SAMPLE several candidate tools this round (the model proposes; verification selects)
-        print(f"[round {rnd}] generating {samples} candidate tool(s)...", flush=True)
+        _log(f"[round {rnd}] generating {samples} candidate tool(s)...")
         t0 = time.time()
         gens = batch_generate(model, tok, [prompt] * samples, dev, max_new=420,
                               sample=(samples > 1), temperature=0.8, chunk=chunk)
-        print(f"[round {rnd}] generated in {time.time()-t0:.0f}s, verifying...", flush=True)
+        _log(f"[round {rnd}] generated in {time.time()-t0:.0f}s, verifying...")
         round_best = None
         for ci, gen in enumerate(gens):
             code = _extract_code(gen)
             acc, fails, err = verify_solver(code, verify_games)
-            print(f"    cand {ci}: verify {acc:.0%}" + (f"  [{err}]" if err else ""), flush=True)
+            _log(f"    cand {ci}: verify {acc:.0%}" + (f"  [{err}]" if err else ""))
             if round_best is None or acc > round_best[0]:
                 round_best = (acc, code, fails, err)
         acc, code, fails, err = round_best
@@ -179,18 +184,18 @@ def run_tool_induction(model_name: str, rounds: int, size: int, verify_n: int, e
             best_code, best_acc, best_fails = code, acc, fails
         eval_acc, _, _ = verify_solver(best_code, eval_games) if best_code else (0.0, [], "")
         note = err if (acc == 0 and err) else ""
-        print(f"[round {rnd}] candidate verify-acc {acc:.0%} -> {tag} (best {best_acc:.0%}) | "
-              f"held-out eval {eval_acc:.0%} {note}", flush=True)
+        _log(f"[round {rnd}] candidate verify-acc {acc:.0%} -> {tag} (best {best_acc:.0%}) | "
+              f"held-out eval {eval_acc:.0%} {note}")
 
-    print(f"\n=== DONE === bootstrapped {len(tool_bank)} verified tool(s); "
-          f"best verify-acc {best_acc:.0%}", flush=True)
+    _log(f"\n=== DONE === bootstrapped {len(tool_bank)} verified tool(s); "
+          f"best verify-acc {best_acc:.0%}")
     if best_code:
         final_eval, _, _ = verify_solver(best_code, eval_games)
-        print(f"  final held-out eval accuracy: {final_eval:.0%}\n", flush=True)
-        print("  ── the method the model discovered ──\n" + best_code, flush=True)
+        _log(f"  final held-out eval accuracy: {final_eval:.0%}\n")
+        _log("  ── the method the model discovered ──\n" + best_code)
         Path("artifacts").mkdir(exist_ok=True)
         Path("artifacts/induced_tool.py").write_text(best_code, encoding="utf-8")
-        print("\n  tool saved -> artifacts/induced_tool.py", flush=True)
+        _log("\n  tool saved -> artifacts/induced_tool.py")
     return best_acc
 
 
