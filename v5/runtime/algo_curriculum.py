@@ -357,21 +357,30 @@ def score_rollout(graph: ArtifactGraph, task: Task, code: str, adv_names: list, 
 
 
 def solve_curriculum_task(graph: ArtifactGraph, gen_fn, task: Task, born: int, tfp: str,
-                          vseeds, eseeds, k: int = 32, samples: int = 1):
-    """Retrieve -> author (best of `samples`) -> verify -> score -> credit(by task fp)+register."""
+                          vseeds, eseeds, k: int = 32, samples: int = 1, select: str = "verify"):
+    """Retrieve -> author `samples` candidates -> SELECT -> score -> credit(by task fp)+register.
+
+    select="verify": pick the highest-verifying candidate (baseline — no reuse preference).
+    select="reward": among the candidates that VERIFY, pick the highest-REWARD one (reuse/compression
+    preference) — this is the best-of-N gate: does the model already PRODUCE reuse solutions among N
+    samples (so RL can amplify them), or never (so RL won't conjure them)?"""
     vcases, ecases = cases(task, vseeds), cases(task, eseeds)
     advertised = graph.retrieve(task.text, k=k)
     adv_names = [a.name for a in advertised]
-    best = (0.0, "", [])
+    cands = []
     for gen in gen_fn([_author_prompt(task, advertised, None, [])] * samples):
         code = _extract_code(gen)
-        sol_defs = _defs_in(code)
         called = [a for a in adv_names
-                  if a not in sol_defs and re.search(rf"\b{re.escape(a)}\s*\(", code)]
-        acc, _, _ = verify_fn(code, task.name, vcases, graph.deps_code(called))
-        if acc > best[0]:
-            best = (acc, code, called)
-    _, code, _ = best
+                  if a not in _defs_in(code) and re.search(rf"\b{re.escape(a)}\s*\(", code)]
+        vacc, _, _ = verify_fn(code, task.name, vcases, graph.deps_code(called))
+        cands.append((code, vacc))
+    if not cands:
+        code = ""
+    elif select == "reward":
+        pool = [c for c, va in cands if va >= 0.999] or [c for c, _ in cands]
+        code = max(pool, key=lambda c: score_rollout(graph, task, c, adv_names, ecases)[0])
+    else:
+        code = max(cands, key=lambda cv: cv[1])[0]
     R, bd, vr, causal, sol_defs = score_rollout(graph, task, code, adv_names, ecases)
     if vr:
         for a in causal:
@@ -383,14 +392,36 @@ def solve_curriculum_task(graph: ArtifactGraph, gen_fn, task: Task, born: int, t
                 causal=causal, breakdown=bd, code=code)
 
 
-def run_curriculum(gen_fn, stream=STREAM, verify_n=6, eval_n=10, k=32, samples=1, graph=None):
+def run_curriculum(gen_fn, stream=STREAM, verify_n=6, eval_n=10, k=32, samples=1, select="verify",
+                   graph=None):
     graph = graph or ArtifactGraph()
     vseeds, eseeds = range(300, 300 + verify_n), range(700, 700 + eval_n)
     log = []
     for i, task in enumerate(stream):
         log.append(solve_curriculum_task(graph, gen_fn, task, i, task_fingerprint(task),
-                                          vseeds, eseeds, k=k, samples=samples))
+                                          vseeds, eseeds, k=k, samples=samples, select=select))
     return graph, log
+
+
+def best_of_n_gate(gen_fn, n=8, stream=STREAM, verify_n=6, eval_n=10):
+    """The pre-RL gate. Run the curriculum twice with best-of-`n` sampling: arm 'verify' selects the
+    highest-verifying candidate (baseline); arm 'reward' selects the highest-REWARD verified candidate
+    (reuse preference). If 'reward' raises causal reuse + amortization + capstone reachability at
+    EQUAL correctness, the behavior is learnable -> RL is worth the GPU. If not, a bigger base is
+    needed (project-model-strategy)."""
+    out = {}
+    for mode in ("verify", "reward"):
+        graph, log = run_curriculum(gen_fn, stream=stream, verify_n=verify_n, eval_n=eval_n,
+                                    samples=n, select=mode)
+        cap = next((r for r in log if r["name"] == "dijkstra_dist"), None)
+        out[mode] = dict(
+            solved=sum(1 for r in log if r["verified"]), total=len(log),
+            reusers=sum(1 for r in log if r["causal"]),
+            amort=graph.amort("build_adj") if "build_adj" in graph.arts else 0,
+            capstone_composed=bool(cap and cap["verified"] and cap["causal"]),
+            mean_reward=round(sum(r["reward"] for r in log) / max(1, len(log)), 2),
+            log=log)
+    return out
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -571,6 +602,21 @@ def _selftest() -> bool:
     assert R_reuse > R_inline, f"reuse {R_reuse:.2f} must beat re-implement {R_inline:.2f}"
     print(f"  [9] reuse ({R_reuse:.2f}) > re-implement inline ({R_inline:.2f}) — over-specific penalized -> PASS")
 
+    # [10] BEST-OF-N selection: given candidates {inline, reuse}, select='reward' surfaces the REUSE
+    # solution; select='verify' does not (both verify) — the mechanism the pre-RL gate relies on
+    def _mock_two(prompts):
+        return ["```python\n" + inline_code + "\n```", "```python\n" + reuse_code + "\n```"]
+    vs, es = range(300, 306), range(700, 710)
+    gr = ArtifactGraph(); gr.register("build_adj", _BUILD_ADJ, "adjacency", 0, [])
+    r_rw = solve_curriculum_task(gr, _mock_two, BY_NAME["bfs_order"], 1, "tfp", vs, es,
+                                 samples=2, select="reward")
+    gv = ArtifactGraph(); gv.register("build_adj", _BUILD_ADJ, "adjacency", 0, [])
+    r_vf = solve_curriculum_task(gv, _mock_two, BY_NAME["bfs_order"], 1, "tfp", vs, es,
+                                 samples=2, select="verify")
+    assert r_rw["causal"] == ["build_adj"], f"reward-select must pick the reuse candidate: {r_rw}"
+    assert r_vf["causal"] == [], f"verify-select has no reuse preference: {r_vf}"
+    print("  [10] best-of-N: select='reward' surfaces reuse, select='verify' does not -> PASS")
+
     print("\n  ALGO_CURRICULUM SELFTEST -> PASS")
     return True
 
@@ -581,6 +627,12 @@ def main():
     ap.add_argument("--run-stub", action="store_true",
                     help="drive the curriculum with the competent StubLM (no GPU) and print the "
                          "reward/amortization trace — the compounding demonstration")
+    ap.add_argument("--gate", action="store_true",
+                    help="best-of-N reuse-preference GATE with a real LM (molab): verify- vs reward-"
+                         "selection on causal reuse / amortization / capstone. Run before RL.")
+    ap.add_argument("--model", default="Qwen/Qwen2.5-3B")
+    ap.add_argument("--n", type=int, default=8, help="best-of-N samples per task for --gate")
+    ap.add_argument("--chunk", type=int, default=8)
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
@@ -593,7 +645,25 @@ def main():
         print(f"\n  build_adj amortization (distinct tasks reusing it): {graph.amort('build_adj')}")
         print(f"  graph nodes: {sorted(graph.arts)}")
         return
-    print("use --selftest (no GPU) or --run-stub (compounding demo).")
+    if a.gate:
+        from v5.runtime.artifact_graph import _real_gen_fn
+        gen_fn = _real_gen_fn(a.model, a.chunk)
+        res = best_of_n_gate(gen_fn, n=a.n)
+        print(f"\nBEST-OF-{a.n} GATE ({a.model}) — verify-select vs reward-select\n", file=sys.stderr)
+        for mode in ("verify", "reward"):
+            r = res[mode]
+            print(f"  [{mode:6}] solved {r['solved']}/{r['total']} | reusers {r['reusers']} | "
+                  f"build_adj amort {r['amort']} | capstone-composed {r['capstone_composed']} | "
+                  f"mean_reward {r['mean_reward']}", file=sys.stderr)
+        v, w = res["verify"], res["reward"]
+        gain = w["reusers"] - v["reusers"]
+        print(f"\n  GATE: reward-select adds {gain:+d} reusers at {w['solved']}/{v['solved']} solved "
+              f"(equal correctness). Capstone composed: verify={v['capstone_composed']} "
+              f"reward={w['capstone_composed']}.", file=sys.stderr)
+        print(f"  => {'PASS (behavior is learnable — RL worth it)' if gain > 0 and w['capstone_composed'] else 'WEAK (model rarely produces reuse in N samples — bigger base?)'}",
+              file=sys.stderr)
+        return
+    print("use --selftest (no GPU) · --run-stub (compounding demo) · --gate (molab pre-RL gate).")
 
 
 if __name__ == "__main__":
