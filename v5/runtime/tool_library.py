@@ -150,17 +150,18 @@ class ToolStore:
         return [(t["sig"], t["desc"]) for t in self.tools.values()]
 
 
-def _compose_prompt(task_text, fn_name, store_sigs):
+def _compose_prompt(task_text, fn_name, catalog, built):
+    """Advertise the CATALOG of tools the library can provide (the registry) — not just what's
+    already built — so the model calls them from the first task (they get induced on first use,
+    reused after). Without this the empty first-task store leaves nothing to call and the model
+    just re-implements, and the library never bootstraps."""
     parts = [task_text]
-    if store_sigs:
-        parts.append("\nVERIFIED tools already in your library (already defined — CALL them, do "
-                     "NOT re-implement their logic):")
-        for sig, desc in store_sigs:
-            parts.append(f"  {sig}  -> {desc}")
-    else:
-        parts.append("\n(your library is empty — you may call helper tools by name and they will "
-                     "be provided; prefer small, reusable helpers.)")
-    parts.append(f"\nWrite `{fn_name}(R, C)`. Output ONLY a Python code block.")
+    parts.append("\nYou can CALL these helper tools by name — they are (or will be) DEFINED for "
+                 "you, so just call them, do NOT re-implement their logic:")
+    for name, sig, desc in catalog:
+        parts.append(f"  {sig}  -> {desc}" + ("  [already verified]" if name in built else ""))
+    parts.append(f"\nWrite `{fn_name}(R, C)` by CALLING the helpers above wherever useful "
+                 f"(build the answer FROM them, do not reinvent them). Output ONLY a Python code block.")
     return "\n\n".join(parts)
 
 
@@ -182,17 +183,19 @@ def run_library(model_name, size, rounds, samples, chunk, verify_n, eval_n):
     _log(f"SELF-EXTENDING LIBRARY on {size}x{size} | model={model_name} | {len(TASKS)} tasks\n")
 
     store = ToolStore()
+    catalog = [(n, PRIMS[n]["sig"], PRIMS[n]["desc"]) for n in PRIMS]   # tools the library CAN provide
     n_induced, n_reused, results = 0, 0, []
 
     for t in TASKS:
         name, task_text = t["name"], t["task"]
         _log(f"\n{'='*60}\n### TASK: {name}")
-        # 1. DRAFT: model proposes a composite, calling whatever library tools it wants
-        draft = batch_generate(model, tok, [_compose_prompt(task_text, name, store.signatures())],
+        built = {n for n in store.tools if n in PRIMS and store.has(n)}
+        # 1. DRAFT: model proposes a composite calling catalog tools (advertised even if not built)
+        draft = batch_generate(model, tok, [_compose_prompt(task_text, name, catalog, built)],
                                dev, max_new=360, sample=True, temperature=0.9, chunk=1)[0]
         draft_code = _extract_code(draft)
         refs = [p for p in PRIMS if (p + "(") in draft_code]
-        _log(f"  drafted; references library tools: {refs or '(none — may re-implement)'}")
+        _log(f"  drafted; references library tools: {refs or '(none — re-implemented inline)'}")
 
         # 2. FULFILL: induce any referenced primitive not yet in the store; reuse the rest
         for r in refs:
