@@ -115,6 +115,19 @@ TASK = ("You are writing one general Python function that solves a class of game
         "player won't switch cols). Return the (i, j) tuple. The matrices may be 2x2 or 3x3.")
 
 
+def _ne_explanation(R, C, ne) -> str:
+    """Refine a failing case into a DIAGNOSTIC: the correct column-max (row player) / row-max
+    (col player) computation at the true NE. This points at the exact axis a wrong solver missed
+    (the common bug: using the row for both) instead of just saying 'wrong'."""
+    i, j = ne
+    m, n = len(R), len(R[0])
+    col_vals = [R[r][j] for r in range(m)]
+    row_vals = [C[i][c] for c in range(n)]
+    return (f"correct NE is ({i}, {j}): down COLUMN {j}, R = {col_vals}, and R[{i}][{j}]={R[i][j]} "
+            f"is the max (so the ROW player won't switch rows); across ROW {i}, C = {row_vals}, and "
+            f"C[{i}][{j}]={C[i][j]} is the max (so the COL player won't switch cols).")
+
+
 def write_tool_prompt(examples: list[dict], prev_code: str | None,
                       fails: list, prev_acc: float | None) -> str:
     parts = [TASK]
@@ -125,10 +138,12 @@ def write_tool_prompt(examples: list[dict], prev_code: str | None,
     if prev_code:
         parts.append(f"\nYour current solver scored {prev_acc:.0%}:\n```python\n{prev_code}\n```")
         if fails:
-            parts.append("It got these WRONG (fix them without breaking the rest):")
-            for R, C, exp, got in fails[:5]:
-                parts.append(f"  R={R} C={C}: your answer {got}, correct {tuple(exp)}")
-        parts.append("Write an IMPROVED `solve_game(R, C)`.")
+            parts.append("It got these WRONG. Here is the CORRECT check for each — note the ROW "
+                         "player's payoff must be the max DOWN ITS COLUMN, and the COL player's "
+                         "the max ACROSS ITS ROW (a frequent bug is checking the row for both):")
+            for R, C, exp, got in fails[:4]:
+                parts.append(f"  your solver returned {got}; {_ne_explanation(R, C, tuple(exp))}")
+        parts.append("Write an IMPROVED `solve_game(R, C)` that fixes the axis of the max checks.")
     else:
         parts.append("\nWrite `solve_game(R, C)`.")
     parts.append("Output ONLY a Python code block with the function.")
@@ -158,15 +173,17 @@ def run_tool_induction(model_name: str, rounds: int, size: int, verify_n: int, e
     _log(f"TOOL-INDUCTION on {size}x{size} Nash | model={model_name} | rounds={rounds} "
           f"samples/round={samples} verify={verify_n} eval={eval_n}\n")
 
-    tool_bank: list[dict] = []          # verified tools: {code, acc, round, parent}
-    best_code, best_acc, best_fails = None, 0.0, []
+    tool_bank: list[dict] = []          # verified tools KEPT (new best): {code, acc, round}
+    best_code, best_acc = None, 0.0     # global best (reported / reused)
+    cur_code, cur_fails, cur_acc = None, [], 0.0   # LATEST attempt — what we refine each round
     for rnd in range(rounds):
-        prompt = write_tool_prompt(examples, best_code, best_fails, best_acc)
-        # SAMPLE several candidate tools this round (the model proposes; verification selects)
+        # refine the LATEST attempt (hill-climb), so the failing-case diagnostics always advance
+        # instead of freezing on a tie. The diagnostic reveals the exact axis the last tool missed.
+        prompt = write_tool_prompt(examples, cur_code, cur_fails, cur_acc)
         _log(f"[round {rnd}] generating {samples} candidate tool(s)...")
         t0 = time.time()
         gens = batch_generate(model, tok, [prompt] * samples, dev, max_new=420,
-                              sample=(samples > 1), temperature=0.8, chunk=chunk)
+                              sample=True, temperature=1.0, chunk=chunk)
         _log(f"[round {rnd}] generated in {time.time()-t0:.0f}s, verifying...")
         round_best = None
         for ci, gen in enumerate(gens):
@@ -176,16 +193,18 @@ def run_tool_induction(model_name: str, rounds: int, size: int, verify_n: int, e
             if round_best is None or acc > round_best[0]:
                 round_best = (acc, code, fails, err)
         acc, code, fails, err = round_best
+        cur_code, cur_fails, cur_acc = code, fails, acc            # ALWAYS advance the working tool
         improved = acc > best_acc + 1e-9
-        tag = "KEPT" if improved else "rejected"
         if improved:
-            tool_bank.append(dict(code=code, acc=acc, round=rnd,
-                                  parent=len(tool_bank) - 1 if tool_bank else None))
-            best_code, best_acc, best_fails = code, acc, fails
+            best_code, best_acc = code, acc
+            tool_bank.append(dict(code=code, acc=acc, round=rnd))
         eval_acc, _, _ = verify_solver(best_code, eval_games) if best_code else (0.0, [], "")
         note = err if (acc == 0 and err) else ""
-        _log(f"[round {rnd}] candidate verify-acc {acc:.0%} -> {tag} (best {best_acc:.0%}) | "
-              f"held-out eval {eval_acc:.0%} {note}")
+        _log(f"[round {rnd}] round-best verify {acc:.0%} -> {'NEW BEST' if improved else 'refine'} "
+              f"(best {best_acc:.0%}) | held-out eval {eval_acc:.0%} {note}")
+        if best_acc >= 0.999:                                       # solved — the tool is correct
+            _log(f"[round {rnd}] tool VERIFIED CORRECT (100%), stopping early")
+            break
 
     _log(f"\n=== DONE === bootstrapped {len(tool_bank)} verified tool(s); "
           f"best verify-acc {best_acc:.0%}")
@@ -237,10 +256,14 @@ def _selftest() -> bool:
     assert ex.startswith("def solve_game") and "return (1,1)" in ex
     print("  [4] code extraction from fenced block -> PASS")
 
-    # the refine prompt carries the failing cases so the model can fix them
+    # the refine prompt refines failures into a DIAGNOSTIC (correct column/row axis), the exact
+    # signal that lets the model fix a wrong-axis solver instead of guessing.
     p = write_tool_prompt(games[:3], wrong, fails_w, acc_w)
-    assert "scored" in p and "WRONG" in p and "R=" in p
-    print("  [5] refine prompt carries measured failures -> PASS")
+    assert "scored" in p and "correct NE is" in p and "COLUMN" in p and "ROW" in p
+    R0, C0, exp0, _ = fails_w[0]
+    expl = _ne_explanation(R0, C0, tuple(exp0))
+    assert f"({exp0[0]}, {exp0[1]})" in expl and "COLUMN" in expl and "ROW" in expl
+    print("  [5] refine prompt carries DIAGNOSTIC (correct column/row axis) -> PASS")
 
     print("\n  TOOL_MEMORY SELFTEST -> PASS")
     return True
