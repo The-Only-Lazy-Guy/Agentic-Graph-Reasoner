@@ -81,25 +81,30 @@ def _cos(a: list[float], b: list[float]) -> float:
 # BEHAVIORAL FINGERPRINT  (for dedup/merge — same behavior => same node)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# mixed single-arg probes: ints and lists/strings, so is_prime / digits / count_primes / ...
-# get DISTINCT output signatures (wrong-arity/type -> ERR, which is itself part of the signature).
-# include large ints (19,199,9999,12345) so a MULTI-iteration fn (digital_root) is distinguishable
-# from a single-pass one (digit_sum) — else they fingerprint-collide and wrongly merge.
-_FP_PROBES = [0, 1, 2, 3, 4, 5, 7, 9, 10, 17, 19, 100, 121, 199, 888, 9999, 12345,
-              [], [2], [1, 2, 3, 4], [4, 6, 8, 9], [2, 3, 5, 7, 11], "aba", "abc"]
+# probe ARGUMENT TUPLES of varied arity/type, so single-arg fns (is_prime/digit_sum) AND multi-arg
+# fns (build_adj(n,edges), dijkstra(n,edges,s)) both get a DISTINCT output signature. Large ints
+# (19,199,9999,12345) separate a multi-iteration fn (digital_root) from a single-pass one; the graph
+# tuples give 2-/3-/4-arg fns a non-ERR signature so equivalent impls MERGE (fixes the earlier
+# multi-arg fp=None -> never-merges gap noted in the design doc).
+_FP_ARGS = [(0,), (1,), (2,), (3,), (4,), (5,), (7,), (9,), (10,), (17,), (19,), (100,), (121,),
+            (199,), (888,), (9999,), (12345,),
+            ([],), ([2],), ([1, 2, 3, 4],), ([4, 6, 8, 9],), ([2, 3, 5, 7, 11],), ("aba",), ("abc",),
+            (3, [(0, 1, 2), (1, 2, 3)]),                                    # (n, edges)
+            (4, [(0, 1, 2), (0, 2, 5), (1, 2, 1), (2, 3, 3)], 0),           # (n, edges, s)
+            (4, [(0, 1, 2), (0, 2, 5), (1, 2, 1), (2, 3, 3)], 0, 3)]        # (n, edges, s, t)
 
 
 def _fingerprint(full_code: str, fn_name: str, timeout: float = 6.0) -> str | None:
-    """Run fn_name over the probe set (with deps prepended); hash the output vector. None if it
+    """Run fn_name over the probe arg-tuples (with deps prepended); hash the output vector. None if it
     can't even be evaluated (treat as unique — don't merge crashers together)."""
     harness = "\n".join([
         full_code, "",
         "if True:",
-        f"    _probes = {_FP_PROBES!r}",
+        f"    _probes = {_FP_ARGS!r}",
         "    _out = []",
         "    for _p in _probes:",
         "        try:",
-        f"            _out.append(repr({fn_name}(_p)))",
+        f"            _out.append(repr({fn_name}(*_p)))",
         "        except Exception as _e:",
         "            _out.append('ERR:' + type(_e).__name__)",
         "    print('FPRINT', '\\t'.join(_out))",
@@ -165,9 +170,11 @@ class Artifact:
     fp: str | None = None           # behavioral fingerprint (dedup key)
     emb: list[float] = field(default_factory=list)   # retrieval address ("emergent type")
     born: int = 0                   # task index created
-    last_used: int = -1             # task index last causally reused
-    wins: int = 0                   # causal-credit reuse count by LATER tasks
+    last_used: object = -1          # task key last causally reused (int idx or task fingerprint)
+    wins: int = 0                   # causal-credit reuse count (raw)
     uses: int = 0                   # times called at all (incl. inert)
+    reused_by: list = field(default_factory=list)  # DISTINCT task keys that causally reused it
+                                                    # -> amort(a) = len(set(reused_by)) = reuse BREADTH
 
 
 class ArtifactGraph:
@@ -217,12 +224,22 @@ class ArtifactGraph:
         self.events.append(f"ADD {key}")
         return key
 
-    def credit(self, name: str, task_idx: int):
+    def credit(self, name: str, task_key):
+        """Record a causal reuse. task_key is an int task index (artifact_graph stream) OR a task
+        behavioral fingerprint (curriculum) — DISTINCT keys measure reuse BREADTH (amortization),
+        so re-solving the same task on many seeds does NOT inflate it (anti-memorization)."""
         if name in self.arts:
             a = self.arts[name]
             a.wins += 1
-            a.last_used = task_idx
-            self.events.append(f"CREDIT {name} (win {a.wins}, task {task_idx})")
+            a.last_used = task_key
+            if task_key not in a.reused_by:
+                a.reused_by.append(task_key)
+            self.events.append(f"CREDIT {name} (win {a.wins}, amort {self.amort(name)}, key {task_key})")
+
+    def amort(self, name: str) -> int:
+        """Amortization = number of BEHAVIORALLY-DISTINCT tasks that causally reused this artifact.
+        High = broadly reusable; 1 = single-context (over-specific / memorized)."""
+        return len(set(self.arts[name].reused_by)) if name in self.arts else 0
 
     def touch(self, name: str):
         if name in self.arts:

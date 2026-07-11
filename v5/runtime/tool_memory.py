@@ -70,8 +70,9 @@ def _extract_code(gen: str) -> str:
         # drop `import foo` / `from foo import ...` for a bare local name (no dot) — those are the
         # in-scope helper tools, not real modules. Keep dotted stdlib imports (itertools, etc.).
         im = re.match(r"(?:from|import)\s+([A-Za-z_][A-Za-z0-9_]*)\b", s)
-        if im and "." not in s.split("import")[0] and im.group(1) not in ("itertools", "math",
-                                                                          "functools", "collections"):
+        _STDLIB_KEEP = ("itertools", "math", "functools", "collections", "heapq", "bisect",
+                        "re", "random", "string", "operator")
+        if im and "." not in s.split("import")[0] and im.group(1) not in _STDLIB_KEEP:
             if s.startswith("from ") or (s.startswith("import ") and "," not in s):
                 continue
         out.append(ln)

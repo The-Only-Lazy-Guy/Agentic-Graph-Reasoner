@@ -191,7 +191,46 @@ HRM-latent frontier.
 
 ---
 
-## 8. Provenance
+## 8. Refinements from design review (2026-07-11)
+
+The central hypothesis, sharpened (the thing that is actually novel — not the graph, but this):
+> A language model improves beyond its **frozen** capabilities not by retrieving stored knowledge, but
+> by **learning reusable procedures for reorganizing and extending its own external computational
+> graph** — so performance compounds over time through verified, reusable artifacts.
+
+**Objective = expected future value of the graph, not "grow the graph."** North star: each edit is
+worth its expected lift on the FUTURE task distribution, `E_future[Perf(G')] − E_future[Perf(G)]`.
+Reuse / amortization / compression are **tractable proxies** for this (measurable now) — *not the
+value itself*.
+
+**Reward beyond reuse — because reuse ≠ value.** The honest hole: `parse_json` might be reused 3000×
+(low insight) while a `graph-cut` lemma is reused twice but pivotal. Pure reuse-count mismeasures
+abstraction quality. Fix: add a **compression (MDL)** term — does having the artifact *shorten the
+total code across solutions*? (DreamCoder's real objective; it credits a rare-but-powerful atom that
+collapses a hard solution.) Target shape `verified · (reuse-amort + compression + generality) −
+overspecific`, with expected-future-value as the north star we approximate (best-of-N estimates it
+directly).
+
+**A 4th artifact class — Representation (non-executable).** Besides compute / meta / learning, the
+graph should hold reusable *structures* the model reasons over but doesn't execute: tree
+decomposition, dependency / constraint graph, intermediate representation, state encoding. Humans
+invent a representation before an algorithm; sometimes re-representing *is* the solution. Verified the
+same way — kept iff using it raises downstream success (delayed credit, like meta).
+
+**Concept / semantic index — and it IS the retrieval-at-scale fix.** The graph is tool-centric (many
+algorithms, no node for "shortest path" / "dynamic programming"). Add representation nodes that
+ORGANIZE + ROUTE — a *learned* semantic index over the algorithm graph (operational, predicts
+applicability; not inert labels). This is how you find the right policy among thousands, so retrieval
+becomes a first-class learned policy: **retrieve → RANK → execute → REFLECT (observe outcome) →
+store** (ranker = `compose_pool` +0.95 / HRM-latent over the concept index), gated when the store is
+big.
+
+**Three research challenges that decide success (named, not hidden):** (1) retrieval scalability;
+(2) long-horizon credit for graph edits (Phase B); (3) representation learning.
+
+---
+
+## 9. Provenance
 
 - **Code:** `v5/runtime/artifact_graph.py`. Reuses `verify_fn` (`tool_compose`), `_extract_code`/`_log`
   (`tool_memory`), `batch_generate` (`reason_rl`), `load_frozen_lm`.
