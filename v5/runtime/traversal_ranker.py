@@ -1,22 +1,25 @@
 """v4 — Iterative Traversal Ranker (latent-only multi-hop).
 
 Wraps the proven v3 Refiner.Net + feat_proj in a multi-hop loop. Each hop:
-  1. Retrieves candidate pool using current h (in mpnet-768) as query
+  1. Retrieves candidate pool using current query h (mpnet-768), excluding seen records
   2. Builds ctx from candidate embeddings + feature fusion
-  3. Runs Refiner.Net at K=1 for one refinement step → new h
-  4. Reads top-k records from pool using h's cosine similarity
-  5. h IS the query for the next hop — no LM generation between hops
+  3. Runs Refiner.Net at K=1 for one refinement step → refined h, used to select this hop's
+     top-k records by cosine
+  4. READS the top delivered record's CODE → embeds it → that IS the query for the next hop
 
-Key difference from v3 (one-shot, single pool, K>=1):
-  v4 does SEQUENTIAL hops with CHANGING pools. Each hop excludes records already
-  found, so h naturally migrates toward the next needed record via cosine similarity
-  in mpnet space.
+Key difference from v3 (one-shot, single pool): v4 does SEQUENTIAL hops with CHANGING pools,
+and each hop's query is CONDITIONED on what the previous hop retrieved.
 
-The conditional dependency works because:
-  - Hop 1 converges toward record A (e.g., config.py with PREFERRED_STRATEGY="nash")
-  - h_1 carries A's content signature (keyword "nash" is in A's embedding)
-  - search_ctx(h_1) at hop 2 retrieves records sharing that signature
-  - Refiner.Net at hop 2 picks the correct conditional target from the new pool
+Why the READ step (learned the hard way, 2026-07-11): the original design fed the refined
+latent h_{k-1} to hop k, assuming "h_1 carries record A's keyword." It does NOT — the retrieval
+index (ImplStore.emb_ctx) keys on each record's SPEC (goal[:400]), and on `preference` config.py's
+spec is byte-identical across strategies (the withholding trick); the deciding keyword
+("nash"/"maxmin") lives only in config's CODE. So the latent never sees it and hop 2 collapsed to
+a constant (verified: always maxmin, correct 4/12). The fix: form the next-hop query from the
+delivered record's CODE (`embed(record["new"])`) — the keyword then matches nash.py/maxmin.py's
+own spec in mpnet space. Still cheap (one mpnet embed, NO LM decode between hops), but it is a
+genuine "read the retrieved record," not pure-latent addressing — the deciding content must be
+read, it cannot be carried in a spec-indexed latent.
 
   python -m v5.runtime.traversal_ranker --selftest
 """
@@ -212,6 +215,17 @@ class TraversalRanker:
                     print(f"  [trav-debug] gap detector stopped at hop {hop}")
                     break
 
+            # READ the retrieved record: the NEXT hop's query is the embedding of the top
+            # delivered record's CODE (record["new"]), NOT the refined latent h. The code
+            # carries the discriminative content (e.g. config.py's PREFERRED_STRATEGY="nash")
+            # that the spec-based emb_ctx index does not — so this is what makes hop k+1
+            # CONDITIONAL on what hop k found. Pure-latent traversal cannot do this because the
+            # keyword never enters the latent. One mpnet embed of retrieved code, no LM decode.
+            if records and records[0] is not None:
+                code = records[0].get("new") or ""
+                if code.strip():
+                    h = self._embed(code[:400])
+
         return TraversalResult(
             records=all_records, hop_count=n_hops, final_h=h,
             hop_records=hop_records, hop_hs=hop_hs
@@ -228,13 +242,16 @@ def build_traversal_reprs(lm, insts: list[dict], embed_fn,
 
     For each dependency session with source_session_idxs (a LIST), this records
     the sequence of hops needed:
-      - hop 1: pool = all records, positive = source_session_idxs[0]
-      - hop 2: pool = (all records except source_session_idxs[0]),
-               positive = source_session_idxs[1]
-      - ... until all sources found
+      - hop 1: h_in = spec query,          pool = all records,        pos = source[0]
+      - hop 2: h_in = source[0]'s emb,     pool = all except source[0], pos = source[1]
+      - ... hop k: h_in = source[k-1]'s emb (TEACHER-FORCING — matches the refined
+               h_{k-1} the inference loop feeds), pool excludes found, pos = source[k]
 
-    Each hop is a TRAINING EXAMPLE for the ranker: (h_in, ctx, feats, pos_idx).
-    The labels for consecutive hops are known from the gold chain structure.
+    Each hop is a TRAINING EXAMPLE for the ranker: (h_in, ctx, feats, pos_idx). The
+    teacher-forced h_in is what makes CONDITIONAL multi-hop learnable: hop k's input
+    carries hop k-1's discovered content (e.g. config.py's "nash"/"maxmin" keyword),
+    which is the ONLY signal that disambiguates hop k's target and is absent from the
+    spec. (Using the spec for every hop gave contradictory labels and no conditionality.)
 
     For non-list source_session_idx (single-source), only 1 hop is recorded.
     """
@@ -343,7 +360,23 @@ def build_traversal_reprs(lm, insts: list[dict], embed_fn,
                             [feat_vecs, np.zeros((pad, feat_vecs.shape[1]), feat_vecs.dtype)], 0)
                     cmask_row = [True] * T + [False] * pad
                     if ci in cand_ids:
-                        H_IN.append(q)
+                        # TEACHER-FORCE + READ: hop k>0's query is the embedding of the
+                        # PREVIOUS source's CODE (record["new"]), matching what retrieve() does
+                        # at inference (embed the delivered record's code).
+                        # Why the CODE and not emb_ctx: on `preference`, hop 1's correct target
+                        # (nash.py vs maxmin.py) is decided ONLY by config.py's PREFERRED_STRATEGY
+                        # = "nash"/"maxmin" — which lives in config's CODE. The record's emb_ctx
+                        # keys on its SPEC (goal[:400]), and config's spec is BYTE-IDENTICAL across
+                        # strategies (the withholding trick), so spec/emb_ctx carry no keyword ->
+                        # contradictory labels -> hop 2 collapses to the default solver (verified:
+                        # always maxmin, correct 4/12). Embedding the code surfaces the keyword,
+                        # which matches nash.py's/maxmin.py's own spec ("Nash"/"maxmin") in mpnet.
+                        if hop_i == 0:
+                            h_in_hop = q
+                        else:
+                            prev_rec = memory.impls.get(correct_impls[hop_i - 1]) or {}
+                            h_in_hop = memory._embed_one((prev_rec.get("new") or "")[:400])
+                        H_IN.append(h_in_hop)
                         CTX.append(ctx_vecs)
                         FEATS.append(feat_vecs)
                         CMASK.append(cmask_row)
@@ -465,17 +498,20 @@ def _synth_traversal(N=200, T=6, d=32, n_op=8, n_hops=2, seed=0):
         correct_tag = tag_a if use_a else tag_b
         wrong_tag = tag_b if use_a else tag_a
 
-        # Hop 1 pool: trigger (has correct_tag) + decoy (random)
-        trigger = 0.3 * rng.randn(d).astype("float32") + 0.7 * correct_tag
-        decoy = 0.3 * rng.randn(d).astype("float32")
+        # noise with a CONTROLLED L2 norm (~s): raw randn in d dims has norm ~sqrt(d),
+        # which would swamp unit-norm tag signals. Scale by s/sqrt(d) so signal dominates.
+        nz = lambda s: (s / np.sqrt(d)) * rng.randn(d).astype("float32")
+        # Hop 1 pool: trigger (carries correct_tag) + decoy (pure noise)
+        trigger = 0.6 * correct_tag + nz(0.4)
+        decoy = nz(0.9)
 
-        # Initial query: has both tags weakly + noise (mimics "strategy preference")
-        g = 0.3 * rng.randn(d).astype("float32") + 0.3 * tag_a + 0.3 * tag_b
+        # Initial query: both tags weakly (symmetric) + noise — hop 1 must find the trigger
+        g = 0.4 * tag_a + 0.4 * tag_b + nz(0.4)
 
-        # Hop 2 pool: target A (tag_a) and target B (tag_b), with distractors
-        target_a = 0.2 * rng.randn(d).astype("float32") + 0.6 * tag_a
-        target_b = 0.2 * rng.randn(d).astype("float32") + 0.6 * tag_b
-        distractor = 0.5 * rng.randn(d).astype("float32")
+        # Hop 2 pool: target A (tag_a) and target B (tag_b) + a noise distractor
+        target_a = 0.5 * tag_a + nz(0.3)
+        target_b = 0.5 * tag_b + nz(0.3)
+        distractor = nz(0.9)
 
         # Build 2-hop training example
         # Hop 1: pool = [trigger, decoy, distractor], pos = trigger
@@ -490,12 +526,17 @@ def _synth_traversal(N=200, T=6, d=32, n_op=8, n_hops=2, seed=0):
         h2_arr = h2_pool[h2_perm]
         h2_pos = int(np.where(h2_perm == (0 if use_a else 1))[0][0])
 
-        for pool_arr, pos_i in [(h1_arr, h1_pos), (h2_arr, h2_pos)]:
+        # TEACHER-FORCING (mirrors build_traversal_reprs): hop 0's input is the query `g`;
+        # hop 1's input is the TRIGGER found at hop 0 (carries correct_tag). Feeding `g` to
+        # hop 1 instead would give identical inputs with contradictory a/b labels -> hop 1
+        # unlearnable (the exact conditional bug this selftest now guards against).
+        for (pool_arr, pos_i), h_in_vec in zip([(h1_arr, h1_pos), (h2_arr, h2_pos)],
+                                               [g, trigger]):
             T_real = len(pool_arr)
             pad = T - T_real
             if pad:
                 pool_arr = np.concatenate([pool_arr, np.zeros((pad, d), "float32")], 0)
-            H_IN.append(g)
+            H_IN.append(h_in_vec)
             CTX.append(pool_arr)
             FEATS.append(np.zeros((T, N_FEAT), dtype=np.float32))
             CMASK.append([True] * T_real + [False] * pad)
@@ -525,9 +566,16 @@ def _selftest() -> bool:
     sims0 = Fn(gt.unsqueeze(1), ct, dim=-1).masked_fill(
         ~torch.as_tensor(cmask[n_tr:]), -1e9)
     base_hit = float((sims0.argmax(1).numpy() == pos_idx[n_tr:]).mean())
-    assert hit > base_hit + 0.10, \
-        f"trained ranker ({hit:.2f}) should beat raw NN ({base_hit:.2f})"
-    print(f"  [1] traversal ranker hit-rate {hit:.2f} > raw-NN {base_hit:.2f} -> PASS")
+    # With teacher-forced hop inputs the conditional task is LEARNABLE — the trained ranker
+    # reaches high accuracy. We assert high absolute hit, NOT a margin over cosine: teacher-
+    # forcing puts the discriminative signal directly in the input, so raw cosine is already
+    # strong on this FEATURELESS toy (feats are zeros). On real `preference` the feat_proj
+    # features (kind, name_mentioned) are what let the refiner beat cosine; here it only needs
+    # to learn the conditional mapping. (The old >NN+0.10 bar was misleading: it "passed" only
+    # because hop-2 was unlearnable for BOTH when the input was the static spec.)
+    assert hit > 0.75, \
+        f"trained ranker ({hit:.2f}) should learn the teacher-forced conditional task (>0.75)"
+    print(f"  [1] traversal ranker hit-rate {hit:.2f} (raw-NN {base_hit:.2f}) -> PASS")
 
     # 2. Save/load roundtrip
     import tempfile

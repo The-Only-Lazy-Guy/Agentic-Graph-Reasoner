@@ -40,6 +40,21 @@ BULK_NAMES = ["bulk_price", "discounted_price", "apply_bulk", "bulk_total"]
 TAXES = [0.05, 0.06, 0.07, 0.08, 0.09, 0.11, 0.12]
 FEE_RATES = [0.02, 0.03, 0.04, 0.10, 0.15]   # service/handling surcharge — compose's 2nd fact
 STRATEGIES = ["nash", "maxmin"]              # game-theory solution concepts — v4 preference
+# preference_pool distractors: OTHER game-theory solvers, deliberately NEAR nash/maxmin in
+# concept space (minimax~maxmin, best-response/dominant~nash) so the read-query embed(config
+# code "nash") can't cleanly pick the correct solver by cosine alone — the hard-retrieval
+# condition under which a trained refiner could beat cosine (cf. compose_pool for the parallel
+# case). Each is a valid, self-contained create session (never the correct answer).
+SOLVER_DISTRACTORS = [
+    ("minimax", "minimax_solution", "minimax strategy (von Neumann) that maximizes the worst-case payoff"),
+    ("bestresp", "best_response", "best-response dynamics against the opponent's fixed strategy"),
+    ("dominant", "dominant_strategy", "strictly dominant strategy elimination"),
+    ("pareto", "pareto_optimal", "Pareto-optimal outcome (no player can improve without hurting the other)"),
+    ("correlated", "correlated_equilibrium", "correlated equilibrium given a signal distribution"),
+    ("stackel", "stackelberg", "Stackelberg leader-follower solution"),
+    ("regret", "min_regret", "minimax-regret decision criterion"),
+    ("security", "security_level", "security level (guaranteed payoff) for the row player"),
+]
 # compose_pool distractors: same "RATE = float + fn(amount)" shape as tax.py/fees.py, so flat
 # cosine can't separate the TWO true sources from the crowd on surface similarity -- this is the
 # ONLY condition under which a smarter ranker could beat cosine (see LGGNv3_design.md 2026-07-08:
@@ -517,7 +532,7 @@ def _compose_pool_n(n: int):
 # toward config_emb carries the keyword signal; search_ctx(h_1) at hop 2 retrieves the
 # matching solver by cosine similarity.
 
-def _preference(rng: random.Random) -> dict:
+def _preference(rng: random.Random, n_distractors: int = 0) -> dict:
     strategy = rng.choice(STRATEGIES)
     utils_i = rng.randrange(len(ID_FMTS))
     id_expr, id_hint = ID_FMTS[utils_i]
@@ -631,26 +646,55 @@ def is_valid_payoff(v):
              ],
              gold={"utils.py": utils_gold}, withheld=[], source_session_idx=None,
              source_session_idxs=[]),
-        dict(kind="compose", target_file="solver.py",
-             spec=("Create solver.py. solve(payoffs) returns the game outcome using the "
-                   "strategy preference this project has already established. Import and use "
-                   "the matching solver. Return the result directly."),
-             tests=[
-                 f"import solver\nassert solver.solve({payoffs!r}) == {gold_out!r}",
-             ],
-             gold={"solver.py": solver_gold},
-             withheld=[strategy],
-             source_session_idx=0,
-             source_session_idxs=[0, solver_idx]),
     ]
+
+    # preference_pool: extra game-theory solver modules crowd hop 2 (after config is read, the
+    # correct solver must be picked among many near-identical solvers). Inserted AFTER the two
+    # real solvers so nash=s1/maxmin=s2 keep their indices; solver.py's source_session_idxs
+    # stay [0, solver_idx]. Non-dependency create sessions (indep unaffected).
+    for nm, fn, concept in rng.sample(SOLVER_DISTRACTORS, min(n_distractors, len(SOLVER_DISTRACTORS))):
+        body = (f'def {fn}(payoffs):\n'
+                f'    """Compute the {concept} for a 2x2 payoff matrix [[a,b],[c,d]]."""\n'
+                f'    a, b, c, d = payoffs[0][0], payoffs[0][1], payoffs[1][0], payoffs[1][1]\n'
+                f'    return (0, 0) if a >= d else (1, 1)\n')
+        sessions.append(dict(
+            kind="create", target_file=f"{nm}.py",
+            spec=(f"Create {nm}.py. {fn}(payoffs) computes the {concept} for a 2x2 payoff "
+                  f"matrix [[a,b],[c,d]] and returns (row_choice, col_choice)."),
+            tests=[f"import {nm}\nassert {nm}.{fn}([[3,1],[0,2]]) == (0, 0)"],
+            gold={f"{nm}.py": body}, withheld=[], source_session_idx=None,
+            source_session_idxs=[]))
+
+    sessions.append(dict(
+        kind="compose", target_file="solver.py",
+        spec=("Create solver.py. solve(payoffs) returns the game outcome using the "
+              "strategy preference this project has already established. Import and use "
+              "the matching solver. Return the result directly."),
+        tests=[
+            f"import solver\nassert solver.solve({payoffs!r}) == {gold_out!r}",
+        ],
+        gold={"solver.py": solver_gold},
+        withheld=[strategy],
+        source_session_idx=0,
+        source_session_idxs=[0, solver_idx]))
+
     return dict(archetype="preference", sessions=sessions,
-                params=dict(strategy=strategy, utils_i=utils_i, payoffs=payoffs))
+                params=dict(strategy=strategy, utils_i=utils_i, payoffs=payoffs,
+                            n_distractors=n_distractors))
+
+
+def _preference_pool(rng: random.Random) -> dict:
+    """preference with 8 near-neighbor solver distractors crowding hop 2 — the hard-retrieval
+    conditional variant, for the fair refiner-vs-cosine test on the read-hop."""
+    inst = _preference(rng, n_distractors=8)
+    inst["archetype"] = "preference_pool"
+    return inst
 
 
 ARCHETYPES = {"inventory": _inventory, "logparse": _logparse,
               "inventory_infer": _inventory_infer, "compose": _compose,
               "compose_pool4": _compose_pool_n(4), "compose_pool": _compose_pool_n(8),
-              "preference": _preference}
+              "preference": _preference, "preference_pool": _preference_pool}
 
 
 def make_instance(archetype: str, seed: int) -> dict:
@@ -774,27 +818,33 @@ def _selftest() -> bool:
 
     # preference (v4 traversal benchmark): conditional multi-hop. Config contains the
     # keyword; the compose spec does NOT; the correct solver is determined by config.
-    for seed in (0, 1, 3, 7, 11):
-        inst = make_instance("preference", seed)
-        ss = inst["sessions"]
-        solver = ss[4]
-        strat = inst["params"]["strategy"]
-        assert strat in ("nash", "maxmin"), f"strategy must be nash or maxmin, got {strat}"
-        assert solver["kind"] == "compose", f"solver session must be compose-kind"
-        assert strat not in solver["spec"], f"strategy keyword {strat} leaked into the spec"
-        assert solver["source_session_idx"] == 0, "primary source must be config.py (s0)"
-        # conditional source list: config + the matching solver
-        want_idxs = [0, 1] if strat == "nash" else [0, 2]
-        assert solver["source_session_idxs"] == want_idxs, \
-            f"seed {seed} strat={strat}: idxs {solver['source_session_idxs']} != {want_idxs}"
-        # the derived answer must be genuinely DERIVED: the gold code calls a solver function,
-        # not just returns a hardcoded value. Check the gold body for import + function call.
-        gold_body = solver["gold"]["solver.py"]
-        assert "from config import get_strategy" in gold_body
-        assert "from nash import nash_equilibrium" in gold_body
-        assert "from maxmin import maxmin_solution" in gold_body
-        assert "solve(payoffs)" in gold_body
-    print("  [1d] preference: conditional multi-hop, strategy keyword withheld, derived answer absent -> PASS")
+    # preference_pool adds near-neighbor solver distractors that crowd hop 2 (nash/maxmin stay
+    # at s1/s2; the solver session shifts, so find it by kind).
+    for arch in ("preference", "preference_pool"):
+        for seed in (0, 1, 3, 7, 11):
+            inst = make_instance(arch, seed)
+            ss = inst["sessions"]
+            solver = next(s for s in ss if s["kind"] == "compose")   # index shifts with distractors
+            strat = inst["params"]["strategy"]
+            assert strat in ("nash", "maxmin"), f"strategy must be nash or maxmin, got {strat}"
+            assert strat not in solver["spec"], f"strategy keyword {strat} leaked into the spec"
+            assert solver["source_session_idx"] == 0, "primary source must be config.py (s0)"
+            # conditional source list: config + the matching solver (nash=s1, maxmin=s2 fixed)
+            want_idxs = [0, 1] if strat == "nash" else [0, 2]
+            assert solver["source_session_idxs"] == want_idxs, \
+                f"{arch} seed {seed} strat={strat}: idxs {solver['source_session_idxs']} != {want_idxs}"
+            # genuinely DERIVED: the gold calls a solver function, not a hardcoded value.
+            gold_body = solver["gold"]["solver.py"]
+            assert "from config import get_strategy" in gold_body
+            assert "from nash import nash_equilibrium" in gold_body
+            assert "from maxmin import maxmin_solution" in gold_body
+            assert "solve(payoffs)" in gold_body
+            # only the solver session is a dependency; distractors are plain create sessions
+            assert [s for s in ss if s.get("withheld")] == [solver], \
+                f"{arch}: only the solver session may carry withheld"
+            assert len(ss) == 5 + inst["params"]["n_distractors"], \
+                f"{arch}: expected {5 + inst['params']['n_distractors']} sessions, got {len(ss)}"
+    print("  [1d] preference(+pool): conditional multi-hop, keyword withheld, distractors crowd hop 2 -> PASS")
 
     # cross-seed variation: conventions actually vary
     specs = {make_instance("inventory", s)["params"]["line_i"] for s in range(12)}
