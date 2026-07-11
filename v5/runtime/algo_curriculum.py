@@ -44,10 +44,14 @@ from v5.runtime.tool_memory import _extract_code
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def gen_graph(seed: int, n_lo: int = 4, n_hi: int = 7, wlo: int = 1, whi: int = 9,
-              p: float = 0.35, dag: bool = False) -> tuple[int, list]:
+              p: float = 0.35, dag: bool = False, parallel: bool = True) -> tuple[int, list]:
     """Deterministic directed weighted graph. dag=True keeps only u<v edges (acyclic — a valid topo
-    order exists); dag=False is general (often cyclic — exercises the 'no order' branch). No duplicate
-    (u, v) pair (so edge_weight/out_degree are unambiguous)."""
+    order exists); dag=False is general (often cyclic — exercises the 'no order' branch).
+
+    HARDENING (parallel=True): for a subset of seeds inject a PARALLEL edge — the same (u, v) with a
+    DIFFERENT weight — so verification REJECTS code that assumes at most one edge per pair (e.g. the
+    3B's `len({(nbr, weight) tuples})` out_degree, which passed only because the base graph had none).
+    The oracles are parallel-safe (distinct nodes / min weight)."""
     rng = random.Random(seed * 7919 + 13)
     n = rng.randint(n_lo, n_hi)
     edges = []
@@ -57,6 +61,10 @@ def gen_graph(seed: int, n_lo: int = 4, n_hi: int = 7, wlo: int = 1, whi: int = 
                 continue
             if rng.random() < p:
                 edges.append((u, v, rng.randint(wlo, whi)))
+    if parallel and edges and seed % 3 == 0:
+        u, v, w = edges[seed % len(edges)]
+        w2 = wlo + (w - wlo + 1) % (whi - wlo + 1)          # a DIFFERENT weight in [wlo, whi]
+        edges.append((u, v, w2))
     return n, edges
 
 
@@ -381,15 +389,22 @@ def solve_curriculum_task(graph: ArtifactGraph, gen_fn, task: Task, born: int, t
         code = max(pool, key=lambda c: score_rollout(graph, task, c, adv_names, ecases)[0])
     else:
         code = max(cands, key=lambda cv: cv[1])[0]
+    ev0 = len(graph.events)                            # snapshot to capture THIS task's graph edits
     R, bd, vr, causal, sol_defs = score_rollout(graph, task, code, adv_names, ecases)
+    authored = []
     if vr:
         for a in causal:
             graph.credit(a, tfp)                       # credit by TASK FINGERPRINT -> amort breadth
         universe = set(sol_defs) | set(graph.arts)
         for name, src in sol_defs.items():
-            graph.register(name, src, task.text[:60], born, _calls_in(src, universe, name))
+            authored.append(graph.register(name, src, task.text[:60], born, _calls_in(src, universe, name)))
     return dict(name=task.name, stage=task.stage, verified=vr, reward=round(R, 3),
-                causal=causal, breakdown=bd, code=code)
+                retrieved=adv_names,                   # what the model was SHOWN (retrieval)
+                reused=causal,                         # what it CHOSE to call from the library
+                authored=[a for a in authored if a not in causal],   # new nodes it wrote
+                edits=graph.events[ev0:],              # what it CHANGED (ADD / MERGE / CREDIT)
+                causal=causal, breakdown=bd, code=code,
+                fail_code="" if vr else code)          # best FAILING attempt (diagnose failures)
 
 
 def run_curriculum(gen_fn, stream=STREAM, verify_n=6, eval_n=10, k=32, samples=1, select="verify",
@@ -445,6 +460,21 @@ def dump_graph(graph: ArtifactGraph, save_dir: str = "artifacts/algo_graph_gate"
     print(f"\n  graph saved -> {save_dir} (commit the small JSONs to inspect offline)", file=sys.stderr)
 
 
+def dump_trace(log, show_fail=True):
+    """Per task: what the model was SHOWN (retrieved), what it CHOSE (reused/authored), and what it
+    CHANGED in the graph (edits) — plus the best FAILING attempt so failures are diagnosable."""
+    print("\n=== PER-TASK TRACE: retrieved -> chose -> graph edits ===", file=sys.stderr)
+    for r in log:
+        print(f"\n[{r['name']}] {'OK' if r['verified'] else 'FAIL'} reward={r['reward']:+.2f}",
+              file=sys.stderr)
+        print(f"   retrieved (shown): {r.get('retrieved', [])}", file=sys.stderr)
+        print(f"   reused   (chose) : {r.get('reused') or '-'}", file=sys.stderr)
+        print(f"   authored (wrote) : {r.get('authored') or '-'}", file=sys.stderr)
+        print(f"   graph edits      : {r.get('edits') or '-'}", file=sys.stderr)
+        if show_fail and not r['verified'] and r.get('fail_code'):
+            print(f"   --- best FAILING attempt ---\n{r['fail_code']}", file=sys.stderr)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # STUB LM (no GPU) — a COMPETENT proposer: factors `build_adj` and CALLS it when advertised.
 # Proves the curriculum is composable + drives the reward selftest. (real LM tested on molab.)
@@ -483,11 +513,12 @@ _STUB_BODY = {
                         "            for v in adj[u]:\n                if v not in seen:\n                    st.append(v)\n"
                         "    return c"),
     "topological_order": (True, "def topological_order(n, edges):\n    import heapq\n"
-                                "    adj = build_adj(n, edges)\n    indeg = [0] * n\n"
-                                "    for u in range(n):\n        for v, _ in adj[u]:\n            indeg[v] += 1\n"
+                                "    adj = build_adj(n, edges)\n"
+                                "    succ = {u: sorted({v for v, _ in adj[u]}) for u in range(n)}\n"
+                                "    indeg = [0] * n\n    for u in range(n):\n        for v in succ[u]:\n            indeg[v] += 1\n"
                                 "    h = [i for i in range(n) if indeg[i] == 0]; heapq.heapify(h); order = []\n"
                                 "    while h:\n        u = heapq.heappop(h); order.append(u)\n"
-                                "        for v in sorted({x for x, _ in adj[u]}):\n            indeg[v] -= 1\n"
+                                "        for v in succ[u]:\n            indeg[v] -= 1\n"
                                 "            if indeg[v] == 0:\n                heapq.heappush(h, v)\n"
                                 "    return order if len(order) == n else []"),
     "shortest_hops": (True, "def shortest_hops(n, edges, s, t):\n    from collections import deque\n"
@@ -546,18 +577,24 @@ def _selftest() -> bool:
     assert _o_dijkstra_dist(3, [(0, 1, 4)], 0) == [0, 4, -1]
     print("  [2] cyclic -> topo []; unreachable -> dijkstra -1 -> PASS")
 
-    # [3] generator deterministic + no duplicate (u,v) pair + valid node range
-    g1, g2 = gen_graph(42), gen_graph(42)
-    assert g1 == g2, "gen must be deterministic"
-    n3, E3 = gen_graph(42)
+    # [3] generator: deterministic; base loop has no dup (u,v); PARALLEL hardening injects one;
+    # oracles stay correct under parallel edges; dag=True acyclic
+    assert gen_graph(42) == gen_graph(42), "gen must be deterministic"
+    n3, E3 = gen_graph(43, parallel=False)                 # base construction (no injected parallel)
     seen = set()
     for (u, v, w) in E3:
         assert 0 <= u < n3 and 0 <= v < n3 and u != v and 1 <= w <= 9
-        assert (u, v) not in seen, "duplicate (u,v) edge"
+        assert (u, v) not in seen, "base loop must not duplicate (u,v)"
         seen.add((u, v))
+    sp = next(s for s in range(0, 40, 3) if gen_graph(s, parallel=False)[1])   # a %3==0 seed w/ edges
+    npar, Epar = gen_graph(sp)
+    pairs = [(u, v) for u, v, _ in Epar]
+    assert len(pairs) != len(set(pairs)), f"seed {sp}: parallel edge must be injected"
+    for u in range(npar):                                  # out_degree oracle = DISTINCT nodes even so
+        assert _o_out_degree(npar, Epar, u) == len({v for v, _ in _build_adj(npar, Epar)[u]})
     dagn, dage = gen_graph(8, dag=True)
     assert all(u < v for (u, v, _) in dage) and _o_topological_order(dagn, dage) != []
-    print(f"  [3] gen deterministic, dedup edges, dag=True acyclic -> PASS")
+    print(f"  [3] gen deterministic + base dedup + PARALLEL hardening (seed {sp}) + dag acyclic -> PASS")
 
     # [4] staged DAG structure: stages 0..3 present, capstone at stage 3, atoms shared across tasks
     assert STAGES == [0, 1, 2, 3], STAGES
@@ -690,6 +727,7 @@ def main():
               f"top amort reward={w['top_amort']} verify={v['top_amort']}.", file=sys.stderr)
         print(f"  => {'LEARNABLE (reuse present to amplify — RL worth it)' if learnable else 'WEAK (little/no reuse in N samples — seed-atoms or bigger base)'}",
               file=sys.stderr)
+        dump_trace(res["reward"]["log"])         # retrieval -> choice -> edits, + failing attempts
         dump_graph(res["reward"]["graph"])       # inspect the ACTUAL artifacts the model wrote
         return
     print("use --selftest (no GPU) · --run-stub (compounding demo) · --gate (molab pre-RL gate).")
