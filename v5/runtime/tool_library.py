@@ -237,9 +237,11 @@ def run_library(model_name, size, rounds, samples, chunk, verify_n, eval_n,
             else:
                 spec = PRIMS[r]
                 _log(f"  INDUCE {r} (new — not in library)")
+                # primitives get MORE candidate samples/round — they're the reliability
+                # bottleneck (everything composes on them), and induction is stochastic.
                 code, acc = induce(model, tok, dev, r, spec["task"], spec["cases"](vg),
-                                   spec["diag"], rounds=rounds, samples=samples, chunk=chunk,
-                                   eval_cases=spec["cases"](eg))
+                                   spec["diag"], rounds=rounds, samples=max(samples, 8),
+                                   chunk=chunk, eval_cases=spec["cases"](eg))
                 store.add(r, code, acc, spec["sig"], spec["desc"])
                 store.save(store_dir)             # persist immediately — build once, reuse forever
                 n_induced += 1

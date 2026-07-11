@@ -166,12 +166,13 @@ def induce(model, tok, dev, fn_name: str, task: str, cases: list, diag, *, avail
     cur_code, cur_fails, cur_acc = None, [], 0.0
     if seed_code and f"def {fn_name}" in seed_code:
         a, f, _ = verify_fn(seed_code, fn_name, cases, deps_code)
-        if a > 0:                                    # only seed from a draft that runs — a 0% seed
-            cur_code, cur_fails, cur_acc = seed_code, f, a   # (crashes) just anchors the loop to junk
+        # refine FROM the draft (it calls the library tools) so the loop keeps a tool-calling
+        # version even at 0% (a 0% draft usually means a dep isn't verified yet, not that the
+        # composition is wrong). Only promote it to `best` if it actually runs.
+        cur_code, cur_fails, cur_acc = seed_code, f, a
+        if a > 0:
             best_code, best_acc = seed_code, a
-            _log(f"\n── inducing {fn_name} (seeded from draft @ {a:.0%}) ──")
-        else:
-            _log(f"\n── inducing {fn_name} (draft seed @ 0%, starting fresh) ──")
+        _log(f"\n── inducing {fn_name} (seeded from draft @ {a:.0%}) ──")
     else:
         _log(f"\n── inducing {fn_name} ──")
     if best_acc >= 0.999:
