@@ -74,15 +74,23 @@ def _classify(row_pay, col_pay) -> str:
 
 
 def make_game(seed: int, size: int = 2, want_type: str | None = None,
-              lo: int = 0, hi: int = 9) -> dict:
-    """Deterministic game with EXACTLY ONE pure NE (reject-sampled), distinct payoffs to avoid
-    ties. `want_type` filters to a structural family for the memory-relevance test."""
+              lo: int = 0, hi: int = 9, balance: bool = True) -> dict:
+    """Deterministic game with EXACTLY ONE pure NE (reject-sampled), distinct payoffs.
+
+    balance=True forces the NE cell to a seed-cycled target so the NE is UNIFORM over cells.
+    This kills the constant-answer confound: 'always guess cell X' then scores exactly 1/cells
+    (25% at 2x2, 11% at 3x3), the floor a reasoning model must BEAT. Without it, a model that
+    anchors to a frequent cell looks like it's 'reasoning'."""
     rng = random.Random(seed * 7919 + 13)
-    for _ in range(2000):
+    cells = [(i, j) for i in range(size) for j in range(size)]
+    target = cells[seed % len(cells)] if balance else None
+    for _ in range(8000):
         rp = [[rng.randint(lo, hi) for _ in range(size)] for _ in range(size)]
         cp = [[rng.randint(lo, hi) for _ in range(size)] for _ in range(size)]
         ne = pure_ne(rp, cp)
         if len(ne) != 1:
+            continue
+        if target is not None and ne[0] != target:
             continue
         typ = _classify(rp, cp)
         if want_type and typ != want_type:
@@ -140,15 +148,22 @@ def build_prompt(inst: dict, examples: list[dict] | None = None) -> str:
 
 
 _ANS_RE = re.compile(r"ANSWER\s*:\s*\(?\s*(\d+)\s*,\s*(\d+)\s*\)?")
+_TUPLE_RE = re.compile(r"\(\s*(\d+)\s*,\s*(\d+)\s*\)")
 
 
 def parse_answer(gen: str) -> tuple[int, int] | None:
-    """Extract the LAST `ANSWER: (i, j)` from the generation (last = the model's final answer)."""
-    matches = _ANS_RE.findall(gen or "")
-    if not matches:
-        return None
-    i, j = matches[-1]
-    return (int(i), int(j))
+    """Extract the model's final answer. Prefer the LAST `ANSWER: (i, j)`; else fall back to the
+    LAST parenthesized (i, j) tuple anywhere. The fallback matters: a model can REASON to the
+    right cell without emitting the exact `ANSWER:` template, and punishing that as 'no answer'
+    conflates formatting with reasoning (it deflated the cold arm)."""
+    gen = gen or ""
+    m = _ANS_RE.findall(gen)
+    if m:
+        return (int(m[-1][0]), int(m[-1][1]))
+    t = _TUPLE_RE.findall(gen)
+    if t:
+        return (int(t[-1][0]), int(t[-1][1]))
+    return None
 
 
 PASS_REWARD = 1.0
@@ -265,16 +280,30 @@ def run_baseline(model_name: str, n: int, size: int, shots: int, mem_mode: str, 
     prompts = [build_prompt(g, retrieve_examples(g, bank, shots, mem_mode)) for g in insts]
     gens = batch_generate(model, tok, prompts, dev, max_new=400, sample=False, chunk=chunk)
 
-    solved, by_type = 0, {}
+    solved, by_type, preds = 0, {}, []
     for inst, gen in zip(insts, gens):
         r, info = reason_reward(gen, inst)
         ok = r >= PASS_REWARD - 0.01
         solved += ok
+        preds.append(parse_answer(gen))
         d = by_type.setdefault(inst["gtype"], [0, 0]); d[0] += ok; d[1] += 1
         print(f"  [{inst['instance_id']}:{inst['gtype']}] {info['verdict']}", flush=True)
     total = len(insts)
+    # floors: the score to BEAT. const = best single-cell guess on THIS eval set; random = 1/cells.
+    from collections import Counter
+    ne_counts = Counter(g["ne"] for g in insts)
+    const_floor = max(ne_counts.values()) / total
+    rand_floor = 1.0 / (size * size)
+    # anchoring diagnostic: is the model just repeating ONE cell?
+    pred_counts = Counter(p for p in preds if p is not None)
+    top_pred, top_n = (pred_counts.most_common(1)[0] if pred_counts else (None, 0))
+    noans = sum(1 for p in preds if p is None)
     print(f"\n  solve {solved}/{total} = {solved/max(1,total):.0%}  "
           + " ".join(f"{t}:{c}/{n_}" for t, (c, n_) in by_type.items()), flush=True)
+    print(f"  floors: const-cell {const_floor:.0%} | random {rand_floor:.0%}   "
+          f"(reasoning only if solve > const)", flush=True)
+    print(f"  anchoring: most-common pred {top_pred} used {top_n}/{total}, no-answer {noans}/{total}",
+          flush=True)
     return solved / max(1, total)
 
 
@@ -398,16 +427,22 @@ def _selftest() -> bool:
     assert ne == [(1, 1)], f"oracle wrong on PD: {ne}"
     print(f"  [1] oracle: PD unique NE = {ne} -> PASS")
 
-    # 2. generator: every instance has EXACTLY ONE pure NE, and it IS a mutual best response
+    # 2. generator: exactly ONE pure NE, and NE cell is BALANCED (uniform over cells) so the
+    # constant-answer floor is 1/cells, not something a guesser can exploit.
+    from collections import Counter
     n_by_type = {}
-    for s in range(40):
-        for size in (2, 3):
-            inst = make_game(s, size=size)
-            assert len(pure_ne(inst["row_pay"], inst["col_pay"])) == 1, f"seed {s}: not unique"
-            assert inst["ne"] == pure_ne(inst["row_pay"], inst["col_pay"])[0]
-            n_by_type[inst["gtype"]] = n_by_type.get(inst["gtype"], 0) + 1
+    cell_hist = Counter()
+    for s in range(48):
+        inst = make_game(s, size=2)
+        assert len(pure_ne(inst["row_pay"], inst["col_pay"])) == 1, f"seed {s}: not unique"
+        assert inst["ne"] == pure_ne(inst["row_pay"], inst["col_pay"])[0]
+        n_by_type[inst["gtype"]] = n_by_type.get(inst["gtype"], 0) + 1
+        cell_hist[inst["ne"]] += 1
+        make_game(s, size=3)   # 3x3 also generates
+    # balance: all 4 cells appear, none dominates (each ~12/48)
+    assert len(cell_hist) == 4 and max(cell_hist.values()) <= 16, f"NE not balanced: {dict(cell_hist)}"
     assert len(n_by_type) >= 2, f"want variety of game types, got {n_by_type}"
-    print(f"  [2] generator: unique-NE games, type mix {n_by_type} -> PASS")
+    print(f"  [2] generator: unique-NE, balanced cells {dict(cell_hist)}, types {n_by_type} -> PASS")
 
     # 3. reward discriminates: correct answer > wrong > no-answer
     inst = make_game(3, size=2); i, j = inst["ne"]
@@ -416,10 +451,14 @@ def _selftest() -> bool:
     r_wrong, _ = reason_reward(f"ANSWER: ({wi}, {j})", inst)
     r_none, _ = reason_reward("no idea", inst)
     assert r_ok > 0 and r_wrong < 0 and r_none < 0, (r_ok, r_wrong, r_none)
-    # parse takes the LAST answer (model's final)
+    # parse takes the LAST answer (model's final); ANSWER: wins over bare tuples; and a bare
+    # tuple with NO `ANSWER:` still parses (don't punish reasoning for formatting).
     assert parse_answer(f"ANSWER: (0,0)\n...revised...\nANSWER: ({i}, {j})") == (i, j)
+    assert parse_answer("checking cells... the equilibrium is (1, 0).") == (1, 0)   # fallback
+    assert parse_answer("R = [[3,1],[0,2]]\nso ANSWER: (0, 1)") == (0, 1)            # ANSWER wins
+    assert parse_answer("no cell here") is None
     print(f"  [3] reward: correct {r_ok:+.0f} / wrong {r_wrong:+.0f} / none {r_none:+.0f}, "
-          f"parse-last -> PASS")
+          f"parse ANSWER>tuple>none -> PASS")
 
     # 4. worked example teaches the method AND states the right answer (no leakage of a wrong one)
     we = worked_example(inst)
