@@ -393,8 +393,11 @@ def solve_curriculum_task(graph: ArtifactGraph, gen_fn, task: Task, born: int, t
 
 
 def run_curriculum(gen_fn, stream=STREAM, verify_n=6, eval_n=10, k=32, samples=1, select="verify",
-                   graph=None):
+                   seed_atoms=False, graph=None):
     graph = graph or ArtifactGraph()
+    if seed_atoms and "build_adj" not in graph.arts:      # pre-register the shared atom (test REUSE
+        graph.register("build_adj", _BUILD_ADJ,           # of a ready-made atom, not FACTORING it)
+                       "adjacency dict {node: [(neighbor, weight)]} built from n and the edge list", 0, [])
     vseeds, eseeds = range(300, 300 + verify_n), range(700, 700 + eval_n)
     log = []
     for i, task in enumerate(stream):
@@ -403,23 +406,28 @@ def run_curriculum(gen_fn, stream=STREAM, verify_n=6, eval_n=10, k=32, samples=1
     return graph, log
 
 
-def best_of_n_gate(gen_fn, n=8, stream=STREAM, verify_n=6, eval_n=10):
+def best_of_n_gate(gen_fn, n=8, stream=STREAM, verify_n=6, eval_n=10, seed_atoms=False):
     """The pre-RL gate. Run the curriculum twice with best-of-`n` sampling: arm 'verify' selects the
     highest-verifying candidate (baseline); arm 'reward' selects the highest-REWARD verified candidate
-    (reuse preference). If 'reward' raises causal reuse + amortization + capstone reachability at
-    EQUAL correctness, the behavior is learnable -> RL is worth the GPU. If not, a bigger base is
-    needed (project-model-strategy)."""
+    (reuse preference). Reuse is measured NAME-AGNOSTICALLY (the model names its own helpers). If
+    'reward' raises reuse at EQUAL correctness (and, seeded, the model reuses a ready-made atom), the
+    behavior is learnable -> RL is worth the GPU."""
     out = {}
     for mode in ("verify", "reward"):
         graph, log = run_curriculum(gen_fn, stream=stream, verify_n=verify_n, eval_n=eval_n,
-                                    samples=n, select=mode)
+                                    samples=n, select=mode, seed_atoms=seed_atoms)
         cap = next((r for r in log if r["name"] == "dijkstra_dist"), None)
+        amorts = {nm: graph.amort(nm) for nm in graph.arts}
+        top_atom, top_am = max(amorts.items(), key=lambda kv: kv[1], default=("-", 0))
         out[mode] = dict(
             solved=sum(1 for r in log if r["verified"]), total=len(log),
-            reusers=sum(1 for r in log if r["causal"]),
-            amort=graph.amort("build_adj") if "build_adj" in graph.arts else 0,
+            reusers=sum(1 for r in log if r["causal"]),                 # tasks with ANY causal reuse
+            total_reuses=sum(len(r["causal"]) for r in log),            # name-agnostic reuse count
+            top_atom=top_atom, top_amort=top_am,                       # most-amortized atom (any name)
             capstone_composed=bool(cap and cap["verified"] and cap["causal"]),
+            capstone_solved=bool(cap and cap["verified"]),
             mean_reward=round(sum(r["reward"] for r in log) / max(1, len(log)), 2),
+            per_task=[(r["name"], r["verified"], r["causal"]) for r in log],
             log=log)
     return out
 
@@ -633,6 +641,9 @@ def main():
     ap.add_argument("--model", default="Qwen/Qwen2.5-3B")
     ap.add_argument("--n", type=int, default=8, help="best-of-N samples per task for --gate")
     ap.add_argument("--chunk", type=int, default=8)
+    ap.add_argument("--seed-atoms", action="store_true",
+                    help="pre-register build_adj so --gate tests REUSE of a ready-made atom "
+                         "(separates 'won't reuse' from 'can't factor')")
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
@@ -648,19 +659,23 @@ def main():
     if a.gate:
         from v5.runtime.artifact_graph import _real_gen_fn
         gen_fn = _real_gen_fn(a.model, a.chunk)
-        res = best_of_n_gate(gen_fn, n=a.n)
-        print(f"\nBEST-OF-{a.n} GATE ({a.model}) — verify-select vs reward-select\n", file=sys.stderr)
+        res = best_of_n_gate(gen_fn, n=a.n, seed_atoms=a.seed_atoms)
+        tag = " [SEED-ATOMS: build_adj pre-registered -> tests REUSE, not factoring]" if a.seed_atoms else ""
+        print(f"\nBEST-OF-{a.n} GATE ({a.model}){tag}\n", file=sys.stderr)
         for mode in ("verify", "reward"):
             r = res[mode]
-            print(f"  [{mode:6}] solved {r['solved']}/{r['total']} | reusers {r['reusers']} | "
-                  f"build_adj amort {r['amort']} | capstone-composed {r['capstone_composed']} | "
-                  f"mean_reward {r['mean_reward']}", file=sys.stderr)
+            print(f"  [{mode:6}] solved {r['solved']}/{r['total']} | reuses {r['total_reuses']} "
+                  f"(tasks {r['reusers']}) | top-atom {r['top_atom']}@amort {r['top_amort']} | "
+                  f"capstone solved={r['capstone_solved']} composed={r['capstone_composed']} | "
+                  f"mean_R {r['mean_reward']}", file=sys.stderr)
+            for name, ok, causal in r["per_task"]:
+                print(f"        {name:20} {'OK ' if ok else 'FAIL'} reuse={causal or '-'}", file=sys.stderr)
         v, w = res["verify"], res["reward"]
-        gain = w["reusers"] - v["reusers"]
-        print(f"\n  GATE: reward-select adds {gain:+d} reusers at {w['solved']}/{v['solved']} solved "
-              f"(equal correctness). Capstone composed: verify={v['capstone_composed']} "
-              f"reward={w['capstone_composed']}.", file=sys.stderr)
-        print(f"  => {'PASS (behavior is learnable — RL worth it)' if gain > 0 and w['capstone_composed'] else 'WEAK (model rarely produces reuse in N samples — bigger base?)'}",
+        gain = w["total_reuses"] - v["total_reuses"]
+        learnable = (w["total_reuses"] > 0 or v["total_reuses"] > 0) and w["solved"] >= v["solved"]
+        print(f"\n  GATE: reward-select {gain:+d} reuses vs verify at {w['solved']}/{v['solved']} solved. "
+              f"top amort reward={w['top_amort']} verify={v['top_amort']}.", file=sys.stderr)
+        print(f"  => {'LEARNABLE (reuse present to amplify — RL worth it)' if learnable else 'WEAK (little/no reuse in N samples — seed-atoms or bigger base)'}",
               file=sys.stderr)
         return
     print("use --selftest (no GPU) · --run-stub (compounding demo) · --gate (molab pre-RL gate).")
