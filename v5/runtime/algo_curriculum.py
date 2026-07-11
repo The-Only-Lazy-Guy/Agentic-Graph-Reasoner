@@ -428,8 +428,21 @@ def best_of_n_gate(gen_fn, n=8, stream=STREAM, verify_n=6, eval_n=10, seed_atoms
             capstone_solved=bool(cap and cap["verified"]),
             mean_reward=round(sum(r["reward"] for r in log) / max(1, len(log)), 2),
             per_task=[(r["name"], r["verified"], r["causal"]) for r in log],
-            log=log)
+            log=log, graph=graph)
     return out
+
+
+def dump_graph(graph: ArtifactGraph, save_dir: str = "artifacts/algo_graph_gate"):
+    """Print every stored artifact's ACTUAL code + reuse edges (inspect what the model really wrote,
+    not just the metrics) and persist to disk for offline review."""
+    graph.save(save_dir)
+    print("\n=== GRAPH CONTENTS (inspect code quality + reuse structure) ===", file=sys.stderr)
+    for name in sorted(graph.arts):
+        a = graph.arts[name]
+        print(f"\n--- {name} | amort {graph.amort(name)} | reused_by "
+              f"{list(dict.fromkeys(a.reused_by))} | calls {a.calls} ---", file=sys.stderr)
+        print(a.code, file=sys.stderr)
+    print(f"\n  graph saved -> {save_dir} (commit the small JSONs to inspect offline)", file=sys.stderr)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -677,6 +690,7 @@ def main():
               f"top amort reward={w['top_amort']} verify={v['top_amort']}.", file=sys.stderr)
         print(f"  => {'LEARNABLE (reuse present to amplify — RL worth it)' if learnable else 'WEAK (little/no reuse in N samples — seed-atoms or bigger base)'}",
               file=sys.stderr)
+        dump_graph(res["reward"]["graph"])       # inspect the ACTUAL artifacts the model wrote
         return
     print("use --selftest (no GPU) · --run-stub (compounding demo) · --gate (molab pre-RL gate).")
 
