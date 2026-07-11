@@ -246,9 +246,8 @@ def build_bank(size: int) -> list[dict]:
 
 def retrieve_examples(inst: dict, bank: list[dict], k: int, mode: str = "relevant",
                       rng: random.Random | None = None) -> list[dict]:
-    """Pick k worked examples from the bank. mode='relevant' -> same game TYPE (tests whether
-    method-matched memory helps more); 'random' -> generic few-shot; 'none' -> [].
-    Excludes the instance's own seed (no answer leakage)."""
+    """[static-bank few-shot, kept for the ablation] Pick k templated worked examples. This is
+    NOT the memory system — it's the frozen-bank control. The real thing is ReasonMemory below."""
     if k <= 0 or mode == "none":
         return []
     rng = rng or random.Random(inst["seed"])
@@ -258,6 +257,127 @@ def retrieve_examples(inst: dict, bank: list[dict], k: int, mode: str = "relevan
         pool = same or pool
     rng.shuffle(pool)
     return pool[:k]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# THE REAL MEMORY: the model WRITES its own verified solutions back, RETRIEVES the
+# method-relevant ones, REFINES the selection, and it COMPOUNDS as it solves more.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def game_repr(inst: dict) -> str:
+    """Text key for retrieval — structure + payoffs (game TYPE is the method-relevance axis)."""
+    return (f"{inst['size']}x{inst['size']} game, {inst['gtype']}. "
+            f"R={inst['row_pay']} C={inst['col_pay']}")
+
+
+class ReasonMemory:
+    """The model's own accumulating, refined solve-bank.
+
+    - WRITE-BACK: add(inst, reasoning, answer) stores a VERIFIED solve — the model's own
+      successful reasoning trace, in its own words (not a template).
+    - RETRIEVE + REFINE: retrieve(inst, k) returns the k records whose method is most relevant
+      to the new game — refined by game TYPE first (dominance vs unique => same solution
+      procedure), then embedding similarity. Never returns the instance's own seed.
+    - COMPOUNDS: it grows across episodes; better/more solves => better retrieval => the model
+      bootstraps off its own past reasoning.
+    """
+    def __init__(self, embed_fn=None):
+        self.embed_fn = embed_fn
+        self.records: list[dict] = []
+
+    def _emb(self, text: str):
+        import numpy as np
+        from v5.memory.store import stable_id
+        key = stable_id("g", text)
+        return np.asarray(self.embed_fn({key: text})[key], dtype="float32")
+
+    def __len__(self):
+        return len(self.records)
+
+    def add(self, inst: dict, reasoning: str, answer: tuple):
+        emb = self._emb(game_repr(inst)) if self.embed_fn is not None else None
+        self.records.append(dict(inst=inst, reasoning=(reasoning or "").strip(),
+                                 answer=answer, gtype=inst["gtype"], seed=inst["seed"], emb=emb))
+
+    def retrieve(self, inst: dict, k: int, refine: bool = True) -> list[dict]:
+        import numpy as np
+        recs = [r for r in self.records if r["seed"] != inst["seed"]]
+        if not recs or k <= 0:
+            return []
+        if self.embed_fn is not None:
+            q = self._emb(game_repr(inst))
+            def sim(r):
+                e = r["emb"]
+                return float(q @ e / (np.linalg.norm(q) * np.linalg.norm(e) + 1e-9))
+            scored = [(sim(r), r) for r in recs]
+        else:
+            scored = [(0.0, r) for r in recs]
+        if refine:
+            # REFINE: method-relevance (same game type) first, then similarity — select the
+            # records whose solution PROCEDURE transfers, not just the nearest text.
+            scored.sort(key=lambda sr: (sr[1]["gtype"] == inst["gtype"], sr[0]), reverse=True)
+        else:
+            scored.sort(key=lambda sr: -sr[0])
+        return [r for _, r in scored[:k]]
+
+
+def build_prompt_from_records(inst: dict, records: list[dict]) -> str:
+    """Prompt seeded with the model's OWN prior verified solves (its reasoning), not templates."""
+    head = ("You find the pure-strategy Nash equilibrium of a 2-player game. Check, for each "
+            "cell, whether the row player's payoff is the max in its column AND the col player's "
+            "payoff is the max in its row. Output the single equilibrium cell as `ANSWER: (i, j)`.")
+    parts = [head]
+    if records:
+        parts.append("\nGames you solved correctly before (same method applies here):")
+        for r in records:
+            body = r["reasoning"][:500].strip()
+            if "ANSWER" not in body:
+                body += f"\nANSWER: ({r['answer'][0]}, {r['answer'][1]})"
+            parts.append(f"{format_game(r['inst'])}\n{body}")
+    parts.append("\nNow solve this game:")
+    parts.append(format_game(inst))
+    parts.append("Show brief reasoning, then end with `ANSWER: (i, j)`.")
+    return "\n\n".join(parts)
+
+
+def run_self_memory(model_name: str, n: int, size: int, k: int, refine: bool, chunk: int = 1):
+    """Frozen model, but memory the model BUILDS itself: solve a game -> write correct solves
+    back -> retrieve method-relevant own-solves for later games. Measures COMPOUNDING (does the
+    solve-rate climb as the model accumulates its own worked examples?)."""
+    from transformers import AutoTokenizer
+    from v5.lm_loader import load_frozen_lm
+    from v5.memory.store import make_mpnet_embedder
+
+    trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
+    model = load_frozen_lm(model_name); model.eval()
+    tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=trust)
+    dev = next(model.parameters()).device
+    mem = ReasonMemory(make_mpnet_embedder())
+
+    games = [make_game(s, size=size) for s in list(EVAL_SEEDS)[:n]]
+    hits = []
+    print(f"SELF-MEMORY (frozen, write-back + refine={refine}): {n} games {size}x{size} k={k} "
+          f"(model={model_name})\n", flush=True)
+    for idx, inst in enumerate(games):
+        recs = mem.retrieve(inst, k, refine=refine)
+        prompt = build_prompt_from_records(inst, recs)
+        gen = batch_generate(model, tok, [prompt], dev, max_new=400, sample=False, chunk=1)[0]
+        r, info = reason_reward(gen, inst)
+        ok = r >= PASS_REWARD - 0.01
+        hits.append(ok)
+        if ok:
+            mem.add(inst, gen, inst["ne"])            # WRITE-BACK the model's own verified solve
+        if idx % 5 == 0 or ok:
+            print(f"  [{idx:2}] {inst['gtype']:9} used {len(recs)} own-solves | mem={len(mem):2} | "
+                  f"{info['verdict']}", flush=True)
+    w = max(1, n // 3)
+    early = sum(hits[:w]) / w
+    late = sum(hits[-w:]) / w
+    print(f"\n  solve {sum(hits)}/{n} = {sum(hits)/n:.0%}  | COMPOUNDING: first {w} = {early:.0%} "
+          f"-> last {w} = {late:.0%}  (memory grew to {len(mem)})", flush=True)
+    print(f"  => memory helps if LATE > EARLY (the model bootstraps off its own solved games)",
+          flush=True)
+    return sum(hits) / n
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -312,7 +432,7 @@ def run_baseline(model_name: str, n: int, size: int, shots: int, mem_mode: str, 
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every, ent_coef,
-          temperature, size, shots, mem_mode, sft_steps, chunk=16):
+          temperature, size, shots, mem_mode, sft_steps, chunk=16, self_mem=False, refine=True):
     import torch
     import torch.nn as nn
     from transformers import AutoTokenizer
@@ -336,9 +456,23 @@ def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every, ent_coef,
           f"{size}x{size} shots={shots} mem={mem_mode}", flush=True)
 
     rng = random.Random(seed)
-    bank = build_bank(size) if shots > 0 else []
+    bank = build_bank(size) if (shots > 0 and not self_mem) else []
     held = [make_game(s, size=size) for s in EVAL_SEEDS][:40]
     train_seeds = list(TRAIN_SEEDS)
+
+    # THE MEMORY the model builds itself: verified rollouts are written back and retrieved
+    # (refined by method) on later steps -> it learns off its OWN accumulating solves.
+    mem = None
+    if self_mem:
+        from v5.memory.store import make_mpnet_embedder
+        mem = ReasonMemory(make_mpnet_embedder())
+    print(f"  memory mode: {'SELF (write-back + refine=%s)' % refine if self_mem else ('static-bank ' + mem_mode if shots else 'none')}",
+          flush=True)
+
+    def prompt_for(inst):
+        if self_mem:
+            return build_prompt_from_records(inst, mem.retrieve(inst, shots, refine=refine))
+        return build_prompt(inst, retrieve_examples(inst, bank, shots, mem_mode))
 
     def encode(prompt):
         m = [{"role": "user", "content": prompt}]
@@ -360,7 +494,7 @@ def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every, ent_coef,
 
     def evaluate():
         model.eval()
-        prompts = [build_prompt(g, retrieve_examples(g, bank, shots, mem_mode)) for g in held]
+        prompts = [prompt_for(g) for g in held]
         gens = batch_generate(model, tok, prompts, dev, max_new=400, sample=False, chunk=chunk)
         rs = [reason_reward(g, inst)[0] for inst, g in zip(held, gens)]
         model.train()
@@ -371,20 +505,25 @@ def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every, ent_coef,
 
     for step in range(1, steps + 1):
         inst = make_game(rng.choice(train_seeds), size=size)
-        ex = retrieve_examples(inst, bank, shots, mem_mode)
-        pids = encode(build_prompt(inst, ex))
+        pids = encode(prompt_for(inst))
         # all K rollouts in ONE batched generate (uses the big VRAM) instead of K calls
         with torch.no_grad():
             out = model.generate(pids, do_sample=True, temperature=temperature, top_p=0.95,
                                  max_new_tokens=400, num_return_sequences=K,
                                  pad_token_id=tok.eos_token_id)
         comp_all = out[:, pids.shape[1]:]     # [K, new]
-        comps, rewards = [], []
+        comps, rewards, first_correct = [], [], None
         for k in range(K):
             comp = comp_all[k:k + 1]
             gen = _clean(tok.decode(comp[0], skip_special_tokens=True))
             comps.append(comp)
             r, _ = reason_reward(gen, inst); rewards.append(r)
+            if r >= PASS_REWARD - 0.01 and first_correct is None:
+                first_correct = gen
+        # WRITE-BACK: if any rollout solved this game, store the model's own verified reasoning
+        # so later steps retrieve it (compounds; the model learns off its own successes).
+        if mem is not None and first_correct is not None:
+            mem.add(inst, first_correct, inst["ne"])
         mean_r = sum(rewards) / K
         r_std = (sum((r - mean_r) ** 2 for r in rewards) / K) ** 0.5
         if r_std < 1e-9:
@@ -483,6 +622,26 @@ def _selftest() -> bool:
     assert "Worked examples" in p_mem and p_mem.count("ANSWER:") >= 3
     print(f"  [6] prompt: cold vs +memory ({len(rel)} worked examples) -> PASS")
 
+    # 7. THE REAL MEMORY: write-back the model's own solve, retrieve it (refined by type),
+    # no self-leak, and the retrieved worked example carries the model's reasoning + answer.
+    import numpy as np
+    def fake_embed(texts: dict) -> dict:
+        return {kk: np.random.RandomState(abs(hash(v)) % (2**31)).randn(64).astype("float32")
+                for kk, v in texts.items()}
+    rm = ReasonMemory(fake_embed)
+    assert rm.retrieve(make_game(1, 2), 3) == [], "empty memory -> no records"
+    g_a = make_game(10, size=2); g_b = make_game(11, size=2)
+    rm.add(g_a, "cell (0,0): row max in col, col max in row -> NE. ANSWER: (0, 0)", g_a["ne"])
+    rm.add(g_b, "checking best responses... ANSWER: (1, 1)", g_b["ne"])
+    # retrieving for g_a excludes g_a's own seed (no answer leak)
+    got = rm.retrieve(g_a, 5)
+    assert all(r["seed"] != g_a["seed"] for r in got), "must not retrieve the query's own solve"
+    assert len(rm) == 2
+    # refine prefers same game type; the prompt built from records carries the model's reasoning
+    p = build_prompt_from_records(make_game(12, size=2), rm.retrieve(make_game(12, size=2), 2))
+    assert "solved correctly before" in p and "ANSWER:" in p
+    print(f"  [7] ReasonMemory: write-back + refined retrieve + no-self-leak + own-reasoning -> PASS")
+
     print(f"\n  REASON_RL SELFTEST -> {'PASS' if ok else 'FAIL'}")
     return ok
 
@@ -508,14 +667,25 @@ def main():
     ap.add_argument("--sft-steps", type=int, default=0)
     ap.add_argument("--chunk", type=int, default=16,
                     help="batched-generation chunk size (raise on big VRAM, e.g. 64 on 90GB)")
+    ap.add_argument("--self-memory", action="store_true",
+                    help="frozen model, but memory it BUILDS itself: write-back verified solves + "
+                         "retrieve method-refined own-solves. Measures compounding (early vs late).")
+    ap.add_argument("--self-mem", action="store_true",
+                    help="RL WITH self-built memory: retrieve own verified solves + write back "
+                         "correct rollouts (the real loop). Use with --shots K.")
+    ap.add_argument("--no-refine", action="store_true",
+                    help="disable method-refinement of retrieved memory (nearest-only, for ablation)")
     a = ap.parse_args()
 
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
+    if a.self_memory:
+        return run_self_memory(a.model, a.n_baseline, a.size, a.shots or 3, not a.no_refine, a.chunk)
     if a.baseline:
         return run_baseline(a.model, a.n_baseline, a.size, a.shots, a.mem, a.chunk)
     train(a.model, a.steps, a.k, a.lr, a.r_lora, a.seed, a.layers, a.eval_every,
-          a.ent_coef, a.temperature, a.size, a.shots, a.mem, a.sft_steps, a.chunk)
+          a.ent_coef, a.temperature, a.size, a.shots, a.mem, a.sft_steps, a.chunk,
+          self_mem=a.self_mem, refine=not a.no_refine)
 
 
 if __name__ == "__main__":
