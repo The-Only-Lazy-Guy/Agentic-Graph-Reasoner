@@ -176,6 +176,46 @@ def advantages(rewards: list[float]) -> list[float]:
     return [(r - mean) / std for r in rewards]
 
 
+def _clean(txt: str) -> str:
+    return re.sub(r"<think>.*?</think>", "", txt or "", flags=re.DOTALL)
+
+
+def _chat_text(tok, prompt: str) -> str:
+    m = [{"role": "user", "content": prompt}]
+    try:
+        return tok.apply_chat_template(m, tokenize=False, add_generation_prompt=True,
+                                       enable_thinking=False)
+    except TypeError:
+        return tok.apply_chat_template(m, tokenize=False, add_generation_prompt=True)
+
+
+def batch_generate(model, tok, prompts: list[str], dev, max_new: int = 400,
+                   sample: bool = False, temperature: float = 1.0, chunk: int = 16) -> list[str]:
+    """Generate for a LIST of prompts in left-padded batches — uses the big VRAM instead of one
+    generation at a time. Returns cleaned completions in prompt order."""
+    import torch
+    if tok.pad_token_id is None:
+        tok.pad_token = tok.eos_token
+    old_side = tok.padding_side
+    tok.padding_side = "left"
+    outs: list[str] = []
+    try:
+        for s in range(0, len(prompts), chunk):
+            texts = [_chat_text(tok, p) for p in prompts[s:s + chunk]]
+            enc = tok(texts, return_tensors="pt", padding=True,
+                      add_special_tokens=False).to(dev)
+            with torch.no_grad():
+                gen = model.generate(**enc, do_sample=sample,
+                                     temperature=temperature if sample else None,
+                                     top_p=0.95 if sample else None,
+                                     max_new_tokens=max_new, pad_token_id=tok.eos_token_id)
+            new = gen[:, enc["input_ids"].shape[1]:]
+            outs.extend(_clean(tok.decode(row, skip_special_tokens=True)) for row in new)
+    finally:
+        tok.padding_side = old_side
+    return outs
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # MEMORY: a solved-bank of worked examples, retrieved by game TYPE (relevant) or random
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -209,8 +249,7 @@ def retrieve_examples(inst: dict, bank: list[dict], k: int, mode: str = "relevan
 # BASELINE EVAL (frozen model) — cold vs +memory
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def run_baseline(model_name: str, n: int, size: int, shots: int, mem_mode: str):
-    import torch
+def run_baseline(model_name: str, n: int, size: int, shots: int, mem_mode: str, chunk: int = 16):
     from transformers import AutoTokenizer
     from v5.lm_loader import load_frozen_lm
 
@@ -221,32 +260,19 @@ def run_baseline(model_name: str, n: int, size: int, shots: int, mem_mode: str):
     bank = build_bank(size) if shots > 0 else []
 
     print(f"FROZEN baseline: {n} games {size}x{size}, shots={shots} mem={mem_mode} "
-          f"(model={model_name})\n", flush=True)
-    solved, total = 0, 0
-    by_type = {}
-    for seed in EVAL_SEEDS:
-        if total >= n:
-            break
-        inst = make_game(seed, size=size)
-        ex = retrieve_examples(inst, bank, shots, mem_mode)
-        prompt = build_prompt(inst, ex)
-        m = [{"role": "user", "content": prompt}]
-        kw = dict(add_generation_prompt=True, return_tensors="pt", return_dict=True)
-        try:
-            enc = tok.apply_chat_template(m, enable_thinking=False, **kw)
-        except TypeError:
-            enc = tok.apply_chat_template(m, **kw)
-        ids = enc["input_ids"].to(dev)
-        with torch.no_grad():
-            out = model.generate(ids, do_sample=False, max_new_tokens=400,
-                                 pad_token_id=tok.eos_token_id)
-        gen = tok.decode(out[0, ids.shape[1]:], skip_special_tokens=True)
-        gen = re.sub(r"<think>.*?</think>", "", gen, flags=re.DOTALL)
+          f"chunk={chunk} (model={model_name})\n", flush=True)
+    insts = [make_game(s, size=size) for s in list(EVAL_SEEDS)[:n]]
+    prompts = [build_prompt(g, retrieve_examples(g, bank, shots, mem_mode)) for g in insts]
+    gens = batch_generate(model, tok, prompts, dev, max_new=400, sample=False, chunk=chunk)
+
+    solved, by_type = 0, {}
+    for inst, gen in zip(insts, gens):
         r, info = reason_reward(gen, inst)
         ok = r >= PASS_REWARD - 0.01
-        solved += ok; total += 1
+        solved += ok
         d = by_type.setdefault(inst["gtype"], [0, 0]); d[0] += ok; d[1] += 1
         print(f"  [{inst['instance_id']}:{inst['gtype']}] {info['verdict']}", flush=True)
+    total = len(insts)
     print(f"\n  solve {solved}/{total} = {solved/max(1,total):.0%}  "
           + " ".join(f"{t}:{c}/{n_}" for t, (c, n_) in by_type.items()), flush=True)
     return solved / max(1, total)
@@ -257,7 +283,7 @@ def run_baseline(model_name: str, n: int, size: int, shots: int, mem_mode: str):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every, ent_coef,
-          temperature, size, shots, mem_mode, sft_steps):
+          temperature, size, shots, mem_mode, sft_steps, chunk=16):
     import torch
     import torch.nn as nn
     from transformers import AutoTokenizer
@@ -293,13 +319,6 @@ def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every, ent_coef,
         except TypeError:
             return tok.apply_chat_template(m, **kw)["input_ids"].to(dev)
 
-    def gen_ids(pids, sample):
-        with torch.no_grad():
-            return model.generate(pids, do_sample=sample,
-                                  temperature=temperature if sample else None,
-                                  top_p=0.95 if sample else None,
-                                  max_new_tokens=400, pad_token_id=tok.eos_token_id)
-
     def seq_logprob(pids, comp):
         full = torch.cat([pids, comp], dim=1)
         logits = model(full).logits[:, :-1]
@@ -310,16 +329,11 @@ def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every, ent_coef,
         ent = -(span.exp() * span).sum(-1).mean()
         return sel, ent
 
-    @torch.no_grad()
     def evaluate():
-        model.eval(); rs = []
-        for inst in held:
-            ex = retrieve_examples(inst, bank, shots, mem_mode)
-            pids = encode(build_prompt(inst, ex))
-            out = gen_ids(pids, sample=False)
-            gen = tok.decode(out[0, pids.shape[1]:], skip_special_tokens=True)
-            gen = re.sub(r"<think>.*?</think>", "", gen, flags=re.DOTALL)
-            r, _ = reason_reward(gen, inst); rs.append(r)
+        model.eval()
+        prompts = [build_prompt(g, retrieve_examples(g, bank, shots, mem_mode)) for g in held]
+        gens = batch_generate(model, tok, prompts, dev, max_new=400, sample=False, chunk=chunk)
+        rs = [reason_reward(g, inst)[0] for inst, g in zip(held, gens)]
         model.train()
         return sum(1 for r in rs if r >= PASS_REWARD - 0.01) / max(1, len(rs))
 
@@ -330,12 +344,16 @@ def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every, ent_coef,
         inst = make_game(rng.choice(train_seeds), size=size)
         ex = retrieve_examples(inst, bank, shots, mem_mode)
         pids = encode(build_prompt(inst, ex))
+        # all K rollouts in ONE batched generate (uses the big VRAM) instead of K calls
+        with torch.no_grad():
+            out = model.generate(pids, do_sample=True, temperature=temperature, top_p=0.95,
+                                 max_new_tokens=400, num_return_sequences=K,
+                                 pad_token_id=tok.eos_token_id)
+        comp_all = out[:, pids.shape[1]:]     # [K, new]
         comps, rewards = [], []
-        for _ in range(K):
-            out = gen_ids(pids, sample=True)
-            comp = out[:, pids.shape[1]:]
-            gen = tok.decode(comp[0], skip_special_tokens=True)
-            gen = re.sub(r"<think>.*?</think>", "", gen, flags=re.DOTALL)
+        for k in range(K):
+            comp = comp_all[k:k + 1]
+            gen = _clean(tok.decode(comp[0], skip_special_tokens=True))
             comps.append(comp)
             r, _ = reason_reward(gen, inst); rewards.append(r)
         mean_r = sum(rewards) / K
@@ -449,14 +467,16 @@ def main():
     ap.add_argument("--ent-coef", type=float, default=0.005)
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--sft-steps", type=int, default=0)
+    ap.add_argument("--chunk", type=int, default=16,
+                    help="batched-generation chunk size (raise on big VRAM, e.g. 64 on 90GB)")
     a = ap.parse_args()
 
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
     if a.baseline:
-        return run_baseline(a.model, a.n_baseline, a.size, a.shots, a.mem)
+        return run_baseline(a.model, a.n_baseline, a.size, a.shots, a.mem, a.chunk)
     train(a.model, a.steps, a.k, a.lr, a.r_lora, a.seed, a.layers, a.eval_every,
-          a.ent_coef, a.temperature, a.size, a.shots, a.mem, a.sft_steps)
+          a.ent_coef, a.temperature, a.size, a.shots, a.mem, a.sft_steps, a.chunk)
 
 
 if __name__ == "__main__":
