@@ -143,11 +143,13 @@ class MBPPTask:
         return verify_asserts((deps_code + "\n" + code) if deps_code else code, self.tests, self.setup)
 
 
-def load_mbpp(limit: int = 0, sanitized: bool = True, split: str = "test"):
+def load_mbpp(limit: int = 0, sanitized: bool = True, split: str = "test",
+              repo: str = "google-research-datasets/mbpp"):
     """Load MBPP from HF datasets (molab has network; the local selftest uses a hardcoded MBPPTask).
+    Uses the NAMESPACED repo id — the bare `mbpp` alias no longer resolves in newer datasets/hf_hub.
     Defensive about field names across the sanitized/full configs."""
     from datasets import load_dataset
-    ds = load_dataset("mbpp", "sanitized" if sanitized else "full", split=split)
+    ds = load_dataset(repo, "sanitized" if sanitized else "full", split=split)
     tasks = []
     for r in ds:
         text = r.get("prompt") or r.get("text") or ""
