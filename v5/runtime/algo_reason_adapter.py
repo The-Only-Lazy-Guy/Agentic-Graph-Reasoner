@@ -57,11 +57,13 @@ def subgraph_node_ids(graph: MemoryGraph, retriever=None):
 
 # ── build the injector (fresh adapter/GNN/goal for the code-compose domain) ────────
 
-def build_injector(model, device, r_plan: int = 4, r_evidence: int = 6, train_gnn: bool = False):
+def build_injector(model, device, r_plan: int = 4, r_evidence: int = 6, train_gnn: bool = False,
+                   seed: int = 0):
     from v5.adapter import GraphAttentionInjector
     from v5.cross_attention import V5AttentionAdapter
     from v5.gnn_encoder import RGCNEncoder
     from v5.goal_encoder import GoalEncoder
+    torch.manual_seed(seed)                    # deterministic init: a frozen GNN must reproduce at eval
     hid = model.config.hidden_size
     adapter = V5AttentionAdapter(r_plan=r_plan, r_evidence=r_evidence, lm_hidden_dim=hid).to(device)
     gnn = RGCNEncoder().to(device)
@@ -144,8 +146,99 @@ def train_adapter(model_name: str, harvest_path: str, graph_path: str, epochs: i
             losses.append(float(loss.detach()))
         print(f"[epoch {ep}] ce={sum(losses)/max(1,len(losses)):.3f}", flush=True)
     Path(out).parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"adapter": adapter.state_dict(), "gnn": gnn.state_dict() if train_gnn else None}, out)
+    torch.save({"adapter": adapter.state_dict(), "gnn": gnn.state_dict()}, out)   # save GNN always
     print(f"  adapter -> {out}", flush=True)
+
+
+# ── STEP 4: the payoff eval — does the STRATEGY channel add lift BEYOND the literal channel? ──────
+
+def eval_adapter(model_name: str, graph_path: str, adapter_path: str, n_tasks: int = 42, samples: int = 8,
+                 k: int = 6, min_cos: float = 0.25, seed: int = 99, r_plan: int = 4, r_evidence: int = 6):
+    """Matched-seed A/B on HELD-OUT compose tasks: literal-only (no hooks) vs +adapter (cross-attend
+    strategy injected during generation). Same sampling seed per task per arm, so the only difference
+    is the adapter -> a clean read on whether the strategy channel lifts compose/solve beyond the
+    literal atom code (the z-wall question). 3-atom family called out (where strategy matters most)."""
+    import contextlib
+    import os
+    from transformers import AutoTokenizer
+    from v5.lm_loader import load_frozen_lm
+    from v5.memory.store import make_mpnet_embedder
+    from v5.runtime.algo_compose_tasks import _NEEDS, gen_compose_tasks, seed_atom_graph
+    from v5.runtime.algo_graph_mg import MGRetriever
+    from v5.runtime.algo_graph_reason import make_query, search_compose
+
+    trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
+    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if not Path(graph_path).exists():
+        seed_atom_graph(graph_path)
+    model = load_frozen_lm(model_name)
+    for p in model.parameters():
+        p.requires_grad_(False)
+    tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=trust)
+    embed = make_mpnet_embedder()
+    graph = MemoryGraph.load_json(graph_path)
+    retr = MGRetriever(graph, embed)
+    node_ids = subgraph_node_ids(graph)
+    text_embeddings = reason_subgraph(graph, node_ids, embed)
+
+    inj, adapter, gnn = build_injector(model, dev, r_plan, r_evidence, train_gnn=False)
+    inj.inject_all_positions = False                 # GENERATION: inject at the anchor, not all positions
+    state = torch.load(adapter_path, map_location=dev)
+    adapter.load_state_dict(state["adapter"])
+    if state.get("gnn"):
+        gnn.load_state_dict(state["gnn"])            # matched frozen GNN the adapter trained against
+    adapter.eval()
+    gnn.eval()
+
+    def encode(prompt):
+        m = [{"role": "user", "content": prompt}]
+        kw = dict(add_generation_prompt=True, return_tensors="pt", return_dict=True)
+        try:
+            return tok.apply_chat_template(m, enable_thinking=False, **kw)["input_ids"].to(dev)
+        except TypeError:
+            return tok.apply_chat_template(m, **kw)["input_ids"].to(dev)
+
+    @torch.no_grad()
+    def _gen(prompts, hooked):
+        out, uniq = [], list(dict.fromkeys(prompts))
+        for p in uniq:
+            n = prompts.count(p)
+            pids = encode(p)
+            ctx = inj.inject(model) if hooked else contextlib.nullcontext()
+            with ctx:
+                seqs = model.generate(pids, do_sample=True, temperature=0.8, top_p=0.95,
+                                      num_return_sequences=n, max_new_tokens=400,
+                                      pad_token_id=tok.eos_token_id)
+            out += [tok.decode(seqs[j, pids.shape[1]:], skip_special_tokens=True) for j in range(n)]
+        return out
+
+    tasks = gen_compose_tasks(n_tasks, seed)
+    print(f"eval_adapter: {model_name} | {len(tasks)} held-out tasks (seed {seed}) | adapter {adapter_path}\n"
+          f"  arm            solve            compose          3-atom-compose", flush=True)
+    agg = {"literal-only": [0, 0, 0, 0], "+adapter": [0, 0, 0, 0]}   # solve, compose, deep_comp, deep_tot
+    for ti, task in enumerate(tasks):
+        q = make_query(task, embed)
+        deep = task.name == "sum_digitsum_prime_dists"
+        for arm, hooked in (("literal-only", False), ("+adapter", True)):
+            if hooked:
+                inj.prepare_session(graph, node_ids, text_embeddings,
+                                    reason_task_frame(task.name, _NEEDS[task.name]),
+                                    r_plan=r_plan, r_evidence=r_evidence)
+            torch.manual_seed(2000 + ti)             # matched draws: only the adapter differs
+            _c, used, ver, _tr = search_compose(task, retr, (lambda pr, h=hooked: _gen(pr, h)), q,
+                                                k=k, samples=samples, min_cos=min_cos)
+            a = agg[arm]
+            a[0] += int(ver); a[1] += int(bool(used)); a[2] += int(deep and bool(used)); a[3] += int(deep)
+    N = len(tasks)
+    for arm in ("literal-only", "+adapter"):
+        s, c, dc, dt = agg[arm]
+        print(f"  {arm:14s} {s}/{N} ({s/N:.0%})      {c}/{N} ({c/N:.0%})      {dc}/{dt}", flush=True)
+    dl = agg["+adapter"][1] / N - agg["literal-only"][1] / N
+    ds = agg["+adapter"][0] / N - agg["literal-only"][0] / N
+    verdict = "strategy channel HELPS" if dl > 0.02 or ds > 0.02 else \
+              "no lift beyond literal (z-wall / needs train_gnn or more data)"
+    print(f"\n  adapter delta: compose {dl:+.0%}, solve {ds:+.0%}  ->  {verdict}", flush=True)
+    return agg
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -218,9 +311,13 @@ def main():
     ap = argparse.ArgumentParser(description="Trained cross-attend refiner for the reason loop (LGGN adapter).")
     ap.add_argument("--smoke", action="store_true", help="local no-network plumbing smoke")
     ap.add_argument("--train", action="store_true", help="train the adapter on a harvest (GPU)")
+    ap.add_argument("--eval", action="store_true", help="A/B: literal-only vs +adapter on held-out tasks")
     ap.add_argument("--model", default="Qwen/Qwen3-4B")
     ap.add_argument("--graph", default="graphs/algo_reason.json")
     ap.add_argument("--harvest", default="artifacts/reason_harvest.jsonl")
+    ap.add_argument("--adapter", default="artifacts/reason_adapter.pt")
+    ap.add_argument("--n-tasks", type=int, default=42, help="held-out tasks for --eval")
+    ap.add_argument("--samples", type=int, default=8)
     ap.add_argument("--epochs", type=int, default=3)
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--train-gnn", action="store_true")
@@ -229,6 +326,9 @@ def main():
         sys.exit(0 if _smoke() else 1)
     if a.train:
         train_adapter(a.model, a.harvest, a.graph, epochs=a.epochs, lr=a.lr, train_gnn=a.train_gnn)
+        return
+    if a.eval:
+        eval_adapter(a.model, a.graph, a.adapter, n_tasks=a.n_tasks, samples=a.samples)
         return
     ap.print_help()
 
