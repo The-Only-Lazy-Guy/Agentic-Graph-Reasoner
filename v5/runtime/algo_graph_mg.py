@@ -68,21 +68,28 @@ class MGRetriever:
         else:
             self.mat = np.zeros((0, 1), dtype=np.float32)
 
-    def retrieve(self, query: str, k: int = 6, min_cos: float = 0.2):
-        """Return [(fn_name, code)] for the top-k impl nodes by cosine of node.text vs the query."""
+    def retrieve_vec(self, vec, k: int = 6, min_cos: float = 0.2):
+        """Return [(fn_name, code)] for the top-k impl nodes by cosine of node.text vs a query VECTOR
+        (so a shared Query.vec — ranker output or embed — drives retrieval)."""
         if not self.ids:
             return []
-        q = np.asarray(list(self.embed_fn({"q": query}).values())[0], dtype=np.float32)
+        q = np.asarray(vec, dtype=np.float32)
         q /= (np.linalg.norm(q) + 1e-9)
         scores = self.mat @ q
-        order = np.argsort(-scores)[:k]
         out = []
-        for j in order:
+        for j in np.argsort(-scores)[:k]:
             if scores[j] < min_cos:
                 continue
             code = self.graph.nodes[self.ids[j]].metadata["code"]
             out.append((_fn_name(code) or self.ids[j], code))
         return out
+
+    def retrieve(self, query: str, k: int = 6, min_cos: float = 0.2):
+        """Retrieve by a query STRING (embeds then delegates to retrieve_vec)."""
+        if not self.ids:
+            return []
+        vec = list(self.embed_fn({"q": query}).values())[0]
+        return self.retrieve_vec(vec, k=k, min_cos=min_cos)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
