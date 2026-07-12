@@ -51,6 +51,64 @@ def _sig(code: str) -> str:
     return m.group(0) if m else ""
 
 
+# ── store-gate: store only STANDALONE reusable ATOMS, deduped by behavior ──────────
+# probe a def over mixed arg-tuples (int / list / graph / str). A genuine atom (build_adj) runs on
+# SOME probe -> a fingerprint. A composite task-solution (bfs_order calling an undefined build_adj)
+# errors on ALL probes -> None -> NOT stored (it's a task answer, not a reusable atom). This alone
+# kills the 561-node flood: only atoms enter the graph, and identical atoms collapse to one.
+_FP_ARGS = [(0,), (2,), (3,), (4,), (10,), (121,), ([1, 2, 3],), ([2, 3, 5, 7],), ("aba",),
+            (3, [(0, 1, 2), (1, 2, 3)]),
+            (4, [(0, 1, 2), (0, 2, 5), (1, 2, 1), (2, 3, 3)], 0),
+            (4, [(0, 1, 2), (0, 2, 5), (1, 2, 1)], 0, 3)]
+
+
+def _code_fingerprint(src: str, fn_name: str, timeout: float = 5.0) -> str | None:
+    """md5 of the def's outputs over the probe set (STANDALONE — no deps). None if it never
+    evaluates (all-ERR) => a composite / non-atom, which we DON'T store as a reusable node."""
+    import hashlib
+    import subprocess
+    import tempfile
+    from pathlib import Path
+    harness = "\n".join([
+        src, "", "if True:", f"    _p = {_FP_ARGS!r}", "    _o = []", "    for _a in _p:",
+        "        try:", f"            _o.append(repr({fn_name}(*_a)))",
+        "        except Exception as _e:", "            _o.append('ERR:' + type(_e).__name__)",
+        "    print('FP', '\\t'.join(_o))"])
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "fp.py"; p.write_text(harness, encoding="utf-8")
+        try:
+            r = subprocess.run([sys.executable, "-I", str(p)], cwd=td, capture_output=True,
+                               text=True, encoding="utf-8", errors="replace", timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return None
+    line = next((l for l in reversed((r.stdout or "").splitlines()) if l.startswith("FP")), "")
+    if not line:
+        return None
+    sig = line[3:]
+    if all(t.startswith("ERR:") for t in sig.split("\t")):
+        return None                              # never ran on any probe -> not a standalone atom
+    return hashlib.md5(sig.encode()).hexdigest()
+
+
+def writeback_atoms(tm: TotalMemory, code: str, task) -> tuple[list, list]:
+    """Store-gate: from a verified solution, store ONLY standalone reusable atoms, deduped by
+    behavioral fingerprint, keyed by PURPOSE (sig) not the birth-task ctx (so cross-task retrieval
+    can surface them). Returns (written_names, skipped_names). Composites/task-solutions are skipped."""
+    seen = {r.get("content") for r in tm.impls.records.values()
+            if r.get("form") == "code" and r.get("content")}
+    written, skipped = [], []
+    for name, src in _top_defs(code).items():
+        fp = _code_fingerprint(src, name)
+        if fp is None or fp in seen:             # composite (None) or behavioral duplicate -> skip
+            skipped.append(name); continue
+        purpose = f"reusable helper {_sig(src) or name}"     # PURPOSE-keyed ctx (not the task text)
+        iid = tm.write(goal=purpose, old="", new=src, trace=purpose, verified=True,
+                       task_id=name, form="code", content=fp)
+        if iid:
+            written.append(name); seen.add(fp)
+    return written, skipped
+
+
 def _author_prompt(task, advertised: list[tuple[str, str]]) -> str:
     """Light supervision: OFFER the model options (call a stored node / define a reusable helper /
     note a strategy) — never force one. `advertised` = [(name, code)] retrieved from memory."""
@@ -96,15 +154,11 @@ def solve_with_memory(tm: TotalMemory, gen_fn, task, vseeds, eseeds, k: int = 6,
     R, bd = code_reward(verified, composed_used=used,
                         authored_new_verified=len(new_helpers) if verified else 0)
 
-    written = []
+    written, skipped = ([], [])
     if verified and writeback:
-        for name, src in _top_defs(code).items():           # store each authored function as a node
-            iid = tm.write(goal=task.text, old="", new=src, trace=f"{task.name} solution",
-                           verified=True, task_id=name, form="code")
-            if iid:
-                written.append(name)
+        written, skipped = writeback_atoms(tm, code, task)  # gate: only standalone deduped atoms
     return dict(name=task.name, verified=verified, reward=round(R, 3), reused=used,
-                authored=new_helpers, written=written, breakdown=bd)
+                authored=new_helpers, written=written, skipped=skipped, breakdown=bd)
 
 
 def run_stream(tm: TotalMemory, gen_fn, stream=None, verify_n=6, eval_n=10, k=6, samples=1):
@@ -159,22 +213,22 @@ def _selftest() -> bool:
         assert tm.impls.get(next(iter(tm.impls.records)))["form"] == "code"
         print("  [1] seeded build_adj as a form=code node in TotalMemory -> PASS")
 
-        # solve neighbors_of: must RETRIEVE build_adj, COMPOSE it, verify, reward>bare, write back
+        # solve neighbors_of: must RETRIEVE build_adj, COMPOSE it, verify, reward>bare. The solution
+        # (a composite calling build_adj) is a task-answer, NOT a reusable atom -> store-gate SKIPS it.
         res = solve_with_memory(tm, _stub_gen, ntask, vs, es)
         assert res["verified"], f"should solve: {res}"
         assert res["reused"] == ["build_adj"], f"should compose the retrieved build_adj: {res}"
         assert res["reward"] > 1.0, f"compose reward should beat bare solve: {res}"
-        assert "neighbors_of" in res["written"], f"solution written back as a node: {res}"
-        print(f"  [2] retrieve->compose build_adj->verify->reward {res['reward']:+.2f}->write-back -> PASS")
+        assert res["written"] == [] and res["skipped"] == ["neighbors_of"], \
+            f"store-gate skips the composite task-solution: {res}"
+        print(f"  [2] retrieve->compose build_adj->verify->reward {res['reward']:+.2f} "
+              f"(composite skipped by gate) -> PASS")
 
-        # the written node is now in the graph with a concept (L2 lifecycle fired via write)
-        assert tm.stats()["impls"] == 2, tm.stats()
-        rec = next(r for r in tm.impls.records.values() if r["task_id"] == "neighbors_of")
-        assert rec["form"] == "code" and rec["verified"] == "strong"
-        print(f"  [3] write-back -> L1 record (form=code) + L2 lifecycle ({tm.stats()['concepts']} concepts) -> PASS")
+        # graph did NOT grow from a pure-reuse solve (no pollution): still just the atom build_adj
+        assert tm.stats()["impls"] == 1, f"no pollution — only the atom persists: {tm.stats()}"
+        print(f"  [3] store-gate: pure-reuse solve adds NO node (no 561-flood) -> PASS")
 
-        # inline baseline scores LESS than compose (GRPO would demote it): solve with NO memory ->
-        # the stub defines build_adj inline -> not composed -> bare-solve reward
+        # inline baseline scores LESS than compose (GRPO would demote it)
         tm_empty = TotalMemory(td + "_e", mode="flat", embed_fn=make_fake_embedder())
         res_inline = solve_with_memory(tm_empty, _stub_gen, ntask, vs, es, writeback=False)
         assert res_inline["verified"] and res_inline["reused"] == [], res_inline
@@ -182,6 +236,17 @@ def _selftest() -> bool:
             f"inline ({res_inline['reward']}) must score below compose ({res['reward']})"
         print(f"  [4] inline-solve reward {res_inline['reward']:+.2f} < compose {res['reward']:+.2f} "
               f"(GRPO demotes inline) -> PASS")
+
+        # store-gate directly: a solution that DEFINES a new atom + a composite stores ONLY the atom,
+        # deduped — the fix for the 561-node/1-concept pollution that killed reuse.
+        tm_g = TotalMemory(td + "_g", mode="flat", embed_fn=make_fake_embedder())
+        sol = _BUILD_ADJ + "\n\ndef bfs_order(n, edges, s):\n    adj = build_adj(n, edges)\n    return sorted(adj)"
+        w, sk = writeback_atoms(tm_g, sol, BY_NAME["bfs_order"])
+        assert "build_adj" in w and "bfs_order" in sk, f"store atom, skip composite: {w} {sk}"
+        assert tm_g.stats()["impls"] == 1, "only the standalone atom stored"
+        w2, sk2 = writeback_atoms(tm_g, sol, BY_NAME["bfs_order"])
+        assert w2 == [] and "build_adj" in sk2, f"behavioral dedup on re-store: {w2} {sk2}"
+        print("  [5] store-gate: stores standalone atom, skips composite, dedups re-store -> PASS")
 
     print("\n  ALGO_GRAPH_RUN SELFTEST -> PASS")
     return True
@@ -300,10 +365,8 @@ def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every, ent_coef, 
             comps.append(comp); rewards.append(r)
             if ok and best is None:
                 best = code
-        if best:                                            # write-back grows the graph (compounding)
-            for name, src in _top_defs(best).items():
-                tm.write(goal=task.text, old="", new=src, trace=f"{task.name} solution",
-                         verified=True, task_id=name, form="code")
+        if best:                                            # write-back grows the graph (gated: atoms only)
+            writeback_atoms(tm, best, task)
         mean_r = sum(rewards) / K
         r_std = (sum((r - mean_r) ** 2 for r in rewards) / K) ** 0.5
         if r_std < 1e-9:
