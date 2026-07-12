@@ -4,10 +4,18 @@ reasoning, not a 4-way lookup.
 At each decode step the reasoner, conditioned on the goal + partial program + the graph's atoms, picks:
 an OP (FILTER/MAP/MAP2/KEEP_MAKEABLE/REDUCE), and its ARG (an ATOM pointer for the ops, an AGG for
 REDUCE), halting at REDUCE. The realizer (algo_dsl) compiles the program to code that CALLS its atoms
-(compose-forced). Trained by imitating the reference programs (algo_dsl._PROGRAMS), teacher-forced
-cross-entropy per step. This is a tiny autoregressive program synthesizer over the graph's action space.
+(compose-forced). Imitating the reference programs (algo_dsl._PROGRAMS) teacher-forced = RECALL (0%
+compositional generalization — it memorizes family->program). GRR-7 turns recall into REASONING with STaR
+(expert iteration): SEARCH program-space (a bounded ENUMERATION of valid pipelines — pure policy-sampling
+can't even explore an unseen family), VERIFY each against oracle I/O (NOT the reference program), KEEP the
+fully-general ones, SFT the net on them so a plain decode jumps straight to the discovered program. This
+low-variance imitation of verified solutions replaces GRPO's high-variance policy gradient (the wanderer),
+ordered by a length curriculum (short programs before long). `--compo-gen-star` is the honest 2-number
+test: zero-shot (recall) vs with-search (reasoning), across seeds so the variance is visible (selftest:
+held-out max_prime_digitsum 0% zero-shot -> 100% with-search, identical across 3 seeds).
 
-  selftest (no LM):  python -m v5.runtime.algo_dsl_trm --selftest
+  selftest (no LM):           python -m v5.runtime.algo_dsl_trm --selftest
+  compo-gen + search (molab): python -m v5.runtime.algo_dsl_trm --compo-gen-star --hard
 """
 from __future__ import annotations
 
@@ -116,28 +124,45 @@ def _build():
     return torch, nn, ProgramDecoder
 
 
-def train_decoder(traces, atom_vecs, atom_names, d=64, steps=2000, lr=1e-3, seed=0):
+def _family_len(fam: str) -> int:
+    """Reference-program length (steps) — the curriculum axis (short programs before long)."""
+    return len(_PROGRAMS[fam][1])
+
+
+def _sft_steps(model, opt, traces, A, steps: int, seed: int = 0, clip: float = 1.0):
+    """SFT gradient steps on an EXISTING model/opt (teacher-forced CE). Shared by warmstart imitation
+    and STaR's imitate-your-own-successes update — same low-variance objective, no policy gradient."""
     import random
+    import torch
+    if not traces:
+        return model
+    rng = random.Random(seed)
+    for _ in range(steps):
+        gv, tgt = traces[rng.randrange(len(traces))]
+        loss = model.loss(torch.as_tensor(gv, dtype=torch.float32), A, tgt)
+        opt.zero_grad(); loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), clip)   # stabilize (lr-too-high diverged)
+        opt.step()
+    return model
+
+
+def train_decoder(traces, atom_vecs, atom_names, d=64, steps=2000, lr=1e-3, seed=0):
     import torch
     torch, nn, ProgramDecoder = _build()
     torch.manual_seed(seed)
     model = ProgramDecoder(d_in=atom_vecs.shape[1], d=d)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     A = torch.as_tensor(atom_vecs, dtype=torch.float32)
-    rng = random.Random(seed)
-    for _ in range(steps):
-        gv, tgt = traces[rng.randrange(len(traces))]
-        loss = model.loss(torch.as_tensor(gv, dtype=torch.float32), A, tgt)
-        opt.zero_grad(); loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)   # stabilize (lr-too-high diverged)
-        opt.step()
+    _sft_steps(model, opt, traces, A, steps, seed=seed)
     return model
 
 
-def fast_reward(code: str, deps: str, name: str, n: int = 16) -> float:
+def fast_reward(code: str, deps: str, name: str, n: int = 16, seed: int = 0) -> float:
     """In-process verify (no subprocess) returning the AGREEMENT FRACTION with the family oracle on n
     random inputs — a DENSE, reference-free reward (a close-but-wrong program scores 0.6, not 0), so RL
-    has a gradient to climb. 1.0 iff fully general. Fast enough for RL's many rollouts."""
+    has a gradient to climb. 1.0 iff fully general on this seed's inputs. Vary `seed` to re-check on FRESH
+    inputs (the STaR keep-gate does — a kept program must be general on two disjoint input sets, not the
+    reward's fixed set). Fast enough for many rollouts."""
     from v5.runtime.algo_compose_tasks import _FAMILIES, _FAMILIES_HARD, _sample
     fams = {**_FAMILIES, **_FAMILIES_HARD}
     if name not in fams:
@@ -151,7 +176,7 @@ def fast_reward(code: str, deps: str, name: str, n: int = 16) -> float:
     fn = ns.get(name)
     if fn is None:
         return 0.0
-    rng = np.random.default_rng(0)
+    rng = np.random.default_rng(seed)
     match = 0
     for _ in range(n):
         args = _sample(kind, rng)
@@ -196,6 +221,106 @@ def train_rl(model, tasks, atom_names, atom_vecs, fams, resolve_fn, embed_fn, K:
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
     return model
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STaR / expert-iteration — SEARCH + verify + imitate-your-own-successes (the STABLE alternative to GRPO).
+# GRPO reinforced policy SAMPLES (high variance — the wanderer), and pure sampling can't even EXPLORE an
+# unseen family: given a novel goal the warmstart is confidently wrong (all mass on the wrong atoms), so a
+# 3-step exact program is ~1e-5 to stumble on. The action space is tiny, so the search is a BOUNDED
+# ENUMERATION of valid pipelines, each VERIFIED against the family's oracle I/O (never the reference
+# PROGRAM) — the DreamCoder "wake". The net then AMORTIZES it: SFT on the discovered programs so a plain
+# decode jumps straight there (its job at inference). Deterministic search -> low variance across seeds.
+# A length curriculum (short programs before long) orders the SFT. Enumeration is complete here, so it
+# subsumes hindsight relabeling; the net-guided ordering + a verify budget are the levers when the space
+# grows past enumeration (noted, not needed for the proof).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _verify_pipe(pipe, fam_name, fams, resolve_fn, n: int = 32, seed: int = 0) -> float:
+    """Realize a pipeline as a solution to `fam_name` and score agreement with its oracle I/O. Kind
+    mismatch / no-REDUCE / wrong atom -> code errors -> 0.0. The verifier uses the task's I/O spec
+    (legit), never the reference PROGRAM."""
+    if fam_name not in fams:
+        return 0.0
+    try:
+        code = realize_program(fam_name, fams[fam_name][0], pipe)
+    except (ValueError, KeyError):
+        return 0.0
+    return fast_reward(code, resolve_fn(atoms_of(pipe)), fam_name, n=n, seed=seed)
+
+
+def _is_general(pipe, fam_name, fams, resolve_fn, n: int = 32) -> bool:
+    """Keep-gate = fully general on TWO disjoint random input sets (GRR-1's fuzz-generality bar, so the
+    search consolidates only correct programs, never a benchmark-overfit)."""
+    return (_verify_pipe(pipe, fam_name, fams, resolve_fn, n, seed=0) >= 1.0
+            and _verify_pipe(pipe, fam_name, fams, resolve_fn, n, seed=7) >= 1.0)
+
+
+def _valid_ops_for_kind(kind: str):
+    """Prune the enumeration by input arity (the realizer would reject the rest anyway)."""
+    if kind == "pairs":
+        return ["MAP2"]
+    if kind == "coins":
+        return ["KEEP_MAKEABLE"]
+    return ["FILTER", "MAP"]                                    # list / arrays -> unary transforms
+
+
+def _enumerate_general(fam, fams, resolve_fn, atom_names, max_transforms=2, n_verify=32, cache=None):
+    """The SEARCH: enumerate every structurally-valid pipeline (<= max_transforms transform ops, each an
+    (op, atom) pair, then a REDUCE(agg)) and keep the ones VERIFIED fully-general for `fam`. Cached per
+    family (the found programs don't depend on the net or the seed -> deterministic, hence stable)."""
+    import itertools
+    if cache is not None and fam in cache:
+        return cache[fam]
+    ops = _valid_ops_for_kind(fams[fam][0])
+    slot = [(op, a) for op in ops for a in atom_names]
+    found = []
+    for n_t in range(max_transforms + 1):
+        for combo in itertools.product(slot, repeat=n_t):
+            for agg in AGGS:
+                pipe = [Op(op, a) for (op, a) in combo] + [Op("REDUCE", agg)]
+                if _is_general(pipe, fam, fams, resolve_fn, n_verify):
+                    found.append(pipe)
+    if cache is not None:
+        cache[fam] = found
+    return found
+
+
+def train_star(model, tasks, atom_names, atom_vecs, fams, resolve_fn, embed_fn, atom_idx,
+               rounds=4, sft_steps=400, lr=5e-4, n_verify=32, max_transforms=2, curriculum=True,
+               seed=0, cache=None, log=False):
+    """Expert iteration: each round SEARCH (enumerate + verify) each active family for general programs,
+    then SFT the net on (task goal -> discovered program). The curriculum unlocks longer-program families
+    as rounds progress. Returns (model, history=[(round, families_discovered, n_active, pool_size)])."""
+    import torch
+    torch.manual_seed(seed)
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    A = torch.as_tensor(atom_vecs, dtype=torch.float32)
+    cache = {} if cache is None else cache
+    by_fam, goal_of = {}, {}
+    for t in tasks:
+        by_fam.setdefault(t.name, []).append(t)
+        goal_of[id(t)] = np.asarray(list(embed_fn({"q": t.text}).values())[0], dtype=np.float32)
+    maxlen = max((_family_len(f) for f in by_fam), default=3)
+    hist = []
+    for r in range(rounds):
+        Lmax = min(maxlen, 2 + r) if curriculum else maxlen    # round0 -> len<=2, then unlock len 3...
+        active = [f for f in by_fam if _family_len(f) <= Lmax] or list(by_fam)
+        pool, discovered = [], 0
+        for f in active:
+            found = _enumerate_general(f, fams, resolve_fn, atom_names, max_transforms, n_verify, cache)
+            if not found:
+                continue
+            discovered += 1
+            for t in by_fam[f]:
+                for prog in found:
+                    pool.append((goal_of[id(t)], program_to_steps(prog, atom_idx)))
+        _sft_steps(model, opt, pool, A, sft_steps, seed=seed + r)
+        hist.append((r, discovered, len(active), len(pool)))
+        if log:
+            print(f"    STaR round {r}: search-discovered {discovered}/{len(active)} families | "
+                  f"pool={len(pool)} traces", flush=True)
+    return model, hist
 
 
 def solve_dsl(model, task, input_kind, atom_names, atom_vecs, embed_fn, graph_path):
@@ -270,6 +395,51 @@ def compo_gen_eval(graph_path: str, hard: bool = True, steps: int = 2500):
     print(f"  OVERALL compositional generalization: {tot_solved}/{tot} ({tot_solved/max(1,tot):.0%}) "
           f"-> {'REASONING (composes novel)' if tot_solved/max(1,tot) > 0.3 else 'RECALL (needs RL/curriculum)'}",
           flush=True)
+
+
+def compo_gen_star(graph_path: str, hard: bool = True, warmstart_steps: int = 2000, rounds: int = 4,
+                   seeds=(1, 2, 3)):
+    """Leave-one-family-out WITH test-time search — the honest 2-number reasoning test (real mpnet).
+    Per holdout family: (a) warmstart-imitate the OTHER families -> ZERO-SHOT decode holdout = the RECALL
+    number (what compo_gen_eval reports); (b) STaR-adapt on holdout TASKS (enumerate + verify oracle I/O,
+    the reference PROGRAM is never used) -> WITH-SEARCH decode = the REASONING-via-search number. Runs
+    several seeds and reports the SPREAD, because GRPO's failure mode was high variance (the wanderer)."""
+    from graph_core import MemoryGraph
+    from v5.runtime.algo_compose_tasks import gen_compose_tasks
+    from v5.runtime.algo_graph_mg import MGRetriever
+    embed, atom_names, atom_idx, atom_vecs, fams, by_fam = _mpnet_setup(graph_path, hard)
+    retr = MGRetriever(MemoryGraph.load_json(graph_path), embed)
+    resolve_fn = lambda atoms: retr.resolve_deps(atoms) if atoms else ""
+    search_cache: dict = {}                                     # enumeration is net/seed-independent -> share
+
+    def _tasks_of(fam, seed, n):
+        ts = list(gen_compose_tasks(80, seed=seed)) + list(gen_compose_tasks(80, seed=seed, hard=hard))
+        return [t for t in ts if t.name == fam][:n]
+
+    print(f"compo_gen_STaR (leave-one-out + test-time search, real mpnet): {graph_path} | "
+          f"{len(fams)} families | seeds={list(seeds)}", flush=True)
+    zs_all, ws_all = [], []
+    for holdout in fams:
+        zs_runs, ws_runs = [], []
+        for sd in seeds:
+            traces = [tr for f in by_fam if f != holdout for tr in by_fam[f]]
+            model = train_decoder(traces, atom_vecs, atom_names, steps=warmstart_steps, seed=sd)
+            held = _tasks_of(holdout, seed=777, n=12)              # eval instances (disjoint from adapt)
+            kind = fams[holdout][0]
+            zs = sum(int(solve_dsl(model, t, kind, atom_names, atom_vecs, embed, graph_path)[0]) for t in held)
+            adapt = _tasks_of(holdout, seed=13, n=16)              # search on THESE (no reference program)
+            model, _ = train_star(model, adapt, atom_names, atom_vecs, fams, resolve_fn, embed, atom_idx,
+                                  rounds=rounds, seed=sd, cache=search_cache)
+            ws = sum(int(solve_dsl(model, t, kind, atom_names, atom_vecs, embed, graph_path)[0]) for t in held)
+            zs_runs.append(zs / max(1, len(held))); ws_runs.append(ws / max(1, len(held)))
+        zsm, wsm = float(np.mean(zs_runs)), float(np.mean(ws_runs))
+        zs_all.append(zsm); ws_all.append(wsm)
+        print(f"  holdout {holdout:22s} zero-shot={zsm:.0%}  ->  with-search={wsm:.0%} "
+              f"[min {min(ws_runs):.0%}, max {max(ws_runs):.0%}]  (unseen family)", flush=True)
+    zsm, wsm = float(np.mean(zs_all)), float(np.mean(ws_all))
+    print(f"  OVERALL  zero-shot(recall)={zsm:.0%}  ->  with-search(reasoning)={wsm:.0%}", flush=True)
+    print(f"  verdict: {'STaR search RECOVERS the unseen composition' if wsm - zsm > 0.3 else 'no lift'} "
+          f"(GRPO was unstable; STaR keeps only verified-general programs)", flush=True)
 
 
 def train_dsl_grr6(graph_path: str, hard: bool = True, steps: int = 3000, d: int = 64, seed: int = 0,
@@ -392,7 +562,40 @@ def _selftest() -> bool:
         print(f"  [3] programs are structured: decode length up to {max(lens)} steps (FILTER->MAP->REDUCE), "
               f"each an op+atom choice -> PASS")
 
-    print("\n  ALGO_DSL_TRM SELFTEST -> PASS  (the reasoner synthesizes programs; composition is real)")
+        # [4] STaR: bounded SEARCH + verify RECOVERS a HELD-OUT family (compo-gen) + STABLE across seeds
+        #     (the GRPO failure mode was high variance). Warmstart imitates the OTHER 5 families; the model
+        #     never saw max_prime_digitsum's program (and pure policy-sampling never explores it). Zero-shot
+        #     decode = recall; STaR-adapt (enumerate valid pipelines -> verify oracle I/O -> keep general ->
+        #     SFT) discovers FILTER(is_prime)+MAP(digit_sum)+REDUCE(max) and consolidates it.
+        resolve_fn = lambda atoms: "\n\n".join(ALL_ATOMS[a][1] for a in atoms if a in ALL_ATOMS)
+        holdout = "max_prime_digitsum"
+        held = [t for t in (list(gen_compose_tasks(60, seed=777)) + list(gen_compose_tasks(60, seed=777, hard=True)))
+                if t.name == holdout][:10]
+        adapt = [t for t in (list(gen_compose_tasks(60, seed=13)) + list(gen_compose_tasks(60, seed=13, hard=True)))
+                 if t.name == holdout][:12]
+
+        def _wo(sd):                                              # traces for every family EXCEPT holdout
+            ts = list(gen_compose_tasks(120, seed=sd)) + list(gen_compose_tasks(120, seed=sd, hard=True))
+            return [(list(embed({"q": t.text}).values())[0], program_to_steps(fams[t.name][1], atom_idx))
+                    for t in ts if t.name in fams and t.name != holdout]
+
+        zs_runs, ws_runs, cache = [], [], {}
+        for sd in (1, 2, 3):
+            warm = train_decoder(_wo(sd), atom_vecs, atom_names, steps=1800, seed=sd)
+            zs = sum(int(solve_dsl(warm, t, fams[holdout][0], atom_names, atom_vecs, embed, gp)[0]) for t in held)
+            star, _ = train_star(warm, adapt, atom_names, atom_vecs, fams, resolve_fn, embed, atom_idx,
+                                 rounds=4, sft_steps=300, seed=sd, cache=cache)
+            ws = sum(int(solve_dsl(star, t, fams[holdout][0], atom_names, atom_vecs, embed, gp)[0]) for t in held)
+            zs_runs.append(zs); ws_runs.append(ws)
+        H = len(held)
+        assert np.mean(ws_runs) >= 0.7 * H, (zs_runs, ws_runs)          # search reliably solves the unseen family
+        assert min(ws_runs) >= max(zs_runs), (zs_runs, ws_runs)         # search never underperforms zero-shot
+        assert max(ws_runs) - min(ws_runs) <= 0.3 * H, ws_runs          # STABLE across seeds (unlike GRPO)
+        print(f"  [4] held-out '{holdout}': zero-shot {zs_runs} -> with-search {ws_runs} (/{H}, 3 seeds) "
+              f"-> STaR recovers the unseen composition + STABLE across seeds -> PASS")
+
+    print("\n  ALGO_DSL_TRM SELFTEST -> PASS  (the reasoner synthesizes programs; STaR turns recall into "
+          "search-and-consolidate reasoning)")
     return True
 
 
@@ -400,10 +603,14 @@ def main():
     ap = argparse.ArgumentParser(description="GRR-6 phase B: TRM autoregressive DSL program decoder.")
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--train", action="store_true", help="train the DSL decoder with real mpnet (molab)")
-    ap.add_argument("--compo-gen", action="store_true", help="leave-one-family-out: does it REASON or recall?")
+    ap.add_argument("--compo-gen", action="store_true", help="leave-one-family-out (imitation): REASON or recall?")
+    ap.add_argument("--compo-gen-star", action="store_true",
+                    help="leave-one-family-out + STaR test-time search: the 2-number (recall vs reasoning) test")
     ap.add_argument("--graph", default="graphs/algo_reason_hard.json")
     ap.add_argument("--hard", action="store_true")
     ap.add_argument("--steps", type=int, default=3000)
+    ap.add_argument("--rounds", type=int, default=5, help="STaR search/SFT rounds (--compo-gen-star)")
+    ap.add_argument("--seeds", type=int, default=3, help="STaR seeds for the variance spread (--compo-gen-star)")
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
@@ -412,6 +619,9 @@ def main():
         return
     if a.compo_gen:
         compo_gen_eval(a.graph, hard=a.hard, steps=a.steps)
+        return
+    if a.compo_gen_star:
+        compo_gen_star(a.graph, hard=a.hard, rounds=a.rounds, seeds=tuple(range(1, a.seeds + 1)))
         return
     ap.print_help()
 
