@@ -77,18 +77,27 @@ def _realize_prompt(task, query_text: str, candidates: list[tuple[str, str]], fe
 
 
 def solve_iterative(task, retriever: MGRetriever, gen_fn, embed_fn, max_rounds: int = 3,
-                    samples: int = 4, k: int = 6, min_cos: float = 0.25, extra_deps: str = ""):
+                    samples: int = 4, k: int = 6, min_cos: float = 0.25, extra_deps: str = "",
+                    meta_retriever=None):
     """Q1: the ITERATIVE loop — retrieve -> attempt (best-of-N) -> verify -> on failure re-query memory
     with the failure signal + retry, until solved or max_rounds. Unlike 1-shot search_compose, the
     failure OBSERVATION steers the next retrieval and prompt (obs-informed retry). `extra_deps` is code
-    always in scope at verify time (multi-step: prior temp nodes + their transitive atoms). Returns
-    solved, rounds used, code, used atoms, and the per-round history."""
+    always in scope at verify time (multi-step: prior temp nodes + their transitive atoms).
+    `meta_retriever` (#54) injects POLICY hints (NL know-how) into the prompt. Returns solved, rounds,
+    code, used atoms, used_policies, history."""
+    from v5.runtime.algo_meta import inject_policies
     feedback, last, history = "", ("", [], False), []
+    used_policies = []
     for rnd in range(max_rounds):
         query = make_query(task, embed_fn, extra=feedback)          # re-query reflects the failure
         ranked = retriever.retrieve_vec(query.vec, k=k, min_cos=min_cos)
         names = [n for n, _ in ranked]
         prompt = _realize_prompt(task, query.text, ranked, feedback=feedback)
+        if meta_retriever is not None:                              # inject policy know-how (#54)
+            pols = meta_retriever.retrieve(task.text, k=2)
+            if pols:
+                used_policies = [pid for pid, _ in pols]
+                prompt = inject_policies(prompt, [t for _, t in pols])
         round_err = "no attempt verified"
         for gen in gen_fn([prompt] * samples):
             code = _extract_code(gen)
@@ -99,11 +108,13 @@ def solve_iterative(task, retriever: MGRetriever, gen_fn, embed_fn, max_rounds: 
             ok, err = _task_verify_detail(task, code, deps)
             if ok:
                 history.append((rnd, True, ""))
-                return dict(solved=True, rounds=rnd + 1, code=code, used=called, history=history)
+                return dict(solved=True, rounds=rnd + 1, code=code, used=called,
+                            used_policies=used_policies, history=history)
             last, round_err = (code, called, False), err
         history.append((rnd, False, round_err))
         feedback = round_err                                         # obs-informed: steer next round
-    return dict(solved=False, rounds=max_rounds, code=last[0], used=last[1], history=history)
+    return dict(solved=False, rounds=max_rounds, code=last[0], used=last[1],
+                used_policies=used_policies, history=history)
 
 
 def search_compose(task, retriever: MGRetriever, gen_fn, query: Query, k: int = 6, samples: int = 8,
