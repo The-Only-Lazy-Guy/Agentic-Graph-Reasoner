@@ -133,6 +133,60 @@ def solve_dsl(model, task, input_kind, atom_names, atom_vecs, embed_fn, graph_pa
     return bool(total and passed == total), pipe
 
 
+def _mpnet_setup(graph_path, hard):
+    """(embed, atom_names, atom_idx, atom_vecs, fams, traces_by_fam) with REAL mpnet — shared by
+    train_dsl_grr6 and the compo-gen eval."""
+    from pathlib import Path
+    from graph_core import MemoryGraph
+    from v5.memory.store import make_mpnet_embedder
+    from v5.runtime.algo_compose_tasks import gen_compose_tasks, seed_atom_graph
+    from v5.runtime.algo_graph_mg import _fn_name
+    if not Path(graph_path).exists():
+        seed_atom_graph(graph_path, hard=hard)
+    embed = make_mpnet_embedder()
+    g = MemoryGraph.load_json(graph_path)
+    impls = [(nid, n) for nid, n in g.nodes.items()
+             if n.node_type == "implementation" and n.metadata.get("code")]
+    atom_names = [_fn_name(n.metadata["code"]) or nid[len("impl_"):] for nid, n in impls]
+    atom_idx = {a: i for i, a in enumerate(atom_names)}
+    vecs = embed({nid: n.text for nid, n in impls})
+    atom_vecs = np.asarray([vecs[nid] for nid, _ in impls], dtype=np.float32)
+    fams = {f: (k, p) for f, (k, p) in _PROGRAMS.items() if atoms_of(p) <= set(atom_names)}
+    ts = list(gen_compose_tasks(300, seed=0)) + list(gen_compose_tasks(300, seed=0, hard=hard))
+    by_fam = {}
+    for t in ts:
+        if t.name in fams:
+            by_fam.setdefault(t.name, []).append(
+                (list(embed({"q": t.text}).values())[0], program_to_steps(fams[t.name][1], atom_idx)))
+    return embed, atom_names, atom_idx, atom_vecs, fams, by_fam
+
+
+def compo_gen_eval(graph_path: str, hard: bool = True, steps: int = 2500):
+    """The REAL reasoning test (molab, real mpnet): leave-one-family-out. Train on the other families,
+    test on the UNSEEN family — can the reasoner compose known ops in a novel combination? >0 here =
+    systematic generalization (reasoning); 0 = recall. mpnet embeddings share sub-structure, so this is
+    the fair test the synthetic embed couldn't be."""
+    import tempfile
+    from pathlib import Path
+    from v5.runtime.algo_compose_tasks import gen_compose_tasks
+    embed, atom_names, atom_idx, atom_vecs, fams, by_fam = _mpnet_setup(graph_path, hard)
+    print(f"compo_gen (leave-one-family-out, real mpnet): {graph_path} | {len(fams)} families", flush=True)
+    tot_solved = tot = 0
+    for holdout in fams:
+        traces = [tr for f in by_fam for tr in by_fam[f] if f != holdout]
+        model = train_decoder(traces, atom_vecs, atom_names, steps=steps, seed=1)
+        held = [t for t in (list(gen_compose_tasks(60, seed=999)) + list(gen_compose_tasks(60, seed=999, hard=hard)))
+                if t.name == holdout][:12]
+        solved = sum(int(solve_dsl(model, t, fams[t.name][0], atom_names, atom_vecs, embed, graph_path)[0])
+                     for t in held)
+        tot_solved += solved; tot += len(held)
+        print(f"  holdout {holdout:22s} solve={solved}/{len(held)} ({solved/max(1,len(held)):.0%}) "
+              f"(unseen family)", flush=True)
+    print(f"  OVERALL compositional generalization: {tot_solved}/{tot} ({tot_solved/max(1,tot):.0%}) "
+          f"-> {'REASONING (composes novel)' if tot_solved/max(1,tot) > 0.3 else 'RECALL (needs RL/curriculum)'}",
+          flush=True)
+
+
 def train_dsl_grr6(graph_path: str, hard: bool = True, steps: int = 3000, d: int = 64, seed: int = 0,
                    out: str = "artifacts/grr6_dsl.pt"):
     """molab: train the DSL program decoder with REAL mpnet embeddings on the graph's atoms. Imitates
@@ -261,6 +315,7 @@ def main():
     ap = argparse.ArgumentParser(description="GRR-6 phase B: TRM autoregressive DSL program decoder.")
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--train", action="store_true", help="train the DSL decoder with real mpnet (molab)")
+    ap.add_argument("--compo-gen", action="store_true", help="leave-one-family-out: does it REASON or recall?")
     ap.add_argument("--graph", default="graphs/algo_reason_hard.json")
     ap.add_argument("--hard", action="store_true")
     ap.add_argument("--steps", type=int, default=3000)
@@ -269,6 +324,9 @@ def main():
         sys.exit(0 if _selftest() else 1)
     if a.train:
         train_dsl_grr6(a.graph, hard=a.hard, steps=a.steps)
+        return
+    if a.compo_gen:
+        compo_gen_eval(a.graph, hard=a.hard, steps=a.steps)
         return
     ap.print_help()
 
