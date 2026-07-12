@@ -39,7 +39,7 @@ import numpy as np
 from graph_core import MemoryGraph
 from v5.runtime.algo_graph_edits import grow, propose_edits
 from v5.runtime.algo_graph_mg import MGRetriever, _fn_name, seed_graph
-from v5.runtime.algo_graph_run import _sig, _task_verify, _top_defs
+from v5.runtime.algo_graph_run import _sig, _task_verify, _task_verify_detail, _top_defs
 from v5.runtime.derive_reward import _def_names
 from v5.runtime.tool_memory import _extract_code
 
@@ -52,19 +52,21 @@ class Query:
     vec: np.ndarray
 
 
-def make_query(task, embed_fn) -> Query:
-    """v0: query = the task's own need statement. The trainable upgrade is traversal_ranker/
-    memory_refiner (LM-hidden -> query vec), same (text, vec) interface — swap in without changing
-    the loop. Kept a seam so the ranker's query can replace this verbatim."""
-    text = task.text
+def make_query(task, embed_fn, extra: str = "") -> Query:
+    """v0: query = the task's own need statement. `extra` folds an obs-informed failure signal into the
+    query so RE-retrieval (and the realizer feature) reflect what went wrong last round — the iterative
+    loop's re-query. The trainable upgrade is traversal_ranker/memory_refiner, same (text, vec)."""
+    text = task.text if not extra else f"{task.text}\n(retry — last attempt failed: {extra})"
     vec = np.asarray(list(embed_fn({"q": text}).values())[0], dtype=np.float32)
     return Query(text=text, vec=vec)
 
 
-def _realize_prompt(task, query_text: str, candidates: list[tuple[str, str]]) -> str:
+def _realize_prompt(task, query_text: str, candidates: list[tuple[str, str]], feedback: str = "") -> str:
     """Glue-realizer prompt: the QUERY is a FEATURE (the LM is TOLD what it needs), the atoms are the
-    building blocks. The LM only writes glue (call the named atoms), never derives content."""
+    building blocks. `feedback` shows the previous attempt's failure so the retry can fix it."""
     parts = [task.text, f"\nWhat this needs: {query_text}"]
+    if feedback:
+        parts.append(f"Your PREVIOUS attempt failed with: {feedback}\nFix that in this attempt.")
     if candidates:
         parts.append("Building blocks already available (CALL them by name — do NOT re-implement):")
         for name, code in candidates:
@@ -72,6 +74,34 @@ def _realize_prompt(task, query_text: str, candidates: list[tuple[str, str]]) ->
         parts.append("COMPOSE these to solve it (wire their outputs together).")
     parts.append(f"Write `{task.name}(...)` in ONE Python code block.")
     return "\n\n".join(parts)
+
+
+def solve_iterative(task, retriever: MGRetriever, gen_fn, embed_fn, max_rounds: int = 3,
+                    samples: int = 4, k: int = 6, min_cos: float = 0.25):
+    """Q1: the ITERATIVE loop — retrieve -> attempt (best-of-N) -> verify -> on failure re-query memory
+    with the failure signal + retry, until solved or max_rounds. Unlike 1-shot search_compose, the
+    failure OBSERVATION steers the next retrieval and prompt (obs-informed retry). Returns solved,
+    rounds used, code, used atoms, and the per-round history."""
+    feedback, last, history = "", ("", [], False), []
+    for rnd in range(max_rounds):
+        query = make_query(task, embed_fn, extra=feedback)          # re-query reflects the failure
+        ranked = retriever.retrieve_vec(query.vec, k=k, min_cos=min_cos)
+        names = [n for n, _ in ranked]
+        prompt = _realize_prompt(task, query.text, ranked, feedback=feedback)
+        round_err = "no attempt verified"
+        for gen in gen_fn([prompt] * samples):
+            code = _extract_code(gen)
+            called = [n for n in names if n not in _def_names(code)
+                      and re.search(rf"\b{re.escape(n)}\s*\(", code)]
+            deps = "\n\n".join(c for n, c in ranked if n in called)
+            ok, err = _task_verify_detail(task, code, deps)
+            if ok:
+                history.append((rnd, True, ""))
+                return dict(solved=True, rounds=rnd + 1, code=code, used=called, history=history)
+            last, round_err = (code, called, False), err
+        history.append((rnd, False, round_err))
+        feedback = round_err                                         # obs-informed: steer next round
+    return dict(solved=False, rounds=max_rounds, code=last[0], used=last[1], history=history)
 
 
 def search_compose(task, retriever: MGRetriever, gen_fn, query: Query, k: int = 6, samples: int = 8,
@@ -376,6 +406,22 @@ def _selftest() -> bool:
         assert g2.edge_between("impl_sum_digitsum_primes", "impl_digit_sum") is not None
         print(f"  [3] verified composition -> {res['grown']['edit_stats']['edge_edits']} depend/part_of "
               f"EDGES grown (composition memory) -> PASS")
+
+        # [4] ITERATIVE loop: round-1 attempt FAILS, the failure is fed back, round-2 SOLVES
+        retr2 = MGRetriever(MemoryGraph.load_json(gp), embed)     # graph irrelevant here; task inlines
+        ftask = MBPPTask("add_one", "return n + 1", ["assert add_one(3) == 4"])
+
+        def _retry_stub(prompts):
+            # buggy until the prompt carries the failure feedback, then correct (obs-informed retry)
+            good = "```python\ndef add_one(n):\n    return n + 1\n```"
+            bad = "```python\ndef add_one(n):\n    return n - 1\n```"
+            return [good if "PREVIOUS attempt failed" in prompts[0] else bad] * len(prompts)
+
+        it = solve_iterative(ftask, retr2, _retry_stub, embed, max_rounds=3, samples=2, min_cos=-1.0)
+        assert it["solved"] and it["rounds"] == 2, it
+        assert it["history"][0][1] is False and "add_one(3) == 4" not in it["history"][0][2], it["history"]
+        print(f"  [4] iterative loop: round 1 FAILED ({it['history'][0][2][:34]}...) -> fed back -> "
+              f"round {it['rounds']} SOLVED -> PASS")
 
     print("\n  ALGO_GRAPH_REASON SELFTEST -> PASS")
     return True

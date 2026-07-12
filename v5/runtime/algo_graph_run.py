@@ -165,6 +165,37 @@ def verify_asserts(code: str, tests: list[str], setup: str = "", timeout: float 
     return "__ALLPASS__" in (r.stdout or "")
 
 
+def verify_asserts_detail(code: str, tests: list[str], setup: str = "", timeout: float = 10.0):
+    """Like verify_asserts but returns (ok, error_line) — the failure text (AssertionError / NameError
+    / ...) is the obs-informed signal the iterative loop feeds back into the next query + prompt."""
+    import subprocess
+    import tempfile
+    from pathlib import Path
+    if not code or "def " not in code:
+        return False, "no function was defined"
+    harness = "\n".join([setup, code, *tests, "print('__ALLPASS__')"])
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "t.py"; p.write_text(harness, encoding="utf-8")
+        try:
+            r = subprocess.run([sys.executable, "-I", str(p)], cwd=td, capture_output=True,
+                               text=True, encoding="utf-8", errors="replace", timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return False, "timed out"
+    if "__ALLPASS__" in (r.stdout or ""):
+        return True, ""
+    err = [ln for ln in (r.stderr or "").strip().splitlines() if ln.strip()]
+    return False, (err[-1].strip() if err else "an assertion failed")
+
+
+def _task_verify_detail(task, code: str, deps_code: str = ""):
+    """(ok, error_line) for the iterative loop. MBPPTask -> its asserts; curriculum Task -> bool + tag."""
+    if hasattr(task, "tests"):
+        full = (deps_code + "\n" + code) if deps_code else code
+        return verify_asserts_detail(full, task.tests, getattr(task, "setup", ""))
+    ok = _task_verify(task, code, deps_code)
+    return ok, ("" if ok else "verification failed")
+
+
 class MBPPTask:
     """One MBPP/MBPP+ problem: prompt + entry-point name + assert tests."""
     def __init__(self, name: str, text: str, tests: list[str], setup: str = ""):
