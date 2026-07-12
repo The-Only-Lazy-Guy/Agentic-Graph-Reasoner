@@ -77,11 +77,12 @@ def _realize_prompt(task, query_text: str, candidates: list[tuple[str, str]], fe
 
 
 def solve_iterative(task, retriever: MGRetriever, gen_fn, embed_fn, max_rounds: int = 3,
-                    samples: int = 4, k: int = 6, min_cos: float = 0.25):
+                    samples: int = 4, k: int = 6, min_cos: float = 0.25, extra_deps: str = ""):
     """Q1: the ITERATIVE loop — retrieve -> attempt (best-of-N) -> verify -> on failure re-query memory
     with the failure signal + retry, until solved or max_rounds. Unlike 1-shot search_compose, the
-    failure OBSERVATION steers the next retrieval and prompt (obs-informed retry). Returns solved,
-    rounds used, code, used atoms, and the per-round history."""
+    failure OBSERVATION steers the next retrieval and prompt (obs-informed retry). `extra_deps` is code
+    always in scope at verify time (multi-step: prior temp nodes + their transitive atoms). Returns
+    solved, rounds used, code, used atoms, and the per-round history."""
     feedback, last, history = "", ("", [], False), []
     for rnd in range(max_rounds):
         query = make_query(task, embed_fn, extra=feedback)          # re-query reflects the failure
@@ -93,7 +94,8 @@ def solve_iterative(task, retriever: MGRetriever, gen_fn, embed_fn, max_rounds: 
             code = _extract_code(gen)
             called = [n for n in names if n not in _def_names(code)
                       and re.search(rf"\b{re.escape(n)}\s*\(", code)]
-            deps = "\n\n".join(c for n, c in ranked if n in called)
+            deps = ((extra_deps + "\n\n") if extra_deps else "") + \
+                   "\n\n".join(c for n, c in ranked if n in called)
             ok, err = _task_verify_detail(task, code, deps)
             if ok:
                 history.append((rnd, True, ""))
@@ -147,6 +149,65 @@ def reason_grow(task, graph_path: str, out_path: str, retriever: MGRetriever, ge
         edges = [(sol_id, concept, "part_of")] + [(sol_id, f"impl_{a}", "depend") for a in used]
         grown = grow(graph_path, out_path, propose_edits(f"reason_{task.name}", stores, edges))
     return dict(name=task.name, verified=verified, used=used, code=code, grown=grown, trace=trace)
+
+
+def solve_multistep(mtask, base_graph_path: str, gen_fn, embed_fn, promote_to: str = None,
+                    max_rounds: int = 2, samples: int = 4, k: int = 8, min_cos: float = 0.2):
+    """#50 + #51: solve ORDERED sub-goals; each verified sub-result becomes a TEMP node in an
+    in-session scratch graph (working memory the next step RETRIEVES = the progression lives in the
+    graph, not the context window -> anti-forget). PROMOTE the whole chain to permanent memory
+    (graph_grower) only if the FINAL verifies; else the scratch is discarded. Reuses solve_iterative
+    per step, so each sub-goal gets the obs-informed retry loop (#49)."""
+    import json
+    import tempfile
+    from pathlib import Path
+    from v5.runtime.algo_graph_run import MBPPTask
+    base = json.loads(Path(base_graph_path).read_text(encoding="utf-8"))
+    scratch = {"metadata": base.get("metadata", {}), "nodes": list(base["nodes"]),
+               "edges": list(base.get("edges", []))}
+    sp = str(Path(tempfile.mkdtemp()) / "scratch.json")
+
+    def _reindex():
+        Path(sp).write_text(json.dumps(scratch), encoding="utf-8")
+        return MGRetriever(MemoryGraph.load_json(sp), embed_fn)
+
+    def _scratch_code():                                     # all impl code in scope (transitive deps)
+        return "\n\n".join(n["metadata"]["code"] for n in scratch["nodes"]
+                           if n.get("node_type") == "implementation" and n.get("metadata", {}).get("code"))
+
+    concept = next((n["id"] for n in base["nodes"] if n.get("node_type") == "concept"), None)
+    retr = _reindex()
+    temp_nodes, progress = [], []
+    for i, st in enumerate(mtask.steps):
+        sub = MBPPTask(st.name, st.text, st.tests)
+        res = solve_iterative(sub, retr, gen_fn, embed_fn, max_rounds=max_rounds, samples=samples,
+                              k=k, min_cos=min_cos, extra_deps=_scratch_code())
+        if not res["solved"]:                                # progression so far is IN the scratch graph
+            return dict(solved=False, failed_step=i, progress=progress,
+                        temp_nodes=[t[0] for t in temp_nodes])
+        nid = f"impl_{st.name}"
+        scratch["nodes"].append({"id": nid, "text": st.text, "node_type": "implementation",
+                                 "metadata": {"code": res["code"]}})       # TEMP node (in-session only)
+        temp_nodes.append((nid, st.name, res["code"], set(st.needs)))
+        progress.append(st.name)
+        retr = _reindex()                                    # re-index -> next step retrieves it
+    ftask = MBPPTask(mtask.final_name, mtask.text + " — call the step functions you built",
+                     mtask.final_tests)
+    fres = solve_iterative(ftask, retr, gen_fn, embed_fn, max_rounds=max_rounds, samples=samples, k=k,
+                           min_cos=min_cos, extra_deps=_scratch_code())
+    promoted = None
+    if fres["solved"] and promote_to:                        # verified chain -> PROMOTE to permanent
+        fid = f"impl_{mtask.final_name}"
+        stores = [(nid, code, f"multistep sub-atom: {name}") for nid, name, code, _ in temp_nodes]
+        stores.append((fid, fres["code"], f"solves: {mtask.name}"))
+        edges = [(fid, nid, "depend") for nid, _, _, _ in temp_nodes]        # final depends on steps
+        for nid, _, _, needs in temp_nodes:                                  # steps tie into base atoms
+            edges += [(nid, f"impl_{a}", "depend") for a in needs]
+            if concept:
+                edges.append((nid, concept, "part_of"))                      # ...and the concept
+        promoted = grow(base_graph_path, promote_to, propose_edits(f"ms_{mtask.name}", stores, edges))
+    return dict(solved=fres["solved"], progress=progress, temp_nodes=[t[0] for t in temp_nodes],
+                final_code=fres["code"], promoted=promoted)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -250,6 +311,37 @@ def run_reason(model_name: str, graph_path: str, tasks=None, concept: str = "con
         Path(dump).write_text("\n".join(dlines), encoding="utf-8")
         print(f"  per-sample trace + code -> {dump}", flush=True)
     return dict(solve=solved / N, reuse=composed / N, nodes=len(g.nodes), edges=len(g.edges))
+
+
+def run_multistep(model_name: str, graph_path: str = "graphs/algo_multistep.json", n_tasks: int = 0,
+                  seed: int = 7, hard: bool = True, promote: bool = True, max_rounds: int = 2,
+                  samples: int = 6, k: int = 8, min_cos: float = 0.25):
+    """Real-LM multi-step run: solve decomposable tasks step-by-step with the graph as working memory;
+    promote verified chains to permanent atoms. Reports solved% + how the graph GREW (compounding)."""
+    from v5.runtime.algo_compose_tasks import seed_atom_graph
+    from v5.runtime.algo_multistep_tasks import MULTISTEP, gen_multistep_tasks
+    if not Path(graph_path).exists():
+        seed_atom_graph(graph_path, hard=hard)
+    gen_fn, embed = _build_lm(model_name)
+    tasks = gen_multistep_tasks(n_tasks, seed) if n_tasks else MULTISTEP
+    n0 = len(MemoryGraph.load_json(graph_path).nodes)
+    print(f"multistep/run: {model_name} | {graph_path} | {len(tasks)} tasks | promote={promote}", flush=True)
+    solved = promoted = 0
+    for t in tasks:
+        tmp = graph_path + ".grown"
+        res = solve_multistep(t, graph_path, gen_fn, embed, promote_to=(tmp if promote else None),
+                              max_rounds=max_rounds, samples=samples, k=k, min_cos=min_cos)
+        solved += int(res["solved"])
+        did = bool(res.get("promoted") and res["promoted"].get("persisted"))
+        promoted += int(did)
+        tag = "SOLVED " + "->".join(res["progress"]) if res["solved"] else f"FAILED@step{res.get('failed_step')}"
+        print(f"  {t.name:24s} {tag}{'  [+promoted]' if did else ''}", flush=True)
+        if did:
+            Path(tmp).replace(graph_path)                    # compound: promoted atoms persist
+    g = MemoryGraph.load_json(graph_path)
+    print(f"\n  solved={solved}/{len(tasks)} ({solved/len(tasks):.0%})  promoted={promoted}  | graph "
+          f"{n0} -> {len(g.nodes)} nodes (compounding: multi-step atoms became reusable)", flush=True)
+    return dict(solved=solved / len(tasks), promoted=promoted, nodes=len(g.nodes))
 
 
 def harvest(model_name: str, graph_path: str, out: str = "artifacts/reason_harvest.jsonl",
@@ -423,6 +515,30 @@ def _selftest() -> bool:
         print(f"  [4] iterative loop: round 1 FAILED ({it['history'][0][2][:34]}...) -> fed back -> "
               f"round {it['rounds']} SOLVED -> PASS")
 
+        # [5] MULTI-STEP: solve ordered sub-goals -> temp nodes (working memory) -> promote verified chain
+        from v5.runtime.algo_compose_tasks import seed_atom_graph
+        from v5.runtime.algo_multistep_tasks import MULTISTEP, _REF_FINAL, _REF_STEP
+        msg = str(Path(td) / "ms_base.json"); seed_atom_graph(msg, hard=True)   # atoms: is_prime, digit_sum...
+        allref = {**_REF_STEP, **_REF_FINAL}
+
+        def _ms_stub(prompts):                                # solves each step/final by fn name
+            p = prompts[0]
+            for nm, cd in allref.items():
+                if f"Write `{nm}(" in p:
+                    return [f"```python\n{cd}\n```"] * len(prompts)
+            return ["```python\ndef _x():\n    return 0\n```"] * len(prompts)
+
+        mt = MULTISTEP[0]            # primes_then_digitsum: keep_primes -> total_ds -> final
+        out5 = str(Path(td) / "ms_grown.json")
+        ms = solve_multistep(mt, msg, _ms_stub, embed, promote_to=out5, max_rounds=1, samples=1, min_cos=-1.0)
+        assert ms["solved"] and ms["progress"] == ["keep_primes", "total_ds"], ms
+        assert ms["promoted"] and ms["promoted"]["persisted"], ms
+        g5 = MemoryGraph.load_json(out5)
+        assert "impl_keep_primes" in g5.nodes and "impl_primes_then_digitsum" in g5.nodes
+        assert g5.edge_between("impl_primes_then_digitsum", "impl_keep_primes") is not None
+        print(f"  [5] multi-step: solved {'->'.join(ms['progress'])} via temp nodes -> verified chain "
+              f"PROMOTED (+{len(ms['temp_nodes'])} atoms + depend edges) -> PASS")
+
     print("\n  ALGO_GRAPH_REASON SELFTEST -> PASS")
     return True
 
@@ -431,6 +547,7 @@ def main():
     ap = argparse.ArgumentParser(description="Reasoning-over-graph: guided search + verify + glue-realizer.")
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--run", action="store_true", help="real-LM run on the compose-necessary tasks")
+    ap.add_argument("--multistep", action="store_true", help="real-LM multi-step run (working memory + temp nodes)")
     ap.add_argument("--harvest", action="store_true", help="harvest verified compositions -> training corpus")
     ap.add_argument("--retrieval-eval", action="store_true", help="retrieval recall@k (no LM) — does the query deliver the needed atom?")
     ap.add_argument("--hard", action="store_true", help="hard suite (inline-failing DP atoms + bigger graph)")
@@ -445,6 +562,11 @@ def main():
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
+    if a.multistep:
+        gpath = a.graph if a.graph != "graphs/algo_reason.json" else "graphs/algo_multistep.json"
+        run_multistep(a.model, gpath, n_tasks=a.n_tasks, hard=a.hard, samples=a.samples, k=a.k,
+                      min_cos=a.min_cos)
+        return
     if a.retrieval_eval:
         retrieval_eval(a.graph, n_tasks=a.n_tasks, k=a.k, min_cos=a.min_cos, hard=a.hard)
         return
