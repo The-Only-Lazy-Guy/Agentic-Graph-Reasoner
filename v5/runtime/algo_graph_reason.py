@@ -271,6 +271,46 @@ def harvest(model_name: str, graph_path: str, out: str = "artifacts/reason_harve
     return uniq
 
 
+def retrieval_eval(graph_path: str, n_tasks: int = 200, k: int = 6, min_cos: float = 0.25,
+                   seed: int = 99, hard: bool = False, embed=None):
+    """Retrieval QUALITY (no LM): for each task, is the NEEDED atom in the top-k retrieved? This caps
+    compose — at a 9-node graph with k=6, 2 atoms are dropped per query, so a miss means the model is
+    never offered the atom it needs. Reports recall@k, the ceiling recall@all (min_cos only), avg
+    retrieved, and per-family recall."""
+    from v5.runtime.algo_compose_tasks import _NEEDS, gen_compose_tasks, seed_atom_graph
+    if not Path(graph_path).exists():
+        seed_atom_graph(graph_path, hard=hard)
+    if embed is None:
+        from v5.memory.store import make_mpnet_embedder
+        embed = make_mpnet_embedder()
+    retr = MGRetriever(MemoryGraph.load_json(graph_path), embed)
+    n_atoms = len(retr.ids)
+    tasks = gen_compose_tasks(n_tasks, seed, hard=hard)
+    hitk = hitall = tot = 0
+    ret_sizes = []
+    per_fam: dict[str, list[int]] = {}
+    for task in tasks:
+        q = make_query(task, embed)
+        gk = {n for n, _ in retr.retrieve_vec(q.vec, k=k, min_cos=min_cos)}
+        gall = {n for n, _ in retr.retrieve_vec(q.vec, k=n_atoms, min_cos=min_cos)}  # ceiling: min_cos only
+        need = _NEEDS[task.name]
+        ok = need <= gk
+        hitk += ok; hitall += (need <= gall); tot += 1
+        ret_sizes.append(len(gk))
+        pf = per_fam.setdefault(task.name, [0, 0]); pf[0] += ok; pf[1] += 1
+    print(f"retrieval_eval: {graph_path} | {n_atoms} atoms | k={k} min_cos={min_cos} | {tot} tasks", flush=True)
+    print(f"  recall@k = {hitk}/{tot} ({hitk/tot:.0%})   ceiling recall@all(min_cos only) = "
+          f"{hitall}/{tot} ({hitall/tot:.0%})   avg retrieved = {sum(ret_sizes)/len(ret_sizes):.1f}/{k}",
+          flush=True)
+    for fam, (h, t) in sorted(per_fam.items()):
+        print(f"    {fam:24s} recall@k {h}/{t} ({h/t:.0%})", flush=True)
+    gap = hitall - hitk
+    if gap:
+        print(f"  NOTE: k={k} drops the needed atom on {gap} tasks that min_cos alone would keep -> "
+              f"raise --k (>= n_atoms={n_atoms} removes the drop) to lift the compose ceiling", flush=True)
+    return dict(recall_k=hitk / tot, recall_all=hitall / tot)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # SELFTEST (no model) — the SYNERGY: one query -> retrieve + realizer-feature -> search+verify ->
 # a COMPOSE-NECESSARY task solved by composing TWO atoms -> edges grow (composition memory)
@@ -346,6 +386,7 @@ def main():
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--run", action="store_true", help="real-LM run on the compose-necessary tasks")
     ap.add_argument("--harvest", action="store_true", help="harvest verified compositions -> training corpus")
+    ap.add_argument("--retrieval-eval", action="store_true", help="retrieval recall@k (no LM) — does the query deliver the needed atom?")
     ap.add_argument("--hard", action="store_true", help="hard suite (inline-failing DP atoms + bigger graph)")
     ap.add_argument("--model", default="Qwen/Qwen2.5-3B")
     ap.add_argument("--graph", default="graphs/algo_reason.json", help="MemoryGraph (seeded with atoms)")
@@ -358,6 +399,9 @@ def main():
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
+    if a.retrieval_eval:
+        retrieval_eval(a.graph, n_tasks=a.n_tasks, k=a.k, min_cos=a.min_cos, hard=a.hard)
+        return
     if a.harvest:
         harvest(a.model, a.graph, out=a.out, n_tasks=a.n_tasks, samples=a.samples, k=a.k,
                 min_cos=a.min_cos, hard=a.hard)
