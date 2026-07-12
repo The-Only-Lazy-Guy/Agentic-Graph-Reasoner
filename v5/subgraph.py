@@ -43,8 +43,10 @@ PLANNING_EPISTEMIC_STATUSES = frozenset({"uncertain", "unknown"})
 
 # Layer 20 evidence: fact, claim, application, solved_subgoal, procedure,
 #   epistemic_state where status in {verified, supported}
+# `implementation` = a verified code atom (a procedure the LM composes) -> evidence. Additive: QA
+# graphs carry no implementation nodes, so this only affects the algorithm-graph reason path.
 EVIDENCE_NODE_TYPES = frozenset({
-    "fact", "claim", "application", "solved_subgoal", "procedure",
+    "fact", "claim", "application", "solved_subgoal", "procedure", "implementation",
 })
 EVIDENCE_EPISTEMIC_STATUSES = frozenset({"verified", "supported"})
 
