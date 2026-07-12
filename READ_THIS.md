@@ -28,30 +28,39 @@ cross-attend adapter (earlier): compose +43% @200tok, +5% @400tok  = AMORTIZATIO
 Δcapability (hard graph, general): only lcs_length/edit_distance load-bearing; rest replaceable
 str_dp2 under compose-forcing: Δ+0.50, TOP atom (vs Δ0 free-form 4B)  <-- THE thesis
 DSL program decoder (mpnet): 100% held-out INSTANCES (base + dp2 graphs)
-compo-gen (leave-one-family-out, mpnet): 0/66 = 0%  <-- imitation is RECALL, not reasoning
-RL + dense reward: DISCOVERED FILTER(is_prime)->MAP(digit_sum) for an UNSEEN family (structure!),
-                   aggregator max-vs-sum not finalized; HIGH VARIANCE / unstable
+compo-gen (leave-one-family-out, mpnet): 0/66 = 0%  <-- IMITATION alone is RECALL, not reasoning
+GRR-7 STaR (search+verify+consolidate): held-out max_prime_digitsum 0% zero-shot -> 100% WITH-SEARCH,
+                   IDENTICAL across 3 seeds (selftest, synthetic embed) <-- recall->reasoning, STABLE
+                   [molab --compo-gen-star --hard = real-mpnet confirmation, PENDING]
+(superseded) RL+GRPO dense reward: discovered structure once but HIGH VARIANCE / unstable -> replaced by STaR
 ```
 
 ## Honest frontier
-- Imitation → RECALL (memorizes family→program; 0% compo-gen on synthetic AND mpnet).
-- RL (GRPO on dense agreement-fraction verify-reward) → the recall→reasoning mechanism: it DISCOVERED a
-  novel composition for an unseen family via search+verify. But UNSTABLE (another run wandered).
-- Open research: curriculum (short→long, forced novel op-combos) + stable RL (entropy/KL-to-warmstart,
-  more seeds) + sharper reward on weakly-distinguished picks + maybe compositional decoder bias.
+- Imitation alone → RECALL (memorizes family→program; 0% compo-gen on synthetic AND mpnet). GRPO was the
+  unstable fix (the wanderer); worse, pure policy-sampling can't even EXPLORE an unseen family.
+- GRR-7 = STaR / expert iteration: SEARCH (bounded enumeration of valid pipelines) -> VERIFY oracle I/O
+  (never the reference program) -> KEEP fuzz-general -> SFT the net so decode amortizes it. Search does the
+  reasoning; the net consolidates. Deterministic search => ZERO variance across seeds (GRPO pain solved).
+  Selftest: held-out family 0%->100%. The NET alone is still recall zero-shot; the SYSTEM (net+search)
+  generalizes — the honest DreamCoder-wake framing.
+- Next: (1) molab --compo-gen-star --hard for the real-mpnet number; (2) net-GUIDED enumeration + verify
+  budget so search scales past brute-force as families/atoms grow (amortization becomes load-bearing);
+  (3) sleep-compress the discovered programs back into the library (close the wake/sleep loop).
 
 ## Repro (molab, no 4B — mpnet + tiny nets, minutes)
 ```
 python -m v5.runtime.algo_composed --selftest                    # thesis: str_dp2 load-bearing
-python -m v5.runtime.algo_dsl_trm --train --hard --graph graphs/algo_reason_hard.json   # 100% (recall)
-python -m v5.runtime.algo_dsl_trm --compo-gen --hard --graph graphs/algo_reason_hard.json  # 0% = recall
+python -m v5.runtime.algo_dsl_trm --train --hard --graph graphs/algo_reason_hard.json      # 100% (recall)
+python -m v5.runtime.algo_dsl_trm --compo-gen --hard --graph graphs/algo_reason_hard.json  # 0% = recall (imitation)
+python -m v5.runtime.algo_dsl_trm --compo-gen-star --hard --graph graphs/algo_reason_hard.json  # STaR: recall vs with-search
 # every module: python -m v5.runtime.<algo_quality|algo_capability|algo_abstract|algo_sleep|algo_dsl|algo_composed|algo_trm_compose|algo_dsl_trm> --selftest
 ```
 
 ## Files (all v5/runtime/)
 algo_quality · algo_capability · algo_abstract · algo_sleep · algo_composed · algo_trm_compose ·
-algo_dsl · algo_dsl_trm (+ RL: train_rl/fast_reward/sample). Reuses: algo_graph_mg (MGRetriever.resolve_deps),
-algo_compose_tasks (_REF/_NEEDS/ALL_ATOMS/gen), graph_grower, subgraph/gnn_encoder/goal_encoder (read stack).
+algo_dsl · algo_dsl_trm (STaR: _enumerate_general/_is_general/train_star/compo_gen_star; legacy train_rl
+kept for comparison). Reuses: algo_graph_mg (MGRetriever.resolve_deps), algo_compose_tasks
+(_REF/_NEEDS/ALL_ATOMS/gen), graph_grower, subgraph/gnn_encoder/goal_encoder (read stack).
 Trained: artifacts/grr6_trm.pt, artifacts/grr6_dsl.pt.
 
-## Next (own push): curriculum + stable RL to turn RECALL → robust REASONING.
+## Next: molab real-mpnet --compo-gen-star; then net-guided search (scale) + sleep-compress discoveries.
