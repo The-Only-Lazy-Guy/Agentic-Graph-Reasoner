@@ -52,6 +52,27 @@ class Query:
     vec: np.ndarray
 
 
+@dataclass
+class Budget:
+    """GRR-2: a real generation budget for ONE solve, so 'benefit under budget' has something to push
+    against. Composing (short glue) is cheap -> more attempts fit; re-deriving inline (long) is
+    expensive -> the budget runs out first. This is the amortization win made a first-class constraint."""
+    total_tokens: int
+    spent: int = 0
+
+    def charge(self, n: int):
+        self.spent += int(n)
+
+    def exhausted(self) -> bool:
+        return self.spent >= self.total_tokens
+
+
+def _char_cost(gen: str) -> int:
+    """Cheap token proxy (~4 chars/token) for no-GPU budget accounting; the real run passes a
+    tokenizer-based cost_fn."""
+    return max(1, len(gen) // 4)
+
+
 def make_query(task, embed_fn, extra: str = "") -> Query:
     """v0: query = the task's own need statement. `extra` folds an obs-informed failure signal into the
     query so RE-retrieval (and the realizer feature) reflect what went wrong last round — the iterative
@@ -78,17 +99,22 @@ def _realize_prompt(task, query_text: str, candidates: list[tuple[str, str]], fe
 
 def solve_iterative(task, retriever: MGRetriever, gen_fn, embed_fn, max_rounds: int = 3,
                     samples: int = 4, k: int = 6, min_cos: float = 0.25, extra_deps: str = "",
-                    meta_retriever=None):
+                    meta_retriever=None, budget: "Budget" = None, cost_fn=None):
     """Q1: the ITERATIVE loop — retrieve -> attempt (best-of-N) -> verify -> on failure re-query memory
     with the failure signal + retry, until solved or max_rounds. Unlike 1-shot search_compose, the
     failure OBSERVATION steers the next retrieval and prompt (obs-informed retry). `extra_deps` is code
     always in scope at verify time (multi-step: prior temp nodes + their transitive atoms).
-    `meta_retriever` (#54) injects POLICY hints (NL know-how) into the prompt. Returns solved, rounds,
-    code, used atoms, used_policies, history."""
+    `meta_retriever` (#54) injects POLICY hints. `budget` (GRR-2) caps total generation — each attempt
+    is charged cost_fn(gen); the solve stops when the budget runs out, so cheap (composed) solutions win
+    under pressure. Returns solved, rounds, code, used, used_policies, tokens, history."""
     from v5.runtime.algo_meta import inject_policies
+    cost_fn = cost_fn or _char_cost
     feedback, last, history = "", ("", [], False), []
     used_policies = []
+    rnd = 0
     for rnd in range(max_rounds):
+        if budget is not None and budget.exhausted():               # out of budget -> stop
+            break
         query = make_query(task, embed_fn, extra=feedback)          # re-query reflects the failure
         ranked = retriever.retrieve_vec(query.vec, k=k, min_cos=min_cos)
         names = [n for n, _ in ranked]
@@ -100,6 +126,8 @@ def solve_iterative(task, retriever: MGRetriever, gen_fn, embed_fn, max_rounds: 
                 prompt = inject_policies(prompt, [t for _, t in pols])
         round_err = "no attempt verified"
         for gen in gen_fn([prompt] * samples):
+            if budget is not None:
+                budget.charge(cost_fn(gen))                         # pay for the generation
             code = _extract_code(gen)
             called = [n for n in names if n not in _def_names(code)
                       and re.search(rf"\b{re.escape(n)}\s*\(", code)]
@@ -109,12 +137,15 @@ def solve_iterative(task, retriever: MGRetriever, gen_fn, embed_fn, max_rounds: 
             if ok:
                 history.append((rnd, True, ""))
                 return dict(solved=True, rounds=rnd + 1, code=code, used=called,
-                            used_policies=used_policies, history=history)
+                            used_policies=used_policies, tokens=(budget.spent if budget else None),
+                            history=history)
             last, round_err = (code, called, False), err
+            if budget is not None and budget.exhausted():
+                break
         history.append((rnd, False, round_err))
         feedback = round_err                                         # obs-informed: steer next round
-    return dict(solved=False, rounds=max_rounds, code=last[0], used=last[1],
-                used_policies=used_policies, history=history)
+    return dict(solved=False, rounds=rnd + 1, code=last[0], used=last[1],
+                used_policies=used_policies, tokens=(budget.spent if budget else None), history=history)
 
 
 def search_compose(task, retriever: MGRetriever, gen_fn, query: Query, k: int = 6, samples: int = 8,
@@ -355,6 +386,37 @@ def run_multistep(model_name: str, graph_path: str = "graphs/algo_multistep.json
     return dict(solved=solved / len(tasks), promoted=promoted, nodes=len(g.nodes))
 
 
+def budget_curve(model_name: str, graph_path: str, budgets=(150, 300, 600, 1200), n_tasks: int = 30,
+                 hard: bool = True, seed: int = 99, samples: int = 4, k: int = 6, min_cos: float = 0.25):
+    """GRR-2: the solve-vs-budget curve — solve held-out tasks under each total-generation budget. This
+    is 'benefit under budget' made first-class (the 200-vs-400 sweep, generalized). GRR-3 measures the
+    same curve WITH vs WITHOUT an atom to get its Δcapability."""
+    from v5.runtime.algo_compose_tasks import gen_compose_tasks, seed_atom_graph
+    if not Path(graph_path).exists():
+        seed_atom_graph(graph_path, hard=hard)
+    gen_fn, embed = _build_lm(model_name)
+    retr = MGRetriever(MemoryGraph.load_json(graph_path), embed)
+    tasks = gen_compose_tasks(n_tasks, seed, hard=hard)
+    print(f"budget_curve: {model_name} | {'hard' if hard else 'easy'} | {n_tasks} tasks | "
+          f"budgets(~tokens) {list(budgets)}\n  budget   solve            avg tokens/solve", flush=True)
+    out = {}
+    for B in budgets:
+        solved, toks = 0, []
+        for task in tasks:
+            bud = Budget(B)
+            r = solve_iterative(task, retr, gen_fn, embed, max_rounds=12, samples=samples, k=k,
+                                min_cos=min_cos, budget=bud)
+            solved += int(r["solved"])
+            if r["solved"]:
+                toks.append(r["tokens"])
+        rate = solved / len(tasks)
+        avg = f"{sum(toks)/len(toks):.0f}" if toks else "-"
+        print(f"  {B:6d}   {solved}/{len(tasks)} ({rate:.0%})       {avg}", flush=True)
+        out[B] = rate
+    print("  (rising solve% with budget = amortization has room to pay; GRR-3 measures per-atom Δ here)")
+    return out
+
+
 def harvest(model_name: str, graph_path: str, out: str = "artifacts/reason_harvest.jsonl",
             n_tasks: int = 200, samples: int = 8, k: int = 6, min_cos: float = 0.25, seed: int = 0,
             concept: str = "concept_algorithms", composed_only: bool = True, hard: bool = False,
@@ -558,6 +620,25 @@ def _selftest() -> bool:
         print(f"  [5] multi-step: solved {'->'.join(ms['progress'])} via temp nodes -> verified chain "
               f"PROMOTED (+{len(ms['temp_nodes'])} atoms + depend edges) -> PASS")
 
+        # [6] BUDGET bites: same task+stub, tight budget runs out before the retry -> unsolved;
+        # loose budget lets the obs-informed retry finish -> solved
+        btask = MBPPTask("add_one", "return n + 1", ["assert add_one(3) == 4"])
+
+        def _bstub(prompts):
+            good = "```python\ndef add_one(n):\n    return n + 1\n```"
+            bad = "```python\ndef add_one(n):\n    return n - 1\n```"
+            return [good if "PREVIOUS attempt failed" in prompts[0] else bad] * len(prompts)
+
+        one_cost = _char_cost("```python\ndef add_one(n):\n    return n - 1\n```")
+        tight = solve_iterative(btask, retr2, _bstub, embed, max_rounds=5, samples=1, min_cos=-1.0,
+                                budget=Budget(one_cost))          # only affords the first (wrong) attempt
+        loose = solve_iterative(btask, retr2, _bstub, embed, max_rounds=5, samples=1, min_cos=-1.0,
+                                budget=Budget(10000))
+        assert not tight["solved"] and tight["tokens"] >= one_cost, tight
+        assert loose["solved"] and loose["tokens"] > 0, loose
+        print(f"  [6] budget bites: tight (~{one_cost} tok) -> UNSOLVED (spent {tight['tokens']}); "
+              f"loose -> SOLVED (spent {loose['tokens']}) -> PASS")
+
     print("\n  ALGO_GRAPH_REASON SELFTEST -> PASS")
     return True
 
@@ -567,6 +648,7 @@ def main():
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--run", action="store_true", help="real-LM run on the compose-necessary tasks")
     ap.add_argument("--multistep", action="store_true", help="real-LM multi-step run (working memory + temp nodes)")
+    ap.add_argument("--budget-curve", action="store_true", help="GRR-2: solve% vs generation budget")
     ap.add_argument("--harvest", action="store_true", help="harvest verified compositions -> training corpus")
     ap.add_argument("--retrieval-eval", action="store_true", help="retrieval recall@k (no LM) — does the query deliver the needed atom?")
     ap.add_argument("--hard", action="store_true", help="hard suite (inline-failing DP atoms + bigger graph)")
@@ -585,6 +667,10 @@ def main():
         gpath = a.graph if a.graph != "graphs/algo_reason.json" else "graphs/algo_multistep.json"
         run_multistep(a.model, gpath, n_tasks=a.n_tasks, hard=a.hard, samples=a.samples, k=a.k,
                       min_cos=a.min_cos)
+        return
+    if a.budget_curve:
+        budget_curve(a.model, a.graph, n_tasks=a.n_tasks, hard=a.hard, samples=a.samples, k=a.k,
+                     min_cos=a.min_cos)
         return
     if a.retrieval_eval:
         retrieval_eval(a.graph, n_tasks=a.n_tasks, k=a.k, min_cos=a.min_cos, hard=a.hard)
