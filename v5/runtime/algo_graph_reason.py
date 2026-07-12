@@ -24,6 +24,7 @@ tool_compose.verify_fn, derive_reward, algo_graph_run (tasks/verify/extract). Th
 (traversal_ranker / memory_refiner) is the trainable upgrade of make_query — same interface.
 
   selftest (no model):  python -m v5.runtime.algo_graph_reason --selftest
+  run (GPU):            V5_LM_TRUST_REMOTE_CODE=1 python -m v5.runtime.algo_graph_reason --run
 """
 from __future__ import annotations
 
@@ -31,6 +32,7 @@ import argparse
 import re
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
@@ -114,6 +116,90 @@ def reason_grow(task, graph_path: str, out_path: str, retriever: MGRetriever, ge
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# REAL-LM RUN — the honest test: search+verify needs NO training (glue is trivial, so a FROZEN model
+# can realize it). Seed atoms -> reason_grow each compose-necessary task -> does reuse move? The pure-
+# LM approaches got reuse ~8% because compose was a rare spontaneous decision; here it's a SEARCH.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _build_lm(model_name: str, max_new_tokens: int = 400, temperature: float = 0.8):
+    """(gen_fn, embed_fn) from a frozen LM — gen_fn: list[str] prompts -> list[str] gens (best-of-N by
+    sampling). The glue-realizer's only job is to call named atoms, so a frozen model suffices."""
+    import os
+    import torch
+    from transformers import AutoTokenizer
+    from v5.lm_loader import load_frozen_lm
+    from v5.memory.store import make_mpnet_embedder
+
+    trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
+    model = load_frozen_lm(model_name)
+    tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=trust)
+    dev = next(model.parameters()).device
+
+    def _encode(prompt):
+        m = [{"role": "user", "content": prompt}]
+        kw = dict(add_generation_prompt=True, return_tensors="pt", return_dict=True)
+        try:
+            return tok.apply_chat_template(m, enable_thinking=False, **kw)["input_ids"].to(dev)
+        except TypeError:
+            return tok.apply_chat_template(m, **kw)["input_ids"].to(dev)
+
+    @torch.no_grad()
+    def gen_fn(prompts):
+        # search_compose passes [prompt]*samples (identical) -> one encode, num_return_sequences
+        out = []
+        uniq = list(dict.fromkeys(prompts))
+        for p in uniq:
+            n = prompts.count(p)
+            pids = _encode(p)
+            seqs = model.generate(pids, do_sample=(n > 1 or temperature > 0), temperature=temperature,
+                                  top_p=0.95, num_return_sequences=n, max_new_tokens=max_new_tokens,
+                                  pad_token_id=tok.eos_token_id)
+            out += [tok.decode(seqs[j, pids.shape[1]:], skip_special_tokens=True) for j in range(n)]
+        return out
+
+    return gen_fn, make_mpnet_embedder()
+
+
+def run_reason(model_name: str, graph_path: str, tasks=None, concept: str = "concept_algorithms",
+               k: int = 6, samples: int = 8, min_cos: float = 0.25, seed_atoms: bool = True):
+    """Seed atoms (bootstrap the candidate set) -> for each compose-necessary task: query -> search +
+    verify + glue -> grow edges. Reports solve% and REUSE% (composed a stored atom) — the metric the
+    pure-LM runs couldn't move — plus the edges grown (composition memory)."""
+    from v5.runtime.algo_compose_tasks import COMPOSE, seed_atom_graph
+    if tasks is None:
+        tasks = COMPOSE
+    if seed_atoms or not Path(graph_path).exists():
+        seed_atom_graph(graph_path, concept)                 # bootstrap: verified atoms in the graph
+    gen_fn, embed = _build_lm(model_name)
+    retr = MGRetriever(MemoryGraph.load_json(graph_path), embed)
+    n_atoms = len(retr.ids)
+    print(f"reason/run: {model_name} | graph {graph_path} | {n_atoms} atoms seeded | {len(tasks)} "
+          f"compose-necessary tasks | k={k} samples={samples}", flush=True)
+
+    solved = composed = 0
+    for task in tasks:
+        tmp = graph_path + ".grown"
+        res = reason_grow(task, graph_path, tmp, retr, gen_fn, embed, concept=concept, k=k,
+                          samples=samples, min_cos=min_cos)
+        solved += int(res["verified"]); composed += int(bool(res["used"]))
+        tag = "COMPOSED " + "+".join(res["used"]) if res["used"] else (
+              "verified (inline)" if res["verified"] else "FAILED")
+        print(f"  {task.name:22s} {tag}", flush=True)
+        if res.get("grown") and res["grown"].get("persisted"):  # composition memory grew -> chain it
+            Path(tmp).replace(graph_path)
+            retr = MGRetriever(MemoryGraph.load_json(graph_path), embed)
+    g = MemoryGraph.load_json(graph_path)
+    n_edges = sum(1 for e in g.edges if e.relation in ("depend", "part_of")
+                  and e.src.startswith("impl_") and e.dst.startswith("impl_"))
+    N = len(tasks)
+    print(f"\n  solve={solved}/{N} ({solved/N:.0%})  REUSE={composed}/{N} ({composed/N:.0%})  "
+          f"| graph {len(g.nodes)} nodes, {len(g.edges)} edges ({n_edges} atom->atom composition edges)",
+          flush=True)
+    print("  (reuse% is the number the pure-LM GRPO/STaR runs left at ~8% — search+verify targets it)")
+    return dict(solve=solved / N, reuse=composed / N, nodes=len(g.nodes), edges=len(g.edges))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # SELFTEST (no model) — the SYNERGY: one query -> retrieve + realizer-feature -> search+verify ->
 # a COMPOSE-NECESSARY task solved by composing TWO atoms -> edges grow (composition memory)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -186,9 +272,20 @@ def _selftest() -> bool:
 def main():
     ap = argparse.ArgumentParser(description="Reasoning-over-graph: guided search + verify + glue-realizer.")
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--run", action="store_true", help="real-LM run on the compose-necessary tasks")
+    ap.add_argument("--model", default="Qwen/Qwen2.5-3B")
+    ap.add_argument("--graph", default="graphs/algo_reason.json", help="MemoryGraph (seeded with atoms)")
+    ap.add_argument("--k", type=int, default=6)
+    ap.add_argument("--samples", type=int, default=8, help="best-of-N glue realizations per task")
+    ap.add_argument("--min-cos", type=float, default=0.25)
+    ap.add_argument("--no-seed", action="store_true", help="do NOT re-seed atoms (use existing graph)")
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
+    if a.run:
+        run_reason(a.model, a.graph, k=a.k, samples=a.samples, min_cos=a.min_cos,
+                   seed_atoms=not a.no_seed)
+        return
     ap.print_help()
 
 
