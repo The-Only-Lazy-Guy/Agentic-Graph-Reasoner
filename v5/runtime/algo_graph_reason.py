@@ -357,20 +357,22 @@ def run_multistep(model_name: str, graph_path: str = "graphs/algo_multistep.json
 
 def harvest(model_name: str, graph_path: str, out: str = "artifacts/reason_harvest.jsonl",
             n_tasks: int = 200, samples: int = 8, k: int = 6, min_cos: float = 0.25, seed: int = 0,
-            concept: str = "concept_algorithms", composed_only: bool = True, hard: bool = False):
+            concept: str = "concept_algorithms", composed_only: bool = True, hard: bool = False,
+            fuzz_gate: bool = True):
     """Run the WORKING search+verify over many generated compose tasks; save every COMPOSED+verified
-    sample as {task, prompt, code, used}. This is the training corpus for the cross-attend adapter
-    (the real data gate — 7 static tasks can't train a GNN+adapter; hundreds of instances can).
-    hard=True: inline-FAILING DP families + the bigger easy+hard seeded graph."""
+    sample as {task, prompt, code, used}. hard=True: inline-FAILING DP families + bigger seeded graph.
+    fuzz_gate (GRR-1): also require the solution to be GENERAL (correct on random inputs vs oracle), not
+    just pass the 2 benchmark asserts — kills the ~31% overfit/buggy solutions verify alone let through."""
     import json
     import time
     from v5.runtime.algo_compose_tasks import gen_compose_tasks, seed_atom_graph
+    from v5.runtime.algo_quality import fuzz
     if not Path(graph_path).exists():
         seed_atom_graph(graph_path, concept, hard=hard)
     gen_fn, embed = _build_lm(model_name)
     retr = MGRetriever(MemoryGraph.load_json(graph_path), embed)
     tasks = gen_compose_tasks(n_tasks, seed, hard=hard)
-    rows, n_ver, n_comp = [], 0, 0
+    rows, n_ver, n_comp, n_overfit = [], 0, 0, 0
     t_start = time.perf_counter()
     for ti, task in enumerate(tasks):
         q = make_query(task, embed)
@@ -386,6 +388,11 @@ def harvest(model_name: str, graph_path: str, out: str = "artifacts/reason_harve
                 n_ver += 1
                 n_comp += bool(called)
                 if called or not composed_only:
+                    if fuzz_gate:                        # GRR-1: general, not just benchmark-verified
+                        p, t = fuzz(code, task.name, deps, n=40)
+                        if t and p < t:                  # overfit -> reject (verify alone accepted it)
+                            n_overfit += 1
+                            continue
                     rows.append({"task": task.name, "prompt": prompt, "code": code, "used": called})
         if (ti + 1) % 25 == 0:
             print(f"  ..{ti+1}/{len(tasks)} tasks | {n_ver} verified, {n_comp} composed", flush=True)
@@ -399,7 +406,8 @@ def harvest(model_name: str, graph_path: str, out: str = "artifacts/reason_harve
     Path(out).write_text("\n".join(json.dumps(r) for r in uniq), encoding="utf-8")
     dt = time.perf_counter() - t_start
     print(f"\nharvest: {len(tasks)} tasks x{samples} = {len(tasks)*samples} samples -> {n_ver} verified "
-          f"({n_comp} composed) -> {len(uniq)} unique composed rows -> {out}", flush=True)
+          f"({n_comp} composed, {n_overfit} REJECTED as overfit by fuzz-gate) -> {len(uniq)} unique "
+          f"general rows -> {out}", flush=True)
     print(f"  wall {dt:.0f}s ({dt/60:.1f} min, {len(tasks)*samples/max(dt,1):.1f} samples/s)", flush=True)
     return uniq
 
