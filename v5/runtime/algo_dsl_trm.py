@@ -76,6 +76,27 @@ def _build():
                 state = self.rnn((self.op_emb(torch.tensor(op_i)) + arg).unsqueeze(0), state.unsqueeze(0))[0]
             return total
 
+        def sample(self, goal_vec, atom_vecs, atom_names, temp=1.0, max_len=5):
+            """Stochastic decode for RL: returns (program, sum log-prob). log-prob keeps grad (REINFORCE);
+            the sampled indices are detached."""
+            g = self.goal_proj(goal_vec)
+            A = self.atom_proj(atom_vecs)
+            state = torch.zeros(self.d)
+            pipe, logp = [], torch.zeros(())
+            for _ in range(max_len):
+                op_l, agg_l, atom_l = self._heads(g, state, A)
+                op = torch.distributions.Categorical(logits=op_l / temp).sample()
+                logp = logp + torch.log_softmax(op_l, -1)[op]
+                if OPS[int(op)] == "REDUCE":
+                    agg = torch.distributions.Categorical(logits=agg_l / temp).sample()
+                    logp = logp + torch.log_softmax(agg_l, -1)[agg]
+                    pipe.append(Op("REDUCE", AGGS[int(agg)])); break
+                ai = torch.distributions.Categorical(logits=atom_l / temp).sample()
+                logp = logp + torch.log_softmax(atom_l, -1)[ai]
+                pipe.append(Op(OPS[int(op)], atom_names[int(ai)]))
+                state = self.rnn((self.op_emb(op) + A[ai]).unsqueeze(0), state.unsqueeze(0))[0]
+            return pipe, logp
+
         @torch.no_grad()
         def decode(self, goal_vec, atom_vecs, atom_names, max_len=5):
             g = self.goal_proj(goal_vec)
@@ -109,6 +130,69 @@ def train_decoder(traces, atom_vecs, atom_names, d=64, steps=2000, lr=1e-3, seed
         loss = model.loss(torch.as_tensor(gv, dtype=torch.float32), A, tgt)
         opt.zero_grad(); loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)   # stabilize (lr-too-high diverged)
+        opt.step()
+    return model
+
+
+def fast_reward(code: str, deps: str, name: str, n: int = 12) -> float:
+    """In-process verify (no subprocess): exec deps+code, check the fn vs the family oracle on n random
+    inputs. 1.0 iff general. Fast enough for RL's many rollouts."""
+    from v5.runtime.algo_compose_tasks import _FAMILIES, _FAMILIES_HARD, _sample
+    fams = {**_FAMILIES, **_FAMILIES_HARD}
+    if name not in fams:
+        return 0.0
+    kind, oracle = fams[name]
+    ns: dict = {}
+    try:
+        exec((deps + "\n" + code) if deps else code, ns)
+    except Exception:
+        return 0.0
+    fn = ns.get(name)
+    if fn is None:
+        return 0.0
+    rng = np.random.default_rng(0)
+    for _ in range(n):
+        args = _sample(kind, rng)
+        try:
+            if fn(*args) != oracle(*args):
+                return 0.0
+        except Exception:
+            return 0.0
+    return 1.0
+
+
+def train_rl(model, tasks, atom_names, atom_vecs, fams, resolve_fn, embed_fn, K: int = 8, steps: int = 250,
+             lr: float = 5e-4, temp: float = 1.2, seed: int = 0):
+    """GRPO on VERIFY reward — the model SEARCHES program-space (samples K programs, rewards the ones
+    that solve) and reinforces. Unlike imitation, it can DISCOVER a program for a task it has no
+    reference for -> the recall->reasoning step."""
+    import random
+    import torch
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    A = torch.as_tensor(atom_vecs, dtype=torch.float32)
+    tlist = [t for t in tasks if t.name in fams]
+    rng = random.Random(seed)
+    solved_ct = 0
+    for _ in range(steps):
+        t = rng.choice(tlist)
+        goal = torch.as_tensor(np.asarray(list(embed_fn({"q": t.text}).values())[0], dtype=np.float32))
+        samples = [model.sample(goal, A, atom_names, temp=temp) for _ in range(K)]
+        rewards = []
+        for pipe, _ in samples:
+            try:
+                code = realize_program(t.name, fams[t.name][0], pipe)
+            except (ValueError, KeyError):
+                rewards.append(0.0); continue
+            rewards.append(fast_reward(code, resolve_fn(atoms_of(pipe)), t.name))
+        R = torch.tensor(rewards)
+        solved_ct += int(R.max() > 0)
+        adv = R - R.mean()
+        if float(adv.abs().sum()) < 1e-6:                    # all-same reward -> no gradient signal
+            continue
+        logps = torch.stack([lp for _, lp in samples])
+        loss = -(adv * logps).mean()
+        opt.zero_grad(); loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
     return model
 
