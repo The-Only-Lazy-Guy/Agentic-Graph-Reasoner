@@ -154,13 +154,15 @@ def train_adapter(model_name: str, harvest_path: str, graph_path: str, epochs: i
 
 def eval_adapter(model_name: str, graph_path: str, adapter_path: str, n_tasks: int = 42, samples: int = 8,
                  k: int = 6, min_cos: float = 0.25, seed: int = 99, r_plan: int = 4, r_evidence: int = 6,
-                 hard: bool = False):
+                 hard: bool = False, max_new_tokens: int = 200):
     """Matched-seed A/B on HELD-OUT compose tasks: literal-only (no hooks) vs +adapter (cross-attend
     strategy injected during generation). Same sampling seed per task per arm, so the only difference
     is the adapter -> a clean read on whether the strategy channel lifts compose/solve beyond the
-    literal atom code (the z-wall question). 3-atom family called out (where strategy matters most)."""
+    literal atom code (the z-wall question). Focus family called out (where strategy matters most).
+    Reports per-arm wall time (adapter arm is batch-1 -> slower; literal arm batches)."""
     import contextlib
     import os
+    import time
     from transformers import AutoTokenizer
     from v5.lm_loader import load_frozen_lm
     from v5.memory.store import make_mpnet_embedder
@@ -202,16 +204,22 @@ def eval_adapter(model_name: str, graph_path: str, adapter_path: str, n_tasks: i
 
     @torch.no_grad()
     def _gen(prompts, hooked):
-        # ONE sequence per generate (batch=1): the adapter's goal is [1, GOAL_DIM] and does not
-        # broadcast across num_return_sequences. Re-enter inject() per generate so each is grounded
-        # (run-once resets on enter). Same per-sample RNG use in both arms -> matched A/B.
+        # literal arm BATCHES (no hooks -> num_return_sequences fine, ~samples-x faster). adapter arm
+        # loops batch=1: the adapter's goal AND LoopState are batch-1 and don't broadcast across
+        # num_return_sequences (would need editing the validated QA adapter internals). glue is short
+        # so max_new_tokens is small.
+        if not hooked:
+            pids = encode(prompts[0])
+            seqs = model.generate(pids, do_sample=True, temperature=0.8, top_p=0.95,
+                                  num_return_sequences=len(prompts), max_new_tokens=max_new_tokens,
+                                  pad_token_id=tok.eos_token_id)
+            return [tok.decode(seqs[j, pids.shape[1]:], skip_special_tokens=True) for j in range(len(prompts))]
         out = []
         for p in prompts:
             pids = encode(p)
-            ctx = inj.inject(model) if hooked else contextlib.nullcontext()
-            with ctx:
+            with inj.inject(model):                          # re-enter per generate -> each grounded
                 seqs = model.generate(pids, do_sample=True, temperature=0.8, top_p=0.95,
-                                      num_return_sequences=1, max_new_tokens=400,
+                                      num_return_sequences=1, max_new_tokens=max_new_tokens,
                                       pad_token_id=tok.eos_token_id)
             out.append(tok.decode(seqs[0, pids.shape[1]:], skip_special_tokens=True))
         return out
@@ -221,6 +229,8 @@ def eval_adapter(model_name: str, graph_path: str, adapter_path: str, n_tasks: i
           f"tasks (seed {seed}) | adapter {adapter_path}\n"
           f"  arm            solve            compose          {focus[:16]}", flush=True)
     agg = {"literal-only": [0, 0, 0, 0], "+adapter": [0, 0, 0, 0]}   # solve, compose, deep_comp, deep_tot
+    wall = {"literal-only": 0.0, "+adapter": 0.0}
+    t_start = time.perf_counter()
     for ti, task in enumerate(tasks):
         q = make_query(task, embed)
         deep = task.name == focus
@@ -230,14 +240,20 @@ def eval_adapter(model_name: str, graph_path: str, adapter_path: str, n_tasks: i
                                     reason_task_frame(task.name, _NEEDS[task.name]),
                                     r_plan=r_plan, r_evidence=r_evidence)
             torch.manual_seed(2000 + ti)             # matched draws: only the adapter differs
+            t0 = time.perf_counter()
             _c, used, ver, _tr = search_compose(task, retr, (lambda pr, h=hooked: _gen(pr, h)), q,
                                                 k=k, samples=samples, min_cos=min_cos)
+            wall[arm] += time.perf_counter() - t0
             a = agg[arm]
             a[0] += int(ver); a[1] += int(bool(used)); a[2] += int(deep and bool(used)); a[3] += int(deep)
     N = len(tasks)
+    total = time.perf_counter() - t_start
     for arm in ("literal-only", "+adapter"):
         s, c, dc, dt = agg[arm]
-        print(f"  {arm:14s} {s}/{N} ({s/N:.0%})      {c}/{N} ({c/N:.0%})      {dc}/{dt}", flush=True)
+        print(f"  {arm:14s} {s}/{N} ({s/N:.0%})      {c}/{N} ({c/N:.0%})      {dc}/{dt}"
+              f"      [{wall[arm]:.0f}s, {wall[arm]/N:.1f}s/task]", flush=True)
+    print(f"  total wall {total:.0f}s ({total/60:.1f} min) for {N} tasks x{samples} x2 arms "
+          f"(max_new_tokens={max_new_tokens})", flush=True)
     dl = agg["+adapter"][1] / N - agg["literal-only"][1] / N
     ds = agg["+adapter"][0] / N - agg["literal-only"][0] / N
     verdict = "strategy channel HELPS" if dl > 0.02 or ds > 0.02 else \
@@ -327,6 +343,7 @@ def main():
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--train-gnn", action="store_true")
     ap.add_argument("--hard", action="store_true", help="hard suite (inline-failing DP atoms) for --eval")
+    ap.add_argument("--max-new-tokens", type=int, default=200, help="gen length cap (glue is short)")
     a = ap.parse_args()
     if a.smoke:
         sys.exit(0 if _smoke() else 1)
@@ -335,7 +352,8 @@ def main():
                       out=a.adapter)
         return
     if a.eval:
-        eval_adapter(a.model, a.graph, a.adapter, n_tasks=a.n_tasks, samples=a.samples, hard=a.hard)
+        eval_adapter(a.model, a.graph, a.adapter, n_tasks=a.n_tasks, samples=a.samples, hard=a.hard,
+                     max_new_tokens=a.max_new_tokens)
         return
     ap.print_help()
 

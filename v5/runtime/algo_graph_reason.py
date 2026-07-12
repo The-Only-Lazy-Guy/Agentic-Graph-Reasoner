@@ -125,7 +125,7 @@ def reason_grow(task, graph_path: str, out_path: str, retriever: MGRetriever, ge
 # LM approaches got reuse ~8% because compose was a rare spontaneous decision; here it's a SEARCH.
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _build_lm(model_name: str, max_new_tokens: int = 400, temperature: float = 0.8):
+def _build_lm(model_name: str, max_new_tokens: int = 256, temperature: float = 0.8):
     """(gen_fn, embed_fn) from a frozen LM — gen_fn: list[str] prompts -> list[str] gens (best-of-N by
     sampling). The glue-realizer's only job is to call named atoms, so a frozen model suffices."""
     import os
@@ -230,6 +230,7 @@ def harvest(model_name: str, graph_path: str, out: str = "artifacts/reason_harve
     (the real data gate — 7 static tasks can't train a GNN+adapter; hundreds of instances can).
     hard=True: inline-FAILING DP families + the bigger easy+hard seeded graph."""
     import json
+    import time
     from v5.runtime.algo_compose_tasks import gen_compose_tasks, seed_atom_graph
     if not Path(graph_path).exists():
         seed_atom_graph(graph_path, concept, hard=hard)
@@ -237,6 +238,7 @@ def harvest(model_name: str, graph_path: str, out: str = "artifacts/reason_harve
     retr = MGRetriever(MemoryGraph.load_json(graph_path), embed)
     tasks = gen_compose_tasks(n_tasks, seed, hard=hard)
     rows, n_ver, n_comp = [], 0, 0
+    t_start = time.perf_counter()
     for ti, task in enumerate(tasks):
         q = make_query(task, embed)
         ranked = retr.retrieve_vec(q.vec, k=k, min_cos=min_cos)
@@ -262,8 +264,10 @@ def harvest(model_name: str, graph_path: str, out: str = "artifacts/reason_harve
             uniq.append(r)
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     Path(out).write_text("\n".join(json.dumps(r) for r in uniq), encoding="utf-8")
+    dt = time.perf_counter() - t_start
     print(f"\nharvest: {len(tasks)} tasks x{samples} = {len(tasks)*samples} samples -> {n_ver} verified "
           f"({n_comp} composed) -> {len(uniq)} unique composed rows -> {out}", flush=True)
+    print(f"  wall {dt:.0f}s ({dt/60:.1f} min, {len(tasks)*samples/max(dt,1):.1f} samples/s)", flush=True)
     return uniq
 
 
