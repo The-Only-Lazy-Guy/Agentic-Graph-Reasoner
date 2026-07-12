@@ -222,10 +222,12 @@ def eval_adapter(model_name: str, graph_path: str, adapter_path: str, n_tasks: i
           f"  arm            solve            compose          {focus[:16]}", flush=True)
     agg = {"literal-only": [0, 0, 0, 0], "+adapter": [0, 0, 0, 0]}   # solve, compose, deep_comp, deep_tot
     wall = {"literal-only": 0.0, "+adapter": 0.0}
+    dlines, flips = [], []
     t_start = time.perf_counter()
     for ti, task in enumerate(tasks):
         q = make_query(task, embed)
         deep = task.name == focus
+        rec = {}
         for arm, hooked in (("literal-only", False), ("+adapter", True)):
             if hooked:
                 inj.prepare_session(graph, node_ids, text_embeddings,
@@ -233,13 +235,25 @@ def eval_adapter(model_name: str, graph_path: str, adapter_path: str, n_tasks: i
                                     r_plan=r_plan, r_evidence=r_evidence)
             torch.manual_seed(2000 + ti)             # matched draws: only the adapter differs
             t0 = time.perf_counter()
-            _c, used, ver, _tr = search_compose(task, retr, (lambda pr, h=hooked: _gen(pr, h)), q,
-                                                k=k, samples=samples, min_cos=min_cos)
+            code, used, ver, _tr = search_compose(task, retr, (lambda pr, h=hooked: _gen(pr, h)), q,
+                                                   k=k, samples=samples, min_cos=min_cos)
             wall[arm] += time.perf_counter() - t0
             a = agg[arm]
             a[0] += int(ver); a[1] += int(bool(used)); a[2] += int(deep and bool(used)); a[3] += int(deep)
+            rec[arm] = (code, bool(used), ver, len(code))
+        # dump: what did each arm actually write? (why literal fails vs adapter solves)
+        dlines.append(
+            f"### {task.name}  [{ti}]\n"
+            + "".join(f"-- {arm}: solved={r[2]} composed={r[1]} chars={r[3]}\n{r[0]}\n"
+                      for arm, r in rec.items()) + "\n")
+        lit, ada = rec["literal-only"], rec["+adapter"]
+        if (not lit[2]) and ada[2]:              # FLIP: literal FAIL -> adapter SOLVE
+            flips.append((ada[1], lit[1], ada[3], lit[3], lit[0].count(chr(10))))
     N = len(tasks)
     total = time.perf_counter() - t_start
+    dump_path = f"artifacts/reason_eval_dump{'_hard' if hard else ''}.txt"
+    Path(dump_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(dump_path).write_text("\n".join(dlines), encoding="utf-8")
     for arm in ("literal-only", "+adapter"):
         s, c, dc, dt = agg[arm]
         print(f"  {arm:14s} {s}/{N} ({s/N:.0%})      {c}/{N} ({c/N:.0%})      {dc}/{dt}"
@@ -251,6 +265,20 @@ def eval_adapter(model_name: str, graph_path: str, adapter_path: str, n_tasks: i
     verdict = "strategy channel HELPS" if dl > 0.02 or ds > 0.02 else \
               "no lift beyond literal (z-wall / needs train_gnn or more data)"
     print(f"\n  adapter delta: compose {dl:+.0%}, solve {ds:+.0%}  ->  {verdict}", flush=True)
+    # MECHANISM: on the flip tasks (literal FAIL -> adapter SOLVE), did the adapter win by COMPOSING
+    # (short atom call = amortization) and was literal near the token ceiling (truncated)?
+    if flips:
+        nf = len(flips)
+        ada_comp = sum(1 for f in flips if f[0])
+        lit_comp = sum(1 for f in flips if f[1])
+        ada_chars = sum(f[2] for f in flips) / nf
+        lit_chars = sum(f[3] for f in flips) / nf
+        print(f"  MECHANISM ({nf} flips literal-FAIL->adapter-SOLVE): adapter COMPOSED {ada_comp}/{nf} "
+              f"(literal composed {lit_comp}/{nf}); avg chars adapter-solve={ada_chars:.0f} vs "
+              f"literal-fail={lit_chars:.0f}. If adapter-composed>>literal AND literal-fail is long "
+              f"-> AMORTIZATION (call cheap atom vs re-derive over budget); else strategy-guides-inline.",
+              flush=True)
+    print(f"  solutions dumped -> {dump_path}", flush=True)
     return agg
 
 
