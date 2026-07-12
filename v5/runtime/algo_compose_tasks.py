@@ -34,14 +34,18 @@ ATOMS: dict[str, tuple[str, str]] = {
     "build_adj": ("adjacency dict {node: [(neighbor, weight)]} from n and an edge list of (u, v, w)",
                   "def build_adj(n, edges):\n    adj = {i: [] for i in range(n)}\n"
                   "    for u, v, w in edges:\n        adj[u].append((v, w))\n    return adj"),
-    "dijkstra": ("shortest weighted distance from s to every node (list; -1 if unreachable)",
+    # NOTE: returns a DICT {reachable_node: dist} — NO -1 sentinel. A sentinel is a composition trap
+    # (the 3B composed dijkstra ~55% of samples but every glue failed on summing/counting the -1). A
+    # dict makes glue clean: sum(d.values()) / len(d). Atom contracts must be glue-friendly.
+    "dijkstra": ("shortest weighted distances from s as a dict {node: dist} over REACHABLE nodes only "
+                 "(unreachable nodes are absent; source maps to 0)",
                  "def dijkstra(n, edges, s):\n    import heapq\n    adj = {i: [] for i in range(n)}\n"
-                 "    for u, v, w in edges:\n        adj[u].append((v, w))\n    INF = float('inf')\n"
-                 "    dist = [INF] * n\n    dist[s] = 0\n    h = [(0, s)]\n    while h:\n"
-                 "        d, u = heapq.heappop(h)\n        if d > dist[u]:\n            continue\n"
-                 "        for v, w in adj[u]:\n            if d + w < dist[v]:\n"
-                 "                dist[v] = d + w\n                heapq.heappush(h, (d + w, v))\n"
-                 "    return [x if x < INF else -1 for x in dist]"),
+                 "    for u, v, w in edges:\n        adj[u].append((v, w))\n    dist = {s: 0}\n"
+                 "    h = [(0, s)]\n    while h:\n        d, u = heapq.heappop(h)\n"
+                 "        if d > dist.get(u, float('inf')):\n            continue\n"
+                 "        for v, w in adj[u]:\n            nd = d + w\n"
+                 "            if nd < dist.get(v, float('inf')):\n                dist[v] = nd\n"
+                 "                heapq.heappush(h, (nd, v))\n    return dist"),
 }
 
 _G = [(0, 1, 2), (0, 2, 5), (1, 2, 1), (2, 3, 3)]        # dijkstra(4,_G,0) = [0, 2, 3, 6]
@@ -74,8 +78,8 @@ COMPOSE = [
 _REF = {
     "sum_digitsum_primes": "def sum_digitsum_primes(lst):\n    return sum(digit_sum(x) for x in lst if is_prime(x))",
     "max_prime_digitsum": "def max_prime_digitsum(lst):\n    ds = [digit_sum(x) for x in lst if is_prime(x)]\n    return max(ds) if ds else 0",
-    "sum_reachable_costs": "def sum_reachable_costs(n, edges, s):\n    return sum(d for d in dijkstra(n, edges, s) if d >= 0)",
-    "count_reachable": "def count_reachable(n, edges, s):\n    return sum(1 for d in dijkstra(n, edges, s) if d >= 0)",
+    "sum_reachable_costs": "def sum_reachable_costs(n, edges, s):\n    return sum(dijkstra(n, edges, s).values())",
+    "count_reachable": "def count_reachable(n, edges, s):\n    return len(dijkstra(n, edges, s))",
 }
 
 # which atoms each compose task needs (for the selftest + as a soft prior)
@@ -109,7 +113,8 @@ def _selftest() -> bool:
         tests = {"is_prime": ["assert is_prime(7) and not is_prime(8) and is_prime(23)"],
                  "digit_sum": ["assert digit_sum(23) == 5 and digit_sum(0) == 0"],
                  "build_adj": ["assert build_adj(2, [(0,1,3)]) == {0: [(1,3)], 1: []}"],
-                 "dijkstra": ["assert dijkstra(4, [(0,1,2),(0,2,5),(1,2,1),(2,3,3)], 0) == [0,2,3,6]"]}[name]
+                 "dijkstra": ["assert dijkstra(4, [(0,1,2),(0,2,5),(1,2,1),(2,3,3)], 0) == {0:0,1:2,2:3,3:6}",
+                              "assert dijkstra(3, [(0,1,4)], 0) == {0:0, 1:4}"]}[name]
         assert verify_asserts(code, tests), f"atom {name} failed"
     print(f"  [1] all {len(ATOMS)} atoms verify -> PASS")
 
