@@ -22,6 +22,8 @@ from pathlib import Path
 
 from graph_core import MemoryGraph
 
+_RANK_BY_FAMILY: dict = {}          # family -> (solved, total) from the last rank_atoms full pass
+
 
 def ablate(graph_path: str, atom_id: str, out_path: str):
     """Write a copy of the graph with `atom_id` (and every edge touching it) removed."""
@@ -81,18 +83,24 @@ def rank_atoms(graph_path: str, tasks, gen_fn, embed_fn, budget_tokens: int, sam
     atom only on its handful of users. ~1 full pass instead of |atoms|+1. delta~0 = dead weight.
     require_general (couples to GRR-1): a task counts solved only if FUZZ-GENERAL, so buggy-inline that
     passes the 2 asserts (count_makeable truthy bug) can't mask the real atom's worth."""
+    from collections import defaultdict
     from v5.runtime.algo_graph_mg import MGRetriever
     from v5.runtime.algo_graph_reason import Budget, solve_iterative
     kw = dict(samples=samples, k=k, min_cos=min_cos, max_rounds=max_rounds)
 
     retr = MGRetriever(MemoryGraph.load_json(graph_path), embed_fn)
     solved = []                                              # (task, used_atom_names) for SOLVED tasks
+    fam = defaultdict(lambda: [0, 0])                        # family -> [solved, total] (disambiguates delta=0)
     for t in tasks:
+        fam[t.name][1] += 1
         r = solve_iterative(t, retr, gen_fn, embed_fn, budget=Budget(budget_tokens), **kw)
         if _solved_general(t, r, require_general):
             solved.append((t, set(r["used"] or [])))
+            fam[t.name][0] += 1
     n = len(tasks)
     full_solved = len(solved)
+    _RANK_BY_FAMILY.clear()
+    _RANK_BY_FAMILY.update({f: tuple(v) for f, v in fam.items()})   # so the CLI can show WHY delta=0
 
     g = MemoryGraph.load_json(graph_path)
     atoms = [nid for nid, node in g.nodes.items() if node.node_type == "implementation"]
@@ -101,7 +109,7 @@ def rank_atoms(graph_path: str, tasks, gen_fn, embed_fn, budget_tokens: int, sam
         aname = aid[len("impl_"):] if aid.startswith("impl_") else aid
         at_risk = [t for t, used in solved if aname in used]     # solved tasks that USED this atom
         if not at_risk:                                          # never used -> ablating it is free -> delta 0
-            out.append(dict(atom=aid, delta=0.0, without=round(full_solved / n, 3)))
+            out.append(dict(atom=aid, delta=0.0, without=round(full_solved / n, 3), users=0))
             continue
         with tempfile.TemporaryDirectory() as td:
             abl = str(Path(td) / "a.json"); ablate(graph_path, aid, abl)
@@ -191,9 +199,15 @@ def main():
         tasks = gen_compose_tasks(a.n_tasks, seed=99, hard=a.hard)
         print(f"rank_atoms: {a.graph} | budget={a.budget} | {len(tasks)} held-out tasks | "
               f"general={a.general}", flush=True)
-        for r in rank_atoms(a.graph, tasks, gen_fn, embed, budget_tokens=a.budget,
-                            require_general=a.general):
-            print(f"  {r['atom']:24s} delta-capability={r['delta']:+.2f}  (without={r['without']:.0%})", flush=True)
+        ranking = rank_atoms(a.graph, tasks, gen_fn, embed, budget_tokens=a.budget,
+                             require_general=a.general)
+        for r in ranking:
+            print(f"  {r['atom']:24s} delta-capability={r['delta']:+.2f}  (without={r['without']:.0%}, "
+                  f"{r.get('users', 0)} users)", flush=True)
+        print("  per-family solve (delta=0 + 0 solved = family never solves; delta=0 + solved = inlined):",
+              flush=True)
+        for f, (s, t) in sorted(_RANK_BY_FAMILY.items()):
+            print(f"    {f:24s} {s}/{t} solved", flush=True)
         return
     ap.print_help()
 
