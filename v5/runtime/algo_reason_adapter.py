@@ -122,7 +122,11 @@ def train_adapter(model_name: str, harvest_path: str, graph_path: str, epochs: i
 
     def encode(prompt):
         m = [{"role": "user", "content": prompt}]
-        return tok.apply_chat_template(m, add_generation_prompt=True, return_tensors="pt").to(dev)
+        kw = dict(add_generation_prompt=True, return_tensors="pt", return_dict=True)
+        try:
+            return tok.apply_chat_template(m, enable_thinking=False, **kw)["input_ids"].to(dev)
+        except TypeError:
+            return tok.apply_chat_template(m, **kw)["input_ids"].to(dev)
 
     for ep in range(1, epochs + 1):
         losses = []
