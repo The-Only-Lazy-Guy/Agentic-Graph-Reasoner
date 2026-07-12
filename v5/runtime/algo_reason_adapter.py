@@ -331,7 +331,8 @@ def main():
     if a.smoke:
         sys.exit(0 if _smoke() else 1)
     if a.train:
-        train_adapter(a.model, a.harvest, a.graph, epochs=a.epochs, lr=a.lr, train_gnn=a.train_gnn)
+        train_adapter(a.model, a.harvest, a.graph, epochs=a.epochs, lr=a.lr, train_gnn=a.train_gnn,
+                      out=a.adapter)
         return
     if a.eval:
         eval_adapter(a.model, a.graph, a.adapter, n_tasks=a.n_tasks, samples=a.samples, hard=a.hard)
