@@ -200,16 +200,18 @@ def eval_adapter(model_name: str, graph_path: str, adapter_path: str, n_tasks: i
 
     @torch.no_grad()
     def _gen(prompts, hooked):
-        out, uniq = [], list(dict.fromkeys(prompts))
-        for p in uniq:
-            n = prompts.count(p)
+        # ONE sequence per generate (batch=1): the adapter's goal is [1, GOAL_DIM] and does not
+        # broadcast across num_return_sequences. Re-enter inject() per generate so each is grounded
+        # (run-once resets on enter). Same per-sample RNG use in both arms -> matched A/B.
+        out = []
+        for p in prompts:
             pids = encode(p)
             ctx = inj.inject(model) if hooked else contextlib.nullcontext()
             with ctx:
                 seqs = model.generate(pids, do_sample=True, temperature=0.8, top_p=0.95,
-                                      num_return_sequences=n, max_new_tokens=400,
+                                      num_return_sequences=1, max_new_tokens=400,
                                       pad_token_id=tok.eos_token_id)
-            out += [tok.decode(seqs[j, pids.shape[1]:], skip_special_tokens=True) for j in range(n)]
+            out.append(tok.decode(seqs[0, pids.shape[1]:], skip_special_tokens=True))
         return out
 
     tasks = gen_compose_tasks(n_tasks, seed)
