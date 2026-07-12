@@ -109,6 +109,70 @@ def writeback_atoms(tm: TotalMemory, code: str, task) -> tuple[list, list]:
     return written, skipped
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# TASK FAMILIES — task-agnostic verify. A task has .name/.text and verifies a solution by execution.
+#   curriculum (algo_curriculum) : verify_fn over generated (args, expected) cases
+#   MBPP+ (open-source, HARDER)  : run the problem's assert tests  (inline-unsolvable -> compose)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def verify_asserts(code: str, tests: list[str], setup: str = "", timeout: float = 10.0) -> bool:
+    """Run `code` + the problem's `assert` tests in an isolated subprocess. True iff ALL pass
+    (a sentinel print only reached if no assertion/exception fired)."""
+    import subprocess
+    import tempfile
+    from pathlib import Path
+    if not code or "def " not in code:
+        return False
+    harness = "\n".join([setup, code, *tests, "print('__ALLPASS__')"])
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "t.py"; p.write_text(harness, encoding="utf-8")
+        try:
+            r = subprocess.run([sys.executable, "-I", str(p)], cwd=td, capture_output=True,
+                               text=True, encoding="utf-8", errors="replace", timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return False
+    return "__ALLPASS__" in (r.stdout or "")
+
+
+class MBPPTask:
+    """One MBPP/MBPP+ problem: prompt + entry-point name + assert tests."""
+    def __init__(self, name: str, text: str, tests: list[str], setup: str = ""):
+        self.name, self.text, self.tests, self.setup = name, text, tests, setup
+
+    def verify(self, code: str, deps_code: str = "") -> bool:
+        return verify_asserts((deps_code + "\n" + code) if deps_code else code, self.tests, self.setup)
+
+
+def load_mbpp(limit: int = 0, sanitized: bool = True, split: str = "test"):
+    """Load MBPP from HF datasets (molab has network; the local selftest uses a hardcoded MBPPTask).
+    Defensive about field names across the sanitized/full configs."""
+    from datasets import load_dataset
+    ds = load_dataset("mbpp", "sanitized" if sanitized else "full", split=split)
+    tasks = []
+    for r in ds:
+        text = r.get("prompt") or r.get("text") or ""
+        tests = r.get("test_list") or []
+        setup = "\n".join(r.get("test_imports") or []) or (r.get("test_setup_code") or "")
+        name = r.get("entry_point") or ""
+        if not name:                                    # derive entry point from the first assert
+            m = re.search(r"assert\s+([A-Za-z_]\w*)\s*\(", " ".join(tests))
+            name = m.group(1) if m else ""
+        if name and tests and text:
+            tasks.append(MBPPTask(name, f"{text}\nWrite `{name}(...)` (only the function).", tests, setup))
+        if limit and len(tasks) >= limit:
+            break
+    return tasks
+
+
+def _task_verify(task, code: str, deps_code: str = "") -> bool:
+    """Task-agnostic verification. MBPPTask carries its own asserts; a curriculum Task verifies via
+    generated cases (fixed eval seeds)."""
+    if hasattr(task, "verify"):
+        return task.verify(code, deps_code)
+    from v5.runtime.algo_curriculum import cases
+    return bool(code) and verify_fn(code, task.name, cases(task, range(700, 712)), deps_code)[0] >= 0.999
+
+
 def _author_prompt(task, advertised: list[tuple[str, str]]) -> str:
     """Light supervision: OFFER the model options (call a stored node / define a reusable helper /
     note a strategy) — never force one. `advertised` = [(name, code)] retrieved from memory."""
@@ -124,51 +188,56 @@ def _author_prompt(task, advertised: list[tuple[str, str]]) -> str:
     return "\n\n".join(parts)
 
 
-def solve_with_memory(tm: TotalMemory, gen_fn, task, vseeds, eseeds, k: int = 6, samples: int = 1,
-                      writeback: bool = True):
-    """One task: retrieve nodes from memory -> author -> verify by execution -> reward -> write back
-    verified nodes (representation-open, form=code). Returns a per-task dict."""
-    from v5.runtime.algo_curriculum import cases           # task family (moves here at retirement)
-    vcases, ecases = cases(task, vseeds), cases(task, eseeds)
-
+def _retrieve_atoms(tm: TotalMemory, task, k: int):
     hit = tm.read(goal=task.text, span=task.text, k_impl=k)
     advertised = [(r.get("task_id") or "", r["new"]) for r in hit.impls
                   if r.get("form") == "code" and r.get("task_id") and r.get("new")]
-    adv_names = [n for n, _ in advertised]
+    return advertised, [n for n, _ in advertised]
 
-    best = (0.0, "", [])
+
+def _called_and_deps(code: str, advertised, adv_names):
+    defined = _def_names(code)
+    called = [n for n in adv_names if n not in defined and re.search(rf"\b{re.escape(n)}\s*\(", code)]
+    return called, "\n\n".join(c for n, c in advertised if n in called)
+
+
+def solve_with_memory(tm: TotalMemory, gen_fn, task, k: int = 6, samples: int = 1,
+                      writeback: bool = True):
+    """One task: retrieve atoms -> author -> verify by execution (task-agnostic) -> reward -> write
+    back atoms (store-gated). Works for the curriculum AND MBPP (task.verify)."""
+    advertised, adv_names = _retrieve_atoms(tm, task, k)
+    best = ("", [], False)                                   # code, called, verified
     for gen in gen_fn([_author_prompt(task, advertised)] * samples):
         code = _extract_code(gen)
-        defined = _def_names(code)
-        called = [n for n in adv_names if n not in defined and re.search(rf"\b{re.escape(n)}\s*\(", code)]
-        deps = "\n\n".join(c for n, c in advertised if n in called)
-        acc, _, _ = verify_fn(code, task.name, vcases, deps)
-        if acc > best[0]:
-            best = (acc, code, called)
-    _, code, called = best
-    deps = "\n\n".join(c for n, c in advertised if n in called)
-    verified = bool(code) and verify_fn(code, task.name, ecases, deps)[0] >= 0.999
-
-    composed, used = grounded_code(code, adv_names)          # composition (call a stored node, no shadow)
+        called, deps = _called_and_deps(code, advertised, adv_names)
+        if _task_verify(task, code, deps):
+            best = (code, called, True); break               # first verified wins (all-or-nothing)
+        if not best[0]:
+            best = (code, called, False)
+    code, called, verified = best
+    _, used = grounded_code(code, adv_names)
     new_helpers = [n for n in _top_defs(code) if n != task.name and n not in adv_names]
     R, bd = code_reward(verified, composed_used=used,
                         authored_new_verified=len(new_helpers) if verified else 0)
-
-    written, skipped = ([], [])
-    if verified and writeback:
-        written, skipped = writeback_atoms(tm, code, task)  # gate: only standalone deduped atoms
+    written, skipped = writeback_atoms(tm, code, task) if (verified and writeback) else ([], [])
     return dict(name=task.name, verified=verified, reward=round(R, 3), reused=used,
                 authored=new_helpers, written=written, skipped=skipped, breakdown=bd)
 
 
-def run_stream(tm: TotalMemory, gen_fn, stream=None, verify_n=6, eval_n=10, k=6, samples=1):
+def run_stream(tm: TotalMemory, gen_fn, tasks=None, k=6, samples=1):
+    if tasks is None:
+        from v5.runtime.algo_curriculum import STREAM
+        tasks = STREAM
+    return [solve_with_memory(tm, gen_fn, t, k=k, samples=samples) for t in tasks]
+
+
+def load_tasks(kind: str = "curriculum", limit: int = 0):
+    """Select the task family. curriculum = synthetic graph-algo (inline-solvable — a control);
+    mbpp = open-source Python problems (HARDER, inline-unsolvable -> composition necessary)."""
+    if kind == "mbpp":
+        return load_mbpp(limit=limit or 200)
     from v5.runtime.algo_curriculum import STREAM
-    stream = stream or STREAM
-    vseeds, eseeds = range(300, 300 + verify_n), range(700, 700 + eval_n)
-    log = []
-    for task in stream:
-        log.append(solve_with_memory(tm, gen_fn, task, vseeds, eseeds, k=k, samples=samples))
-    return log
+    return list(STREAM)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -200,7 +269,6 @@ def _selftest() -> bool:
     from v5.runtime.algo_curriculum import BY_NAME, _BUILD_ADJ
     print("algo_graph_run --selftest: retrieve(TotalMemory) -> author -> verify -> reward -> "
           "write-back, on the real stack (no model)\n")
-    vs, es = range(300, 306), range(700, 710)
 
     with tempfile.TemporaryDirectory() as td:
         tm = TotalMemory(td, mode="flat", embed_fn=make_fake_embedder())
@@ -215,7 +283,7 @@ def _selftest() -> bool:
 
         # solve neighbors_of: must RETRIEVE build_adj, COMPOSE it, verify, reward>bare. The solution
         # (a composite calling build_adj) is a task-answer, NOT a reusable atom -> store-gate SKIPS it.
-        res = solve_with_memory(tm, _stub_gen, ntask, vs, es)
+        res = solve_with_memory(tm, _stub_gen, ntask)
         assert res["verified"], f"should solve: {res}"
         assert res["reused"] == ["build_adj"], f"should compose the retrieved build_adj: {res}"
         assert res["reward"] > 1.0, f"compose reward should beat bare solve: {res}"
@@ -230,7 +298,7 @@ def _selftest() -> bool:
 
         # inline baseline scores LESS than compose (GRPO would demote it)
         tm_empty = TotalMemory(td + "_e", mode="flat", embed_fn=make_fake_embedder())
-        res_inline = solve_with_memory(tm_empty, _stub_gen, ntask, vs, es, writeback=False)
+        res_inline = solve_with_memory(tm_empty, _stub_gen, ntask, writeback=False)
         assert res_inline["verified"] and res_inline["reused"] == [], res_inline
         assert res_inline["reward"] < res["reward"], \
             f"inline ({res_inline['reward']}) must score below compose ({res['reward']})"
@@ -248,6 +316,20 @@ def _selftest() -> bool:
         assert w2 == [] and "build_adj" in sk2, f"behavioral dedup on re-store: {w2} {sk2}"
         print("  [5] store-gate: stores standalone atom, skips composite, dedups re-store -> PASS")
 
+        # MBPP task path (open-source harder family): assert-based verify + task.verify + solve loop,
+        # no network (hardcoded problem). Proves the loop is task-family-agnostic.
+        mtask = MBPPTask("add_one", "Write `add_one(x)` returning x+1.",
+                         ["assert add_one(3) == 4", "assert add_one(-1) == 0"])
+        assert mtask.verify("def add_one(x):\n    return x + 1"), "correct solution passes asserts"
+        assert not mtask.verify("def add_one(x):\n    return x + 2"), "wrong solution fails asserts"
+
+        def _mstub(prompts):
+            return ["```python\ndef add_one(x):\n    return x + 1\n```"] * len(prompts)
+        tm_m = TotalMemory(td + "_m", mode="flat", embed_fn=make_fake_embedder())
+        res_m = solve_with_memory(tm_m, _mstub, mtask)
+        assert res_m["verified"], f"MBPP task solved via the same loop: {res_m}"
+        print("  [6] MBPP path: verify_asserts + task.verify + task-agnostic solve loop -> PASS")
+
     print("\n  ALGO_GRAPH_RUN SELFTEST -> PASS")
     return True
 
@@ -258,7 +340,7 @@ def _selftest() -> bool:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every, ent_coef, temperature,
-          chunk, root):
+          chunk, root, tasks=None):
     import os
     import random
     import torch
@@ -267,8 +349,10 @@ def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every, ent_coef, 
     from peft import LoraConfig, get_peft_model
     from v5.lm_loader import load_frozen_lm
     from v5.memory.store import make_mpnet_embedder
-    from v5.runtime.algo_curriculum import STREAM, cases
     from v5.runtime.derive_rl import advantages
+    if tasks is None:
+        from v5.runtime.algo_curriculum import STREAM
+        tasks = list(STREAM)
 
     trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
     tm = TotalMemory(root, mode="concept", embed_fn=make_mpnet_embedder())
@@ -287,16 +371,16 @@ def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every, ent_coef, 
           f"graph root={root}", flush=True)
 
     rng = random.Random(seed)
-    stages = sorted({t.stage for t in STREAM})
-    vseeds, eseeds = range(300, 306), range(700, 710)
-    held = list(STREAM)
+    stages = sorted({t.stage for t in tasks if hasattr(t, "stage")})   # curriculum has stages; MBPP doesn't
+    held = list(tasks)[:24]
 
     def sample_task(step):
-        # curriculum ramp (derive_rl's p_hard idea): unlock harder stages as training progresses, so
-        # early steps build/reuse atoms before the composite/capstone tasks demand them.
+        if not stages:                                   # MBPP etc.: uniform sample (no stage ramp)
+            return rng.choice(tasks)
+        # curriculum ramp (derive_rl's p_hard idea): unlock harder stages as training progresses.
         frac = min(1.0, step / max(1, 0.6 * steps))
         max_stage = min(max(stages), int(frac * (max(stages) + 1)))
-        return rng.choice([t for t in STREAM if t.stage <= max_stage])
+        return rng.choice([t for t in tasks if getattr(t, "stage", 0) <= max_stage])
 
     def encode(prompt):
         m = [{"role": "user", "content": prompt}]
@@ -317,11 +401,9 @@ def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every, ent_coef, 
         ent = -(span.exp() * span).sum(-1).mean()
         return sel, ent
 
-    def score(task, code, advertised, adv_names, vcases, ecases):
-        defined = _def_names(code)
-        called = [n for n in adv_names if n not in defined and re.search(rf"\b{re.escape(n)}\s*\(", code)]
-        deps = "\n\n".join(c for n, c in advertised if n in called)
-        verified = bool(code) and verify_fn(code, task.name, ecases, deps)[0] >= 0.999
+    def score(task, code, advertised, adv_names):
+        called, deps = _called_and_deps(code, advertised, adv_names)
+        verified = _task_verify(task, code, deps)
         _, used = grounded_code(code, adv_names)
         new_h = [n for n in _top_defs(code) if n != task.name and n not in adv_names]
         r, _ = code_reward(verified, composed_used=used, authored_new_verified=len(new_h) if verified else 0)
@@ -338,7 +420,7 @@ def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every, ent_coef, 
             pids = encode(_author_prompt(task, adv))
             out = model.generate(pids, do_sample=False, max_new_tokens=420, pad_token_id=tok.eos_token_id)
             code = _extract_code(tok.decode(out[0, pids.shape[1]:], skip_special_tokens=True))
-            r, ok, used = score(task, code, adv, [n for n, _ in adv], None, cases(task, eseeds))
+            r, ok, used = score(task, code, adv, [n for n, _ in adv])
             solved += ok; reused += bool(used)
         model.train()
         return solved / len(held), reused / len(held)
@@ -356,12 +438,11 @@ def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every, ent_coef, 
             outs = model.generate(pids, do_sample=True, temperature=temperature, top_p=0.95,
                                   max_new_tokens=420, num_return_sequences=K, pad_token_id=tok.eos_token_id)
         comp_all = outs[:, pids.shape[1]:]
-        ecases = cases(task, eseeds)
         comps, rewards, best = [], [], None
         for k in range(K):
             comp = comp_all[k:k + 1]
             code = _extract_code(tok.decode(comp[0], skip_special_tokens=True))
-            r, ok, used = score(task, code, advertised, adv_names, None, ecases)
+            r, ok, used = score(task, code, advertised, adv_names)
             comps.append(comp); rewards.append(r)
             if ok and best is None:
                 best = code
@@ -428,16 +509,21 @@ def main():
     ap.add_argument("--eval-every", type=int, default=50)
     ap.add_argument("--ent-coef", type=float, default=0.005)
     ap.add_argument("--temperature", type=float, default=1.0)
+    ap.add_argument("--tasks", default="curriculum", choices=["curriculum", "mbpp"],
+                    help="curriculum (synthetic graph algos, inline-solvable control) or mbpp (harder)")
+    ap.add_argument("--task-limit", type=int, default=0, help="cap number of tasks (0 = default)")
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
+    tasks = load_tasks(a.tasks, a.task_limit)
+    print(f"tasks: {a.tasks} ({len(tasks)} loaded)", file=sys.stderr)
     if a.train:
         train(a.model, a.steps, a.k, a.lr, a.r_lora, a.seed, a.layers, a.eval_every,
-              a.ent_coef, a.temperature, a.chunk, a.root)
+              a.ent_coef, a.temperature, a.chunk, a.root, tasks=tasks)
         return
     from v5.memory.store import make_mpnet_embedder
     tm = TotalMemory(a.root, mode="concept", embed_fn=make_mpnet_embedder())
-    log = run_stream(tm, _real_gen_fn(a.model, a.chunk), samples=a.samples)
+    log = run_stream(tm, _real_gen_fn(a.model, a.chunk), tasks=tasks, samples=a.samples)
     solved = sum(1 for r in log if r["verified"])
     reusers = sum(1 for r in log if r["reused"])
     print(f"\n=== UNIFIED RUN === solved {solved}/{len(log)} | reusers {reusers} | "
