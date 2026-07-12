@@ -91,6 +91,29 @@ class MGRetriever:
         vec = list(self.embed_fn({"q": query}).values())[0]
         return self.retrieve_vec(vec, k=k, min_cos=min_cos)
 
+    def resolve_deps(self, called_names) -> str:
+        """Graph WALK for transitive dependencies: gather the code of the called atoms PLUS any impl
+        atom they reference (transitively) — so an abstracted leaf (edit_distance -> str_dp2) pulls its
+        skeleton. Reference-closure over the whole graph's impl nodes (not just the top-k retrieved).
+        Without this every ABSTRACT breaks at compose time."""
+        code_by_fn = {}
+        for nid in self.ids:
+            c = self.graph.nodes[nid].metadata.get("code", "")
+            fn = _fn_name(c)
+            if fn:
+                code_by_fn[fn] = c
+        needed, frontier = set(), [n for n in called_names if n in code_by_fn]
+        while frontier:
+            fn = frontier.pop()
+            if fn in needed:
+                continue
+            needed.add(fn)
+            body = code_by_fn[fn]
+            for other, oc in code_by_fn.items():           # any other impl fn this one calls
+                if other != fn and other not in needed and re.search(rf"\b{re.escape(other)}\s*\(", body):
+                    frontier.append(other)
+        return "\n\n".join(code_by_fn[fn] for fn in needed)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SOLVE + GROW — retrieve -> author -> verify -> reward -> model edits -> health-gated grow

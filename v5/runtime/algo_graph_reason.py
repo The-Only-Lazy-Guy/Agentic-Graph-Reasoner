@@ -132,7 +132,7 @@ def solve_iterative(task, retriever: MGRetriever, gen_fn, embed_fn, max_rounds: 
             called = [n for n in names if n not in _def_names(code)
                       and re.search(rf"\b{re.escape(n)}\s*\(", code)]
             deps = ((extra_deps + "\n\n") if extra_deps else "") + \
-                   "\n\n".join(c for n, c in ranked if n in called)
+                   retriever.resolve_deps(called)          # graph WALK: pull transitive deps (skeletons)
             ok, err = _task_verify_detail(task, code, deps)
             if ok:
                 history.append((rnd, True, ""))
