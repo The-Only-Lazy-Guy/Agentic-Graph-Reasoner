@@ -90,6 +90,37 @@ def _code_fingerprint(src: str, fn_name: str, timeout: float = 5.0) -> str | Non
     return hashlib.md5(sig.encode()).hexdigest()
 
 
+def _parse_store_actions(gen: str) -> list[tuple[str, str]]:
+    """The MODEL chooses what to store: lines of the form `STORE <name>: <purpose>`."""
+    return [(m.group(1), m.group(2).strip())
+            for m in re.finditer(r"^\s*STORE\s+([A-Za-z_]\w*)\s*:\s*(.+)$", gen or "", re.M)]
+
+
+def apply_model_stores(tm: TotalMemory, code: str, actions: list[tuple[str, str]]) -> tuple[list, list]:
+    """MODEL-DIRECTED node creation (honors 'the model chooses what to store'): the model asked to
+    STORE these helpers with a PURPOSE. We only VERIFY (must be a standalone reusable atom, behaviorally
+    new) — we don't decide WHAT; the model does, and its purpose becomes the retrieval ctx (far better
+    than an auto-derived key). Returns (stored, rejected[(name, why)])."""
+    defs = _top_defs(code)
+    seen = {r.get("content") for r in tm.impls.records.values()
+            if r.get("form") == "code" and r.get("content")}
+    stored, rejected = [], []
+    for name, purpose in actions:
+        src = defs.get(name)
+        if not src:
+            rejected.append((name, "not a def in the solution")); continue
+        fp = _code_fingerprint(src, name)
+        if fp is None:
+            rejected.append((name, "not a standalone verifiable atom")); continue
+        if fp in seen:
+            rejected.append((name, "behavioral duplicate")); continue
+        iid = tm.write(goal=purpose, old="", new=src, trace=purpose, verified=True,
+                       task_id=name, form="code", content=fp)      # ctx = the MODEL's purpose
+        if iid:
+            stored.append(name); seen.add(fp)
+    return stored, rejected
+
+
 def writeback_atoms(tm: TotalMemory, code: str, task) -> tuple[list, list]:
     """Store-gate: from a verified solution, store ONLY standalone reusable atoms, deduped by
     behavioral fingerprint, keyed by PURPOSE (sig) not the birth-task ctx (so cross-task retrieval
@@ -184,14 +215,20 @@ def _author_prompt(task, advertised: list[tuple[str, str]]) -> str:
                      "name, do NOT re-implement their logic):")
         for name, code in advertised:
             parts.append(f"  {_sig(code) or name}")
-    parts.append("\nYou may CALL the functions above, DEFINE a new small reusable helper for any "
-                 "sub-computation, and/or leave a short reusable strategy note — your choice.")
-    parts.append(f"Write `{task.name}(...)`. Output ONLY a Python code block.")
+    parts.append("\nYou may CALL the functions above, and DEFINE a new small reusable helper for any "
+                 "sub-computation — your choice.")
+    parts.append(f"Write `{task.name}(...)` in ONE Python code block.")
+    parts.append("Then, IF you wrote a genuinely reusable helper worth keeping for FUTURE tasks, "
+                 "curate your library — one line each, AFTER the code block:\n"
+                 "  STORE <helper_name>: <one-line purpose of what it computes>\n"
+                 "Only store genuinely reusable helpers; store nothing if none apply (your choice).")
     return "\n\n".join(parts)
 
 
-def _retrieve_atoms(tm: TotalMemory, task, k: int):
-    hit = tm.read(goal=task.text, span=task.text, k_impl=k)
+def _retrieve_atoms(tm: TotalMemory, task, k: int, min_fit: float = 0.25):
+    # lower min_fit than the SWE default (0.35): the --inspect dump showed retrieval delivered NOTHING
+    # for most tasks (atom purpose-ctx vs task text is a weaker match than an old->new SWE edit).
+    hit = tm.read(goal=task.text, span=task.text, k_impl=k, min_fit=min_fit)
     advertised = [(r.get("task_id") or "", r["new"]) for r in hit.impls
                   if r.get("form") == "code" and r.get("task_id") and r.get("new")]
     return advertised, [n for n, _ in advertised]
@@ -208,22 +245,23 @@ def solve_with_memory(tm: TotalMemory, gen_fn, task, k: int = 6, samples: int = 
     """One task: retrieve atoms -> author -> verify by execution (task-agnostic) -> reward -> write
     back atoms (store-gated). Works for the curriculum AND MBPP (task.verify)."""
     advertised, adv_names = _retrieve_atoms(tm, task, k)
-    best = ("", [], False)                                   # code, called, verified
+    best = ("", [], False, "")                               # code, called, verified, raw_gen
     for gen in gen_fn([_author_prompt(task, advertised)] * samples):
         code = _extract_code(gen)
         called, deps = _called_and_deps(code, advertised, adv_names)
         if _task_verify(task, code, deps):
-            best = (code, called, True); break               # first verified wins (all-or-nothing)
+            best = (code, called, True, gen); break          # first verified wins (all-or-nothing)
         if not best[0]:
-            best = (code, called, False)
-    code, called, verified = best
+            best = (code, called, False, gen)
+    code, called, verified, raw = best
     _, used = grounded_code(code, adv_names)
     new_helpers = [n for n in _top_defs(code) if n != task.name and n not in adv_names]
     R, bd = code_reward(verified, composed_used=used,
                         authored_new_verified=len(new_helpers) if verified else 0)
-    written, skipped = writeback_atoms(tm, code, task) if (verified and writeback) else ([], [])
+    stored, rejected = (apply_model_stores(tm, code, _parse_store_actions(raw))   # MODEL chose what to store
+                        if (verified and writeback) else ([], []))
     return dict(name=task.name, verified=verified, reward=round(R, 3), reused=used,
-                authored=new_helpers, written=written, skipped=skipped, breakdown=bd)
+                authored=new_helpers, written=stored, rejected=rejected, breakdown=bd)
 
 
 def run_stream(tm: TotalMemory, gen_fn, tasks=None, k=6, samples=1):
@@ -283,20 +321,17 @@ def _selftest() -> bool:
         assert tm.impls.get(next(iter(tm.impls.records)))["form"] == "code"
         print("  [1] seeded build_adj as a form=code node in TotalMemory -> PASS")
 
-        # solve neighbors_of: must RETRIEVE build_adj, COMPOSE it, verify, reward>bare. The solution
-        # (a composite calling build_adj) is a task-answer, NOT a reusable atom -> store-gate SKIPS it.
+        # solve neighbors_of: RETRIEVE build_adj, COMPOSE it, verify, reward>bare. The stub emits no
+        # STORE action, so the MODEL stored nothing (its choice) -> the graph does not grow.
         res = solve_with_memory(tm, _stub_gen, ntask)
-        assert res["verified"], f"should solve: {res}"
-        assert res["reused"] == ["build_adj"], f"should compose the retrieved build_adj: {res}"
-        assert res["reward"] > 1.0, f"compose reward should beat bare solve: {res}"
-        assert res["written"] == [] and res["skipped"] == ["neighbors_of"], \
-            f"store-gate skips the composite task-solution: {res}"
-        print(f"  [2] retrieve->compose build_adj->verify->reward {res['reward']:+.2f} "
-              f"(composite skipped by gate) -> PASS")
+        assert res["verified"] and res["reused"] == ["build_adj"], f"compose build_adj: {res}"
+        assert res["reward"] > 1.0, f"compose reward beats bare solve: {res}"
+        assert res["written"] == [], f"no STORE action -> model stored nothing: {res}"
+        print(f"  [2] retrieve->compose->verify->reward {res['reward']:+.2f}; model stored nothing "
+              f"(no STORE) -> PASS")
 
-        # graph did NOT grow from a pure-reuse solve (no pollution): still just the atom build_adj
-        assert tm.stats()["impls"] == 1, f"no pollution — only the atom persists: {tm.stats()}"
-        print(f"  [3] store-gate: pure-reuse solve adds NO node (no 561-flood) -> PASS")
+        assert tm.stats()["impls"] == 1, f"no auto-write — graph unchanged: {tm.stats()}"
+        print(f"  [3] MODEL-directed: no STORE action -> graph does NOT grow (no auto-extraction) -> PASS")
 
         # inline baseline scores LESS than compose (GRPO would demote it)
         tm_empty = TotalMemory(td + "_e", mode="flat", embed_fn=make_fake_embedder())
@@ -307,16 +342,21 @@ def _selftest() -> bool:
         print(f"  [4] inline-solve reward {res_inline['reward']:+.2f} < compose {res['reward']:+.2f} "
               f"(GRPO demotes inline) -> PASS")
 
-        # store-gate directly: a solution that DEFINES a new atom + a composite stores ONLY the atom,
-        # deduped — the fix for the 561-node/1-concept pollution that killed reuse.
-        tm_g = TotalMemory(td + "_g", mode="flat", embed_fn=make_fake_embedder())
-        sol = _BUILD_ADJ + "\n\ndef bfs_order(n, edges, s):\n    adj = build_adj(n, edges)\n    return sorted(adj)"
-        w, sk = writeback_atoms(tm_g, sol, BY_NAME["bfs_order"])
-        assert "build_adj" in w and "bfs_order" in sk, f"store atom, skip composite: {w} {sk}"
-        assert tm_g.stats()["impls"] == 1, "only the standalone atom stored"
-        w2, sk2 = writeback_atoms(tm_g, sol, BY_NAME["bfs_order"])
-        assert w2 == [] and "build_adj" in sk2, f"behavioral dedup on re-store: {w2} {sk2}"
-        print("  [5] store-gate: stores standalone atom, skips composite, dedups re-store -> PASS")
+        # MODEL-DIRECTED node creation: the model emits STORE actions; we only VERIFY (standalone atom,
+        # behaviorally new) and key by the MODEL's PURPOSE. Wrong name / non-atom / dup rejected.
+        tm_s = TotalMemory(td + "_s", mode="flat", embed_fn=make_fake_embedder())
+        g = ("```python\n" + _BUILD_ADJ + "\n```\n"
+             "STORE build_adj: directed adjacency list {node:[(nbr,weight)]} from edges\n"
+             "STORE nope: not defined in the solution")
+        acts = _parse_store_actions(g)
+        assert len(acts) == 2 and acts[0][0] == "build_adj", acts
+        stored, rej = apply_model_stores(tm_s, _extract_code(g), acts)
+        assert stored == ["build_adj"] and any(n == "nope" for n, _ in rej), f"{stored} {rej}"
+        rec = next(r for r in tm_s.impls.records.values() if r["task_id"] == "build_adj")
+        assert "adjacency" in rec["ctx_text"], "node keyed by the MODEL's purpose, not an auto key"
+        stored2, _ = apply_model_stores(tm_s, _extract_code(g), acts)
+        assert stored2 == [], "behavioral dedup on re-store"
+        print("  [5] MODEL-directed STORE: model chooses; verify-gated + purpose-keyed + dedup -> PASS")
 
         # MBPP task path (open-source harder family): assert-based verify + task.verify + solve loop,
         # no network (hardcoded problem). Proves the loop is task-family-agnostic.
@@ -440,16 +480,17 @@ def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every, ent_coef, 
             outs = model.generate(pids, do_sample=True, temperature=temperature, top_p=0.95,
                                   max_new_tokens=420, num_return_sequences=K, pad_token_id=tok.eos_token_id)
         comp_all = outs[:, pids.shape[1]:]
-        comps, rewards, best = [], [], None
+        comps, rewards, best_gen, best_code = [], [], None, None
         for k in range(K):
             comp = comp_all[k:k + 1]
-            code = _extract_code(tok.decode(comp[0], skip_special_tokens=True))
+            gen = tok.decode(comp[0], skip_special_tokens=True)
+            code = _extract_code(gen)
             r, ok, used = score(task, code, advertised, adv_names)
             comps.append(comp); rewards.append(r)
-            if ok and best is None:
-                best = code
-        if best:                                            # write-back grows the graph (gated: atoms only)
-            writeback_atoms(tm, best, task)
+            if ok and best_gen is None:
+                best_gen, best_code = gen, code
+        if best_gen:                                        # MODEL-directed write-back (its STORE actions)
+            apply_model_stores(tm, best_code, _parse_store_actions(best_gen))
         mean_r = sum(rewards) / K
         r_std = (sum((r - mean_r) ** 2 for r in rewards) / K) ** 0.5
         if r_std < 1e-9:
@@ -534,6 +575,118 @@ def inspect_graph(tm: TotalMemory, sample_tasks, k: int = 6):
             print("    (nothing cleared MIN_FIT — retrieval delivered NOTHING)")
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# STaR / rejection-SFT — the denser supervision. GRPO only AMPLIFIES existing behavior (needs reward
+# variance); composing is rare, so it barely moves. STaR INJECTS it: sample -> KEEP the composed+
+# verified ones (bias the kept set toward composition) -> SFT on them -> the graph grows from the
+# model's own STORE actions on those wins -> repeat. Sidesteps GRPO's amplify-only limitation.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def train_star(model_name, rounds, tasks, k=8, batch=16, epochs=1, lr=1e-4, r_lora=8,
+               layers=(20, 22, 24, 26, 28), seed=0, chunk=8, temperature=1.0,
+               root="data/algo_graph_star"):
+    import os
+    import random
+    import torch
+    import torch.nn as nn
+    from transformers import AutoTokenizer
+    from peft import LoraConfig, get_peft_model
+    from v5.lm_loader import load_frozen_lm
+    from v5.memory.store import make_mpnet_embedder
+
+    trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
+    tm = TotalMemory(root, mode="concept", embed_fn=make_mpnet_embedder())
+    base = load_frozen_lm(model_name)
+    tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=trust)
+    dev = next(base.parameters()).device
+    leaf = sorted({n.split(".")[-1] for n, m in base.named_modules()
+                   if isinstance(m, nn.Linear) and ".layers." in n
+                   and not any(x in n.lower() for x in ("lm_head", "embed"))})
+    cfg = LoraConfig(r=r_lora, lora_alpha=2 * r_lora, lora_dropout=0.0, task_type="CAUSAL_LM",
+                     target_modules=leaf, layers_to_transform=list(layers))
+    model = get_peft_model(base, cfg); model.train()
+    trainable = [p for p in model.parameters() if p.requires_grad]
+    opt = torch.optim.AdamW(trainable, lr=lr)
+    ce = nn.CrossEntropyLoss()
+    rng = random.Random(seed)
+    print(f"STaR: LoRA r={r_lora} layers={list(layers)} | graph root={root} | {len(tasks)} tasks",
+          flush=True)
+
+    def encode(prompt):
+        m = [{"role": "user", "content": prompt}]
+        kw = dict(add_generation_prompt=True, return_tensors="pt", return_dict=True)
+        try:
+            return tok.apply_chat_template(m, enable_thinking=False, **kw)["input_ids"].to(dev)
+        except TypeError:
+            return tok.apply_chat_template(m, **kw)["input_ids"].to(dev)
+
+    @torch.no_grad()
+    def evaluate(held):
+        model.eval(); solved = reused = 0
+        for task in held:
+            adv, names = _retrieve_atoms(tm, task, 6)
+            pids = encode(_author_prompt(task, adv))
+            out = model.generate(pids, do_sample=False, max_new_tokens=460, pad_token_id=tok.eos_token_id)
+            code = _extract_code(tok.decode(out[0, pids.shape[1]:], skip_special_tokens=True))
+            called, deps = _called_and_deps(code, adv, names)
+            ok = _task_verify(task, code, deps)
+            solved += ok; reused += bool(grounded_code(code, names)[1]) and ok
+        model.train()
+        return solved / max(1, len(held)), reused / max(1, len(held))
+
+    held = list(tasks)[:24]
+    bs, brz = evaluate(held)
+    print(f"[round 0] solve={bs:.0%} reuse={brz:.0%}", flush=True)
+    for rnd in range(1, rounds + 1):
+        # 1. GENERATE + FILTER: keep verified completions, PREFER composed; grow graph from composed wins
+        model.eval()
+        kept, n_comp = [], 0
+        for _ in range(batch):
+            task = rng.choice(tasks)
+            adv, names = _retrieve_atoms(tm, task, 6)
+            prompt = _author_prompt(task, adv)
+            pids = encode(prompt)
+            with torch.no_grad():
+                outs = model.generate(pids, do_sample=True, temperature=temperature, top_p=0.95,
+                                      max_new_tokens=460, num_return_sequences=k,
+                                      pad_token_id=tok.eos_token_id)
+            pick = None                                       # (gen, composed) — prefer composed verified
+            for j in range(k):
+                gen = tok.decode(outs[j, pids.shape[1]:], skip_special_tokens=True)
+                code = _extract_code(gen)
+                called, deps = _called_and_deps(code, adv, names)
+                if not _task_verify(task, code, deps):
+                    continue
+                composed = bool(grounded_code(code, names)[1])
+                if composed:
+                    apply_model_stores(tm, code, _parse_store_actions(gen))   # grow graph from composed wins
+                if pick is None or (composed and not pick[1]):
+                    pick = (gen, composed)
+            if pick:
+                kept.append((prompt, pick[0])); n_comp += int(pick[1])
+        # 2. SFT on the kept (prompt -> completion) pairs
+        model.train()
+        losses = []
+        for _ in range(epochs):
+            rng.shuffle(kept)
+            for prompt, comp in kept:
+                pids = encode(prompt)
+                cids = tok(comp + tok.eos_token, return_tensors="pt",
+                           add_special_tokens=False).input_ids.to(dev)
+                logits = model(torch.cat([pids, cids], dim=1)).logits
+                s = pids.shape[1]
+                pred = logits[:, s - 1:s - 1 + cids.shape[1]].reshape(-1, logits.shape[-1])
+                loss = ce(pred.float(), cids.reshape(-1))
+                loss.backward(); torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+                opt.step(); opt.zero_grad(); losses.append(float(loss.detach()))
+        s, rz = evaluate(held)
+        ml = sum(losses) / max(1, len(losses))
+        print(f"[round {rnd}] kept {len(kept)}/{batch} ({n_comp} composed) sft_loss={ml:.3f} | "
+              f"solve={s:.0%} reuse={rz:.0%} | graph {tm.stats()['impls']} nodes", flush=True)
+    model.save_pretrained("artifacts/algo_graph_star_lora")
+    print("  LoRA saved -> artifacts/algo_graph_star_lora", flush=True)
+
+
 def _real_gen_fn(model_name: str, chunk: int):
     import os
     from transformers import AutoTokenizer
@@ -555,6 +708,9 @@ def main():
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--inspect", action="store_true", help="dump the stored graph + show retrieval for sample tasks")
     ap.add_argument("--train", action="store_true", help="GRPO LoRA training (curriculum + write-back)")
+    ap.add_argument("--star", action="store_true", help="STaR / rejection-SFT (denser than GRPO; injects compose)")
+    ap.add_argument("--rounds", type=int, default=20, help="STaR rounds")
+    ap.add_argument("--batch", type=int, default=16, help="STaR tasks sampled per round")
     ap.add_argument("--model", default="Qwen/Qwen2.5-3B")
     ap.add_argument("--root", default="data/algo_graph", help="TotalMemory root (persists the graph)")
     ap.add_argument("--samples", type=int, default=4)
@@ -580,6 +736,10 @@ def main():
         from v5.memory.store import make_mpnet_embedder
         tm = TotalMemory(a.root, mode="concept", embed_fn=make_mpnet_embedder())
         inspect_graph(tm, tasks[:6])
+        return
+    if a.star:
+        train_star(a.model, a.rounds, tasks, k=a.k, batch=a.batch, lr=a.lr, r_lora=a.r_lora,
+                   layers=a.layers, seed=a.seed, chunk=a.chunk, temperature=a.temperature, root=a.root)
         return
     if a.train:
         train(a.model, a.steps, a.k, a.lr, a.r_lora, a.seed, a.layers, a.eval_every,
