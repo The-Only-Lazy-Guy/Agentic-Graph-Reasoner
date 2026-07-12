@@ -66,6 +66,18 @@ _REF_FINAL = {
 _STEP_ATOM = {"keep_primes": {"is_prime"}, "total_ds": {"digit_sum"}, "reachable_dists": {"dijkstra"},
               "sum_vals_ds": {"digit_sum"}, "edit_dists": {"edit_distance"}, "list_max": set()}
 
+# real per-step SPEC (the model never sees the asserts — the description must say what the fn computes)
+_STEP_DESC = {
+    "keep_primes": "`keep_primes(lst)`: return the sublist of the PRIME numbers in lst (use the prime-test atom).",
+    "total_ds": "`total_ds(lst)`: return the SUM of the digit-sums of the integers in lst (use the digit-sum atom).",
+    "reachable_dists": "`reachable_dists(n, edges, s)`: the shortest-path distance dict {node: dist} from s "
+                       "in a weighted directed graph (edges = list of (u,v,w)) — use the dijkstra atom.",
+    "sum_vals_ds": "`sum_vals_ds(d)`: given a dict d, return the sum of the digit-sums of its VALUES (use digit-sum).",
+    "edit_dists": "`edit_dists(pairs)`: given a list of [a,b] string pairs, return the list of their edit "
+                  "distances (use the edit_distance atom).",
+    "list_max": "`list_max(lst)`: return the maximum element of lst, or 0 if lst is empty.",
+}
+
 
 # ── families: (final_name, kind, step_names, oracles) ─────────────────────────────
 def _o_keep_primes(lst): return [x for x in lst if _is_prime(x)]
@@ -120,13 +132,21 @@ def _mk_task(fam: str, args_list) -> MultiStepTask:
             sout = spec["step_o"][si](*sin)
             argstr = ", ".join(repr(x) for x in sin)
             tests.append(f"assert {sname}({argstr}) == {sout!r}")
-        steps.append(Step(sname, f"step {si+1}: compute {sname}", tests, _STEP_ATOM[sname]))
+        steps.append(Step(sname, _STEP_DESC[sname], tests, _STEP_ATOM[sname]))
     final_tests = []
     for args in args_list:
         argstr = ", ".join(repr(x) for x in args)
         final_tests.append(f"assert {fam}({argstr}) == {spec['chain'](*args)!r}")
-    text = f"{fam}: solve in order — {' -> '.join(spec['steps'])}, then compose them."
+    text = f"{_FINAL_DESC[fam]}. Build it in order: {' then '.join(spec['steps'])}, then compose them."
     return MultiStepTask(fam, text, steps, fam, final_tests)
+
+
+_FINAL_DESC = {
+    "primes_then_digitsum": "`primes_then_digitsum(lst)`: the sum of the digit-sums of the PRIME numbers in lst",
+    "dist_then_digitsum": "`dist_then_digitsum(n, edges, s)`: the sum of the digit-sums of the shortest-path "
+                          "distances from s (edges = list of (u,v,w))",
+    "edits_then_max": "`edits_then_max(pairs)`: the maximum edit distance among a list of [a,b] string pairs",
+}
 
 
 def gen_multistep_tasks(n: int = 60, seed: int = 0):
