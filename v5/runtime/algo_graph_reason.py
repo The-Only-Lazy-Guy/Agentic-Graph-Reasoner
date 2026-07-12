@@ -78,24 +78,28 @@ def search_compose(task, retriever: MGRetriever, gen_fn, query: Query, k: int = 
                    min_cos: float = 0.2):
     """Guided SEARCH + VERIFY: retrieve ranked atoms (by the query vec), glue-realize best-of-N
     (query text as a feature), verify each by execution, keep a VERIFIED one — preferring one that
-    actually composed a retrieved atom. Returns (code, used_atoms, verified)."""
+    actually composed a retrieved atom. Returns (code, used_atoms, verified, trace) where trace =
+    per-sample [(called_atoms, verified)] for diagnosis (why inline vs compose vs fail)."""
     ranked = retriever.retrieve_vec(query.vec, k=k, min_cos=min_cos)   # [(fn_name, code)]
     names = [n for n, _ in ranked]
     prompt = _realize_prompt(task, query.text, ranked)
-    pick, fallback = None, ("", [], False)
+    pick, fallback, trace = None, ("", [], False), []
     for gen in gen_fn([prompt] * samples):
         code = _extract_code(gen)
         called = [n for n in names if n not in _def_names(code)
                   and re.search(rf"\b{re.escape(n)}\s*\(", code)]
         deps = "\n\n".join(c for n, c in ranked if n in called)
-        if _task_verify(task, code, deps):                   # VERIFY grounds the search
+        ok = _task_verify(task, code, deps)                  # VERIFY grounds the search
+        trace.append((called, ok, code))
+        if ok:
             if called and (pick is None):                    # prefer a composing solution
                 pick = (code, called, True)
             elif fallback[0] == "" or not fallback[2]:
                 fallback = (code, called, True)
         elif fallback[0] == "":
             fallback = (code, called, False)
-    return pick or fallback
+    c, u, v = pick or fallback
+    return c, u, v, trace
 
 
 def reason_grow(task, graph_path: str, out_path: str, retriever: MGRetriever, gen_fn,
@@ -104,15 +108,15 @@ def reason_grow(task, graph_path: str, out_path: str, retriever: MGRetriever, ge
     """One reasoning step: query -> search+verify -> if it composed, GROW edges (the composition
     memory) so the next search is biased by what worked."""
     query = make_query(task, embed_fn)
-    code, used, verified = search_compose(task, retriever, gen_fn, query, k=k, samples=samples,
-                                          min_cos=min_cos)
+    code, used, verified, trace = search_compose(task, retriever, gen_fn, query, k=k, samples=samples,
+                                                 min_cos=min_cos)
     grown = None
     if verified and used:                                    # verified COMPOSITION -> edges
         sol_id = f"impl_{task.name}"
         stores = [(sol_id, code, f"solves: {task.text[:60]}")]
         edges = [(sol_id, concept, "part_of")] + [(sol_id, f"impl_{a}", "depend") for a in used]
         grown = grow(graph_path, out_path, propose_edits(f"reason_{task.name}", stores, edges))
-    return dict(name=task.name, verified=verified, used=used, code=code, grown=grown)
+    return dict(name=task.name, verified=verified, used=used, code=code, grown=grown, trace=trace)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -161,10 +165,13 @@ def _build_lm(model_name: str, max_new_tokens: int = 400, temperature: float = 0
 
 
 def run_reason(model_name: str, graph_path: str, tasks=None, concept: str = "concept_algorithms",
-               k: int = 6, samples: int = 8, min_cos: float = 0.25, seed_atoms: bool = True):
+               k: int = 6, samples: int = 8, min_cos: float = 0.25, seed_atoms: bool = True,
+               dump: str = "artifacts/reason_dump.txt"):
     """Seed atoms (bootstrap the candidate set) -> for each compose-necessary task: query -> search +
     verify + glue -> grow edges. Reports solve% and REUSE% (composed a stored atom) — the metric the
-    pure-LM runs couldn't move — plus the edges grown (composition memory)."""
+    pure-LM runs couldn't move — plus the edges grown (composition memory). `dump` writes each task's
+    per-sample trace (how many of N composed / verified / composed+verified) + picked code, so an
+    inline/FAILED case is diagnosable (survives molab reset via stdout too)."""
     from v5.runtime.algo_compose_tasks import COMPOSE, seed_atom_graph
     if tasks is None:
         tasks = COMPOSE
@@ -177,6 +184,7 @@ def run_reason(model_name: str, graph_path: str, tasks=None, concept: str = "con
           f"compose-necessary tasks | k={k} samples={samples}", flush=True)
 
     solved = composed = 0
+    dlines = []
     for task in tasks:
         tmp = graph_path + ".grown"
         res = reason_grow(task, graph_path, tmp, retr, gen_fn, embed, concept=concept, k=k,
@@ -184,7 +192,18 @@ def run_reason(model_name: str, graph_path: str, tasks=None, concept: str = "con
         solved += int(res["verified"]); composed += int(bool(res["used"]))
         tag = "COMPOSED " + "+".join(res["used"]) if res["used"] else (
               "verified (inline)" if res["verified"] else "FAILED")
-        print(f"  {task.name:22s} {tag}", flush=True)
+        # per-sample trace: of N, how many composed an atom / verified / BOTH (the diagnosis)
+        tr = res.get("trace", [])
+        n_comp = sum(1 for c, _, _ in tr if c)
+        n_ver = sum(1 for _, v, _ in tr if v)
+        n_both = sum(1 for c, v, _ in tr if c and v)
+        print(f"  {task.name:22s} {tag:28s} [of {len(tr)}: {n_comp} composed, {n_ver} verified, "
+              f"{n_both} composed+verified]", flush=True)
+        dlines.append(f"### {task.name}  ->  {tag}   "
+                      f"(composed {n_comp}/{len(tr)}, verified {n_ver}, both {n_both})\n"
+                      f"--- picked code ---\n{res['code']}\n"
+                      + "".join(f"--- sample {i} (called={c or '[]'}, verified={v}) ---\n{code}\n"
+                               for i, (c, v, code) in enumerate(tr)) + "\n")
         if res.get("grown") and res["grown"].get("persisted"):  # composition memory grew -> chain it
             Path(tmp).replace(graph_path)
             retr = MGRetriever(MemoryGraph.load_json(graph_path), embed)
@@ -196,6 +215,10 @@ def run_reason(model_name: str, graph_path: str, tasks=None, concept: str = "con
           f"| graph {len(g.nodes)} nodes, {len(g.edges)} edges ({n_edges} atom->atom composition edges)",
           flush=True)
     print("  (reuse% is the number the pure-LM GRPO/STaR runs left at ~8% — search+verify targets it)")
+    if dump:
+        Path(dump).parent.mkdir(parents=True, exist_ok=True)
+        Path(dump).write_text("\n".join(dlines), encoding="utf-8")
+        print(f"  per-sample trace + code -> {dump}", flush=True)
     return dict(solve=solved / N, reuse=composed / N, nodes=len(g.nodes), edges=len(g.edges))
 
 
@@ -251,7 +274,7 @@ def _selftest() -> bool:
             return ["```python\ndef sum_digitsum_primes(lst):\n"
                     "    return sum(digit_sum(x) for x in lst if is_prime(x))\n```"] * len(prompts)
 
-        code, used, verified = search_compose(task, retr, _glue, q, min_cos=-1.0)
+        code, used, verified, _tr = search_compose(task, retr, _glue, q, min_cos=-1.0)
         assert verified and set(used) == {"is_prime", "digit_sum"}, f"composed BOTH atoms: {used}"
         print(f"  [2] search+verify: compose-necessary task solved by GLUING 2 atoms {sorted(used)} -> PASS")
 
