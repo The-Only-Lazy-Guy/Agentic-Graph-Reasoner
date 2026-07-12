@@ -91,17 +91,19 @@ class MGRetriever:
         vec = list(self.embed_fn({"q": query}).values())[0]
         return self.retrieve_vec(vec, k=k, min_cos=min_cos)
 
-    def resolve_deps(self, called_names) -> str:
-        """Graph WALK for transitive dependencies: gather the code of the called atoms PLUS any impl
-        atom they reference (transitively) — so an abstracted leaf (edit_distance -> str_dp2) pulls its
-        skeleton. Reference-closure over the whole graph's impl nodes (not just the top-k retrieved).
-        Without this every ABSTRACT breaks at compose time."""
-        code_by_fn = {}
+    def _code_by_fn(self):
+        d = {}
         for nid in self.ids:
             c = self.graph.nodes[nid].metadata.get("code", "")
             fn = _fn_name(c)
             if fn:
-                code_by_fn[fn] = c
+                d[fn] = c
+        return d
+
+    def resolve_dep_names(self, called_names) -> set:
+        """Reference-CLOSURE: the called atoms PLUS everything they transitively reference (edit_distance
+        -> str_dp2). Used both to assemble deps AND to credit transitively-needed atoms in Δcapability."""
+        code_by_fn = self._code_by_fn()
         needed, frontier = set(), [n for n in called_names if n in code_by_fn]
         while frontier:
             fn = frontier.pop()
@@ -109,10 +111,16 @@ class MGRetriever:
                 continue
             needed.add(fn)
             body = code_by_fn[fn]
-            for other, oc in code_by_fn.items():           # any other impl fn this one calls
+            for other in code_by_fn:                       # any other impl fn this one calls
                 if other != fn and other not in needed and re.search(rf"\b{re.escape(other)}\s*\(", body):
                     frontier.append(other)
-        return "\n\n".join(code_by_fn[fn] for fn in needed)
+        return needed
+
+    def resolve_deps(self, called_names) -> str:
+        """Graph WALK: the code of the transitive closure (so an abstracted leaf pulls its skeleton).
+        Without this every ABSTRACT breaks at compose time."""
+        code_by_fn = self._code_by_fn()
+        return "\n\n".join(code_by_fn[fn] for fn in self.resolve_dep_names(called_names) if fn in code_by_fn)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

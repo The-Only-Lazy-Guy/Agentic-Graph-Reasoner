@@ -95,7 +95,8 @@ def rank_atoms(graph_path: str, tasks, gen_fn, embed_fn, budget_tokens: int, sam
         fam[t.name][1] += 1
         r = solve_iterative(t, retr, gen_fn, embed_fn, budget=Budget(budget_tokens), **kw)
         if _solved_general(t, r, require_general):
-            solved.append((t, set(r["used"] or [])))
+            used = retr.resolve_dep_names(r["used"] or [])   # transitive: using edit_distance uses str_dp2
+            solved.append((t, used))
             fam[t.name][0] += 1
     n = len(tasks)
     full_solved = len(solved)
