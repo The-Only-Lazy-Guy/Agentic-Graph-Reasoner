@@ -32,9 +32,24 @@ def ablate(graph_path: str, atom_id: str, out_path: str):
     Path(out_path).write_text(json.dumps(g), encoding="utf-8")
 
 
+def _solved_general(task, r, require_general: bool) -> bool:
+    """A task counts as solved only if it VERIFIED, and (when require_general) is also FUZZ-GENERAL —
+    so a buggy-but-benchmark-passing inline (the count_makeable truthy bug) does NOT mask the atom's
+    real worth. Couples GRR-3's reward to GRR-1's quality bar."""
+    if not r["solved"]:
+        return False
+    if not require_general:
+        return True
+    from v5.runtime.algo_compose_tasks import ALL_ATOMS
+    from v5.runtime.algo_quality import fuzz
+    deps = "\n\n".join(ALL_ATOMS[a][1] for a in (r.get("used") or []) if a in ALL_ATOMS)
+    p, t = fuzz(r["code"], task.name, deps, n=30)
+    return t > 0 and p == t
+
+
 def solve_rate(graph_path: str, tasks, gen_fn, embed_fn, budget_tokens: int, samples: int = 4,
-               k: int = 8, min_cos: float = 0.25, max_rounds: int = 8) -> float:
-    """Fraction of tasks solved UNDER the token budget with the given graph."""
+               k: int = 8, min_cos: float = 0.25, max_rounds: int = 8, require_general: bool = False) -> float:
+    """Fraction of tasks solved UNDER the token budget. require_general: count only fuzz-general solves."""
     from v5.runtime.algo_graph_mg import MGRetriever
     from v5.runtime.algo_graph_reason import Budget, solve_iterative
     retr = MGRetriever(MemoryGraph.load_json(graph_path), embed_fn)
@@ -42,7 +57,7 @@ def solve_rate(graph_path: str, tasks, gen_fn, embed_fn, budget_tokens: int, sam
     for t in tasks:
         r = solve_iterative(t, retr, gen_fn, embed_fn, max_rounds=max_rounds, samples=samples, k=k,
                             min_cos=min_cos, budget=Budget(budget_tokens))
-        solved += int(r["solved"])
+        solved += int(_solved_general(t, r, require_general))
     return solved / max(1, len(tasks))
 
 
@@ -59,10 +74,13 @@ def delta_capability(atom_id: str, graph_path: str, tasks, gen_fn, embed_fn, bud
 
 
 def rank_atoms(graph_path: str, tasks, gen_fn, embed_fn, budget_tokens: int, samples: int = 4,
-               k: int = 8, min_cos: float = 0.25, max_rounds: int = 8) -> list[dict]:
+               k: int = 8, min_cos: float = 0.25, max_rounds: int = 8,
+               require_general: bool = False) -> list[dict]:
     """Score every impl atom by delta-capability, FAST. Ablating atom A can only change tasks whose
     full-graph solution actually USED A -> solve the set ONCE (recording used atoms), then re-test each
-    atom only on its handful of users. ~1 full pass instead of |atoms|+1. delta~0 = dead weight."""
+    atom only on its handful of users. ~1 full pass instead of |atoms|+1. delta~0 = dead weight.
+    require_general (couples to GRR-1): a task counts solved only if FUZZ-GENERAL, so buggy-inline that
+    passes the 2 asserts (count_makeable truthy bug) can't mask the real atom's worth."""
     from v5.runtime.algo_graph_mg import MGRetriever
     from v5.runtime.algo_graph_reason import Budget, solve_iterative
     kw = dict(samples=samples, k=k, min_cos=min_cos, max_rounds=max_rounds)
@@ -71,7 +89,7 @@ def rank_atoms(graph_path: str, tasks, gen_fn, embed_fn, budget_tokens: int, sam
     solved = []                                              # (task, used_atom_names) for SOLVED tasks
     for t in tasks:
         r = solve_iterative(t, retr, gen_fn, embed_fn, budget=Budget(budget_tokens), **kw)
-        if r["solved"]:
+        if _solved_general(t, r, require_general):
             solved.append((t, set(r["used"] or [])))
     n = len(tasks)
     full_solved = len(solved)
@@ -89,8 +107,9 @@ def rank_atoms(graph_path: str, tasks, gen_fn, embed_fn, budget_tokens: int, sam
             abl = str(Path(td) / "a.json"); ablate(graph_path, aid, abl)
             r2 = MGRetriever(MemoryGraph.load_json(abl), embed_fn)
             still = sum(1 for t in at_risk
-                        if solve_iterative(t, r2, gen_fn, embed_fn, budget=Budget(budget_tokens),
-                                           **kw)["solved"])
+                        if _solved_general(t, solve_iterative(t, r2, gen_fn, embed_fn,
+                                                              budget=Budget(budget_tokens), **kw),
+                                           require_general))
         without = full_solved - len(at_risk) + still            # non-users unchanged; users re-tested
         out.append(dict(atom=aid, delta=round((full_solved - without) / n, 3),
                         without=round(without / n, 3), users=len(at_risk)))
@@ -159,6 +178,7 @@ def main():
     ap.add_argument("--n-tasks", type=int, default=24)
     ap.add_argument("--budget", type=int, default=600)
     ap.add_argument("--hard", action="store_true")
+    ap.add_argument("--general", action="store_true", help="count only FUZZ-GENERAL solves (GRR-1 bar)")
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
@@ -169,8 +189,10 @@ def main():
             seed_atom_graph(a.graph, hard=a.hard)
         gen_fn, embed = _build_lm(a.model)
         tasks = gen_compose_tasks(a.n_tasks, seed=99, hard=a.hard)
-        print(f"rank_atoms: {a.graph} | budget={a.budget} | {len(tasks)} held-out tasks", flush=True)
-        for r in rank_atoms(a.graph, tasks, gen_fn, embed, budget_tokens=a.budget):
+        print(f"rank_atoms: {a.graph} | budget={a.budget} | {len(tasks)} held-out tasks | "
+              f"general={a.general}", flush=True)
+        for r in rank_atoms(a.graph, tasks, gen_fn, embed, budget_tokens=a.budget,
+                            require_general=a.general):
             print(f"  {r['atom']:24s} delta-capability={r['delta']:+.2f}  (without={r['without']:.0%})", flush=True)
         return
     ap.print_help()
