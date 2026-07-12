@@ -143,6 +143,24 @@ class GraphAttentionInjector:
         with torch.no_grad():
             self._goal = encode_task_frame(task_frame, self.device, self.goal_encoder)
 
+    def _run_batched(self, run_fn, h_anchor, r_max):
+        """Run a recurrent block on a [B, d_lm] anchor. The block's LoopState is batch-1 (QA processed
+        one question at a time); for B>1 (e.g. num_return_sequences during generation) loop the CHEAP
+        adapter over the B rows and stack — the expensive LM forward stays batched. B==1 hits the exact
+        original path (zero change to the validated QA behavior)."""
+        B = h_anchor.shape[0]
+        if B == 1:
+            return run_fn(h=h_anchor, goal=self._goal, graph_kv=self._graph_kv, r_max=r_max,
+                          task_frame=self._task_frame)
+        outs, last_state, last_logs = [], None, []
+        goal0 = self._goal[:1]
+        for b in range(B):
+            hu, st, lg = run_fn(h=h_anchor[b:b + 1], goal=goal0, graph_kv=self._graph_kv, r_max=r_max,
+                                task_frame=self._task_frame)
+            outs.append(hu)
+            last_state, last_logs = st, lg
+        return torch.cat(outs, dim=0), last_state, last_logs
+
     def _planning_hook(self, module, args, output):
         """Forward hook for layer 8 (planning block). Uses planning_mask.
 
@@ -172,13 +190,8 @@ class GraphAttentionInjector:
         adapter_dtype = next(self.adapter.parameters()).dtype
         h_anchor = h[:, -1, :].to(adapter_dtype)   # [B, d_lm]
 
-        h_updated, state, logs = self.adapter.run_planning(
-            h=h_anchor,
-            goal=self._goal,
-            graph_kv=self._graph_kv,
-            r_max=self._r_plan,
-            task_frame=self._task_frame,
-        )
+        h_updated, state, logs = self._run_batched(
+            self.adapter.run_planning, h_anchor, self._r_plan)
         self._plan_state = state
         self._plan_ran = True
         self._loop_logs.extend(logs)
@@ -218,13 +231,8 @@ class GraphAttentionInjector:
         adapter_dtype = next(self.adapter.parameters()).dtype
         h_anchor = h[:, -1, :].to(adapter_dtype)   # [B, d_lm] (cast bf16 LM -> adapter dtype)
 
-        h_updated, state, logs = self.adapter.run_evidence(
-            h=h_anchor,
-            goal=self._goal,
-            graph_kv=self._graph_kv,
-            r_max=self._r_evidence,
-            task_frame=self._task_frame,
-        )
+        h_updated, state, logs = self._run_batched(
+            self.adapter.run_evidence, h_anchor, self._r_evidence)
         self._evid_state = state
         self._evid_ran = True
         self._loop_logs.extend(logs)

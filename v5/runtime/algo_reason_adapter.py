@@ -204,25 +204,17 @@ def eval_adapter(model_name: str, graph_path: str, adapter_path: str, n_tasks: i
 
     @torch.no_grad()
     def _gen(prompts, hooked):
-        # literal arm BATCHES (no hooks -> num_return_sequences fine, ~samples-x faster). adapter arm
-        # loops batch=1: the adapter's goal AND LoopState are batch-1 and don't broadcast across
-        # num_return_sequences (would need editing the validated QA adapter internals). glue is short
-        # so max_new_tokens is small.
-        if not hooked:
-            pids = encode(prompts[0])
+        # BOTH arms batch (num_return_sequences=n in ONE LM forward). The adapter hook now handles
+        # B>1 by looping the cheap adapter over batch rows (_run_batched), so the expensive 4B forward
+        # is batched for the +adapter arm too. search passes identical [prompt]*n.
+        pids = encode(prompts[0])
+        n = len(prompts)
+        ctx = inj.inject(model) if hooked else contextlib.nullcontext()
+        with ctx:
             seqs = model.generate(pids, do_sample=True, temperature=0.8, top_p=0.95,
-                                  num_return_sequences=len(prompts), max_new_tokens=max_new_tokens,
+                                  num_return_sequences=n, max_new_tokens=max_new_tokens,
                                   pad_token_id=tok.eos_token_id)
-            return [tok.decode(seqs[j, pids.shape[1]:], skip_special_tokens=True) for j in range(len(prompts))]
-        out = []
-        for p in prompts:
-            pids = encode(p)
-            with inj.inject(model):                          # re-enter per generate -> each grounded
-                seqs = model.generate(pids, do_sample=True, temperature=0.8, top_p=0.95,
-                                      num_return_sequences=1, max_new_tokens=max_new_tokens,
-                                      pad_token_id=tok.eos_token_id)
-            out.append(tok.decode(seqs[0, pids.shape[1]:], skip_special_tokens=True))
-        return out
+        return [tok.decode(seqs[j, pids.shape[1]:], skip_special_tokens=True) for j in range(n)]
 
     tasks = gen_compose_tasks(n_tasks, seed, hard=hard)
     print(f"eval_adapter: {model_name} | {'HARD' if hard else 'easy'} suite | {len(tasks)} held-out "
