@@ -153,7 +153,8 @@ def train_adapter(model_name: str, harvest_path: str, graph_path: str, epochs: i
 # ── STEP 4: the payoff eval — does the STRATEGY channel add lift BEYOND the literal channel? ──────
 
 def eval_adapter(model_name: str, graph_path: str, adapter_path: str, n_tasks: int = 42, samples: int = 8,
-                 k: int = 6, min_cos: float = 0.25, seed: int = 99, r_plan: int = 4, r_evidence: int = 6):
+                 k: int = 6, min_cos: float = 0.25, seed: int = 99, r_plan: int = 4, r_evidence: int = 6,
+                 hard: bool = False):
     """Matched-seed A/B on HELD-OUT compose tasks: literal-only (no hooks) vs +adapter (cross-attend
     strategy injected during generation). Same sampling seed per task per arm, so the only difference
     is the adapter -> a clean read on whether the strategy channel lifts compose/solve beyond the
@@ -169,8 +170,9 @@ def eval_adapter(model_name: str, graph_path: str, adapter_path: str, n_tasks: i
 
     trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    focus = "sum_edit_distance" if hard else "sum_digitsum_prime_dists"   # hardest family (callout col)
     if not Path(graph_path).exists():
-        seed_atom_graph(graph_path)
+        seed_atom_graph(graph_path, hard=hard)
     model = load_frozen_lm(model_name)
     for p in model.parameters():
         p.requires_grad_(False)
@@ -214,13 +216,14 @@ def eval_adapter(model_name: str, graph_path: str, adapter_path: str, n_tasks: i
             out.append(tok.decode(seqs[0, pids.shape[1]:], skip_special_tokens=True))
         return out
 
-    tasks = gen_compose_tasks(n_tasks, seed)
-    print(f"eval_adapter: {model_name} | {len(tasks)} held-out tasks (seed {seed}) | adapter {adapter_path}\n"
-          f"  arm            solve            compose          3-atom-compose", flush=True)
+    tasks = gen_compose_tasks(n_tasks, seed, hard=hard)
+    print(f"eval_adapter: {model_name} | {'HARD' if hard else 'easy'} suite | {len(tasks)} held-out "
+          f"tasks (seed {seed}) | adapter {adapter_path}\n"
+          f"  arm            solve            compose          {focus[:16]}", flush=True)
     agg = {"literal-only": [0, 0, 0, 0], "+adapter": [0, 0, 0, 0]}   # solve, compose, deep_comp, deep_tot
     for ti, task in enumerate(tasks):
         q = make_query(task, embed)
-        deep = task.name == "sum_digitsum_prime_dists"
+        deep = task.name == focus
         for arm, hooked in (("literal-only", False), ("+adapter", True)):
             if hooked:
                 inj.prepare_session(graph, node_ids, text_embeddings,
@@ -323,6 +326,7 @@ def main():
     ap.add_argument("--epochs", type=int, default=3)
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--train-gnn", action="store_true")
+    ap.add_argument("--hard", action="store_true", help="hard suite (inline-failing DP atoms) for --eval")
     a = ap.parse_args()
     if a.smoke:
         sys.exit(0 if _smoke() else 1)
@@ -330,7 +334,7 @@ def main():
         train_adapter(a.model, a.harvest, a.graph, epochs=a.epochs, lr=a.lr, train_gnn=a.train_gnn)
         return
     if a.eval:
-        eval_adapter(a.model, a.graph, a.adapter, n_tasks=a.n_tasks, samples=a.samples)
+        eval_adapter(a.model, a.graph, a.adapter, n_tasks=a.n_tasks, samples=a.samples, hard=a.hard)
         return
     ap.print_help()
 

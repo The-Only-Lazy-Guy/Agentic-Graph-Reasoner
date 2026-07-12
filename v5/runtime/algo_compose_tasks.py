@@ -163,6 +163,143 @@ _FAMILIES = {
 _TEXT = {t.name: t.text for t in COMPOSE}
 
 
+# ── HARD suite: inline-FAILING atoms (DP the 4B botches) + trivial-glue families over them ─────────
+# The capability test: literal-inline of these atoms craters; composing the seeded atom + a trivial
+# reduce succeeds. So compose becomes NECESSARY for SOLVING (not just reuse) -> the adapter's
+# forced-composition should convert to a SOLVE lift, unlike the inline-easy suite (ceiling).
+
+HARD_ATOMS: dict[str, tuple[str, str]] = {
+    "edit_distance": ("Levenshtein edit distance between two strings a and b (min single-char inserts, "
+                      "deletes, substitutions)",
+                      "def edit_distance(a, b):\n    m, n = len(a), len(b)\n"
+                      "    dp = [[0] * (n + 1) for _ in range(m + 1)]\n"
+                      "    for i in range(m + 1):\n        dp[i][0] = i\n"
+                      "    for j in range(n + 1):\n        dp[0][j] = j\n"
+                      "    for i in range(1, m + 1):\n        for j in range(1, n + 1):\n"
+                      "            if a[i-1] == b[j-1]:\n                dp[i][j] = dp[i-1][j-1]\n"
+                      "            else:\n                dp[i][j] = 1 + min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1])\n"
+                      "    return dp[m][n]"),
+    "lcs_length": ("length of the longest common subsequence of two strings a and b",
+                   "def lcs_length(a, b):\n    m, n = len(a), len(b)\n"
+                   "    dp = [[0] * (n + 1) for _ in range(m + 1)]\n"
+                   "    for i in range(1, m + 1):\n        for j in range(1, n + 1):\n"
+                   "            if a[i-1] == b[j-1]:\n                dp[i][j] = dp[i-1][j-1] + 1\n"
+                   "            else:\n                dp[i][j] = max(dp[i-1][j], dp[i][j-1])\n"
+                   "    return dp[m][n]"),
+    "coin_change": ("fewest coins from `coins` summing to `amount`, or -1 if impossible",
+                    "def coin_change(coins, amount):\n    INF = float('inf')\n"
+                    "    dp = [0] + [INF] * amount\n    for a in range(1, amount + 1):\n"
+                    "        for c in coins:\n            if c <= a and dp[a-c] + 1 < dp[a]:\n"
+                    "                dp[a] = dp[a-c] + 1\n    return dp[amount] if dp[amount] < INF else -1"),
+    "lis_length": ("length of the longest strictly-increasing subsequence of a list",
+                   "def lis_length(arr):\n    import bisect\n    tails = []\n    for x in arr:\n"
+                   "        i = bisect.bisect_left(tails, x)\n        if i == len(tails):\n"
+                   "            tails.append(x)\n        else:\n            tails[i] = x\n    return len(tails)"),
+}
+ALL_ATOMS = {**ATOMS, **HARD_ATOMS}
+
+
+def _edit_distance(a, b):
+    m, n = len(a), len(b)
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    for i in range(m + 1):
+        dp[i][0] = i
+    for j in range(n + 1):
+        dp[0][j] = j
+    for i in range(1, m + 1):
+        for j in range(1, n + 1):
+            dp[i][j] = dp[i-1][j-1] if a[i-1] == b[j-1] else 1 + min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1])
+    return dp[m][n]
+
+
+def _lcs_length(a, b):
+    m, n = len(a), len(b)
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    for i in range(1, m + 1):
+        for j in range(1, n + 1):
+            dp[i][j] = dp[i-1][j-1] + 1 if a[i-1] == b[j-1] else max(dp[i-1][j], dp[i][j-1])
+    return dp[m][n]
+
+
+def _coin_change(coins, amount):
+    INF = float("inf")
+    dp = [0] + [INF] * amount
+    for a in range(1, amount + 1):
+        for c in coins:
+            if c <= a and dp[a-c] + 1 < dp[a]:
+                dp[a] = dp[a-c] + 1
+    return dp[amount] if dp[amount] < INF else -1
+
+
+def _lis_length(arr):
+    import bisect
+    tails = []
+    for x in arr:
+        i = bisect.bisect_left(tails, x)
+        (tails.append(x) if i == len(tails) else tails.__setitem__(i, x))
+    return len(tails)
+
+
+_FAMILIES_HARD = {
+    "sum_edit_distance": ("pairs", lambda ps: sum(_edit_distance(a, b) for a, b in ps)),
+    "sum_lcs": ("pairs", lambda ps: sum(_lcs_length(a, b) for a, b in ps)),
+    "count_makeable": ("coins", lambda coins, amts: sum(1 for a in amts if _coin_change(coins, a) != -1)),
+    "max_lis": ("arrays", lambda arrs: max((_lis_length(a) for a in arrs), default=0)),
+}
+_TEXT_HARD = {
+    "sum_edit_distance": "sum of the edit (Levenshtein) distances over a list of [a,b] string pairs. "
+                         "needs an edit-distance routine.",
+    "sum_lcs": "sum of the longest-common-subsequence lengths over a list of [a,b] string pairs. needs "
+               "an LCS routine.",
+    "count_makeable": "how many of the given amounts can be made exactly from the coin set (edges = "
+                      "coins list, amounts list). needs a coin-change routine.",
+    "max_lis": "the largest longest-increasing-subsequence length among a list of integer arrays. "
+               "needs an LIS routine.",
+}
+_NEEDS_HARD = {"sum_edit_distance": {"edit_distance"}, "sum_lcs": {"lcs_length"},
+               "count_makeable": {"coin_change"}, "max_lis": {"lis_length"}}
+_REF_HARD = {
+    "sum_edit_distance": "def sum_edit_distance(pairs):\n    return sum(edit_distance(a, b) for a, b in pairs)",
+    "sum_lcs": "def sum_lcs(pairs):\n    return sum(lcs_length(a, b) for a, b in pairs)",
+    "count_makeable": "def count_makeable(coins, amounts):\n    return sum(1 for a in amounts if coin_change(coins, a) != -1)",
+    "max_lis": "def max_lis(arrays):\n    return max((lis_length(a) for a in arrays), default=0)",
+}
+_REF.update(_REF_HARD)
+_NEEDS.update(_NEEDS_HARD)
+_TEXT.update(_TEXT_HARD)
+
+
+def _hard_static(name, inputs):
+    _, oracle = _FAMILIES_HARD[name]
+    asserts = [f"assert {name}({', '.join(repr(x) for x in args)}) == {oracle(*args)!r}" for args in inputs]
+    return MBPPTask(name, _TEXT_HARD[name], asserts)
+
+
+HARD_COMPOSE = [
+    _hard_static("sum_edit_distance", [([["kitten", "sitting"], ["ab", "abc"]],), ([["cat", "cat"]],)]),
+    _hard_static("sum_lcs", [([["abcde", "ace"], ["abc", "abc"]],), ([["xy", "yx"]],)]),
+    _hard_static("count_makeable", [([3, 4], [6, 2, 7, 1]), ([2, 5], [4, 3, 10])]),
+    _hard_static("max_lis", [([[3, 1, 2, 4], [5, 4, 3]],), ([[1, 2, 3]],)]),
+]
+
+
+def _rand_strs(rng):
+    def one():
+        return "".join(chr(97 + int(rng.integers(0, 5))) for _ in range(int(rng.integers(2, 7))))
+    return [[one(), one()] for _ in range(int(rng.integers(2, 4)))]
+
+
+def _rand_arrays(rng):
+    return [[int(rng.integers(0, 9)) for _ in range(int(rng.integers(3, 7)))]
+            for _ in range(int(rng.integers(2, 4)))]
+
+
+def _rand_coins(rng):
+    coins = sorted({int(rng.integers(2, 7)) for _ in range(int(rng.integers(2, 4)))})
+    amounts = [int(rng.integers(1, 16)) for _ in range(int(rng.integers(3, 6)))]
+    return coins, amounts
+
+
 def _rand_list(rng):
     return [int(rng.integers(2, 40)) for _ in range(int(rng.integers(3, 7)))]
 
@@ -177,37 +314,50 @@ def _rand_graph(rng):
     return n, edges, 0
 
 
-def gen_compose_tasks(n: int = 200, seed: int = 0):
+def _sample(kind, rng):
+    """Random args (a TUPLE) for a family's fn, by input kind."""
+    if kind == "list":
+        return (_rand_list(rng),)
+    if kind == "graph":
+        return _rand_graph(rng)                 # (n, edges, s)
+    if kind == "pairs":
+        return (_rand_strs(rng),)
+    if kind == "arrays":
+        return (_rand_arrays(rng),)
+    if kind == "coins":
+        return _rand_coins(rng)                 # (coins, amounts)
+    raise ValueError(kind)
+
+
+def gen_compose_tasks(n: int = 200, seed: int = 0, hard: bool = False):
     """n parametrized compose-necessary instances (random inputs, oracle-computed asserts). Same fn
-    names as the families (so retrieval/atoms line up); asserts are sound by construction. The harvest
-    corpus + a bigger, deeper task set than the 7 static COMPOSE."""
+    names as the families (so retrieval/atoms line up); asserts sound by construction. hard=True uses
+    the inline-FAILING DP families (edit_distance/lcs/coin_change/lis)."""
+    fams = _FAMILIES_HARD if hard else _FAMILIES
     rng = np.random.default_rng(seed)
-    fams = list(_FAMILIES)
+    names = list(fams)
     tasks = []
     for i in range(n):
-        name = fams[i % len(fams)]
-        kind, oracle = _FAMILIES[name]
+        name = names[i % len(names)]
+        kind, oracle = fams[name]
         asserts = []
-        tries = 0
-        while len(asserts) < 2 and tries < 20:
-            tries += 1
-            if kind == "list":
-                a = _rand_list(rng)
-                asserts.append(f"assert {name}({a!r}) == {oracle(a)!r}")
-            else:
-                gn, e, s = _rand_graph(rng)
-                asserts.append(f"assert {name}({gn}, {e!r}, {s}) == {oracle(gn, e, s)!r}")
+        for _ in range(2):
+            args = _sample(kind, rng)
+            argstr = ", ".join(repr(x) for x in args)
+            asserts.append(f"assert {name}({argstr}) == {oracle(*args)!r}")
         tasks.append(MBPPTask(name, _TEXT[name], asserts))
     return tasks
 
 
-def seed_atom_graph(path: str, concept: str = "concept_algorithms"):
-    """Write a MemoryGraph pre-seeded with the verified atoms (bootstrap the candidate set)."""
+def seed_atom_graph(path: str, concept: str = "concept_algorithms", hard: bool = False):
+    """Write a MemoryGraph pre-seeded with the verified atoms (bootstrap the candidate set). hard=True
+    seeds the BIGGER easy+hard atom set (so retrieval must discriminate -> strategy actually matters)."""
     import json
     from pathlib import Path
+    atoms = ALL_ATOMS if hard else ATOMS
     nodes = [{"id": concept, "text": "algorithms", "node_type": "concept"}]
     edges = []
-    for name, (purpose, code) in ATOMS.items():
+    for name, (purpose, code) in atoms.items():
         nodes.append({"id": f"impl_{name}", "text": purpose, "node_type": "implementation",
                       "metadata": {"code": code}})
         edges.append({"src": f"impl_{name}", "dst": concept, "relation": "part_of",
@@ -249,9 +399,26 @@ def _selftest() -> bool:
     for t in gen:
         deps = "\n\n".join(ATOMS[a][1] for a in _NEEDS[t.name])
         assert t.verify(_REF[t.name], deps), f"generated {t.name} unsound: {t.tests}"
-    fam_counts = {f: sum(1 for t in gen if t.name == f) for f in _FAMILIES}
     print(f"  [3] generator: {len(gen)} parametrized instances across {len(_FAMILIES)} families, ALL "
           f"sound (oracle asserts pass the composing ref) -> PASS")
+
+    # [4] HARD suite: inline-failing DP atoms verify; hard families sound + compose-necessary; generator
+    for name, (_, code) in HARD_ATOMS.items():
+        tests = {"edit_distance": ["assert edit_distance('kitten', 'sitting') == 3 and edit_distance('a','a') == 0"],
+                 "lcs_length": ["assert lcs_length('abcde', 'ace') == 3 and lcs_length('xy','yx') == 1"],
+                 "coin_change": ["assert coin_change([3,4], 6) == 2 and coin_change([3,4], 2) == -1"],
+                 "lis_length": ["assert lis_length([3,1,2,4]) == 3 and lis_length([5,4,3]) == 1"]}[name]
+        assert verify_asserts(code, tests), f"hard atom {name} failed"
+    for t in HARD_COMPOSE:
+        deps = "\n\n".join(HARD_ATOMS[a][1] for a in _NEEDS[t.name])
+        assert t.verify(_REF[t.name], deps), f"hard {t.name}: ref+atoms must pass"
+        assert not t.verify(_REF[t.name], ""), f"hard {t.name}: must NEED its atom"
+    genh = gen_compose_tasks(n=40, seed=2, hard=True)
+    for t in genh:
+        deps = "\n\n".join(HARD_ATOMS[a][1] for a in _NEEDS[t.name])
+        assert t.verify(_REF[t.name], deps), f"gen hard {t.name} unsound: {t.tests}"
+    print(f"  [4] HARD suite: {len(HARD_ATOMS)} inline-failing DP atoms verify; {len(HARD_COMPOSE)} "
+          f"families sound + compose-necessary; {len(genh)} generated instances sound -> PASS")
 
     print("\n  ALGO_COMPOSE_TASKS SELFTEST -> PASS")
     return True

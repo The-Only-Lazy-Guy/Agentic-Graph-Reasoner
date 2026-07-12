@@ -224,17 +224,18 @@ def run_reason(model_name: str, graph_path: str, tasks=None, concept: str = "con
 
 def harvest(model_name: str, graph_path: str, out: str = "artifacts/reason_harvest.jsonl",
             n_tasks: int = 200, samples: int = 8, k: int = 6, min_cos: float = 0.25, seed: int = 0,
-            concept: str = "concept_algorithms", composed_only: bool = True):
+            concept: str = "concept_algorithms", composed_only: bool = True, hard: bool = False):
     """Run the WORKING search+verify over many generated compose tasks; save every COMPOSED+verified
     sample as {task, prompt, code, used}. This is the training corpus for the cross-attend adapter
-    (the real data gate — 7 static tasks can't train a GNN+adapter; hundreds of instances can)."""
+    (the real data gate — 7 static tasks can't train a GNN+adapter; hundreds of instances can).
+    hard=True: inline-FAILING DP families + the bigger easy+hard seeded graph."""
     import json
     from v5.runtime.algo_compose_tasks import gen_compose_tasks, seed_atom_graph
     if not Path(graph_path).exists():
-        seed_atom_graph(graph_path, concept)
+        seed_atom_graph(graph_path, concept, hard=hard)
     gen_fn, embed = _build_lm(model_name)
     retr = MGRetriever(MemoryGraph.load_json(graph_path), embed)
-    tasks = gen_compose_tasks(n_tasks, seed)
+    tasks = gen_compose_tasks(n_tasks, seed, hard=hard)
     rows, n_ver, n_comp = [], 0, 0
     for ti, task in enumerate(tasks):
         q = make_query(task, embed)
@@ -341,6 +342,7 @@ def main():
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--run", action="store_true", help="real-LM run on the compose-necessary tasks")
     ap.add_argument("--harvest", action="store_true", help="harvest verified compositions -> training corpus")
+    ap.add_argument("--hard", action="store_true", help="hard suite (inline-failing DP atoms + bigger graph)")
     ap.add_argument("--model", default="Qwen/Qwen2.5-3B")
     ap.add_argument("--graph", default="graphs/algo_reason.json", help="MemoryGraph (seeded with atoms)")
     ap.add_argument("--out", default="artifacts/reason_harvest.jsonl", help="harvest output jsonl")
@@ -354,7 +356,7 @@ def main():
         sys.exit(0 if _selftest() else 1)
     if a.harvest:
         harvest(a.model, a.graph, out=a.out, n_tasks=a.n_tasks, samples=a.samples, k=a.k,
-                min_cos=a.min_cos)
+                min_cos=a.min_cos, hard=a.hard)
         return
     if a.run:
         run_reason(a.model, a.graph, k=a.k, samples=a.samples, min_cos=a.min_cos,
