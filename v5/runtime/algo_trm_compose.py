@@ -114,6 +114,42 @@ def eval_policy(model, atom_names, atom_vecs, graph_path, embed_fn, n_eval: int 
     return dict(solved=solved / max(1, len(tasks)), atom_acc=correct / max(1, len(tasks)), n=len(tasks))
 
 
+def train_grr6(graph_path: str, hard: bool = True, n_train: int = 400, steps: int = 1500, d: int = 48,
+               T: int = 3, seed: int = 0, out: str = "artifacts/grr6_trm.pt"):
+    """molab scale run: REAL mpnet embeddings + train the TRM policy on the graph's atoms, eval
+    held-out. The honest number past the synthetic 75%. On the dp2 graph, the TRM learns to pick the
+    edit_distance/lcs_length INSTANCES -> compose-forced solve pulls str_dp2 (load-bearing under the
+    LEARNED policy)."""
+    from pathlib import Path
+    import numpy as np
+    import torch
+    from graph_core import MemoryGraph
+    from v5.memory.store import make_mpnet_embedder
+    from v5.runtime.algo_compose_tasks import seed_atom_graph
+    from v5.runtime.algo_graph_mg import _fn_name
+    if not Path(graph_path).exists():
+        seed_atom_graph(graph_path, hard=hard)
+    embed = make_mpnet_embedder()
+    g = MemoryGraph.load_json(graph_path)
+    impls = [(nid, n) for nid, n in g.nodes.items()
+             if n.node_type == "implementation" and n.metadata.get("code")]
+    atom_names = [_fn_name(n.metadata["code"]) or nid[len("impl_"):] for nid, n in impls]
+    vecs = embed({nid: n.text for nid, n in impls})
+    atom_vecs = np.asarray([vecs[nid] for nid, _ in impls], dtype=np.float32)
+    print(f"grr6 train: {graph_path} | {len(atom_names)} atoms | d_in={atom_vecs.shape[1]} | "
+          f"n_train={n_train} steps={steps}", flush=True)
+    model = train_policy(atom_names, atom_vecs, embed, n_train=n_train, steps=steps, d=d, T=T, seed=seed)
+    ev = eval_policy(model, atom_names, atom_vecs, graph_path, embed, n_eval=60)
+    print(f"  held-out ({ev['n']} tasks): atom-pick acc={ev['atom_acc']:.0%}, compose-forced "
+          f"solve={ev['solved']:.0%}", flush=True)
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"state": model.state_dict(), "atom_names": atom_names, "atom_vecs": atom_vecs,
+                "d": d, "T": T, "d_in": int(atom_vecs.shape[1])}, out)
+    print(f"  TRM policy -> {out}  (tiny reasoner: {sum(p.numel() for p in model.parameters())} params)",
+          flush=True)
+    return ev
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # SELFTEST — the TRM learns task->atom and DRIVES the compose-forced solver (no LM). Synthetic embedder
 # gives each family a recoverable signal; the TRM must map it to the right atom among all candidates.
@@ -184,9 +220,17 @@ def _selftest() -> bool:
 def main():
     ap = argparse.ArgumentParser(description="GRR-6 steps 2-3: TRM policy + templated realizer (phase A).")
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--train", action="store_true", help="train the TRM policy with real mpnet (molab)")
+    ap.add_argument("--graph", default="graphs/algo_reason_hard.json")
+    ap.add_argument("--hard", action="store_true")
+    ap.add_argument("--n-train", type=int, default=400)
+    ap.add_argument("--steps", type=int, default=1500)
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
+    if a.train:
+        train_grr6(a.graph, hard=a.hard, n_train=a.n_train, steps=a.steps)
+        return
     ap.print_help()
 
 
