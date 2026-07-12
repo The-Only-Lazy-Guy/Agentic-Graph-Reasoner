@@ -501,6 +501,28 @@ def inspect_graph(tm: TotalMemory, sample_tasks, k: int = 6):
         first = ((r.get("new") or "").strip().splitlines() or [""])[0]
         print(f"    [{(r.get('task_id') or '?'):26}] {first[:74]}")
 
+    # EDGES: the concept graph under ConceptStore (concept<->concept CONNECT edges + bigrams + the
+    # lifecycle edit-log). NOTE: observe_impl writes single-concept trajectories, so CONNECT edges
+    # (which need consecutive DISTINCT concepts) may never fire -> expect ~0 edges = a flat clustered
+    # store, not a connected graph. Showing it makes that explicit.
+    cg = tm.concepts.graph
+    n_edges = sum(len(d) for d in cg.edges.values())
+    edit_kinds = Counter(r.kind for r in cg.log)
+    print(f"\n=== CONCEPT GRAPH: {len(cg.nodes)} concepts | {n_edges} edges | "
+          f"{len(cg.bigrams)} bigrams | edit-log {dict(edit_kinds)} ===")
+    for cid, node in list(cg.nodes.items())[:12]:
+        m = len(tm.concepts.members.get(cid, []))
+        print(f"    concept {cid} '{node.name}' conf={node.confidence:.2f} "
+              f"val={node.validation_count} members={m} retrievable={node.retrievable}")
+    if n_edges:
+        print("    -- concept edges (src -> dst : weight) --")
+        edges = [(s, d, w) for s, dd in cg.edges.items() for d, w in dd.items()]
+        for s, d, w in sorted(edges, key=lambda x: -x[2])[:15]:
+            print(f"      {s} -> {d} : {w:.2f}")
+    else:
+        print("    (NO concept edges — impls are observed into a SINGLE concept each, so CONNECT "
+              "never fires; the 'graph' is a flat clustered store, not a connected graph)")
+
     print("\n=== RETRIEVAL for sample tasks — ARE THE RETRIEVED NODES USABLE? ===")
     for task in sample_tasks:
         hit = tm.read(goal=task.text, span=task.text, k_impl=k)
