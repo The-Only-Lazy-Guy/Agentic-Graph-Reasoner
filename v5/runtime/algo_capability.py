@@ -58,17 +58,42 @@ def delta_capability(atom_id: str, graph_path: str, tasks, gen_fn, embed_fn, bud
                 delta=round(full - without, 3))
 
 
-def rank_atoms(graph_path: str, tasks, gen_fn, embed_fn, budget_tokens: int, **kw) -> list[dict]:
-    """Score every impl atom by delta-capability. delta~0 = dead weight (prune-bait); high delta = load-bearing."""
+def rank_atoms(graph_path: str, tasks, gen_fn, embed_fn, budget_tokens: int, samples: int = 4,
+               k: int = 8, min_cos: float = 0.25, max_rounds: int = 8) -> list[dict]:
+    """Score every impl atom by delta-capability, FAST. Ablating atom A can only change tasks whose
+    full-graph solution actually USED A -> solve the set ONCE (recording used atoms), then re-test each
+    atom only on its handful of users. ~1 full pass instead of |atoms|+1. delta~0 = dead weight."""
+    from v5.runtime.algo_graph_mg import MGRetriever
+    from v5.runtime.algo_graph_reason import Budget, solve_iterative
+    kw = dict(samples=samples, k=k, min_cos=min_cos, max_rounds=max_rounds)
+
+    retr = MGRetriever(MemoryGraph.load_json(graph_path), embed_fn)
+    solved = []                                              # (task, used_atom_names) for SOLVED tasks
+    for t in tasks:
+        r = solve_iterative(t, retr, gen_fn, embed_fn, budget=Budget(budget_tokens), **kw)
+        if r["solved"]:
+            solved.append((t, set(r["used"] or [])))
+    n = len(tasks)
+    full_solved = len(solved)
+
     g = MemoryGraph.load_json(graph_path)
-    atoms = [nid for nid, n in g.nodes.items() if n.node_type == "implementation"]
-    full = solve_rate(graph_path, tasks, gen_fn, embed_fn, budget_tokens, **kw)
+    atoms = [nid for nid, node in g.nodes.items() if node.node_type == "implementation"]
     out = []
     for aid in atoms:
+        aname = aid[len("impl_"):] if aid.startswith("impl_") else aid
+        at_risk = [t for t, used in solved if aname in used]     # solved tasks that USED this atom
+        if not at_risk:                                          # never used -> ablating it is free -> delta 0
+            out.append(dict(atom=aid, delta=0.0, without=round(full_solved / n, 3)))
+            continue
         with tempfile.TemporaryDirectory() as td:
             abl = str(Path(td) / "a.json"); ablate(graph_path, aid, abl)
-            without = solve_rate(abl, tasks, gen_fn, embed_fn, budget_tokens, **kw)
-        out.append(dict(atom=aid, delta=round(full - without, 3), without=round(without, 3)))
+            r2 = MGRetriever(MemoryGraph.load_json(abl), embed_fn)
+            still = sum(1 for t in at_risk
+                        if solve_iterative(t, r2, gen_fn, embed_fn, budget=Budget(budget_tokens),
+                                           **kw)["solved"])
+        without = full_solved - len(at_risk) + still            # non-users unchanged; users re-tested
+        out.append(dict(atom=aid, delta=round((full_solved - without) / n, 3),
+                        without=round(without / n, 3), users=len(at_risk)))
     out.sort(key=lambda d: -d["delta"])
     return out
 

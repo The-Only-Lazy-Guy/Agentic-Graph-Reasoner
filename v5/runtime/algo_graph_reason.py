@@ -386,7 +386,7 @@ def run_multistep(model_name: str, graph_path: str = "graphs/algo_multistep.json
     return dict(solved=solved / len(tasks), promoted=promoted, nodes=len(g.nodes))
 
 
-def budget_curve(model_name: str, graph_path: str, budgets=(150, 300, 600, 1200), n_tasks: int = 30,
+def budget_curve(model_name: str, graph_path: str, budgets=(150, 300, 600, 1200), n_tasks: int = 20,
                  hard: bool = True, seed: int = 99, samples: int = 4, k: int = 6, min_cos: float = 0.25):
     """GRR-2: the solve-vs-budget curve — solve held-out tasks under each total-generation budget. This
     is 'benefit under budget' made first-class (the 200-vs-400 sweep, generalized). GRR-3 measures the
