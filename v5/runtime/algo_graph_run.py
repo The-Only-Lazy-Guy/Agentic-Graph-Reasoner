@@ -478,6 +478,40 @@ def train(model_name, steps, K, lr, r_lora, seed, layers, eval_every, ent_coef, 
     print("  LoRA saved -> artifacts/algo_graph_lora", flush=True)
 
 
+def inspect_graph(tm: TotalMemory, sample_tasks, k: int = 6):
+    """Dump the stored graph + show what tm.read RETRIEVES for sample tasks — are the retrieved nodes
+    usable atoms, or junk / same-task solutions? Answers 'retrieved but unusable?' directly."""
+    from collections import Counter
+    recs = list(tm.impls.records.values())
+    forms = Counter(r.get("form", "") for r in recs)
+    print(f"\n=== GRAPH: {len(recs)} nodes | forms {dict(forms)} | {tm.stats().get('concepts')} concepts ===")
+    code = [r for r in recs if r.get("form") == "code"]
+    by_id = Counter(r.get("task_id", "") for r in code)
+    # OLD curriculum pollution vs MBPP-era atoms
+    try:
+        from v5.runtime.algo_curriculum import BY_NAME
+        curric = set(BY_NAME) | {"build_adj", "build_edge_weight_matrix"}
+    except Exception:
+        curric = set()
+    old = sum(1 for r in code if r.get("task_id") in curric)
+    print(f"  code nodes {len(code)} | distinct task_ids {len(by_id)} | "
+          f"OLD-curriculum-pollution {old} | top ids {by_id.most_common(8)}")
+    print("\n  -- sample stored code nodes (id :: first line) --")
+    for r in code[:18]:
+        first = ((r.get("new") or "").strip().splitlines() or [""])[0]
+        print(f"    [{(r.get('task_id') or '?'):26}] {first[:74]}")
+
+    print("\n=== RETRIEVAL for sample tasks — ARE THE RETRIEVED NODES USABLE? ===")
+    for task in sample_tasks:
+        hit = tm.read(goal=task.text, span=task.text, k_impl=k)
+        print(f"\n[{task.name}] retrieved {len(hit.impls)} (fit-gated):")
+        for r in hit.impls:
+            first = ((r.get("new") or "").strip().splitlines() or [""])[0]
+            print(f"    form={r.get('form',''):5} id={(r.get('task_id') or '?'):22} :: {first[:70]}")
+        if not hit.impls:
+            print("    (nothing cleared MIN_FIT — retrieval delivered NOTHING)")
+
+
 def _real_gen_fn(model_name: str, chunk: int):
     import os
     from transformers import AutoTokenizer
@@ -497,6 +531,7 @@ def _real_gen_fn(model_name: str, chunk: int):
 def main():
     ap = argparse.ArgumentParser(description="Unified algorithm-graph loop on TotalMemory + derive_reward.")
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--inspect", action="store_true", help="dump the stored graph + show retrieval for sample tasks")
     ap.add_argument("--train", action="store_true", help="GRPO LoRA training (curriculum + write-back)")
     ap.add_argument("--model", default="Qwen/Qwen2.5-3B")
     ap.add_argument("--root", default="data/algo_graph", help="TotalMemory root (persists the graph)")
@@ -519,6 +554,11 @@ def main():
         sys.exit(0 if _selftest() else 1)
     tasks = load_tasks(a.tasks, a.task_limit)
     print(f"tasks: {a.tasks} ({len(tasks)} loaded)", file=sys.stderr)
+    if a.inspect:
+        from v5.memory.store import make_mpnet_embedder
+        tm = TotalMemory(a.root, mode="concept", embed_fn=make_mpnet_embedder())
+        inspect_graph(tm, tasks[:6])
+        return
     if a.train:
         train(a.model, a.steps, a.k, a.lr, a.r_lora, a.seed, a.layers, a.eval_every,
               a.ent_coef, a.temperature, a.chunk, a.root, tasks=tasks)
