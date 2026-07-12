@@ -134,9 +134,10 @@ def train_decoder(traces, atom_vecs, atom_names, d=64, steps=2000, lr=1e-3, seed
     return model
 
 
-def fast_reward(code: str, deps: str, name: str, n: int = 12) -> float:
-    """In-process verify (no subprocess): exec deps+code, check the fn vs the family oracle on n random
-    inputs. 1.0 iff general. Fast enough for RL's many rollouts."""
+def fast_reward(code: str, deps: str, name: str, n: int = 16) -> float:
+    """In-process verify (no subprocess) returning the AGREEMENT FRACTION with the family oracle on n
+    random inputs — a DENSE, reference-free reward (a close-but-wrong program scores 0.6, not 0), so RL
+    has a gradient to climb. 1.0 iff fully general. Fast enough for RL's many rollouts."""
     from v5.runtime.algo_compose_tasks import _FAMILIES, _FAMILIES_HARD, _sample
     fams = {**_FAMILIES, **_FAMILIES_HARD}
     if name not in fams:
@@ -151,14 +152,14 @@ def fast_reward(code: str, deps: str, name: str, n: int = 12) -> float:
     if fn is None:
         return 0.0
     rng = np.random.default_rng(0)
+    match = 0
     for _ in range(n):
         args = _sample(kind, rng)
         try:
-            if fn(*args) != oracle(*args):
-                return 0.0
+            match += int(fn(*args) == oracle(*args))
         except Exception:
-            return 0.0
-    return 1.0
+            pass
+    return match / n
 
 
 def train_rl(model, tasks, atom_names, atom_vecs, fams, resolve_fn, embed_fn, K: int = 8, steps: int = 250,
