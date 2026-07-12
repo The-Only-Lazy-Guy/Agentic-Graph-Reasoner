@@ -20,6 +20,8 @@ from __future__ import annotations
 import argparse
 import sys
 
+import numpy as np
+
 from v5.runtime.algo_graph_run import MBPPTask
 
 
@@ -72,6 +74,23 @@ COMPOSE = [
              "list of (u,v,w)). needs shortest-path distances.",
              ["assert count_reachable(4, [(0,1,2),(0,2,5),(1,2,1),(2,3,3)], 0) == 4",
               "assert count_reachable(3, [(0,1,4)], 0) == 2"]),
+    # cross-domain / 3-atom: inlining is hopeless (would re-derive dijkstra AND is_prime AND digit_sum)
+    MBPPTask("count_prime_reachable",
+             "how many reachable nodes have a PRIME node id, from s in a weighted directed graph "
+             "(edges = list of (u,v,w)). needs shortest paths AND a prime test.",
+             ["assert count_prime_reachable(4, [(0,1,2),(0,2,5),(1,2,1),(2,3,3)], 0) == 2",
+              "assert count_prime_reachable(3, [(0,1,4)], 0) == 0"]),
+    MBPPTask("sum_digitsum_reachable",
+             "sum of the digit-sums of the shortest-path DISTANCES to all reachable nodes from s "
+             "(edges = list of (u,v,w)). needs shortest paths AND a digit sum.",
+             ["assert sum_digitsum_reachable(4, [(0,1,2),(0,2,5),(1,2,1),(2,3,3)], 0) == 11",
+              "assert sum_digitsum_reachable(3, [(0,1,4)], 0) == 4"]),
+    MBPPTask("sum_digitsum_prime_dists",
+             "sum of the digit-sums of the shortest-path distances that are PRIME, over reachable "
+             "nodes from s (edges = list of (u,v,w)). needs shortest paths, a prime test, AND a digit "
+             "sum (three atoms).",
+             ["assert sum_digitsum_prime_dists(4, [(0,1,2),(0,2,5),(1,2,1),(2,3,3)], 0) == 5",
+              "assert sum_digitsum_prime_dists(4, [(0,1,2),(1,2,9),(2,3,2)], 0) == 8"]),
 ]
 
 # reference (oracle) solutions — each GLUES atoms; proves the asserts are sound + compose solves it
@@ -80,12 +99,106 @@ _REF = {
     "max_prime_digitsum": "def max_prime_digitsum(lst):\n    ds = [digit_sum(x) for x in lst if is_prime(x)]\n    return max(ds) if ds else 0",
     "sum_reachable_costs": "def sum_reachable_costs(n, edges, s):\n    return sum(dijkstra(n, edges, s).values())",
     "count_reachable": "def count_reachable(n, edges, s):\n    return len(dijkstra(n, edges, s))",
+    "count_prime_reachable": "def count_prime_reachable(n, edges, s):\n    return sum(1 for node in dijkstra(n, edges, s) if is_prime(node))",
+    "sum_digitsum_reachable": "def sum_digitsum_reachable(n, edges, s):\n    return sum(digit_sum(d) for d in dijkstra(n, edges, s).values())",
+    "sum_digitsum_prime_dists": "def sum_digitsum_prime_dists(n, edges, s):\n    return sum(digit_sum(d) for d in dijkstra(n, edges, s).values() if is_prime(d))",
 }
 
 # which atoms each compose task needs (for the selftest + as a soft prior)
 _NEEDS = {"sum_digitsum_primes": {"is_prime", "digit_sum"},
           "max_prime_digitsum": {"is_prime", "digit_sum"},
-          "sum_reachable_costs": {"dijkstra"}, "count_reachable": {"dijkstra"}}
+          "sum_reachable_costs": {"dijkstra"}, "count_reachable": {"dijkstra"},
+          "count_prime_reachable": {"dijkstra", "is_prime"},
+          "sum_digitsum_reachable": {"dijkstra", "digit_sum"},
+          "sum_digitsum_prime_dists": {"dijkstra", "is_prime", "digit_sum"}}
+
+
+# ── parametrized generator — MANY compose-necessary instances (the training-corpus data gate) ─────
+# oracle funcs mirror the ATOMS (dict-dijkstra contract); family oracles COMPOSE them.
+
+def _is_prime(x):
+    if x < 2:
+        return False
+    i = 2
+    while i * i <= x:
+        if x % i == 0:
+            return False
+        i += 1
+    return True
+
+
+def _digit_sum(x):
+    return sum(int(c) for c in str(abs(x)))
+
+
+def _dijkstra(n, edges, s):
+    import heapq
+    adj = {i: [] for i in range(n)}
+    for u, v, w in edges:
+        adj[u].append((v, w))
+    dist = {s: 0}
+    h = [(0, s)]
+    while h:
+        d, u = heapq.heappop(h)
+        if d > dist.get(u, float("inf")):
+            continue
+        for v, w in adj[u]:
+            nd = d + w
+            if nd < dist.get(v, float("inf")):
+                dist[v] = nd
+                heapq.heappush(h, (nd, v))
+    return dist
+
+
+# family -> (kind, oracle). text/ref/needs reuse the COMPOSE + _REF + _NEEDS above (same fn names).
+_FAMILIES = {
+    "sum_digitsum_primes": ("list", lambda a: sum(_digit_sum(x) for x in a if _is_prime(x))),
+    "max_prime_digitsum": ("list", lambda a: max([_digit_sum(x) for x in a if _is_prime(x)] or [0])),
+    "sum_reachable_costs": ("graph", lambda n, e, s: sum(_dijkstra(n, e, s).values())),
+    "count_reachable": ("graph", lambda n, e, s: len(_dijkstra(n, e, s))),
+    "count_prime_reachable": ("graph", lambda n, e, s: sum(1 for k in _dijkstra(n, e, s) if _is_prime(k))),
+    "sum_digitsum_reachable": ("graph", lambda n, e, s: sum(_digit_sum(d) for d in _dijkstra(n, e, s).values())),
+    "sum_digitsum_prime_dists": ("graph", lambda n, e, s: sum(_digit_sum(d) for d in _dijkstra(n, e, s).values() if _is_prime(d))),
+}
+_TEXT = {t.name: t.text for t in COMPOSE}
+
+
+def _rand_list(rng):
+    return [int(rng.integers(2, 40)) for _ in range(int(rng.integers(3, 7)))]
+
+
+def _rand_graph(rng):
+    n = int(rng.integers(3, 7))
+    edges = []
+    for u in range(n):
+        for v in range(u + 1, n):
+            if rng.random() < 0.55:
+                edges.append((u, v, int(rng.integers(1, 10))))
+    return n, edges, 0
+
+
+def gen_compose_tasks(n: int = 200, seed: int = 0):
+    """n parametrized compose-necessary instances (random inputs, oracle-computed asserts). Same fn
+    names as the families (so retrieval/atoms line up); asserts are sound by construction. The harvest
+    corpus + a bigger, deeper task set than the 7 static COMPOSE."""
+    rng = np.random.default_rng(seed)
+    fams = list(_FAMILIES)
+    tasks = []
+    for i in range(n):
+        name = fams[i % len(fams)]
+        kind, oracle = _FAMILIES[name]
+        asserts = []
+        tries = 0
+        while len(asserts) < 2 and tries < 20:
+            tries += 1
+            if kind == "list":
+                a = _rand_list(rng)
+                asserts.append(f"assert {name}({a!r}) == {oracle(a)!r}")
+            else:
+                gn, e, s = _rand_graph(rng)
+                asserts.append(f"assert {name}({gn}, {e!r}, {s}) == {oracle(gn, e, s)!r}")
+        tasks.append(MBPPTask(name, _TEXT[name], asserts))
+    return tasks
 
 
 def seed_atom_graph(path: str, concept: str = "concept_algorithms"):
@@ -127,8 +240,18 @@ def _selftest() -> bool:
         assert all(re_search(a, ref) for a in _NEEDS[t.name]), f"{t.name}: ref must CALL its atoms"
         # and it FAILS without the atoms (genuinely compose-necessary, not inlined)
         assert not t.verify(ref, ""), f"{t.name}: ref must NEED its atoms (fails without them)"
-    print(f"  [2] all {len(COMPOSE)} compose tasks: sound asserts + solved by GLUING atoms + FAIL "
-          f"without them (compose-necessary) -> PASS")
+    print(f"  [2] all {len(COMPOSE)} compose tasks ({sum(1 for t in COMPOSE if len(_NEEDS[t.name])>=2)} "
+          f"multi-atom, incl 3-atom): sound asserts + solved by GLUING atoms + FAIL without them "
+          f"(compose-necessary) -> PASS")
+
+    # [3] generator: many parametrized instances, each SOUND (ref+its atoms passes the random asserts)
+    gen = gen_compose_tasks(n=70, seed=1)
+    for t in gen:
+        deps = "\n\n".join(ATOMS[a][1] for a in _NEEDS[t.name])
+        assert t.verify(_REF[t.name], deps), f"generated {t.name} unsound: {t.tests}"
+    fam_counts = {f: sum(1 for t in gen if t.name == f) for f in _FAMILIES}
+    print(f"  [3] generator: {len(gen)} parametrized instances across {len(_FAMILIES)} families, ALL "
+          f"sound (oracle asserts pass the composing ref) -> PASS")
 
     print("\n  ALGO_COMPOSE_TASKS SELFTEST -> PASS")
     return True

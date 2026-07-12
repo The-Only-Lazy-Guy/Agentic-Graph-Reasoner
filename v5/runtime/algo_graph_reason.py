@@ -222,6 +222,50 @@ def run_reason(model_name: str, graph_path: str, tasks=None, concept: str = "con
     return dict(solve=solved / N, reuse=composed / N, nodes=len(g.nodes), edges=len(g.edges))
 
 
+def harvest(model_name: str, graph_path: str, out: str = "artifacts/reason_harvest.jsonl",
+            n_tasks: int = 200, samples: int = 8, k: int = 6, min_cos: float = 0.25, seed: int = 0,
+            concept: str = "concept_algorithms", composed_only: bool = True):
+    """Run the WORKING search+verify over many generated compose tasks; save every COMPOSED+verified
+    sample as {task, prompt, code, used}. This is the training corpus for the cross-attend adapter
+    (the real data gate — 7 static tasks can't train a GNN+adapter; hundreds of instances can)."""
+    import json
+    from v5.runtime.algo_compose_tasks import gen_compose_tasks, seed_atom_graph
+    if not Path(graph_path).exists():
+        seed_atom_graph(graph_path, concept)
+    gen_fn, embed = _build_lm(model_name)
+    retr = MGRetriever(MemoryGraph.load_json(graph_path), embed)
+    tasks = gen_compose_tasks(n_tasks, seed)
+    rows, n_ver, n_comp = [], 0, 0
+    for ti, task in enumerate(tasks):
+        q = make_query(task, embed)
+        ranked = retr.retrieve_vec(q.vec, k=k, min_cos=min_cos)
+        names = [n for n, _ in ranked]
+        prompt = _realize_prompt(task, q.text, ranked)
+        for gen in gen_fn([prompt] * samples):
+            code = _extract_code(gen)
+            called = [n for n in names if n not in _def_names(code)
+                      and re.search(rf"\b{re.escape(n)}\s*\(", code)]
+            deps = "\n\n".join(c for n, c in ranked if n in called)
+            if _task_verify(task, code, deps):
+                n_ver += 1
+                n_comp += bool(called)
+                if called or not composed_only:
+                    rows.append({"task": task.name, "prompt": prompt, "code": code, "used": called})
+        if (ti + 1) % 25 == 0:
+            print(f"  ..{ti+1}/{len(tasks)} tasks | {n_ver} verified, {n_comp} composed", flush=True)
+    seen, uniq = set(), []
+    for r in rows:                                           # dedup identical (task, code)
+        key = (r["task"], r["code"])
+        if key not in seen:
+            seen.add(key)
+            uniq.append(r)
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    Path(out).write_text("\n".join(json.dumps(r) for r in uniq), encoding="utf-8")
+    print(f"\nharvest: {len(tasks)} tasks x{samples} = {len(tasks)*samples} samples -> {n_ver} verified "
+          f"({n_comp} composed) -> {len(uniq)} unique composed rows -> {out}", flush=True)
+    return uniq
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # SELFTEST (no model) — the SYNERGY: one query -> retrieve + realizer-feature -> search+verify ->
 # a COMPOSE-NECESSARY task solved by composing TWO atoms -> edges grow (composition memory)
@@ -296,8 +340,11 @@ def main():
     ap = argparse.ArgumentParser(description="Reasoning-over-graph: guided search + verify + glue-realizer.")
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--run", action="store_true", help="real-LM run on the compose-necessary tasks")
+    ap.add_argument("--harvest", action="store_true", help="harvest verified compositions -> training corpus")
     ap.add_argument("--model", default="Qwen/Qwen2.5-3B")
     ap.add_argument("--graph", default="graphs/algo_reason.json", help="MemoryGraph (seeded with atoms)")
+    ap.add_argument("--out", default="artifacts/reason_harvest.jsonl", help="harvest output jsonl")
+    ap.add_argument("--n-tasks", type=int, default=200, help="generated compose instances to harvest over")
     ap.add_argument("--k", type=int, default=6)
     ap.add_argument("--samples", type=int, default=8, help="best-of-N glue realizations per task")
     ap.add_argument("--min-cos", type=float, default=0.25)
@@ -305,6 +352,10 @@ def main():
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
+    if a.harvest:
+        harvest(a.model, a.graph, out=a.out, n_tasks=a.n_tasks, samples=a.samples, k=a.k,
+                min_cos=a.min_cos)
+        return
     if a.run:
         run_reason(a.model, a.graph, k=a.k, samples=a.samples, min_cos=a.min_cos,
                    seed_atoms=not a.no_seed)
