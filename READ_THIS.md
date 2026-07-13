@@ -80,12 +80,17 @@ Reuses: algo_graph_mg (MGRetriever.resolve_deps), algo_compose_tasks (_REF/_NEED
 algo_graph_edits+graph_grower (health-gated writes), subgraph/gnn_encoder/goal_encoder (read stack).
 Trained: artifacts/grr6_trm.pt, artifacts/grr6_dsl.pt.
 
-## GRR-9c FACTORY LOOP (real mpnet, 24 generated fams, paraphrased goals, molab 1h40m -> perf-fixed):
-##   beam-only STALLED at 10/24 (rich-get-richer, twice reproduced) -> EPSILON slots fix discovery:
-##   15/24 banked, zero-shot 12/24 fams (25/48 held-out-phrasing inst), rebuild-net 10/24 (24/48) ~= loop.
-##   PROVENANCE->REUSE (the "does exploration find load-bearing programs?" metric, stamped per node):
-##     beam 10 discovered -> 10 reused (19/20 inst) | epsilon 5 discovered -> 3 reused (6/10 inst)
-##     epsilon = a THIRD of all discoveries; its late finds are under-consolidated, not junk.
+## GRR-9c FACTORY LOOP (real mpnet, 24 generated fams, paraphrased goals):
+##   beam-only STALLED at 10/24 (rich-get-richer, twice reproduced) -> EPSILON slots fix discovery.
+##   PERF: 1h40m -> 3m46s (~26x): vectorized level scoring (_score_pipes_batch, one forward per level;
+##     the TRM is 150k params on CPU — cost was python-loop overhead, NOT compute; the 90GB VRAM matters
+##     at the LM phase) + batched embed cache + search-once-per-stuck-fam-per-round.
+##   FINAL RUN (3m46s): 15/24 banked | zero-shot 8/24 fams (21/48 held-out inst) |
+##     rebuild-net 9/24 (24/48) — a fresh net trained PURELY from the graph BEATS the online net.
+##   PROVENANCE->REUSE (per-node origin/found_round; "does exploration find load-bearing programs?"):
+##     run A: beam 10/10 reused (19/20 inst), eps 5 disc/3 reused | run B: eps 8 disc/7 reused (11/16),
+##     beam 7 disc/6 reused (10/14) -> epsilon ~ HALF of all knowledge, definitively load-bearing.
+##   Open: ~9 deepest fams undiscovered at budget 800 (runs now cheap enough to knob-sweep).
 ##   Repro: python -m v5.runtime.algo_grr_loop --loop --factory --families 24 --rounds 8 \
 ##            --budget 800 --n-wake 3 --sft-steps 1200 --explore 8 --graph graphs/algo_grr_factory.json
 ## GRR-9 h2h VERDICT (real mpnet, 32 factory fams, held-out-PHRASING eval, 3 seeds):
