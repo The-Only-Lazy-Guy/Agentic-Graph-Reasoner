@@ -112,6 +112,8 @@ def factory_domain(n_families=24, fam_seed=0, para_train=3, para_eval=2, beam=12
         seed_graph=seed_graph,
         curriculum=lambda r: min(maxlen - 1, 2 + r), beam=beam, explore=explore,
         all_texts=[t for vs in allv.values() for t in vs],   # warm the embed cache in ONE batched encode
+        lm_vocab=([a for a, v in GEN_ATOMS.items() if v[3] == "pred"],
+                  [a for a, v in GEN_ATOMS.items() if v[3] == "map"]),   # proposer vocabulary
     )
 
 
@@ -203,9 +205,11 @@ def _sleep_store(graph_path: str, retr: MGRetriever, discoveries: dict, rnd: int
 
 def wake_sleep_loop(graph_path: str, embed_fn, rounds: int = 3, budget: int = 1500,
                     sft_steps: int = 400, n_wake: int = 2, seed: int = 0, log: bool = True,
-                    domain: dict | None = None):
+                    domain: dict | None = None, lm_gen=None, lm_k: int = 6):
     """The loop. Returns (model, hist) with hist rows:
-    (round, n_search_discoveries, mean_verifies_to_solve, fams_zero_shot, n_fams, graph_nodes)."""
+    (round, n_search_discoveries, mean_verifies_to_solve, fams_zero_shot, n_fams, graph_nodes).
+    lm_gen plugs the GRR-12 escalation ladder: decode -> beam+epsilon -> LM PROPOSER (task text ->
+    candidate pipelines, SAME verify gate, origin='lm') — motivated by the measured search ceiling."""
     import torch
     domain = domain or hand6_domain()
     torch, _nn, ProgramDecoder = _build()
@@ -238,6 +242,19 @@ def wake_sleep_loop(graph_path: str, embed_fn, rounds: int = 3, budget: int = 15
                                         explore=domain.get("explore", 0))
                 if not res["solved"] and fam not in failed_this_round:
                     failed_this_round.add(fam)
+                    if lm_gen is not None and domain.get("lm_vocab") and fam not in known:
+                        # GRR-12 ladder rung: search failed -> the LM proposes from the TASK TEXT,
+                        # candidates pass the SAME gate (MDL-first). A hit is a discovery like any other.
+                        from v5.runtime.algo_lm_proposer import propose_and_verify
+                        preds, maps = domain["lm_vocab"]
+                        pipe_lm, nver = propose_and_verify(lm_gen, t.text, fam, chk, preds, maps, k=lm_k)
+                        if pipe_lm is not None:
+                            res = dict(solved=True, pipe=pipe_lm, via="search",
+                                       verifies=res["verifies"] + nver, origin="lm")
+                            _sft_steps(model, opt, [(np.asarray(list(embed_fn({"q": t.text}).values())[0],
+                                                                dtype=np.float32),
+                                                     program_to_steps(pipe_lm, atom_idx))], A, 150,
+                                       seed=seed + r)
                 if res["solved"]:
                     verifies.append(res["verifies"])
                     if res["via"] == "search":
@@ -446,6 +463,8 @@ def main():
     ap.add_argument("--budget", type=int, default=1500)
     ap.add_argument("--n-wake", type=int, default=2)
     ap.add_argument("--sft-steps", type=int, default=400, help="consolidation SFT steps per round")
+    ap.add_argument("--lm", default="", help="HF model for the GRR-12 proposer ladder (e.g. Qwen/Qwen2.5-3B)")
+    ap.add_argument("--lm-k", type=int, default=6, help="LM proposal samples per stuck family")
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args()
     if a.selftest:
@@ -460,10 +479,16 @@ def main():
             domain["seed_graph"](a.graph)
         embed = _mpnet_embed()
         if a.loop:
+            lm_gen = None
+            if a.lm:
+                from v5.runtime.algo_lm_proposer import make_hf_gen
+                lm_gen = make_hf_gen(a.lm)
             print(f"GRR-8 loop (real mpnet, domain={domain['name']}): {a.graph} | rounds={a.rounds} "
-                  f"budget={a.budget} n_wake={a.n_wake} sft_steps={a.sft_steps}", flush=True)
+                  f"budget={a.budget} n_wake={a.n_wake} sft_steps={a.sft_steps} "
+                  f"lm={a.lm or 'off'}", flush=True)
             wake_sleep_loop(a.graph, embed, rounds=a.rounds, budget=a.budget, n_wake=a.n_wake,
-                            sft_steps=a.sft_steps, seed=a.seed, domain=domain)
+                            sft_steps=a.sft_steps, seed=a.seed, domain=domain,
+                            lm_gen=lm_gen, lm_k=a.lm_k)
         if a.rebuild:
             print(f"GRR-8 rebuild-net (real mpnet, domain={domain['name']}): {a.graph}", flush=True)
             rebuild_net(a.graph, embed, sft_steps=max(800, a.sft_steps * 2), seed=a.seed, domain=domain)
