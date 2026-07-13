@@ -80,6 +80,14 @@ Reuses: algo_graph_mg (MGRetriever.resolve_deps), algo_compose_tasks (_REF/_NEED
 algo_graph_edits+graph_grower (health-gated writes), subgraph/gnn_encoder/goal_encoder (read stack).
 Trained: artifacts/grr6_trm.pt, artifacts/grr6_dsl.pt.
 
+## GRR-9c FACTORY LOOP (real mpnet, 24 generated fams, paraphrased goals, molab 1h40m -> perf-fixed):
+##   beam-only STALLED at 10/24 (rich-get-richer, twice reproduced) -> EPSILON slots fix discovery:
+##   15/24 banked, zero-shot 12/24 fams (25/48 held-out-phrasing inst), rebuild-net 10/24 (24/48) ~= loop.
+##   PROVENANCE->REUSE (the "does exploration find load-bearing programs?" metric, stamped per node):
+##     beam 10 discovered -> 10 reused (19/20 inst) | epsilon 5 discovered -> 3 reused (6/10 inst)
+##     epsilon = a THIRD of all discoveries; its late finds are under-consolidated, not junk.
+##   Repro: python -m v5.runtime.algo_grr_loop --loop --factory --families 24 --rounds 8 \
+##            --budget 800 --n-wake 3 --sft-steps 1200 --explore 8 --graph graphs/algo_grr_factory.json
 ## GRR-9 h2h VERDICT (real mpnet, 32 factory fams, held-out-PHRASING eval, 3 seeds):
 ##   gru 92% (153k params) vs recursive(TRM-merge) 90% (186k) -> TIE, no length bucket favors
 ##   recursion -> GRU stays production; recursion + F-bank PARKED (revisit: len10+/adaptive-T/nested DSL).
