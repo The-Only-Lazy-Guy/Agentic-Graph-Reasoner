@@ -363,7 +363,13 @@ def _beam_search(model, goal_vec, fam, fams, resolve_fn, atom_names, atom_vecs, 
     g_t = torch.as_tensor(np.asarray(goal_vec, dtype=np.float32))
     A = torch.as_tensor(atom_vecs, dtype=torch.float32)
     chk = is_general or _default_is_general(fams, resolve_fn, n_verify)
-    score = lambda steps: -float(model.loss(g_t, A, steps)) if steps else 0.0
+
+    def score(steps):
+        if not steps:
+            return 0.0
+        with torch.no_grad():                                # scoring only — no autograd graphs
+            return -float(model.loss(g_t, A, steps))
+
     used = 0
     prefixes = [[]]
     for _depth in range(max_transforms + 1):

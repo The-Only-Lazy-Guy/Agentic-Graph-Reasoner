@@ -70,6 +70,7 @@ def hand6_domain():
 
     return dict(
         name="hand6", fams=FAM_KINDS, text_of=_TEXT,
+        texts_of={f: [_TEXT[f]] for f in FAM_KINDS},
         make_is_general=lambda resolve_fn: (lambda p, f: _is_general(p, f, FAM_KINDS, resolve_fn, 24)),
         tasks_by_fam=tasks_by_fam, eval_texts=eval_texts,
         seed_graph=lambda path: seed_atom_graph(path, hard=True),
@@ -103,6 +104,7 @@ def factory_domain(n_families=24, fam_seed=0, para_train=3, para_eval=2, beam=12
     maxlen = max(len(p) for p in pipes.values())
     return dict(
         name="factory", fams=fams, text_of={f: allv[f][0] for f in pipes},
+        texts_of={f: allv[f][:para_train] for f in pipes},   # the goal REGION the graph must remember
         make_is_general=lambda _resolve_fn: (lambda p, f: pipe_is_general(p, pipes, f, n=24)),
         tasks_by_fam=tasks_by_fam,
         eval_texts=lambda _seed: {f: allv[f][para_train:] for f in pipes},   # HELD-OUT phrasings
@@ -159,7 +161,10 @@ def _sleep_store(graph_path: str, retr: MGRetriever, discoveries: dict, rnd: int
         cands.append(node_candidate(
             nid, code, domain["text_of"][fam], f"grr8_r{rnd}",
             metadata={"kind": "program", "family": fam, "input_kind": domain["fams"][fam][0],
-                      "pipeline": [[op.kind, op.arg] for op in pipe]}))
+                      "pipeline": [[op.kind, op.arg] for op in pipe],
+                      # the goal REGION, not a point: every train phrasing rides with the program, so a
+                      # rebuilt net generalizes to held-out phrasings (one stored phrasing measured 5/24)
+                      "texts": domain["texts_of"][fam]}))
         cands.append(edge_candidate(nid, concept, "part_of", f"grr8_r{rnd}"))
         for atom in sorted(atoms_of(pipe)):
             cands.append(edge_candidate(nid, f"impl_{atom}", "depend", f"grr8_r{rnd}"))
@@ -240,8 +245,10 @@ def rebuild_net(graph_path: str, embed_fn, sft_steps: int = 800, seed: int = 0, 
     traces = []
     for nid, n in progs:
         pipe = [Op(k, a) for k, a in n.metadata["pipeline"]]
-        gv = np.asarray(list(embed_fn({nid: n.text}).values())[0], dtype=np.float32)
-        traces.append((gv, program_to_steps(pipe, atom_idx)))
+        steps = program_to_steps(pipe, atom_idx)
+        for text in n.metadata.get("texts", [n.text]):       # every stored phrasing (the goal REGION)
+            gv = np.asarray(list(embed_fn({"q": text}).values())[0], dtype=np.float32)
+            traces.append((gv, steps))
     model = ProgramDecoder(d_in=atom_vecs.shape[1], d=64)
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
     _sft_steps(model, opt, traces, torch.as_tensor(atom_vecs, dtype=torch.float32), sft_steps, seed=seed)
@@ -250,8 +257,8 @@ def rebuild_net(graph_path: str, embed_fn, sft_steps: int = 800, seed: int = 0, 
     chk = domain["make_is_general"](resolve_fn)
     fz, nf, iz, it = _zero_shot(model, atom_names, atom_vecs, embed_fn, chk, domain["eval_texts"](901))
     if log:
-        print(f"  rebuild-net: fresh net + {len(traces)} graph-stored programs (no search) -> "
-              f"zero-shot {fz}/{nf} fams ({iz}/{it} inst)", flush=True)
+        print(f"  rebuild-net: fresh net + {len(progs)} graph-stored programs ({len(traces)} stored "
+              f"phrasings, no search) -> zero-shot {fz}/{nf} fams ({iz}/{it} inst)", flush=True)
     return fz, nf
 
 
@@ -388,6 +395,7 @@ def main():
     ap.add_argument("--rounds", type=int, default=3)
     ap.add_argument("--budget", type=int, default=1500)
     ap.add_argument("--n-wake", type=int, default=2)
+    ap.add_argument("--sft-steps", type=int, default=400, help="consolidation SFT steps per round")
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args()
     if a.selftest:
@@ -402,9 +410,9 @@ def main():
         embed = _mpnet_embed()
         if a.loop:
             print(f"GRR-8 loop (real mpnet, domain={domain['name']}): {a.graph} | rounds={a.rounds} "
-                  f"budget={a.budget} n_wake={a.n_wake}", flush=True)
+                  f"budget={a.budget} n_wake={a.n_wake} sft_steps={a.sft_steps}", flush=True)
             wake_sleep_loop(a.graph, embed, rounds=a.rounds, budget=a.budget, n_wake=a.n_wake,
-                            seed=a.seed, domain=domain)
+                            sft_steps=a.sft_steps, seed=a.seed, domain=domain)
         if a.rebuild:
             print(f"GRR-8 rebuild-net (real mpnet, domain={domain['name']}): {a.graph}", flush=True)
             rebuild_net(a.graph, embed, seed=a.seed, domain=domain)
