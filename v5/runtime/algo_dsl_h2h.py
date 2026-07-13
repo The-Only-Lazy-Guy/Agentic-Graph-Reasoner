@@ -24,7 +24,8 @@ import sys
 import numpy as np
 
 from v5.runtime.algo_dsl import Op
-from v5.runtime.algo_dsl_gen import GEN_ATOMS, gen_families, gen_tasks, pipe_is_general, pipe_text
+from v5.runtime.algo_dsl_gen import (GEN_ATOMS, gen_families, gen_tasks, pipe_is_general, pipe_text,
+                                     pipe_text_variants)
 from v5.runtime.algo_dsl_trm import AGGS, OPS, _REDUCE, _sft_steps, program_to_steps
 
 
@@ -153,24 +154,32 @@ def _traces(fams, atom_idx, embed_fn, n_per=4, seed=0):
     return out
 
 
-def _bucket_solve(model, fams, atom_names, atom_vecs, embed_fn, max_len=8):
-    """Decode each family's goal -> pipe_is_general. Returns {length_bucket: (solved, total)}."""
+def _bucket_solve(model, fams, atom_names, atom_vecs, embed_fn, max_len=8, texts_by_fam=None):
+    """Decode each family's goal(s) -> pipe_is_general. texts_by_fam overrides the canonical text with a
+    LIST of phrasings per family (the held-out-paraphrase eval). Returns {length_bucket: (solved, total)}."""
     import torch
     A = torch.as_tensor(atom_vecs, dtype=torch.float32)
     buckets = {}
     for fam, pipe in fams.items():
-        gv = np.asarray(list(embed_fn({"q": pipe_text(pipe)}).values())[0], dtype=np.float32)
-        got = model.decode(torch.as_tensor(gv), A, atom_names, max_len=max_len)
-        ok = pipe_is_general(got, fams, fam)
+        texts = texts_by_fam[fam] if texts_by_fam else [pipe_text(pipe)]
         L = len(pipe)
-        s, t = buckets.get(L, (0, 0))
-        buckets[L] = (s + int(ok), t + 1)
+        for text in texts:
+            gv = np.asarray(list(embed_fn({"q": text}).values())[0], dtype=np.float32)
+            got = model.decode(torch.as_tensor(gv), A, atom_names, max_len=max_len)
+            ok = pipe_is_general(got, fams, fam)
+            s, t = buckets.get(L, (0, 0))
+            buckets[L] = (s + int(ok), t + 1)
     return buckets
 
 
-def h2h(n_families=24, steps=4000, seeds=(1, 2, 3), d=64, T=3, embed_fn=None, fam_seed=0, log=True):
+def h2h(n_families=24, steps=4000, seeds=(1, 2, 3), d=64, T=3, embed_fn=None, fam_seed=0, log=True,
+        para=None):
     """Train BOTH decoders on the same factory traces; report per-length-bucket decode-solve at
-    checkpoints (steps/2 and steps). Returns {arch: {seed: {checkpoint: buckets}}}."""
+    checkpoints. para=(k_train, k_eval) switches on the PARAPHRASE regime: each family gets
+    k_train+k_eval distinct phrasings; training sees only the first k_train, eval decodes the HELD-OUT
+    phrasings (generalization, not point-recall — with one fixed text per family mpnet gives one
+    deterministic embedding and any net just memorizes 32 points: measured 100% everywhere).
+    Returns {arch: {seed: {checkpoint: buckets}}} (buckets = held-out eval when para is set)."""
     import torch
     from v5.runtime.algo_dsl_trm import _build as _build_gru
     RecursiveProgramDecoder = _build_recursive()
@@ -182,12 +191,21 @@ def h2h(n_families=24, steps=4000, seeds=(1, 2, 3), d=64, T=3, embed_fn=None, fa
     atom_names, atom_idx, atom_vecs = _setup(fams, embed_fn)
     A = torch.as_tensor(atom_vecs, dtype=torch.float32)
     d_in = atom_vecs.shape[1]
+    train_texts = eval_texts = None
+    if para:
+        k_train, k_eval = para
+        allv = {f: pipe_text_variants(p, k_train + k_eval) for f, p in fams.items()}
+        train_texts = {f: v[:k_train] for f, v in allv.items()}
+        eval_texts = {f: v[k_train:] for f, v in allv.items()}
     archs = {"gru": lambda: ProgramDecoder(d_in=d_in, d=d),
              "recursive": lambda: RecursiveProgramDecoder(d_in=d_in, d=d, T=T)}
     if log:
         for name, mk in archs.items():
             torch.manual_seed(0)
             print(f"  {name}: {sum(p.numel() for p in mk().parameters())} params", flush=True)
+        if para:
+            print(f"  paraphrase regime: train on {para[0]} phrasings/family, eval on {para[1]} "
+                  f"HELD-OUT phrasings/family", flush=True)
     results = {a: {} for a in archs}
     half = steps // 2
     for arch, mk in archs.items():
@@ -195,11 +213,16 @@ def h2h(n_families=24, steps=4000, seeds=(1, 2, 3), d=64, T=3, embed_fn=None, fa
             torch.manual_seed(sd)
             model = mk()
             opt = torch.optim.Adam(model.parameters(), lr=1e-3)
-            traces = _traces(fams, atom_idx, embed_fn, seed=sd)
+            if para:
+                traces = [(np.asarray(list(embed_fn({"q": t}).values())[0], dtype=np.float32),
+                           program_to_steps(fams[f], atom_idx))
+                          for f in fams for t in train_texts[f]]
+            else:
+                traces = _traces(fams, atom_idx, embed_fn, seed=sd)
             _sft_steps(model, opt, traces, A, half, seed=sd)
-            b_half = _bucket_solve(model, fams, atom_names, atom_vecs, embed_fn)
+            b_half = _bucket_solve(model, fams, atom_names, atom_vecs, embed_fn, texts_by_fam=eval_texts)
             _sft_steps(model, opt, traces, A, steps - half, seed=sd + 100)
-            b_full = _bucket_solve(model, fams, atom_names, atom_vecs, embed_fn)
+            b_full = _bucket_solve(model, fams, atom_names, atom_vecs, embed_fn, texts_by_fam=eval_texts)
             results[arch][sd] = {half: b_half, steps: b_full}
             if log:
                 tot = lambda b: (sum(s for s, _ in b.values()), sum(t for _, t in b.values()))
@@ -208,7 +231,8 @@ def h2h(n_families=24, steps=4000, seeds=(1, 2, 3), d=64, T=3, embed_fn=None, fa
                       f"by-len@{steps} {{{', '.join(f'{k}:{v[0]}/{v[1]}' for k, v in sorted(b_full.items()))}}}",
                       flush=True)
     if log:
-        print("\n  === VERDICT (mean solve over seeds, final checkpoint) ===", flush=True)
+        tag = "held-out PHRASINGS" if para else "canonical text (recall)"
+        print(f"\n  === VERDICT (mean solve over seeds, final checkpoint, {tag}) ===", flush=True)
         for arch in archs:
             per_len = {}
             for sd in seeds:
@@ -233,7 +257,8 @@ def _selftest() -> bool:
     d_in = 64
     fams = gen_families(12, seed=3, max_chain=3)
     base = {f: rng.standard_normal(d_in).astype("float32") for f in fams}
-    texts = {pipe_text(p): f for f, p in fams.items()}
+    # any phrasing of a family -> that family's base + noise (a stub of what mpnet does with paraphrases)
+    texts = {t: f for f, p in fams.items() for t in pipe_text_variants(p, 6)}
 
     def embed(d):
         out = {}
@@ -276,6 +301,17 @@ def _selftest() -> bool:
     print(f"  [3] h2h runs end-to-end; both learn, NEITHER saturates (the benchmark finally "
           f"discriminates) -> PASS")
 
+    # [4] paraphrase regime smoke: train on 2 phrasings/family, eval on 1 HELD-OUT phrasing —
+    #     the anti-point-memorization eval (mpnet 32-fam recall saturated at 100% without it)
+    resp = h2h(n_families=12, steps=800, seeds=(1,), d=48, T=3, embed_fn=embed, fam_seed=3, log=False,
+               para=(2, 1))
+    for arch in ("gru", "recursive"):
+        b = resp[arch][1][800]
+        assert sum(t for _, t in b.values()) == 12, b          # 1 held-out phrasing per family evaluated
+    print(f"  [4] paraphrase regime: trains on seen phrasings, evals HELD-OUT phrasings "
+          f"(gru {sum(s for s,_ in resp['gru'][1][800].values())}/12, "
+          f"recursive {sum(s for s,_ in resp['recursive'][1][800].values())}/12 at smoke budget) -> PASS")
+
     print("\n  ALGO_DSL_H2H SELFTEST -> PASS  (mechanism proven; the VERDICT is the molab mpnet table)")
     return True
 
@@ -289,13 +325,19 @@ def main():
     ap.add_argument("--seeds", type=int, default=3)
     ap.add_argument("--d", type=int, default=64)
     ap.add_argument("--T", type=int, default=3)
+    ap.add_argument("--paraphrase", action="store_true",
+                    help="train on --para-train phrasings/family, eval HELD-OUT phrasings (the real test)")
+    ap.add_argument("--para-train", type=int, default=3)
+    ap.add_argument("--para-eval", type=int, default=2)
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
     if a.h2h:
-        print(f"h2h (real mpnet): families={a.families} steps={a.steps} seeds={a.seeds} d={a.d} T={a.T}",
-              flush=True)
-        h2h(n_families=a.families, steps=a.steps, seeds=tuple(range(1, a.seeds + 1)), d=a.d, T=a.T)
+        para = (a.para_train, a.para_eval) if a.paraphrase else None
+        print(f"h2h (real mpnet): families={a.families} steps={a.steps} seeds={a.seeds} d={a.d} T={a.T} "
+              f"paraphrase={para}", flush=True)
+        h2h(n_families=a.families, steps=a.steps, seeds=tuple(range(1, a.seeds + 1)), d=a.d, T=a.T,
+            para=para)
         return
     ap.print_help()
 

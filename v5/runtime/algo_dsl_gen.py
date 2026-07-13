@@ -137,6 +137,64 @@ def pipe_text(pipe) -> str:
             f"needs {', '.join(sorted(set(preds + maps)))}.")
 
 
+# paraphrase pools — the GENERALIZATION axis. With a single fixed text per family, mpnet gives ONE
+# deterministic embedding -> the benchmark collapses to memorizing (point -> program) pairs and every
+# architecture saturates (measured: 32 fams, 100% everywhere). Variants make a family a REGION in
+# embedding space; training on some phrasings and evaluating on HELD-OUT phrasings is a real
+# generalization test.
+_SYN_PHRASE = {
+    "is_prime": ["prime", "prime-number"], "is_odd": ["odd", "non-even"],
+    "is_square": ["perfect-square", "square-number"],
+    "digit_sum": ["digit-sum", "sum-of-digits"], "square": ["square", "second-power"],
+    "reverse_digits": ["digit-reversal", "reversed-digits"],
+    "count_divisors": ["divisor-count", "number-of-divisors"],
+    "collatz_steps": ["Collatz-step-count", "Collatz-steps"], "double": ["double", "twice-the-value"],
+}
+_SYN_AGG = {"sum": ["the sum", "the total", "the aggregate"],
+            "max": ["the largest value", "the maximum", "the highest result"],
+            "count": ["the count", "how many", "the tally"],
+            "len": ["the number", "how many", "the tally"]}
+
+
+def _variant_text(pipe, vi: int) -> str:
+    """Deterministic paraphrase #vi of a pipeline's task text. vi=0 == pipe_text (the canonical form).
+    Varies: synonyms (per-atom, per-agg), sentence STRUCTURE (nested 'x of the y' vs forward
+    'apply y then x'), and whether the 'needs ...' atom hint appears (half the variants drop it)."""
+    if vi == 0:
+        return pipe_text(pipe)
+    rng = np.random.default_rng(10_000 + vi * 977 + len(pipe) * 31 +
+                                sum(ord(c) for op in pipe for c in op.arg))
+    syn = lambda a: _SYN_PHRASE[a][int(rng.integers(0, len(_SYN_PHRASE[a])))]
+    preds = [op.arg for op in pipe if op.kind == "FILTER"]
+    maps = [op.arg for op in pipe if op.kind == "MAP"]
+    agg = pipe[-1].arg
+    aggw = _SYN_AGG[agg][int(rng.integers(0, len(_SYN_AGG[agg])))]
+    kept = (" and ".join(syn(p) for p in preds) + " numbers") if preds else "the numbers"
+    nested = " of the ".join(syn(m) for m in reversed(maps))
+    forward = " then ".join(syn(m) for m in maps)
+    hint = f" needs {', '.join(sorted(set(preds + maps)))}." if rng.integers(0, 2) else ""
+    if agg in ("count", "len"):
+        forms = [f"{aggw} of {kept} in the list.",
+                 f"given a list of integers, keep {kept} and report {aggw}.",
+                 f"across the list, tally {kept}: {aggw}."]
+    else:
+        forms = [f"{aggw} of the {nested} over {kept} in the list.",
+                 f"given a list of integers, keep {kept}, apply {forward}, then take {aggw}.",
+                 f"for each of {kept} compute the {nested}; report {aggw}."]
+    return forms[int(rng.integers(0, len(forms)))] + hint
+
+
+def pipe_text_variants(pipe, k: int) -> list:
+    """k DISTINCT paraphrases (variant 0 = the canonical pipe_text). Deterministic."""
+    out, vi = [], 0
+    while len(out) < k and vi < k * 20:
+        t = _variant_text(pipe, vi)
+        if t not in out:
+            out.append(t)
+        vi += 1
+    return out
+
+
 def interpret(pipe, lst) -> int:
     """The ORACLE: interpret the pipeline with oracle fns (canonical semantics — filters on the raw
     element, maps composed — matching realize_program)."""
@@ -294,6 +352,14 @@ def _selftest() -> bool:
     for a in t.asserts:
         exec(a, ns)
     print(f"  [5] {len(tasks)} parametrized instances; asserts sound by construction -> PASS")
+
+    # [6] paraphrase axis: k distinct variants per family (variant 0 = canonical), deterministic
+    for fam, pipe in list(fams.items())[:8]:
+        vs = pipe_text_variants(pipe, 5)
+        assert len(vs) == 5 and len(set(vs)) == 5 and vs[0] == pipe_text(pipe), (fam, vs)
+        assert vs == pipe_text_variants(pipe, 5), "variants must be deterministic"
+    print("  [6] paraphrase variants: 5 distinct deterministic phrasings/family (variant 0 = canonical; "
+          "synonyms + structure flips + hint dropout) -> PASS")
 
     print("\n  ALGO_DSL_GEN SELFTEST -> PASS  (a benchmark that can finally discriminate architectures)")
     return True
