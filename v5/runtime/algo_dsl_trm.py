@@ -266,21 +266,36 @@ def _valid_ops_for_kind(kind: str):
 
 
 def _enumerate_general(fam, fams, resolve_fn, atom_names, max_transforms=2, n_verify=32, cache=None):
-    """The SEARCH: enumerate every structurally-valid pipeline (<= max_transforms transform ops, each an
-    (op, atom) pair, then a REDUCE(agg)) and keep the ones VERIFIED fully-general for `fam`. Cached per
-    family (the found programs don't depend on the net or the seed -> deterministic, hence stable)."""
+    """The SEARCH: enumerate structurally-valid pipelines (<= max_transforms transform ops, each an
+    (op, atom) pair, then a REDUCE(agg)) and keep the ones VERIFIED fully-general for `fam`. MDL: stop at
+    the SHORTEST solving length and dedup by realized code — a longer program with a dead/no-op op (or one
+    that's only-correct on weak inputs, e.g. digit_sum acting as identity on single-digit values) is
+    rejected in favour of the minimal program. Without this the SFT target set is ambiguous AND can
+    contain weak-input-only variants that pass search but fail the eval fuzz -> seed-dependent instability.
+    Cached per family (net/seed-independent -> deterministic, hence stable)."""
     import itertools
     if cache is not None and fam in cache:
         return cache[fam]
-    ops = _valid_ops_for_kind(fams[fam][0])
+    kind = fams[fam][0]
+    ops = _valid_ops_for_kind(kind)
     slot = [(op, a) for op in ops for a in atom_names]
-    found = []
-    for n_t in range(max_transforms + 1):
+    found: list = []
+    for n_t in range(max_transforms + 1):                      # ascending length -> first hit == MDL-minimal
+        seen, level = set(), []
         for combo in itertools.product(slot, repeat=n_t):
             for agg in AGGS:
                 pipe = [Op(op, a) for (op, a) in combo] + [Op("REDUCE", agg)]
-                if _is_general(pipe, fam, fams, resolve_fn, n_verify):
-                    found.append(pipe)
+                if not _is_general(pipe, fam, fams, resolve_fn, n_verify):
+                    continue
+                try:
+                    code = realize_program(fam, kind, pipe)    # dedup truly-equivalent realizations
+                except (ValueError, KeyError):
+                    continue
+                if code not in seen:
+                    seen.add(code); level.append(pipe)
+        if level:                                              # shortest length that solves -> take it, stop
+            found = level
+            break
     if cache is not None:
         cache[fam] = found
     return found
