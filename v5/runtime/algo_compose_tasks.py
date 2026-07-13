@@ -290,8 +290,10 @@ def _rand_strs(rng):
 
 
 def _rand_arrays(rng):
-    return [[int(rng.integers(0, 9)) for _ in range(int(rng.integers(3, 7)))]
-            for _ in range(int(rng.integers(2, 4)))]
+    # lengths up to 10 so lis_length can EXCEED 9: any digit_sum-as-identity degenerate program (identity
+    # only on single-digit values) now fails fuzz directly, instead of leaning on MDL-minimality alone
+    return [[int(rng.integers(0, 50)) for _ in range(int(rng.integers(3, 11)))]
+            for _ in range(int(rng.integers(2, 5)))]
 
 
 def _rand_coins(rng):

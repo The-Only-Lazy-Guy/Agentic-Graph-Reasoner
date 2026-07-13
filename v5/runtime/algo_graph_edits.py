@@ -20,11 +20,13 @@ import sys
 
 
 def node_candidate(node_id: str, code: str, purpose: str, session_id: str,
-                   node_type: str = "implementation", support: float = 1.0) -> dict:
+                   node_type: str = "implementation", support: float = 1.0,
+                   metadata: dict | None = None) -> dict:
     """A model-chosen atom -> an add_node candidate (code rides in metadata; the model's purpose is
-    the node text = the retrieval key)."""
+    the node text = the retrieval key). `metadata` merges extra SYMBOLIC content into the node (e.g. a
+    discovered program's pipeline — the graph stores the program's FORM, not just its realization)."""
     return {"raw_edit": {"op": "add_node", "node_id": node_id, "node_type": node_type,
-                         "text": purpose, "metadata": {"code": code}, "tier": "add"},
+                         "text": purpose, "metadata": {"code": code, **(metadata or {})}, "tier": "add"},
             "lane": "substrate", "session_id": session_id, "patch_id": node_id,
             "target_id": node_id, "support_score": support}
 

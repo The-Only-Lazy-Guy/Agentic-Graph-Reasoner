@@ -301,6 +301,66 @@ def _enumerate_general(fam, fams, resolve_fn, atom_names, max_transforms=2, n_ve
     return found
 
 
+def _score_pipe(model, goal_t, A, atom_idx, pipe) -> float:
+    """Net log-prob of a pipeline (teacher-forced scoring, no grad) — CHEAP (a few GRU steps), unlike a
+    verify (exec + oracle calls). The guided search's ordering key."""
+    import torch
+    with torch.no_grad():
+        return -float(model.loss(goal_t, A, program_to_steps(pipe, atom_idx)))
+
+
+def _guided_search(model, goal_vec, fam, fams, resolve_fn, atom_names, atom_vecs, max_transforms=2,
+                   n_verify=32, budget=None):
+    """Net-GUIDED search: the same ascending-length levels as _enumerate_general (MDL-minimality
+    preserved), but WITHIN a level candidates are verified in the net's log-prob order, stopping at the
+    first general hit (or after `budget` verifies). Returns (found, verifies_used). As the net
+    consolidates, the true program ranks earlier -> verifies-to-solve DROPS: the measured amortization
+    that lets search scale past brute force as atoms/families grow."""
+    import itertools
+    import torch
+    kind = fams[fam][0]
+    ops = _valid_ops_for_kind(kind)
+    slot = [(op, a) for op in ops for a in atom_names]
+    atom_idx = {a: i for i, a in enumerate(atom_names)}
+    g_t = torch.as_tensor(np.asarray(goal_vec, dtype=np.float32))
+    A = torch.as_tensor(atom_vecs, dtype=torch.float32)
+    used = 0
+    for n_t in range(max_transforms + 1):
+        cands = [[Op(op, a) for (op, a) in combo] + [Op("REDUCE", agg)]
+                 for combo in itertools.product(slot, repeat=n_t) for agg in AGGS]
+        cands.sort(key=lambda p: -_score_pipe(model, g_t, A, atom_idx, p))
+        for pipe in cands:
+            if budget is not None and used >= budget:
+                return [], used
+            used += 1
+            if _is_general(pipe, fam, fams, resolve_fn, n_verify):
+                return [pipe], used                       # first general hit at the minimal length
+    return [], used
+
+
+def solve_with_search(model, task, fams, atom_names, atom_vecs, resolve_fn, embed_fn, atom_idx,
+                      opt=None, sft_steps=150, budget=None, max_transforms=2, n_verify=32,
+                      lr=5e-4, seed=0):
+    """The TRM inference primitive — the design's retrieve -> reason -> VERIFY -> update -> retry-until-
+    solve, embodied: (1) DECODE (recall) + verify-general; (2) on fail, net-GUIDED SEARCH under a verify
+    budget; (3) CONSOLIDATE the discovery (SFT) so the next decode on this family jumps straight there.
+    Returns dict(solved, pipe, via='decode'|'search'|None, verifies)."""
+    import torch
+    gv = np.asarray(list(embed_fn({"q": task.text}).values())[0], dtype=np.float32)
+    A = torch.as_tensor(atom_vecs, dtype=torch.float32)
+    pipe = model.decode(torch.as_tensor(gv), A, atom_names)
+    if _is_general(pipe, task.name, fams, resolve_fn, n_verify):
+        return dict(solved=True, pipe=pipe, via="decode", verifies=1)
+    found, used = _guided_search(model, gv, task.name, fams, resolve_fn, atom_names, atom_vecs,
+                                 max_transforms=max_transforms, n_verify=n_verify, budget=budget)
+    if not found:
+        return dict(solved=False, pipe=None, via=None, verifies=used + 1)
+    if opt is None:
+        opt = torch.optim.Adam(model.parameters(), lr=lr)
+    _sft_steps(model, opt, [(gv, program_to_steps(p, atom_idx)) for p in found], A, sft_steps, seed=seed)
+    return dict(solved=True, pipe=found[0], via="search", verifies=used + 1)
+
+
 def train_star(model, tasks, atom_names, atom_vecs, fams, resolve_fn, embed_fn, atom_idx,
                rounds=4, sft_steps=400, lr=5e-4, n_verify=32, max_transforms=2, curriculum=True,
                seed=0, cache=None, log=False):
@@ -517,9 +577,11 @@ def _selftest() -> bool:
     # families we cover with the DSL (need their atoms present)
     fams = {f: (k, p) for f, (k, p) in _PROGRAMS.items()
             if atoms_of(p) <= set(atom_names)}
+    # specific before general: "increasing" precedes "subsequence" (max_lis's text contains
+    # "longest-increasing-SUBSEQUENCE" — the general keyword would collapse both fams to one embedding)
     kw = [("largest digit-sum", "max_prime_digitsum"), ("prime", "sum_digitsum_primes"),
-          ("edit", "sum_edit_distance"), ("subsequence", "sum_lcs"),
-          ("increasing", "max_lis"), ("coin", "count_makeable")]     # specific before general
+          ("edit", "sum_edit_distance"), ("increasing", "max_lis"),
+          ("subsequence", "sum_lcs"), ("coin", "count_makeable")]
     fam_base = {f: rng.standard_normal(d_in).astype("float32") for f in fams}
 
     def embed(d):
@@ -608,6 +670,26 @@ def _selftest() -> bool:
         assert max(ws_runs) - min(ws_runs) <= 0.3 * H, ws_runs          # STABLE across seeds (unlike GRPO)
         print(f"  [4] held-out '{holdout}': zero-shot {zs_runs} -> with-search {ws_runs} (/{H}, 3 seeds) "
               f"-> STaR recovers the unseen composition + STABLE across seeds -> PASS")
+
+        # [5] GUIDED search + solve_with_search (the until-solve inference primitive): verifies-to-solve
+        #     DROPS after consolidation (net orders candidates -> measured amortization, the scale lever),
+        #     and the second call on the same family flips via=search -> via=decode.
+        torch_, _, PD = _build()
+        torch_.manual_seed(0)
+        cold = PD(d_in=d_in, d=64)
+        t_lis = [t for t in gen_compose_tasks(60, seed=21, hard=True) if t.name == "max_lis"][:2]
+        gv_lis = np.asarray(list(embed({"q": t_lis[0].text}).values())[0], dtype=np.float32)
+        _, v_cold = _guided_search(cold, gv_lis, "max_lis", fams, resolve_fn, atom_names, atom_vecs)
+        r1 = solve_with_search(cold, t_lis[0], fams, atom_names, atom_vecs, resolve_fn, embed, atom_idx)
+        assert r1["solved"] and r1["via"] == "search", r1
+        _, v_hot = _guided_search(cold, gv_lis, "max_lis", fams, resolve_fn, atom_names, atom_vecs)
+        r2 = solve_with_search(cold, t_lis[1], fams, atom_names, atom_vecs, resolve_fn, embed, atom_idx)
+        assert r2["solved"] and r2["via"] == "decode", r2
+        # floor is 5: the 4 level-0 (REDUCE-only) candidates are always verified first, then the
+        # consolidated net must rank the true program ~first within its level
+        assert v_hot <= 7 and v_hot < v_cold, (v_cold, v_hot)
+        print(f"  [5] guided search: verifies-to-solve {v_cold} (cold net) -> {v_hot} (consolidated); "
+              f"solve_with_search via=search -> via=decode (until-solve primitive, amortized) -> PASS")
 
     print("\n  ALGO_DSL_TRM SELFTEST -> PASS  (the reasoner synthesizes programs; STaR turns recall into "
           "search-and-consolidate reasoning)")
