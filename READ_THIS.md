@@ -80,6 +80,11 @@ Reuses: algo_graph_mg (MGRetriever.resolve_deps), algo_compose_tasks (_REF/_NEED
 algo_graph_edits+graph_grower (health-gated writes), subgraph/gnn_encoder/goal_encoder (read stack).
 Trained: artifacts/grr6_trm.pt, artifacts/grr6_dsl.pt.
 
+## GRR-9 h2h VERDICT (real mpnet, 32 factory fams, held-out-PHRASING eval, 3 seeds):
+##   gru 92% (153k params) vs recursive(TRM-merge) 90% (186k) -> TIE, no length bucket favors
+##   recursion -> GRU stays production; recursion + F-bank PARKED (revisit: len10+/adaptive-T/nested DSL).
+##   Benchmark lesson: fixed-text recall saturates (100% = point memorization); PARAPHRASE held-out
+##   is the real generalization test — both nets ~90% there (decoder maps meaning REGIONS, not points).
 ## GRR-7 DONE: real mpnet 0% recall -> 100% with-search, all 6 families stable every seed.
 ## GRR-8 DONE + REAL-MPNET CONFIRMED (molab): zero-shot 4/6 -> 6/6 fams (18/18 inst) while
 ##   verifies-to-solve 13.2 -> 1.0 (r2: ZERO searches); rebuild-net: fresh net + graph only -> 6/6.
