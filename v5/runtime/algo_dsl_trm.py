@@ -375,23 +375,25 @@ def _beam_search(model, goal_vec, fam, fams, resolve_fn, atom_names, atom_vecs, 
             return -float(model.loss(g_t, A, steps))
 
     used = 0
-    prefixes = [[]]
+    prefixes = [([], False)]                               # (prefix, came-through-an-epsilon-slot)
     for _depth in range(max_transforms + 1):
-        terms = [p + [Op("REDUCE", agg)] for p in prefixes for agg in AGGS]
-        terms.sort(key=lambda p: -_score_pipe(model, g_t, A, atom_idx, p))
-        for pipe in terms:
+        terms = [(p + [Op("REDUCE", agg)], eps) for p, eps in prefixes for agg in AGGS]
+        terms.sort(key=lambda pe: -_score_pipe(model, g_t, A, atom_idx, pe[0]))
+        for pipe, eps in terms:
             if budget is not None and used >= budget:
-                return [], used
+                return [], used, None
             used += 1
             if chk(pipe, fam):
-                return [pipe], used                       # shallowest general hit in the beam
-        ext = [p + [Op(op, a)] for p in prefixes for (op, a) in slot]
-        ext.sort(key=lambda p: -score(program_to_steps(p, atom_idx)))
+                # shallowest general hit; origin records WHO found it (the epsilon reuse metric:
+                # "how often does exploration discover programs that later become heavily reused?")
+                return [pipe], used, ("epsilon" if eps else "beam")
+        ext = [(p + [Op(op, a)], eps) for p, eps in prefixes for (op, a) in slot]
+        ext.sort(key=lambda pe: -score(program_to_steps(pe[0], atom_idx)))
         keep = ext[:B]
         if explore and len(ext) > B:                       # epsilon slots: escape the prior's corner
-            keep = keep + rng.sample(ext[B:], min(explore, len(ext) - B))
+            keep = keep + [(p, True) for p, _ in rng.sample(ext[B:], min(explore, len(ext) - B))]
         prefixes = keep
-    return [], used
+    return [], used, None
 
 
 def solve_with_search(model, task, fams, atom_names, atom_vecs, resolve_fn, embed_fn, atom_idx,
@@ -409,18 +411,21 @@ def solve_with_search(model, task, fams, atom_names, atom_vecs, resolve_fn, embe
     chk = is_general or _default_is_general(fams, resolve_fn, n_verify)
     pipe = model.decode(torch.as_tensor(gv), A, atom_names, max_len=max_transforms + 2)
     if chk(pipe, task.name):
-        return dict(solved=True, pipe=pipe, via="decode", verifies=1)
-    search = _beam_search if beam else _guided_search
+        return dict(solved=True, pipe=pipe, via="decode", verifies=1, origin=None)
     kw = dict(max_transforms=max_transforms, n_verify=n_verify, budget=budget, is_general=is_general)
     if beam:
         kw["B"], kw["explore"], kw["seed"] = beam, explore, seed
-    found, used = search(model, gv, task.name, fams, resolve_fn, atom_names, atom_vecs, **kw)
+        found, used, origin = _beam_search(model, gv, task.name, fams, resolve_fn, atom_names,
+                                           atom_vecs, **kw)
+    else:
+        found, used = _guided_search(model, gv, task.name, fams, resolve_fn, atom_names, atom_vecs, **kw)
+        origin = "guided" if found else None
     if not found:
-        return dict(solved=False, pipe=None, via=None, verifies=used + 1)
+        return dict(solved=False, pipe=None, via=None, verifies=used + 1, origin=None)
     if opt is None:
         opt = torch.optim.Adam(model.parameters(), lr=lr)
     _sft_steps(model, opt, [(gv, program_to_steps(p, atom_idx)) for p in found], A, sft_steps, seed=seed)
-    return dict(solved=True, pipe=found[0], via="search", verifies=used + 1)
+    return dict(solved=True, pipe=found[0], via="search", verifies=used + 1, origin=origin)
 
 
 def train_star(model, tasks, atom_names, atom_vecs, fams, resolve_fn, embed_fn, atom_idx,

@@ -132,10 +132,11 @@ def _graph_atoms(graph: MemoryGraph, embed_fn, programs_as_atoms: bool = False):
 
 def _zero_shot(model, atom_names, atom_vecs, embed_fn, chk, texts_by_fam, max_len=8):
     """Decode-ONLY solve on the given goals (no search, no updates) — the recall/amortization measure.
-    For the factory domain the goals are HELD-OUT phrasings, so this is paraphrase generalization."""
+    For the factory domain the goals are HELD-OUT phrasings, so this is paraphrase generalization.
+    Returns (fams_solved, n_fams, inst_solved, inst_total, per_fam={fam: (ok, total)})."""
     import torch
     A = torch.as_tensor(atom_vecs, dtype=torch.float32)
-    fams_solved, inst_solved, inst_total = 0, 0, 0
+    fams_solved, inst_solved, inst_total, per_fam = 0, 0, 0, {}
     for fam, texts in texts_by_fam.items():
         ok = 0
         for text in texts:
@@ -143,15 +144,17 @@ def _zero_shot(model, atom_names, atom_vecs, embed_fn, chk, texts_by_fam, max_le
             pipe = model.decode(torch.as_tensor(gv), A, atom_names, max_len=max_len)
             ok += int(chk(pipe, fam))
         inst_solved += ok; inst_total += len(texts)
+        per_fam[fam] = (ok, len(texts))
         fams_solved += int(ok == len(texts) and ok > 0)
-    return fams_solved, len(texts_by_fam), inst_solved, inst_total
+    return fams_solved, len(texts_by_fam), inst_solved, inst_total, per_fam
 
 
 def _sleep_store(graph_path: str, retr: MGRetriever, discoveries: dict, rnd: int, domain: dict,
-                 concept: str = "concept_algorithms"):
+                 concept: str = "concept_algorithms", origins: dict | None = None):
     """SLEEP write-back: each discovered family program -> an implementation node (kind=program, pipeline
     symbolic in metadata) + depend edges to the atoms it calls + part_of the concept. Health-gated via
-    graph_grower. Returns #stored."""
+    graph_grower. `origins[fam]` (beam|epsilon|guided) rides in metadata — the provenance behind the
+    "how often does exploration discover programs that get reused?" metric. Returns #stored."""
     g = retr.graph
     cands = []
     for fam, pipe in discoveries.items():
@@ -163,6 +166,7 @@ def _sleep_store(graph_path: str, retr: MGRetriever, discoveries: dict, rnd: int
             nid, code, domain["text_of"][fam], f"grr8_r{rnd}",
             metadata={"kind": "program", "family": fam, "input_kind": domain["fams"][fam][0],
                       "pipeline": [[op.kind, op.arg] for op in pipe],
+                      "origin": (origins or {}).get(fam, "unknown"), "found_round": rnd,
                       # the goal REGION, not a point: every train phrasing rides with the program, so a
                       # rebuilt net generalizes to held-out phrasings (one stored phrasing measured 5/24)
                       "texts": domain["texts_of"][fam]}))
@@ -195,7 +199,7 @@ def wake_sleep_loop(graph_path: str, embed_fn, rounds: int = 3, budget: int = 15
     model = ProgramDecoder(d_in=atom_vecs.shape[1], d=64)
     opt = torch.optim.Adam(model.parameters(), lr=5e-4)
     A = torch.as_tensor(atom_vecs, dtype=torch.float32)
-    pool, known = [], {}                                    # known: fam -> discovered pipe
+    pool, known, origin_of = [], {}, {}                     # known: fam -> discovered pipe
     hist = []
     for r in range(rounds):
         mt = domain["curriculum"](r)
@@ -212,23 +216,37 @@ def wake_sleep_loop(graph_path: str, embed_fn, rounds: int = 3, budget: int = 15
                     verifies.append(res["verifies"])
                     if res["via"] == "search":
                         n_disc += 1
+                        if fam not in known:                # first discovery fixes the origin credit
+                            origin_of[fam] = res.get("origin") or "search"
                         known[fam] = res["pipe"]
                     gv = np.asarray(list(embed_fn({"q": t.text}).values())[0], dtype=np.float32)
                     pool.append((gv, program_to_steps(known.get(fam, res["pipe"]), atom_idx)))
         _sft_steps(model, opt, pool, A, sft_steps, seed=seed + r)          # CONSOLIDATE (replay)
-        stored = _sleep_store(graph_path, retr, known, r, domain)          # SLEEP (idempotent per fam)
+        stored = _sleep_store(graph_path, retr, known, r, domain, origins=origin_of)
         if stored:
             retr = MGRetriever(MemoryGraph.load_json(graph_path), embed_fn)
             resolve_fn = lambda atoms: retr.resolve_deps(atoms) if atoms else ""
             chk = domain["make_is_general"](resolve_fn)
-        fz, nf, iz, it = _zero_shot(model, atom_names, atom_vecs, embed_fn, chk,
-                                    domain["eval_texts"](900 + r))
+        fz, nf, iz, it, per_fam = _zero_shot(model, atom_names, atom_vecs, embed_fn, chk,
+                                             domain["eval_texts"](900 + r))
         mv = sum(verifies) / max(1, len(verifies))
         hist.append((r, n_disc, mv, fz, nf, len(retr.graph.nodes)))
         if log:
             print(f"  round {r}: mt<={mt} | search-discovered {n_disc} | verifies-to-solve {mv:.1f} | "
                   f"zero-shot {fz}/{nf} fams ({iz}/{it} inst) | graph {len(retr.graph.nodes)} nodes "
                   f"{len(retr.graph.edges)} edges", flush=True)
+    if log and origin_of:
+        # THE EPSILON-REUSE METRIC: for each discovery origin, how many of its finds are now REUSED
+        # zero-shot (the net decodes them on held-out goals with no search)? Exploration that finds
+        # load-bearing programs shows up here; junk finds don't get reused.
+        print("  --- discovery provenance -> reuse (held-out zero-shot) ---", flush=True)
+        for origin in sorted({o for o in origin_of.values()}):
+            fams_o = [f for f, o in origin_of.items() if o == origin]
+            reused = [f for f in fams_o if per_fam.get(f, (0, 0))[0] > 0]
+            inst_ok = sum(per_fam.get(f, (0, 0))[0] for f in fams_o)
+            inst_tot = sum(per_fam.get(f, (0, 0))[1] for f in fams_o)
+            print(f"  {origin:8s}: discovered {len(fams_o)} fams -> reused {len(reused)} "
+                  f"({inst_ok}/{inst_tot} held-out inst) : {', '.join(sorted(reused)) or '-'}", flush=True)
     return model, hist
 
 
@@ -257,10 +275,11 @@ def rebuild_net(graph_path: str, embed_fn, sft_steps: int = 800, seed: int = 0, 
     retr = MGRetriever(g, embed_fn)
     resolve_fn = lambda atoms: retr.resolve_deps(atoms) if atoms else ""
     chk = domain["make_is_general"](resolve_fn)
-    fz, nf, iz, it = _zero_shot(model, atom_names, atom_vecs, embed_fn, chk, domain["eval_texts"](901))
+    fz, nf, iz, it, _pf = _zero_shot(model, atom_names, atom_vecs, embed_fn, chk, domain["eval_texts"](901))
     if log:
         print(f"  rebuild-net: fresh net + {len(progs)} graph-stored programs ({len(traces)} stored "
-              f"phrasings, no search) -> zero-shot {fz}/{nf} fams ({iz}/{it} inst)", flush=True)
+              f"phrasings, no search, sft={sft_steps}) -> zero-shot {fz}/{nf} fams ({iz}/{it} inst)",
+              flush=True)
     return fz, nf
 
 
@@ -420,7 +439,7 @@ def main():
                             sft_steps=a.sft_steps, seed=a.seed, domain=domain)
         if a.rebuild:
             print(f"GRR-8 rebuild-net (real mpnet, domain={domain['name']}): {a.graph}", flush=True)
-            rebuild_net(a.graph, embed, seed=a.seed, domain=domain)
+            rebuild_net(a.graph, embed, sft_steps=max(800, a.sft_steps * 2), seed=a.seed, domain=domain)
         return
     ap.print_help()
 
