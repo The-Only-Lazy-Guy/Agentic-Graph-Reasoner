@@ -347,14 +347,17 @@ def _guided_search(model, goal_vec, fam, fams, resolve_fn, atom_names, atom_vecs
 
 
 def _beam_search(model, goal_vec, fam, fams, resolve_fn, atom_names, atom_vecs, max_transforms=6,
-                 n_verify=32, budget=None, B=12, is_general=None):
+                 n_verify=32, budget=None, B=12, is_general=None, explore=0, seed=0):
     """Net-BEAM search for DEEP programs (exhaustive levels die combinatorially: depth 6 over 9 atoms
     x 2 ops ~ 34M candidates). Depth-ascending like the exhaustive search (so the first general hit is
     still the shallowest = MDL-minimal within the explored set): at each depth, (1) TERMINATE the top-B
     prefixes with every REDUCE(agg), verify in the net's score order; (2) EXTEND each prefix by every
-    (op, atom), keep the top-B partials by teacher-forced log-prob. Completeness is traded for the
-    net's prior — the curriculum makes that prior real before deep families are attempted.
+    (op, atom), keep the top-B partials by teacher-forced log-prob PLUS `explore` random extensions.
+    The exploration slots break the rich-get-richer collapse (measured twice: after consolidation the
+    prior owns the beam and unseen structures never enter the top-B — discovery stalled at 7/10 and
+    10/24); vary `seed` per round so the random slice explores a FRESH corner each retry.
     Returns (found, verifies_used)."""
+    import random
     import torch
     kind = fams[fam][0]
     ops = _valid_ops_for_kind(kind)
@@ -363,6 +366,7 @@ def _beam_search(model, goal_vec, fam, fams, resolve_fn, atom_names, atom_vecs, 
     g_t = torch.as_tensor(np.asarray(goal_vec, dtype=np.float32))
     A = torch.as_tensor(atom_vecs, dtype=torch.float32)
     chk = is_general or _default_is_general(fams, resolve_fn, n_verify)
+    rng = random.Random(seed)
 
     def score(steps):
         if not steps:
@@ -383,13 +387,16 @@ def _beam_search(model, goal_vec, fam, fams, resolve_fn, atom_names, atom_vecs, 
                 return [pipe], used                       # shallowest general hit in the beam
         ext = [p + [Op(op, a)] for p in prefixes for (op, a) in slot]
         ext.sort(key=lambda p: -score(program_to_steps(p, atom_idx)))
-        prefixes = ext[:B]
+        keep = ext[:B]
+        if explore and len(ext) > B:                       # epsilon slots: escape the prior's corner
+            keep = keep + rng.sample(ext[B:], min(explore, len(ext) - B))
+        prefixes = keep
     return [], used
 
 
 def solve_with_search(model, task, fams, atom_names, atom_vecs, resolve_fn, embed_fn, atom_idx,
                       opt=None, sft_steps=150, budget=None, max_transforms=2, n_verify=32,
-                      lr=5e-4, seed=0, is_general=None, beam=0):
+                      lr=5e-4, seed=0, is_general=None, beam=0, explore=0):
     """The TRM inference primitive — the design's retrieve -> reason -> VERIFY -> update -> retry-until-
     solve, embodied: (1) DECODE (recall) + verify-general; (2) on fail, net-GUIDED SEARCH under a verify
     budget (exhaustive-guided by default; `beam=B` switches to beam search for deep programs);
@@ -406,7 +413,7 @@ def solve_with_search(model, task, fams, atom_names, atom_vecs, resolve_fn, embe
     search = _beam_search if beam else _guided_search
     kw = dict(max_transforms=max_transforms, n_verify=n_verify, budget=budget, is_general=is_general)
     if beam:
-        kw["B"] = beam
+        kw["B"], kw["explore"], kw["seed"] = beam, explore, seed
     found, used = search(model, gv, task.name, fams, resolve_fn, atom_names, atom_vecs, **kw)
     if not found:
         return dict(solved=False, pipe=None, via=None, verifies=used + 1)

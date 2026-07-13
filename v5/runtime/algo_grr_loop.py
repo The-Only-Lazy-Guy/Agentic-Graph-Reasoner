@@ -78,7 +78,8 @@ def hand6_domain():
     )
 
 
-def factory_domain(n_families=24, fam_seed=0, para_train=3, para_eval=2, beam=12, max_chain=4):
+def factory_domain(n_families=24, fam_seed=0, para_train=3, para_eval=2, beam=12, max_chain=4,
+                   explore=6):
     """The scale-up domain: algo_dsl_gen factory families, paraphrased goals, beam search.
     Zero-shot eval decodes HELD-OUT phrasings (never trained on) — generalization, not point recall."""
     from v5.runtime.algo_dsl_gen import (GEN_ATOMS, gen_families, gen_tasks, pipe_is_general,
@@ -109,7 +110,7 @@ def factory_domain(n_families=24, fam_seed=0, para_train=3, para_eval=2, beam=12
         tasks_by_fam=tasks_by_fam,
         eval_texts=lambda _seed: {f: allv[f][para_train:] for f in pipes},   # HELD-OUT phrasings
         seed_graph=seed_graph,
-        curriculum=lambda r: min(maxlen - 1, 2 + r), beam=beam,
+        curriculum=lambda r: min(maxlen - 1, 2 + r), beam=beam, explore=explore,
     )
 
 
@@ -205,7 +206,8 @@ def wake_sleep_loop(graph_path: str, embed_fn, rounds: int = 3, budget: int = 15
                 res = solve_with_search(model, t, domain["fams"], atom_names, atom_vecs, resolve_fn,
                                         embed_fn, atom_idx, opt=opt, budget=budget,
                                         max_transforms=mt, seed=seed + r,
-                                        is_general=chk, beam=domain["beam"])
+                                        is_general=chk, beam=domain["beam"],
+                                        explore=domain.get("explore", 0))
                 if res["solved"]:
                     verifies.append(res["verifies"])
                     if res["via"] == "search":
@@ -391,6 +393,8 @@ def main():
     ap.add_argument("--para-train", type=int, default=3)
     ap.add_argument("--para-eval", type=int, default=2)
     ap.add_argument("--beam", type=int, default=12)
+    ap.add_argument("--explore", type=int, default=6,
+                    help="epsilon slots in the beam (random extensions kept besides the top-B)")
     ap.add_argument("--graph", default="graphs/algo_grr_loop.json")
     ap.add_argument("--rounds", type=int, default=3)
     ap.add_argument("--budget", type=int, default=1500)
@@ -402,7 +406,8 @@ def main():
         sys.exit(0 if _selftest() else 1)
     if a.loop or a.rebuild:
         if a.factory:
-            domain = factory_domain(a.families, a.fam_seed, a.para_train, a.para_eval, a.beam)
+            domain = factory_domain(a.families, a.fam_seed, a.para_train, a.para_eval, a.beam,
+                                    explore=a.explore)
         else:
             domain = hand6_domain()
         if not Path(a.graph).exists():
