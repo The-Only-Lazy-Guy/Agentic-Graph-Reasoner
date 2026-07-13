@@ -90,7 +90,13 @@ Trained: artifacts/grr6_trm.pt, artifacts/grr6_dsl.pt.
 ##   PROVENANCE->REUSE (per-node origin/found_round; "does exploration find load-bearing programs?"):
 ##     run A: beam 10/10 reused (19/20 inst), eps 5 disc/3 reused | run B: eps 8 disc/7 reused (11/16),
 ##     beam 7 disc/6 reused (10/14) -> epsilon ~ HALF of all knowledge, definitively load-bearing.
-##   Open: ~9 deepest fams undiscovered at budget 800 (runs now cheap enough to knob-sweep).
+##   SEARCH CEILING (knob-sweep verdict, 14m28s run): 4x budget (3000) + 2x epsilon (16) + 14 rounds =
+##     SAME 15/24 — budget is NOT binding. Everything discovered is perfectly amortized (beam 12/12
+##     reused 24/24 inst, eps 3/3 6/6; zero-shot 15/24 = exactly the discovered set; rebuild 12/24).
+##     The 9 resisters are structural: a len-6 program's 5-prefix must survive 4 consecutive beam
+##     prunings (~5e-5/search) — the blind-search wall. THE LM-PHASE MOTIVATION: those fams' texts
+##     ("sum of the digit-reversal of the square of...") are compositionally PARSEABLE — an LM proposer
+##     emits the pipeline directly, same verify gate.
 ##   Repro: python -m v5.runtime.algo_grr_loop --loop --factory --families 24 --rounds 8 \
 ##            --budget 800 --n-wake 3 --sft-steps 1200 --explore 8 --graph graphs/algo_grr_factory.json
 ## GRR-9 h2h VERDICT (real mpnet, 32 factory fams, held-out-PHRASING eval, 3 seeds):
