@@ -47,26 +47,40 @@ GRR-7 STaR (search+verify+consolidate), REAL MPNET --compo-gen-star --hard, leav
   weak-input-only variants (digit_sum-as-identity on single-digit values) that pass search but fail eval
   fuzz -> max_lis wandered 0-100%; minimality drops them (they're longer than the true ref) -> 100% stable.
   The NET alone is still recall zero-shot; the SYSTEM (net+search) generalizes — the honest DreamCoder-wake framing.
-- Next: (1) net-GUIDED enumeration + verify budget so search scales past brute-force as families/atoms grow
-  (amortization becomes load-bearing: verifies-to-solve should DROP as the net learns); (2) sleep-compress
-  the discovered programs back into the library (close the wake/sleep loop -> compounding); (3) harder task
-  gen (wider input ranges) so the quality bar doesn't lean on minimality alone.
+- GRR-8 (design-complete pass) = ALL THREE next-levers BUILT + selftested:
+  (1) net-GUIDED search + verify budget (algo_dsl_trm._guided_search): verifies-to-solve 54 -> 5 after
+      consolidation (selftest [5]) — amortization measured, search scales past brute force;
+  (2) solve_with_search: the design's retrieve->reason->VERIFY->update->retry-UNTIL-SOLVE inference
+      primitive (decode -> guided search -> consolidate; via flips search->decode);
+  (3) algo_grr_loop.py = THE unified wake/sleep compounding loop over ONE graph: wake -> consolidate ->
+      SLEEP writes discovered programs INTO THE GRAPH (impl nodes, pipeline SYMBOLIC in metadata, depend
+      edges to atom closure, health-gated) -> re-index -> measure. Selftest: zero-shot RISES 4/6 -> 6/6
+      fams while verifies-to-solve FALLS 8.8 -> 1.0; --rebuild-net: FRESH net + graph only -> 6/6
+      (the graph IS the memory — survives net/box resets; the net just re-amortizes);
+  (4) harder task inputs (arrays len<=10, vals<=49): weak-input degenerates now fail fuzz directly.
+  Also fixed a selftest keyword collision ("increasing" before "subsequence") that had collapsed
+  max_lis+sum_lcs to one embedding — explains the old synthetic-86%-vs-mpnet-100% gap.
+- Deferred to SCALE-UP by design (user call): more dataset, RL-with-LM synergy (LM authors new atoms),
+  hierarchical tasks (--programs-as-atoms wins), RGCN structured read.
 
 ## Repro (molab, no 4B — mpnet + tiny nets, minutes)
 ```
 python -m v5.runtime.algo_composed --selftest                    # thesis: str_dp2 load-bearing
-python -m v5.runtime.algo_dsl_trm --train --hard --graph graphs/algo_reason_hard.json      # 100% (recall)
-python -m v5.runtime.algo_dsl_trm --compo-gen --hard --graph graphs/algo_reason_hard.json  # 0% = recall (imitation)
-python -m v5.runtime.algo_dsl_trm --compo-gen-star --hard --graph graphs/algo_reason_hard.json  # STaR: recall vs with-search
-# every module: python -m v5.runtime.<algo_quality|algo_capability|algo_abstract|algo_sleep|algo_dsl|algo_composed|algo_trm_compose|algo_dsl_trm> --selftest
+python -m v5.runtime.algo_dsl_trm --compo-gen-star --hard --graph graphs/algo_reason_hard.json  # 0% -> 100%
+python -m v5.runtime.algo_grr_loop --loop --graph graphs/algo_grr_loop.json     # THE loop (compounding table)
+python -m v5.runtime.algo_grr_loop --rebuild --graph graphs/algo_grr_loop.json  # graph-only net rebuild
+# every module: python -m v5.runtime.<algo_quality|algo_capability|algo_abstract|algo_sleep|algo_graph_edits|algo_graph_mg|algo_compose_tasks|algo_composed|algo_trm_compose|algo_dsl|algo_dsl_trm|algo_grr_loop|algo_meta|algo_anticheat> --selftest   # 14/14 PASS
 ```
 
 ## Files (all v5/runtime/)
 algo_quality · algo_capability · algo_abstract · algo_sleep · algo_composed · algo_trm_compose ·
-algo_dsl · algo_dsl_trm (STaR: _enumerate_general/_is_general/train_star/compo_gen_star; legacy train_rl
-kept for comparison). Reuses: algo_graph_mg (MGRetriever.resolve_deps), algo_compose_tasks
-(_REF/_NEEDS/ALL_ATOMS/gen), graph_grower, subgraph/gnn_encoder/goal_encoder (read stack).
+algo_dsl · algo_dsl_trm (STaR + _guided_search + solve_with_search; legacy train_rl kept for comparison) ·
+algo_grr_loop (GRR-8: wake_sleep_loop/rebuild_net/_sleep_store) · algo_meta · algo_anticheat.
+Reuses: algo_graph_mg (MGRetriever.resolve_deps), algo_compose_tasks (_REF/_NEEDS/ALL_ATOMS/gen),
+algo_graph_edits+graph_grower (health-gated writes), subgraph/gnn_encoder/goal_encoder (read stack).
 Trained: artifacts/grr6_trm.pt, artifacts/grr6_dsl.pt.
 
-## Next: net-guided search (scale past brute-force) + sleep-compress discoveries (compounding).
 ## GRR-7 DONE: real mpnet 0% recall -> 100% with-search, all 6 families stable every seed.
+## GRR-8 DONE: design-complete — unified loop compounds (zero-shot 4/6->6/6, verifies 8.8->1.0),
+##             graph remembers (rebuild-net 6/6 from graph alone). 14/14 selftests PASS.
+## NEXT = SCALE-UP: more dataset + RL-with-LM synergy (LM authors new atoms) + hierarchical tasks.
