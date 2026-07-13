@@ -2,31 +2,38 @@
 
   WAKE         per task (curriculum: the transform budget grows with rounds): DECODE (recall) -> verify;
                on fail, net-GUIDED SEARCH under a verify budget (algo_dsl_trm.solve_with_search — the
-               until-solve inference primitive)
+               until-solve inference primitive; beam search for deep programs)
   CONSOLIDATE  SFT the net on every discovery so far (STaR: the decode amortizes the search)
   SLEEP        write each newly-discovered family PROGRAM into the GRAPH as an implementation node —
                code = the realized program (CALLS atoms, never inlines), the pipeline rides SYMBOLICALLY
                in metadata (the graph stores the program's FORM), depend edges to its atom closure —
                via graph_grower's health-gated apply. Then re-index retrieval: the action space IS the
                graph, and it grew.
-  MEASURE      per round: net zero-shot solve (decode-only, fresh instances), mean verifies-to-solve,
+  MEASURE      per round: net zero-shot solve (decode-only, fresh goals), mean verifies-to-solve,
                graph size. Compounding = zero-shot RISES while verifies-to-solve FALLS.
 
 --rebuild-net  fresh net, NO search: SFT purely from the GRAPH's stored program nodes, then eval.
                Content is symbolic in the graph (survives any net/box reset); the net just re-amortizes.
 
-Discovery is search + oracle-I/O verify only — reference pipelines are NEVER read (algo_dsl._PROGRAMS
-supplies family SCOPE and input kind, nothing else). Program nodes are stored as retrievable outputs;
-enumerating them as callable atoms (--programs-as-atoms) is the hierarchical-composition lever for the
-scale-up dataset (mechanism present, wins need tasks that nest families).
+DOMAINS (GRR-9c): the loop is domain-parametrized.
+  hand6    the 6 hand-written families (algo_compose_tasks oracles, exhaustive-guided search) — the
+           original validation domain, unchanged.
+  factory  algo_dsl_gen: N generated families, chain depth to ~6, PARAPHRASED goals (train phrasings !=
+           eval phrasings — zero-shot is measured on HELD-OUT phrasings), BEAM search (exhaustive levels
+           die combinatorially at this depth), pipe_is_general verifier. The scale-up domain.
+Discovery is search + oracle-I/O verify only — reference pipelines are NEVER read by the searcher (they
+define each family's oracle BEHAVIOR and the node text, nothing else).
 
   selftest (no LM):     python -m v5.runtime.algo_grr_loop --selftest
   molab (real mpnet):   python -m v5.runtime.algo_grr_loop --loop --graph graphs/algo_grr_loop.json
-                        python -m v5.runtime.algo_grr_loop --rebuild --graph graphs/algo_grr_loop.json
+                        python -m v5.runtime.algo_grr_loop --loop --factory --families 24 --rounds 5 \
+                            --graph graphs/algo_grr_factory.json
+                        python -m v5.runtime.algo_grr_loop --rebuild [--factory --families 24] --graph ...
 """
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -34,14 +41,79 @@ import numpy as np
 
 from graph_core import MemoryGraph
 from v5.runtime.algo_dsl import _PROGRAMS, Op, atoms_of, realize_program
-from v5.runtime.algo_dsl_trm import (_build, _guided_search, _is_general, _sft_steps, program_to_steps,
+from v5.runtime.algo_dsl_trm import (_build, _is_general, _sft_steps, program_to_steps,
                                      solve_with_search)
 from v5.runtime.algo_graph_edits import edge_candidate, grow, node_candidate
 from v5.runtime.algo_graph_mg import MGRetriever, _fn_name
 
-# family SCOPE + input kind only — the reference pipelines are never read (discovery = search + verify)
+# hand6 family SCOPE + input kind only — reference pipelines are never read by the search
 FAM_KINDS = {f: (k, None) for f, (k, _p) in _PROGRAMS.items()}
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DOMAINS — everything family-specific lives here; the loop below is domain-blind.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def hand6_domain():
+    """The original 6-family validation domain (algo_compose_tasks oracles, exhaustive-guided search)."""
+    from v5.runtime.algo_compose_tasks import _TEXT, gen_compose_tasks, seed_atom_graph
+
+    def tasks_by_fam(seed):
+        by = {}
+        for t in list(gen_compose_tasks(60, seed=seed)) + list(gen_compose_tasks(60, seed=seed, hard=True)):
+            if t.name in FAM_KINDS:
+                by.setdefault(t.name, []).append(t)
+        return by
+
+    def eval_texts(seed):
+        return {f: [t.text for t in ts[:3]] for f, ts in tasks_by_fam(seed).items()}
+
+    return dict(
+        name="hand6", fams=FAM_KINDS, text_of=_TEXT,
+        make_is_general=lambda resolve_fn: (lambda p, f: _is_general(p, f, FAM_KINDS, resolve_fn, 24)),
+        tasks_by_fam=tasks_by_fam, eval_texts=eval_texts,
+        seed_graph=lambda path: seed_atom_graph(path, hard=True),
+        curriculum=lambda r: 1 if r == 0 else 2, beam=0,
+    )
+
+
+def factory_domain(n_families=24, fam_seed=0, para_train=3, para_eval=2, beam=12, max_chain=4):
+    """The scale-up domain: algo_dsl_gen factory families, paraphrased goals, beam search.
+    Zero-shot eval decodes HELD-OUT phrasings (never trained on) — generalization, not point recall."""
+    from v5.runtime.algo_dsl_gen import (GEN_ATOMS, gen_families, gen_tasks, pipe_is_general,
+                                         pipe_text_variants)
+    pipes = gen_families(n_families, seed=fam_seed, max_chain=max_chain)
+    fams = {f: ("list", None) for f in pipes}
+    allv = {f: pipe_text_variants(p, para_train + para_eval) for f, p in pipes.items()}
+
+    def tasks_by_fam(seed):
+        by = {}
+        for t in gen_tasks(pipes, n_per=max(3, para_train), seed=seed, paraphrase_k=para_train):
+            by.setdefault(t.name, []).append(t)
+        return by
+
+    def seed_graph(path):
+        nodes = [{"id": "concept_algorithms", "text": "algorithms", "node_type": "concept"}]
+        for a, (text, code, _fn, _role) in GEN_ATOMS.items():
+            nodes.append({"id": f"impl_{a}", "text": text, "node_type": "implementation",
+                          "metadata": {"code": code}})
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(json.dumps({"metadata": {}, "nodes": nodes, "edges": []}), encoding="utf-8")
+
+    maxlen = max(len(p) for p in pipes.values())
+    return dict(
+        name="factory", fams=fams, text_of={f: allv[f][0] for f in pipes},
+        make_is_general=lambda _resolve_fn: (lambda p, f: pipe_is_general(p, pipes, f, n=24)),
+        tasks_by_fam=tasks_by_fam,
+        eval_texts=lambda _seed: {f: allv[f][para_train:] for f in pipes},   # HELD-OUT phrasings
+        seed_graph=seed_graph,
+        curriculum=lambda r: min(maxlen - 1, 2 + r), beam=beam,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# The loop (domain-blind)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def _graph_atoms(graph: MemoryGraph, embed_fn, programs_as_atoms: bool = False):
     """The action space, read from the GRAPH: implementation nodes with code (program nodes excluded by
@@ -55,49 +127,38 @@ def _graph_atoms(graph: MemoryGraph, embed_fn, programs_as_atoms: bool = False):
     return names, {a: i for i, a in enumerate(names)}, mat
 
 
-def _tasks_by_family(seed: int, n: int = 60):
-    from v5.runtime.algo_compose_tasks import gen_compose_tasks
-    by = {}
-    for t in list(gen_compose_tasks(n, seed=seed)) + list(gen_compose_tasks(n, seed=seed, hard=True)):
-        if t.name in FAM_KINDS:
-            by.setdefault(t.name, []).append(t)
-    return by
-
-
-def _zero_shot(model, atom_names, atom_vecs, resolve_fn, embed_fn, seed: int, n_per: int = 3,
-               n_verify: int = 24):
-    """Decode-ONLY solve on fresh instances (no search, no updates) — the recall/amortization measure."""
+def _zero_shot(model, atom_names, atom_vecs, embed_fn, chk, texts_by_fam, max_len=8):
+    """Decode-ONLY solve on the given goals (no search, no updates) — the recall/amortization measure.
+    For the factory domain the goals are HELD-OUT phrasings, so this is paraphrase generalization."""
     import torch
     A = torch.as_tensor(atom_vecs, dtype=torch.float32)
-    by = _tasks_by_family(seed)
     fams_solved, inst_solved, inst_total = 0, 0, 0
-    for fam, ts in by.items():
+    for fam, texts in texts_by_fam.items():
         ok = 0
-        for t in ts[:n_per]:
-            gv = np.asarray(list(embed_fn({"q": t.text}).values())[0], dtype=np.float32)
-            pipe = model.decode(torch.as_tensor(gv), A, atom_names)
-            ok += int(_is_general(pipe, fam, FAM_KINDS, resolve_fn, n_verify))
-        inst_solved += ok; inst_total += min(n_per, len(ts))
-        fams_solved += int(ok == min(n_per, len(ts)) and ok > 0)
-    return fams_solved, len(by), inst_solved, inst_total
+        for text in texts:
+            gv = np.asarray(list(embed_fn({"q": text}).values())[0], dtype=np.float32)
+            pipe = model.decode(torch.as_tensor(gv), A, atom_names, max_len=max_len)
+            ok += int(chk(pipe, fam))
+        inst_solved += ok; inst_total += len(texts)
+        fams_solved += int(ok == len(texts) and ok > 0)
+    return fams_solved, len(texts_by_fam), inst_solved, inst_total
 
 
-def _sleep_store(graph_path: str, retr: MGRetriever, discoveries: dict, rnd: int,
+def _sleep_store(graph_path: str, retr: MGRetriever, discoveries: dict, rnd: int, domain: dict,
                  concept: str = "concept_algorithms"):
     """SLEEP write-back: each discovered family program -> an implementation node (kind=program, pipeline
     symbolic in metadata) + depend edges to the atoms it calls + part_of the concept. Health-gated via
     graph_grower. Returns #stored."""
-    from v5.runtime.algo_compose_tasks import _TEXT
     g = retr.graph
     cands = []
     for fam, pipe in discoveries.items():
         nid = f"impl_{fam}"
         if nid in g.nodes:                                  # already banked (or name collision) -> skip
             continue
-        code = realize_program(fam, FAM_KINDS[fam][0], pipe)
+        code = realize_program(fam, domain["fams"][fam][0], pipe)
         cands.append(node_candidate(
-            nid, code, _TEXT[fam], f"grr8_r{rnd}",
-            metadata={"kind": "program", "family": fam, "input_kind": FAM_KINDS[fam][0],
+            nid, code, domain["text_of"][fam], f"grr8_r{rnd}",
+            metadata={"kind": "program", "family": fam, "input_kind": domain["fams"][fam][0],
                       "pipeline": [[op.kind, op.arg] for op in pipe]}))
         cands.append(edge_candidate(nid, concept, "part_of", f"grr8_r{rnd}"))
         for atom in sorted(atoms_of(pipe)):
@@ -112,30 +173,34 @@ def _sleep_store(graph_path: str, retr: MGRetriever, discoveries: dict, rnd: int
 
 
 def wake_sleep_loop(graph_path: str, embed_fn, rounds: int = 3, budget: int = 1500,
-                    sft_steps: int = 400, n_wake: int = 2, seed: int = 0, log: bool = True):
+                    sft_steps: int = 400, n_wake: int = 2, seed: int = 0, log: bool = True,
+                    domain: dict | None = None):
     """The loop. Returns (model, hist) with hist rows:
     (round, n_search_discoveries, mean_verifies_to_solve, fams_zero_shot, n_fams, graph_nodes)."""
     import torch
+    domain = domain or hand6_domain()
     torch, _nn, ProgramDecoder = _build()
     torch.manual_seed(seed)
     g = MemoryGraph.load_json(graph_path)
     atom_names, atom_idx, atom_vecs = _graph_atoms(g, embed_fn)
     retr = MGRetriever(g, embed_fn)
     resolve_fn = lambda atoms: retr.resolve_deps(atoms) if atoms else ""
+    chk = domain["make_is_general"](resolve_fn)
     model = ProgramDecoder(d_in=atom_vecs.shape[1], d=64)
     opt = torch.optim.Adam(model.parameters(), lr=5e-4)
     A = torch.as_tensor(atom_vecs, dtype=torch.float32)
     pool, known = [], {}                                    # known: fam -> discovered pipe
     hist = []
     for r in range(rounds):
-        mt = 1 if r == 0 else 2                             # curriculum: 2-step programs, then 3-step
-        by = _tasks_by_family(seed=100 + r)
+        mt = domain["curriculum"](r)
+        by = domain["tasks_by_fam"](100 + r)
         n_disc, verifies = 0, []
         for fam, ts in sorted(by.items()):
             for t in ts[:n_wake]:                           # WAKE
-                res = solve_with_search(model, t, FAM_KINDS, atom_names, atom_vecs, resolve_fn,
+                res = solve_with_search(model, t, domain["fams"], atom_names, atom_vecs, resolve_fn,
                                         embed_fn, atom_idx, opt=opt, budget=budget,
-                                        max_transforms=mt, seed=seed + r)
+                                        max_transforms=mt, seed=seed + r,
+                                        is_general=chk, beam=domain["beam"])
                 if res["solved"]:
                     verifies.append(res["verifies"])
                     if res["via"] == "search":
@@ -144,11 +209,13 @@ def wake_sleep_loop(graph_path: str, embed_fn, rounds: int = 3, budget: int = 15
                     gv = np.asarray(list(embed_fn({"q": t.text}).values())[0], dtype=np.float32)
                     pool.append((gv, program_to_steps(known.get(fam, res["pipe"]), atom_idx)))
         _sft_steps(model, opt, pool, A, sft_steps, seed=seed + r)          # CONSOLIDATE (replay)
-        stored = _sleep_store(graph_path, retr, known, r)                  # SLEEP (idempotent per fam)
+        stored = _sleep_store(graph_path, retr, known, r, domain)          # SLEEP (idempotent per fam)
         if stored:
             retr = MGRetriever(MemoryGraph.load_json(graph_path), embed_fn)
             resolve_fn = lambda atoms: retr.resolve_deps(atoms) if atoms else ""
-        fz, nf, iz, it = _zero_shot(model, atom_names, atom_vecs, resolve_fn, embed_fn, seed=900 + r)
+            chk = domain["make_is_general"](resolve_fn)
+        fz, nf, iz, it = _zero_shot(model, atom_names, atom_vecs, embed_fn, chk,
+                                    domain["eval_texts"](900 + r))
         mv = sum(verifies) / max(1, len(verifies))
         hist.append((r, n_disc, mv, fz, nf, len(retr.graph.nodes)))
         if log:
@@ -158,11 +225,13 @@ def wake_sleep_loop(graph_path: str, embed_fn, rounds: int = 3, budget: int = 15
     return model, hist
 
 
-def rebuild_net(graph_path: str, embed_fn, sft_steps: int = 800, seed: int = 0, log: bool = True):
+def rebuild_net(graph_path: str, embed_fn, sft_steps: int = 800, seed: int = 0, log: bool = True,
+                domain: dict | None = None):
     """The persistence proof: a FRESH net, NO search — SFT purely from the graph's stored program nodes
-    (pipeline is symbolic in metadata), then decode-only eval on fresh instances. The graph IS the
-    memory; the net re-amortizes it in seconds. Returns (fams_solved, n_fams)."""
+    (pipeline is symbolic in metadata), then decode-only eval on fresh goals (factory: HELD-OUT
+    phrasings). The graph IS the memory; the net re-amortizes it in seconds. Returns (fams, n_fams)."""
     import torch
+    domain = domain or hand6_domain()
     torch, _nn, ProgramDecoder = _build()
     torch.manual_seed(seed)
     g = MemoryGraph.load_json(graph_path)
@@ -178,7 +247,8 @@ def rebuild_net(graph_path: str, embed_fn, sft_steps: int = 800, seed: int = 0, 
     _sft_steps(model, opt, traces, torch.as_tensor(atom_vecs, dtype=torch.float32), sft_steps, seed=seed)
     retr = MGRetriever(g, embed_fn)
     resolve_fn = lambda atoms: retr.resolve_deps(atoms) if atoms else ""
-    fz, nf, iz, it = _zero_shot(model, atom_names, atom_vecs, resolve_fn, embed_fn, seed=901)
+    chk = domain["make_is_general"](resolve_fn)
+    fz, nf, iz, it = _zero_shot(model, atom_names, atom_vecs, embed_fn, chk, domain["eval_texts"](901))
     if log:
         print(f"  rebuild-net: fresh net + {len(traces)} graph-stored programs (no search) -> "
               f"zero-shot {fz}/{nf} fams ({iz}/{it} inst)", flush=True)
@@ -191,13 +261,11 @@ def _mpnet_embed():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SELFTEST — the WHOLE loop, no LM: cold net discovers by search; consolidation lifts zero-shot;
-# sleep banks programs into the graph (retrievable); verifies-to-solve falls; a FRESH net rebuilds
-# from the graph alone (the persistence thesis).
+# SELFTEST — [1-5] the hand6 loop (unchanged semantics), [6] the FACTORY domain at scale-down:
+# beam search discovers deep generated families, banks them, zero-shot measured on HELD-OUT phrasings.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _selftest() -> bool:
-    import json
     import tempfile
     from v5.runtime.algo_compose_tasks import ALL_ATOMS
     print("algo_grr_loop --selftest: wake->consolidate->sleep(graph)->measure, + rebuild-from-graph\n")
@@ -267,8 +335,41 @@ def _selftest() -> bool:
         print(f"  [5] rebuild-net: fresh net + graph-stored programs only -> {fz}/{nf} fams zero-shot "
               f"-> the GRAPH is the memory; the net re-amortizes -> PASS")
 
+    # [6] FACTORY domain at scale-down: beam search + paraphrased goals + held-out-phrasing zero-shot
+    from v5.runtime.algo_dsl_gen import gen_families, pipe_text_variants
+    dom = factory_domain(n_families=10, fam_seed=3, para_train=2, para_eval=1, beam=10, max_chain=3)
+    pipes = gen_families(10, seed=3, max_chain=3)
+    fam_base2 = {f: rng.standard_normal(d_in).astype("float32") for f in pipes}
+    text2fam = {t: f for f, p in pipes.items() for t in pipe_text_variants(p, 6)}
+
+    def embed2(d):
+        out = {}
+        for k, text in d.items():
+            f = text2fam.get(text)
+            out[k] = ((fam_base2[f] if f in fam_base2 else 0.05 * rng.standard_normal(d_in))
+                      + 0.15 * rng.standard_normal(d_in)).astype("float32")
+        return out
+
+    with tempfile.TemporaryDirectory() as td:
+        gp2 = str(Path(td) / "gf.json")
+        dom["seed_graph"](gp2)
+        model2, hist2 = wake_sleep_loop(gp2, embed2, rounds=4, budget=400, sft_steps=600, n_wake=3,
+                                        seed=0, domain=dom)
+        disc = sum(h[1] for h in hist2)
+        assert disc >= 6, hist2                                   # beam search discovers deep families
+        assert hist2[-1][3] >= 0.6 * hist2[-1][4], hist2[-1]      # held-out-phrasing zero-shot majority
+        g2 = MemoryGraph.load_json(gp2)
+        progs2 = [nid for nid, n in g2.nodes.items() if n.metadata.get("kind") == "program"]
+        assert len(progs2) >= 6, progs2
+        fz2, nf2 = rebuild_net(gp2, embed2, seed=7, domain=dom, log=False)
+        assert fz2 >= 0.6 * nf2, (fz2, nf2)
+        print(f"  [6] FACTORY domain: beam search discovered {disc} deep families "
+              f"(len<={max(len(p) for p in pipes.values())}), zero-shot on HELD-OUT phrasings "
+              f"{hist2[-1][3]}/{hist2[-1][4]} fams, {len(progs2)} programs banked, rebuild "
+              f"{fz2}/{nf2} -> PASS")
+
     print("\n  ALGO_GRR_LOOP SELFTEST -> PASS  (wake/sleep compounding loop closed: search discovers, "
-          "net amortizes, graph REMEMBERS)")
+          "net amortizes, graph REMEMBERS — hand6 AND factory domains)")
     return True
 
 
@@ -277,24 +378,36 @@ def main():
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--loop", action="store_true", help="run the loop with real mpnet (molab)")
     ap.add_argument("--rebuild", action="store_true", help="fresh net from graph-stored programs (molab)")
+    ap.add_argument("--factory", action="store_true", help="factory domain (generated fams, paraphrases, beam)")
+    ap.add_argument("--families", type=int, default=24)
+    ap.add_argument("--fam-seed", type=int, default=0)
+    ap.add_argument("--para-train", type=int, default=3)
+    ap.add_argument("--para-eval", type=int, default=2)
+    ap.add_argument("--beam", type=int, default=12)
     ap.add_argument("--graph", default="graphs/algo_grr_loop.json")
     ap.add_argument("--rounds", type=int, default=3)
     ap.add_argument("--budget", type=int, default=1500)
+    ap.add_argument("--n-wake", type=int, default=2)
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
     if a.loop or a.rebuild:
-        from v5.runtime.algo_compose_tasks import seed_atom_graph
+        if a.factory:
+            domain = factory_domain(a.families, a.fam_seed, a.para_train, a.para_eval, a.beam)
+        else:
+            domain = hand6_domain()
         if not Path(a.graph).exists():
-            seed_atom_graph(a.graph, hard=True)
+            domain["seed_graph"](a.graph)
         embed = _mpnet_embed()
         if a.loop:
-            print(f"GRR-8 loop (real mpnet): {a.graph} | rounds={a.rounds} budget={a.budget}", flush=True)
-            wake_sleep_loop(a.graph, embed, rounds=a.rounds, budget=a.budget, seed=a.seed)
+            print(f"GRR-8 loop (real mpnet, domain={domain['name']}): {a.graph} | rounds={a.rounds} "
+                  f"budget={a.budget} n_wake={a.n_wake}", flush=True)
+            wake_sleep_loop(a.graph, embed, rounds=a.rounds, budget=a.budget, n_wake=a.n_wake,
+                            seed=a.seed, domain=domain)
         if a.rebuild:
-            print(f"GRR-8 rebuild-net (real mpnet): {a.graph}", flush=True)
-            rebuild_net(a.graph, embed, seed=a.seed)
+            print(f"GRR-8 rebuild-net (real mpnet, domain={domain['name']}): {a.graph}", flush=True)
+            rebuild_net(a.graph, embed, seed=a.seed, domain=domain)
         return
     ap.print_help()
 

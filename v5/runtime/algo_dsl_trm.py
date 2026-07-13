@@ -309,13 +309,20 @@ def _score_pipe(model, goal_t, A, atom_idx, pipe) -> float:
         return -float(model.loss(goal_t, A, program_to_steps(pipe, atom_idx)))
 
 
+def _default_is_general(fams, resolve_fn, n_verify):
+    """The hand-family verifier as a (pipe, fam) closure — the pluggable-verifier default. Factory
+    domains (algo_dsl_gen) pass their own closure instead; the search machinery is domain-agnostic."""
+    return lambda pipe, fam: _is_general(pipe, fam, fams, resolve_fn, n_verify)
+
+
 def _guided_search(model, goal_vec, fam, fams, resolve_fn, atom_names, atom_vecs, max_transforms=2,
-                   n_verify=32, budget=None):
+                   n_verify=32, budget=None, is_general=None):
     """Net-GUIDED search: the same ascending-length levels as _enumerate_general (MDL-minimality
     preserved), but WITHIN a level candidates are verified in the net's log-prob order, stopping at the
     first general hit (or after `budget` verifies). Returns (found, verifies_used). As the net
     consolidates, the true program ranks earlier -> verifies-to-solve DROPS: the measured amortization
-    that lets search scale past brute force as atoms/families grow."""
+    that lets search scale past brute force as atoms/families grow. EXHAUSTIVE per level — complete but
+    only tractable to depth ~2-3; _beam_search is the deep-program engine."""
     import itertools
     import torch
     kind = fams[fam][0]
@@ -324,6 +331,7 @@ def _guided_search(model, goal_vec, fam, fams, resolve_fn, atom_names, atom_vecs
     atom_idx = {a: i for i, a in enumerate(atom_names)}
     g_t = torch.as_tensor(np.asarray(goal_vec, dtype=np.float32))
     A = torch.as_tensor(atom_vecs, dtype=torch.float32)
+    chk = is_general or _default_is_general(fams, resolve_fn, n_verify)
     used = 0
     for n_t in range(max_transforms + 1):
         cands = [[Op(op, a) for (op, a) in combo] + [Op("REDUCE", agg)]
@@ -333,26 +341,67 @@ def _guided_search(model, goal_vec, fam, fams, resolve_fn, atom_names, atom_vecs
             if budget is not None and used >= budget:
                 return [], used
             used += 1
-            if _is_general(pipe, fam, fams, resolve_fn, n_verify):
+            if chk(pipe, fam):
                 return [pipe], used                       # first general hit at the minimal length
+    return [], used
+
+
+def _beam_search(model, goal_vec, fam, fams, resolve_fn, atom_names, atom_vecs, max_transforms=6,
+                 n_verify=32, budget=None, B=12, is_general=None):
+    """Net-BEAM search for DEEP programs (exhaustive levels die combinatorially: depth 6 over 9 atoms
+    x 2 ops ~ 34M candidates). Depth-ascending like the exhaustive search (so the first general hit is
+    still the shallowest = MDL-minimal within the explored set): at each depth, (1) TERMINATE the top-B
+    prefixes with every REDUCE(agg), verify in the net's score order; (2) EXTEND each prefix by every
+    (op, atom), keep the top-B partials by teacher-forced log-prob. Completeness is traded for the
+    net's prior — the curriculum makes that prior real before deep families are attempted.
+    Returns (found, verifies_used)."""
+    import torch
+    kind = fams[fam][0]
+    ops = _valid_ops_for_kind(kind)
+    slot = [(op, a) for op in ops for a in atom_names]
+    atom_idx = {a: i for i, a in enumerate(atom_names)}
+    g_t = torch.as_tensor(np.asarray(goal_vec, dtype=np.float32))
+    A = torch.as_tensor(atom_vecs, dtype=torch.float32)
+    chk = is_general or _default_is_general(fams, resolve_fn, n_verify)
+    score = lambda steps: -float(model.loss(g_t, A, steps)) if steps else 0.0
+    used = 0
+    prefixes = [[]]
+    for _depth in range(max_transforms + 1):
+        terms = [p + [Op("REDUCE", agg)] for p in prefixes for agg in AGGS]
+        terms.sort(key=lambda p: -_score_pipe(model, g_t, A, atom_idx, p))
+        for pipe in terms:
+            if budget is not None and used >= budget:
+                return [], used
+            used += 1
+            if chk(pipe, fam):
+                return [pipe], used                       # shallowest general hit in the beam
+        ext = [p + [Op(op, a)] for p in prefixes for (op, a) in slot]
+        ext.sort(key=lambda p: -score(program_to_steps(p, atom_idx)))
+        prefixes = ext[:B]
     return [], used
 
 
 def solve_with_search(model, task, fams, atom_names, atom_vecs, resolve_fn, embed_fn, atom_idx,
                       opt=None, sft_steps=150, budget=None, max_transforms=2, n_verify=32,
-                      lr=5e-4, seed=0):
+                      lr=5e-4, seed=0, is_general=None, beam=0):
     """The TRM inference primitive — the design's retrieve -> reason -> VERIFY -> update -> retry-until-
     solve, embodied: (1) DECODE (recall) + verify-general; (2) on fail, net-GUIDED SEARCH under a verify
-    budget; (3) CONSOLIDATE the discovery (SFT) so the next decode on this family jumps straight there.
-    Returns dict(solved, pipe, via='decode'|'search'|None, verifies)."""
+    budget (exhaustive-guided by default; `beam=B` switches to beam search for deep programs);
+    (3) CONSOLIDATE the discovery (SFT) so the next decode on this family jumps straight there.
+    `is_general(pipe, fam)` plugs a domain verifier (factory families). Returns
+    dict(solved, pipe, via='decode'|'search'|None, verifies)."""
     import torch
     gv = np.asarray(list(embed_fn({"q": task.text}).values())[0], dtype=np.float32)
     A = torch.as_tensor(atom_vecs, dtype=torch.float32)
-    pipe = model.decode(torch.as_tensor(gv), A, atom_names)
-    if _is_general(pipe, task.name, fams, resolve_fn, n_verify):
+    chk = is_general or _default_is_general(fams, resolve_fn, n_verify)
+    pipe = model.decode(torch.as_tensor(gv), A, atom_names, max_len=max_transforms + 2)
+    if chk(pipe, task.name):
         return dict(solved=True, pipe=pipe, via="decode", verifies=1)
-    found, used = _guided_search(model, gv, task.name, fams, resolve_fn, atom_names, atom_vecs,
-                                 max_transforms=max_transforms, n_verify=n_verify, budget=budget)
+    search = _beam_search if beam else _guided_search
+    kw = dict(max_transforms=max_transforms, n_verify=n_verify, budget=budget, is_general=is_general)
+    if beam:
+        kw["B"] = beam
+    found, used = search(model, gv, task.name, fams, resolve_fn, atom_names, atom_vecs, **kw)
     if not found:
         return dict(solved=False, pipe=None, via=None, verifies=used + 1)
     if opt is None:

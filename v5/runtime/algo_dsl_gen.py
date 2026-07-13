@@ -253,15 +253,18 @@ class GenTask:
         self.name, self.text, self.asserts = name, text, asserts
 
 
-def gen_tasks(fams, n_per: int = 4, seed: int = 0):
-    """Parametrized instances per family (random input lists, oracle-computed asserts)."""
+def gen_tasks(fams, n_per: int = 4, seed: int = 0, paraphrase_k: int = 1):
+    """Parametrized instances per family (random input lists, oracle-computed asserts). paraphrase_k>1
+    cycles the instances through that many distinct phrasings (goal variation — instance i gets variant
+    i mod k), so a training pool covers a REGION of goal space, not a point."""
     rng = np.random.default_rng(seed)
     out = []
     for fam, pipe in fams.items():
-        text = pipe_text(pipe)
-        for _ in range(n_per):
+        texts = pipe_text_variants(pipe, paraphrase_k) if paraphrase_k > 1 else [pipe_text(pipe)]
+        for i in range(n_per):
             lst = _rand_list(rng)
-            out.append(GenTask(fam, text, [f"assert {fam}({lst!r}) == {interpret(pipe, lst)!r}"]))
+            out.append(GenTask(fam, texts[i % len(texts)],
+                               [f"assert {fam}({lst!r}) == {interpret(pipe, lst)!r}"]))
     return out
 
 
