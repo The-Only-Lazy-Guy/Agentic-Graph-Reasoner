@@ -309,6 +309,48 @@ def _score_pipe(model, goal_t, A, atom_idx, pipe) -> float:
         return -float(model.loss(goal_t, A, program_to_steps(pipe, atom_idx)))
 
 
+def _score_pipes_batch(model, goal_t, A_raw, atom_idx, pipes) -> list:
+    """VECTORIZED log-prob of N same-length pipelines in ONE forward (search levels/beam extensions all
+    share a length). The searches were calling model.loss per candidate — thousands of sequential tiny
+    python-loop forwards per search dominated wall time; batching them is the fix (the net is ~150k
+    params: its cost is loop overhead, not compute). Returns [N] floats, same semantics as _score_pipe."""
+    import torch
+    if not pipes:
+        return []
+    steps = [program_to_steps(p, atom_idx) for p in pipes]
+    L = len(steps[0])
+    assert all(len(s) == L for s in steps), "batch must be same-length (search levels are)"
+    B = len(steps)
+    with torch.no_grad():
+        g = model.goal_proj(goal_t)                            # [d]
+        A = model.atom_proj(A_raw)                             # [n, d]
+        gB = g.unsqueeze(0).expand(B, -1)
+        state = torch.zeros(B, model.d)
+        total = torch.zeros(B)
+        ar = torch.arange(B)
+        for t in range(L):
+            op_i = torch.tensor([s[t][0] for s in steps])
+            atom_i = torch.tensor([max(s[t][1], 0) for s in steps])
+            agg_i = torch.tensor([max(s[t][2], 0) for s in steps])
+            ctx = torch.cat([gB, state], dim=-1)               # [B, 2d]
+            op_l = model.op_head(ctx)
+            total = total + torch.log_softmax(op_l, -1)[ar, op_i]
+            is_red = op_i == _REDUCE
+            if bool(is_red.any()):
+                agg_l = model.agg_head(ctx)
+                total = total + torch.where(
+                    is_red, torch.log_softmax(agg_l, -1)[ar, agg_i], torch.zeros(B))
+            if bool((~is_red).any()):
+                q = model.q_atom(ctx)                          # [B, d]
+                atom_l = q @ A.T                               # [B, n]
+                total = total + torch.where(
+                    ~is_red, torch.log_softmax(atom_l, -1)[ar, atom_i], torch.zeros(B))
+            if t + 1 < L:                                      # advance program state (transform rows)
+                inp = model.op_emb(op_i) + A[atom_i]
+                state = model.rnn(inp, state)
+    return [float(x) for x in total]
+
+
 def _default_is_general(fams, resolve_fn, n_verify):
     """The hand-family verifier as a (pipe, fam) closure — the pluggable-verifier default. Factory
     domains (algo_dsl_gen) pass their own closure instead; the search machinery is domain-agnostic."""
@@ -336,7 +378,8 @@ def _guided_search(model, goal_vec, fam, fams, resolve_fn, atom_names, atom_vecs
     for n_t in range(max_transforms + 1):
         cands = [[Op(op, a) for (op, a) in combo] + [Op("REDUCE", agg)]
                  for combo in itertools.product(slot, repeat=n_t) for agg in AGGS]
-        cands.sort(key=lambda p: -_score_pipe(model, g_t, A, atom_idx, p))
+        scores = _score_pipes_batch(model, g_t, A, atom_idx, cands)      # one vectorized forward
+        cands = [cands[i] for i in sorted(range(len(cands)), key=lambda i: (-scores[i], i))]
         for pipe in cands:
             if budget is not None and used >= budget:
                 return [], used
@@ -368,17 +411,14 @@ def _beam_search(model, goal_vec, fam, fams, resolve_fn, atom_names, atom_vecs, 
     chk = is_general or _default_is_general(fams, resolve_fn, n_verify)
     rng = random.Random(seed)
 
-    def score(steps):
-        if not steps:
-            return 0.0
-        with torch.no_grad():                                # scoring only — no autograd graphs
-            return -float(model.loss(g_t, A, steps))
+    def _order(pairs):                                     # one vectorized forward per level
+        scores = _score_pipes_batch(model, g_t, A, atom_idx, [p for p, _e in pairs])
+        return [pairs[i] for i in sorted(range(len(pairs)), key=lambda i: (-scores[i], i))]
 
     used = 0
     prefixes = [([], False)]                               # (prefix, came-through-an-epsilon-slot)
     for _depth in range(max_transforms + 1):
-        terms = [(p + [Op("REDUCE", agg)], eps) for p, eps in prefixes for agg in AGGS]
-        terms.sort(key=lambda pe: -_score_pipe(model, g_t, A, atom_idx, pe[0]))
+        terms = _order([(p + [Op("REDUCE", agg)], eps) for p, eps in prefixes for agg in AGGS])
         for pipe, eps in terms:
             if budget is not None and used >= budget:
                 return [], used, None
@@ -387,8 +427,7 @@ def _beam_search(model, goal_vec, fam, fams, resolve_fn, atom_names, atom_vecs, 
                 # shallowest general hit; origin records WHO found it (the epsilon reuse metric:
                 # "how often does exploration discover programs that later become heavily reused?")
                 return [pipe], used, ("epsilon" if eps else "beam")
-        ext = [(p + [Op(op, a)], eps) for p, eps in prefixes for (op, a) in slot]
-        ext.sort(key=lambda pe: -score(program_to_steps(pe[0], atom_idx)))
+        ext = _order([(p + [Op(op, a)], eps) for p, eps in prefixes for (op, a) in slot])
         keep = ext[:B]
         if explore and len(ext) > B:                       # epsilon slots: escape the prior's corner
             keep = keep + [(p, True) for p, _ in rng.sample(ext[B:], min(explore, len(ext) - B))]

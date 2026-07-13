@@ -111,6 +111,7 @@ def factory_domain(n_families=24, fam_seed=0, para_train=3, para_eval=2, beam=12
         eval_texts=lambda _seed: {f: allv[f][para_train:] for f in pipes},   # HELD-OUT phrasings
         seed_graph=seed_graph,
         curriculum=lambda r: min(maxlen - 1, 2 + r), beam=beam, explore=explore,
+        all_texts=[t for vs in allv.values() for t in vs],   # warm the embed cache in ONE batched encode
     )
 
 
@@ -121,16 +122,17 @@ def factory_domain(n_families=24, fam_seed=0, para_train=3, para_eval=2, beam=12
 def _cached_embed(embed_fn):
     """Text-keyed embedding cache. The loop re-embeds the SAME texts constantly (eval phrasings every
     round, wake phrasings cycling) — measured a large share of the 1h40m molab wall time. mpnet is
-    deterministic per text, so this is free."""
+    deterministic per text, so this is free. Misses are encoded in ONE batched call (single-text mpnet
+    calls pay per-call overhead), so warming the cache with every known text upfront is one encode."""
     cache: dict = {}
 
     def f(d):
-        out = {}
-        for k, t in d.items():
-            if t not in cache:
-                cache[t] = list(embed_fn({k: t}).values())[0]
-            out[k] = cache[t]
-        return out
+        missing = {f"m{i}": t for i, t in enumerate({t for t in d.values() if t not in cache})}
+        if missing:
+            got = embed_fn(missing)
+            for k, t in missing.items():
+                cache[t] = got[k]
+        return {k: cache[t] for k, t in d.items()}
 
     return f
 
@@ -209,6 +211,8 @@ def wake_sleep_loop(graph_path: str, embed_fn, rounds: int = 3, budget: int = 15
     torch, _nn, ProgramDecoder = _build()
     torch.manual_seed(seed)
     embed_fn = _cached_embed(embed_fn)
+    if domain.get("all_texts"):                             # one batched encode instead of N singles
+        embed_fn({f"w{i}": t for i, t in enumerate(domain["all_texts"])})
     g = MemoryGraph.load_json(graph_path)
     atom_names, atom_idx, atom_vecs = _graph_atoms(g, embed_fn)
     retr = MGRetriever(g, embed_fn)
