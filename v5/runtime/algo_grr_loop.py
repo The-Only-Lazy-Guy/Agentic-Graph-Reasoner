@@ -118,6 +118,23 @@ def factory_domain(n_families=24, fam_seed=0, para_train=3, para_eval=2, beam=12
 # The loop (domain-blind)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _cached_embed(embed_fn):
+    """Text-keyed embedding cache. The loop re-embeds the SAME texts constantly (eval phrasings every
+    round, wake phrasings cycling) — measured a large share of the 1h40m molab wall time. mpnet is
+    deterministic per text, so this is free."""
+    cache: dict = {}
+
+    def f(d):
+        out = {}
+        for k, t in d.items():
+            if t not in cache:
+                cache[t] = list(embed_fn({k: t}).values())[0]
+            out[k] = cache[t]
+        return out
+
+    return f
+
+
 def _graph_atoms(graph: MemoryGraph, embed_fn, programs_as_atoms: bool = False):
     """The action space, read from the GRAPH: implementation nodes with code (program nodes excluded by
     default — see module docstring). Returns (atom_names, atom_idx, atom_vecs)."""
@@ -191,6 +208,7 @@ def wake_sleep_loop(graph_path: str, embed_fn, rounds: int = 3, budget: int = 15
     domain = domain or hand6_domain()
     torch, _nn, ProgramDecoder = _build()
     torch.manual_seed(seed)
+    embed_fn = _cached_embed(embed_fn)
     g = MemoryGraph.load_json(graph_path)
     atom_names, atom_idx, atom_vecs = _graph_atoms(g, embed_fn)
     retr = MGRetriever(g, embed_fn)
@@ -205,13 +223,17 @@ def wake_sleep_loop(graph_path: str, embed_fn, rounds: int = 3, budget: int = 15
         mt = domain["curriculum"](r)
         by = domain["tasks_by_fam"](100 + r)
         n_disc, verifies = 0, []
-        for fam, ts in sorted(by.items()):
-            for t in ts[:n_wake]:                           # WAKE
+        failed_this_round = set()                           # a fam that just failed a FULL search will
+        for fam, ts in sorted(by.items()):                  # fail its siblings too (same net, same goal
+            for t in ts[:n_wake]:                           # region) -> search once per fam per round
                 res = solve_with_search(model, t, domain["fams"], atom_names, atom_vecs, resolve_fn,
-                                        embed_fn, atom_idx, opt=opt, budget=budget,
+                                        embed_fn, atom_idx, opt=opt,
+                                        budget=0 if fam in failed_this_round else budget,
                                         max_transforms=mt, seed=seed + r,
                                         is_general=chk, beam=domain["beam"],
                                         explore=domain.get("explore", 0))
+                if not res["solved"] and fam not in failed_this_round:
+                    failed_this_round.add(fam)
                 if res["solved"]:
                     verifies.append(res["verifies"])
                     if res["via"] == "search":
@@ -259,6 +281,7 @@ def rebuild_net(graph_path: str, embed_fn, sft_steps: int = 800, seed: int = 0, 
     domain = domain or hand6_domain()
     torch, _nn, ProgramDecoder = _build()
     torch.manual_seed(seed)
+    embed_fn = _cached_embed(embed_fn)
     g = MemoryGraph.load_json(graph_path)
     atom_names, atom_idx, atom_vecs = _graph_atoms(g, embed_fn)
     progs = [(nid, n) for nid, n in g.nodes.items() if n.metadata.get("kind") == "program"]
