@@ -81,6 +81,9 @@ algo_graph_edits+graph_grower (health-gated writes), subgraph/gnn_encoder/goal_e
 Trained: artifacts/grr6_trm.pt, artifacts/grr6_dsl.pt.
 
 ## GRR-7 DONE: real mpnet 0% recall -> 100% with-search, all 6 families stable every seed.
-## GRR-8 DONE: design-complete — unified loop compounds (zero-shot 4/6->6/6, verifies 8.8->1.0),
-##             graph remembers (rebuild-net 6/6 from graph alone). 14/14 selftests PASS.
+## GRR-8 DONE + REAL-MPNET CONFIRMED (molab): zero-shot 4/6 -> 6/6 fams (18/18 inst) while
+##   verifies-to-solve 13.2 -> 1.0 (r2: ZERO searches); rebuild-net: fresh net + graph only -> 6/6.
+##   Matches the synthetic selftest exactly. 14/14 selftests PASS. Graph: graphs/algo_grr_loop.json
+##   (15 nodes 22 edges, 6 program nodes banked) — committed? artifacts/ dies at box reset; the graph
+##   json is re-derivable in ~2 min via --loop (deterministic search), so no artifact dependency.
 ## NEXT = SCALE-UP: more dataset + RL-with-LM synergy (LM authors new atoms) + hierarchical tasks.
