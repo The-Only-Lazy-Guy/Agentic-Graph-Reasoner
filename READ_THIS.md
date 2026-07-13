@@ -29,9 +29,10 @@ cross-attend adapter (earlier): compose +43% @200tok, +5% @400tok  = AMORTIZATIO
 str_dp2 under compose-forcing: Δ+0.50, TOP atom (vs Δ0 free-form 4B)  <-- THE thesis
 DSL program decoder (mpnet): 100% held-out INSTANCES (base + dp2 graphs)
 compo-gen (leave-one-family-out, mpnet): 0/66 = 0%  <-- IMITATION alone is RECALL, not reasoning
-GRR-7 STaR (search+verify+consolidate): held-out max_prime_digitsum 0% zero-shot -> 100% WITH-SEARCH,
-                   IDENTICAL across 3 seeds (selftest, synthetic embed) <-- recall->reasoning, STABLE
-                   [molab --compo-gen-star --hard = real-mpnet confirmation, PENDING]
+GRR-7 STaR (search+verify+consolidate), REAL MPNET --compo-gen-star --hard, leave-one-family-out x3 seeds:
+                   zero-shot(recall)=0%  ->  with-search(reasoning)=100%  (ALL 6 families 100% [min 100,
+                   max 100] every seed) <-- recall->reasoning, PERFECTLY STABLE. matches synthetic selftest.
+                   (first real run: 89%, max_lis wandered 0-100%; fixed by MDL-minimal keep-gate, see below)
 (superseded) RL+GRPO dense reward: discovered structure once but HIGH VARIANCE / unstable -> replaced by STaR
 ```
 
@@ -39,13 +40,17 @@ GRR-7 STaR (search+verify+consolidate): held-out max_prime_digitsum 0% zero-shot
 - Imitation alone → RECALL (memorizes family→program; 0% compo-gen on synthetic AND mpnet). GRPO was the
   unstable fix (the wanderer); worse, pure policy-sampling can't even EXPLORE an unseen family.
 - GRR-7 = STaR / expert iteration: SEARCH (bounded enumeration of valid pipelines) -> VERIFY oracle I/O
-  (never the reference program) -> KEEP fuzz-general -> SFT the net so decode amortizes it. Search does the
-  reasoning; the net consolidates. Deterministic search => ZERO variance across seeds (GRPO pain solved).
-  Selftest: held-out family 0%->100%. The NET alone is still recall zero-shot; the SYSTEM (net+search)
-  generalizes — the honest DreamCoder-wake framing.
-- Next: (1) molab --compo-gen-star --hard for the real-mpnet number; (2) net-GUIDED enumeration + verify
-  budget so search scales past brute-force as families/atoms grow (amortization becomes load-bearing);
-  (3) sleep-compress the discovered programs back into the library (close the wake/sleep loop).
+  (never the reference program) -> KEEP fuzz-general + MDL-MINIMAL (shortest solving length, dedup by
+  realized code) -> SFT the net so decode amortizes it. Search does the reasoning; the net consolidates.
+  Deterministic search => ZERO variance (GRPO pain solved). REAL mpnet: 0% recall -> 100% with-search,
+  all 6 families 100% every seed. The MDL-minimal keep-gate was load-bearing: without it the search kept
+  weak-input-only variants (digit_sum-as-identity on single-digit values) that pass search but fail eval
+  fuzz -> max_lis wandered 0-100%; minimality drops them (they're longer than the true ref) -> 100% stable.
+  The NET alone is still recall zero-shot; the SYSTEM (net+search) generalizes — the honest DreamCoder-wake framing.
+- Next: (1) net-GUIDED enumeration + verify budget so search scales past brute-force as families/atoms grow
+  (amortization becomes load-bearing: verifies-to-solve should DROP as the net learns); (2) sleep-compress
+  the discovered programs back into the library (close the wake/sleep loop -> compounding); (3) harder task
+  gen (wider input ranges) so the quality bar doesn't lean on minimality alone.
 
 ## Repro (molab, no 4B — mpnet + tiny nets, minutes)
 ```
@@ -63,4 +68,5 @@ kept for comparison). Reuses: algo_graph_mg (MGRetriever.resolve_deps), algo_com
 (_REF/_NEEDS/ALL_ATOMS/gen), graph_grower, subgraph/gnn_encoder/goal_encoder (read stack).
 Trained: artifacts/grr6_trm.pt, artifacts/grr6_dsl.pt.
 
-## Next: molab real-mpnet --compo-gen-star; then net-guided search (scale) + sleep-compress discoveries.
+## Next: net-guided search (scale past brute-force) + sleep-compress discoveries (compounding).
+## GRR-7 DONE: real mpnet 0% recall -> 100% with-search, all 6 families stable every seed.
