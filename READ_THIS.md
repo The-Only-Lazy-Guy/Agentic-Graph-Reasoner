@@ -80,6 +80,10 @@ Reuses: algo_graph_mg (MGRetriever.resolve_deps), algo_compose_tasks (_REF/_NEED
 algo_graph_edits+graph_grower (health-gated writes), subgraph/gnn_encoder/goal_encoder (read stack).
 Trained: artifacts/grr6_trm.pt, artifacts/grr6_dsl.pt.
 
+## DEPLOYMENT CONSTRAINT (hard, user): <= 6GB VRAM. Big LMs (32B/72B class) = OFFLINE TEACHERS only,
+##   never deployed. The GRR stack IS the distillation channel (graph-mediated: teacher -> gate ->
+##   symbolic nodes -> rebuild tiny net). Deployed stack = mpnet ~220MB fp16 + TRM <1MB + graph (CPU)
+##   = <0.5GB. Teacher upgrades are drop-in re-runs with zero deployment change.
 ## GRR-14 INVENTION RUNG (LM authors NEW ATOMS, real 3B on real MBPP+, 5m17s):
 ##   baseline first (algo_grr_inspect --mbpp-baseline): current ladder on MBPP+ = 1/40 (2%) — outside
 ##   its atom vocabulary the system is dead. With authoring: 39/60 SOLVED (65%, 32x baseline), 39 atoms
