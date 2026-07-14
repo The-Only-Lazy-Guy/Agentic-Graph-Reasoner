@@ -435,6 +435,40 @@ def _beam_search(model, goal_vec, fam, fams, resolve_fn, atom_names, atom_vecs, 
     return [], used, None
 
 
+def sketch(model, goal_vec, atom_names, atom_vecs, k: int = 4, tau: float = 0.15, max_len: int = 8):
+    """The TRM's THOUGHT as a symbolic, confidence-gated sketch — the 'second brain' handoff to the LM
+    (latent injection measured amortization-not-capability + z-wall; a TRM plan IS a symbolic program,
+    so TEXT is the lossless channel). Returns dict(atoms=[(name, prob)], draft=[(op, arg)] | None).
+    Confidence gate: atoms below tau are DROPPED, a draft whose first-step op-confidence is below tau
+    is withheld entirely — the ads lesson: never hand the LM low-confidence memory with authority."""
+    import torch
+    with torch.no_grad():
+        g = model.goal_proj(torch.as_tensor(np.asarray(goal_vec, dtype=np.float32)))
+        A = model.atom_proj(torch.as_tensor(atom_vecs, dtype=torch.float32))
+        state = torch.zeros(model.d)
+        ctx = torch.cat([g, state])
+        atom_p = torch.softmax(A @ model.q_atom(ctx), -1)
+        top = sorted(zip(atom_names, atom_p.tolist()), key=lambda x: -x[1])[:k]
+        atoms = [(a, round(p, 2)) for a, p in top if p >= tau]
+        draft, confident = [], True
+        for _ in range(max_len):
+            ctx = torch.cat([g, state])
+            op_l = model.op_head(ctx)
+            op_p = torch.softmax(op_l, -1)
+            if float(op_p.max()) < tau:
+                confident = False
+                break
+            op = int(op_l.argmax())
+            if OPS[op] == "REDUCE":
+                draft.append(("REDUCE", AGGS[int(model.agg_head(ctx).argmax())]))
+                break
+            ai = int((A @ model.q_atom(ctx)).argmax())
+            draft.append((OPS[op], atom_names[ai]))
+            state = model.rnn((model.op_emb(torch.tensor(op)) + A[ai]).unsqueeze(0),
+                              state.unsqueeze(0))[0]
+        return dict(atoms=atoms, draft=(draft if confident and draft else None))
+
+
 def solve_with_search(model, task, fams, atom_names, atom_vecs, resolve_fn, embed_fn, atom_idx,
                       opt=None, sft_steps=150, budget=None, max_transforms=2, n_verify=32,
                       lr=5e-4, seed=0, is_general=None, beam=0, explore=0):
@@ -796,6 +830,18 @@ def _selftest() -> bool:
         assert v_hot <= 7 and v_hot < v_cold, (v_cold, v_hot)
         print(f"  [5] guided search: verifies-to-solve {v_cold} (cold net) -> {v_hot} (consolidated); "
               f"solve_with_search via=search -> via=decode (until-solve primitive, amortized) -> PASS")
+
+        # [6] GRR-16 sketch: the consolidated net emits a confident symbolic thought (atoms + draft);
+        #     the confidence gate withholds junk from a cold net's draft or empties the atom list
+        sk_hot = sketch(cold, gv_lis, atom_names, atom_vecs)          # 'cold' was consolidated in [5]
+        assert sk_hot["draft"] is not None and ("MAP", "lis_length") in sk_hot["draft"], sk_hot
+        assert any(a == "lis_length" for a, _p in sk_hot["atoms"]), sk_hot
+        torch_.manual_seed(3)
+        frozen = PD(d_in=d_in, d=48)
+        sk_cold = sketch(frozen, gv_lis, atom_names, atom_vecs, tau=0.9)   # absurd bar -> withheld
+        assert sk_cold["draft"] is None and sk_cold["atoms"] == [], sk_cold
+        print(f"  [6] sketch: consolidated net -> confident symbolic thought "
+              f"{sk_hot['draft']}; confidence gate withholds an unconfident one -> PASS")
 
     print("\n  ALGO_DSL_TRM SELFTEST -> PASS  (the reasoner synthesizes programs; STaR turns recall into "
           "search-and-consolidate reasoning)")

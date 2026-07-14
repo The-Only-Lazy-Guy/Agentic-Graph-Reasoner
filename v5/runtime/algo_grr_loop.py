@@ -221,7 +221,7 @@ def _sleep_store(graph_path: str, retr: MGRetriever, discoveries: dict, rnd: int
 
 def wake_sleep_loop(graph_path: str, embed_fn, rounds: int = 3, budget: int = 1500,
                     sft_steps: int = 400, n_wake: int = 2, seed: int = 0, log: bool = True,
-                    domain: dict | None = None, lm_gen=None, lm_k: int = 6):
+                    domain: dict | None = None, lm_gen=None, lm_k: int = 6, lm_hint: bool = False):
     """The loop. Returns (model, hist) with hist rows:
     (round, n_search_discoveries, mean_verifies_to_solve, fams_zero_shot, n_fams, graph_nodes).
     lm_gen plugs the GRR-12 escalation ladder: decode -> beam+epsilon -> LM PROPOSER (task text ->
@@ -261,9 +261,16 @@ def wake_sleep_loop(graph_path: str, embed_fn, rounds: int = 3, budget: int = 15
                     if lm_gen is not None and domain.get("lm_vocab") and fam not in known:
                         # GRR-12 ladder rung: search failed -> the LM proposes from the TASK TEXT,
                         # candidates pass the SAME gate (MDL-first). A hit is a discovery like any other.
+                        # GRR-16: lm_hint hands the TRM's confidence-gated THOUGHT to the LM as text.
                         from v5.runtime.algo_lm_proposer import propose_and_verify
                         preds, maps = domain["lm_vocab"]
-                        pipe_lm, nver = propose_and_verify(lm_gen, t.text, fam, chk, preds, maps, k=lm_k)
+                        sk = None
+                        if lm_hint:
+                            from v5.runtime.algo_dsl_trm import sketch as _sketch
+                            gv_h = np.asarray(list(embed_fn({"q": t.text}).values())[0], dtype=np.float32)
+                            sk = _sketch(model, gv_h, atom_names, atom_vecs)
+                        pipe_lm, nver = propose_and_verify(lm_gen, t.text, fam, chk, preds, maps,
+                                                           k=lm_k, sketch=sk)
                         if pipe_lm is not None:
                             res = dict(solved=True, pipe=pipe_lm, via="search",
                                        verifies=res["verifies"] + nver, origin="lm")
@@ -483,6 +490,8 @@ def main():
     ap.add_argument("--sft-steps", type=int, default=400, help="consolidation SFT steps per round")
     ap.add_argument("--lm", default="", help="HF model for the GRR-12 proposer ladder (e.g. Qwen/Qwen2.5-3B)")
     ap.add_argument("--lm-k", type=int, default=6, help="LM proposal samples per stuck family")
+    ap.add_argument("--lm-hint", action="store_true",
+                    help="GRR-16: include the TRM's confidence-gated sketch in the proposer prompt")
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args()
     if a.selftest:
@@ -503,10 +512,10 @@ def main():
                 lm_gen = make_hf_gen(a.lm)
             print(f"GRR-8 loop (real mpnet, domain={domain['name']}): {a.graph} | rounds={a.rounds} "
                   f"budget={a.budget} n_wake={a.n_wake} sft_steps={a.sft_steps} "
-                  f"lm={a.lm or 'off'}", flush=True)
+                  f"lm={a.lm or 'off'} hint={a.lm_hint}", flush=True)
             wake_sleep_loop(a.graph, embed, rounds=a.rounds, budget=a.budget, n_wake=a.n_wake,
                             sft_steps=a.sft_steps, seed=a.seed, domain=domain,
-                            lm_gen=lm_gen, lm_k=a.lm_k)
+                            lm_gen=lm_gen, lm_k=a.lm_k, lm_hint=a.lm_hint)
         if a.rebuild:
             print(f"GRR-8 rebuild-net (real mpnet, domain={domain['name']}): {a.graph}", flush=True)
             rebuild_net(a.graph, embed, sft_steps=max(800, a.sft_steps * 2), seed=a.seed, domain=domain)

@@ -37,9 +37,22 @@ GEN_AGGS = ["sum", "max", "count", "len"]
 # Prompt + parse — the strict interchange format
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def proposer_prompt(task_text: str, pred_names, map_names) -> str:
+def proposer_prompt(task_text: str, pred_names, map_names, sketch: dict | None = None) -> str:
     """Task TEXT + grammar + atom vocabulary -> ask for candidate pipelines. Contains NO reference
-    pipeline and NO oracle — the LM must parse the language."""
+    pipeline and NO oracle — the LM must parse the language. `sketch` (GRR-16) is the TRM's
+    confidence-gated THOUGHT rendered as text — atoms it points at + its (unverified) draft — phrased
+    SOFT: the ads lesson says never hand the LM memory with authority it can't check."""
+    hint = ""
+    if sketch and (sketch.get("atoms") or sketch.get("draft")):
+        lines = []
+        if sketch.get("atoms"):
+            lines.append("relevant atoms (with confidence): "
+                         + ", ".join(f"{a} ({p:.2f})" for a, p in sketch["atoms"]))
+        if sketch.get("draft"):
+            lines.append("draft pipeline (UNVERIFIED, may be wrong): "
+                         + " -> ".join(f"{k}({v})" for k, v in sketch["draft"]))
+        hint = ("A small memory model that has solved related tasks suggests (use ONLY if it helps; "
+                "it may be wrong):\n  " + "\n  ".join(lines) + "\n")
     return (
         "You translate a task description into a small program PIPELINE with this exact grammar:\n"
         "  PIPE: FILTER(<pred>) -> ... -> MAP(<fn>) -> ... -> REDUCE(<agg>)\n"
@@ -51,6 +64,7 @@ def proposer_prompt(task_text: str, pred_names, map_names) -> str:
         f"Aggregators: {', '.join(GEN_AGGS)} (count/len = how many elements survive the filters)\n"
         "Example task: 'the count of prime numbers in the list.'\n"
         "Example answer: PIPE: FILTER(is_prime) -> REDUCE(count)\n"
+        + hint +
         f"Task: {task_text}\n"
         "Give up to 4 different candidate PIPE lines, most likely first. Answer with PIPE lines only."
     )
@@ -89,10 +103,10 @@ def parse_pipelines(text: str, pred_names, map_names) -> list:
 
 
 def propose_and_verify(gen_fn, task_text: str, fam: str, is_general, pred_names, map_names,
-                       k: int = 6, max_verify: int = 16):
+                       k: int = 6, max_verify: int = 16, sketch: dict | None = None):
     """One ladder rung: prompt the LM (k samples), parse, MDL-order (shortest first), verify each through
     the SAME gate until a general hit. Returns (pipe|None, n_verified)."""
-    prompt = proposer_prompt(task_text, pred_names, map_names)
+    prompt = proposer_prompt(task_text, pred_names, map_names, sketch=sketch)
     cands = []
     for out in gen_fn([prompt] * k):
         cands.extend(parse_pipelines(out, pred_names, map_names))
@@ -218,6 +232,14 @@ def _selftest() -> bool:
     ps = parse_pipelines(txt, preds, maps)
     assert len(ps) == 2 and len(ps[0]) == 3 and len(ps[1]) == 1, ps
     print("  [1] parse: 2 valid kept (dup + unknown atom + MAP-before-FILTER dropped) -> PASS")
+
+    # [1b] GRR-16 sketch hint: present iff given, SOFT phrasing, absent when confidence-gated empty
+    sk = dict(atoms=[("is_odd", 0.62), ("square", 0.31)], draft=[("FILTER", "is_odd"), ("REDUCE", "sum")])
+    p_h = proposer_prompt("t", preds, maps, sketch=sk)
+    assert "may be wrong" in p_h and "is_odd (0.62)" in p_h and "FILTER(is_odd) -> REDUCE(sum)" in p_h
+    assert proposer_prompt("t", preds, maps, sketch=dict(atoms=[], draft=None)) == \
+        proposer_prompt("t", preds, maps)
+    print("  [1b] sketch hint: rendered SOFT with confidences; empty sketch -> identical prompt -> PASS")
 
     # [2] the stub LM parses REAL factory texts back to verifying pipelines (text only, no reference)
     fams = gen_families(16, seed=3, max_chain=4)
