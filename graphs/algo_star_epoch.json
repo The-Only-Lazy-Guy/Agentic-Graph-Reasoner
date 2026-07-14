@@ -4070,6 +4070,26 @@
       },
       "access_count": 0,
       "context_guard": {}
+    },
+    {
+      "id": "impl_is_lower",
+      "text": "Write a python function to convert the given string to lower case.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def is_lower(s):\n    return s.lower()",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T185808Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_228",
+        "grow_patch_id": "impl_is_lower",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
     }
   ],
   "edges": [
@@ -7333,6 +7353,22 @@
         "grow_lane": "substrate",
         "grow_source_session": "grr14_195",
         "grow_patch_id": "impl_median_trapezium->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_is_lower",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T185808Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_228",
+        "grow_patch_id": "impl_is_lower->concept_algorithms::part_of",
         "grow_support_score": 1.0
       },
       "confidence": 1.0
