@@ -154,6 +154,41 @@ def _failure_class(t, code: str, deps: str) -> str:
     return "assert_fail"
 
 
+def dump_raw(graph_path: str, embed_fn, gen_fn, tasks, out: str = "artifacts/grr14_raw.jsonl",
+             k_retrieve: int = 6, samples: int = 2, ad_style: str = "off"):
+    """THE RAW PIPELINE, per task, nothing aggregated: exact prompt -> every generation verbatim ->
+    extracted code -> per-sample verify verdict + failing line (stderr). Written to jsonl for
+    inspection. This is the what-exactly-happened view; run it BEFORE arguing about causes."""
+    import re as _re
+    from v5.runtime.algo_graph_run import (_author_prompt, verify_asserts_detail)
+    from v5.runtime.derive_reward import _def_names
+    from v5.runtime.tool_memory import _extract_code
+    if not Path(graph_path).exists():
+        seed_graph(graph_path, ("concept_algorithms",))
+    retr = MGRetriever(MemoryGraph.load_json(graph_path), embed_fn)
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w", encoding="utf-8") as f:
+        for i, t in enumerate(tasks):
+            advertised = [] if ad_style == "off" else retr.retrieve(t.text, k=k_retrieve)
+            prompt = _author_prompt(t, advertised)
+            gens = gen_fn([prompt] * samples)
+            rec = {"i": i, "task": t.name, "text": t.text, "prompt": prompt, "samples": []}
+            for g in gens:
+                code = _extract_code(g)
+                defined = _def_names(code)
+                called = [n for n, _c in advertised if n not in defined
+                          and _re.search(rf"(?<![\w.]){_re.escape(n)}\s*\(", code)]
+                deps = "\n\n".join(c for n, c in advertised if n in called)
+                full = (deps + "\n" + code) if deps else code
+                ok, err = verify_asserts_detail(full, t.tests, getattr(t, "setup", ""))
+                rec["samples"].append({"generation": g, "extracted_code": code, "called": called,
+                                       "verified": ok, "error": err})
+            f.write(json.dumps(rec) + "\n")
+            print(f"  [{i+1}/{len(tasks)}] {t.name}: "
+                  f"{sum(s['verified'] for s in rec['samples'])}/{len(gens)} samples verified", flush=True)
+    print(f"  raw dump -> {out}", flush=True)
+
+
 def run_author_loop(graph_path: str, embed_fn, gen_fn, tasks, k_retrieve: int = 6, samples: int = 4,
                     reindex_every: int = 5, log: bool = True,
                     failure_log: str = "artifacts/grr14_failures.jsonl", ad_style: str = "sig",
@@ -338,9 +373,19 @@ def main():
                     help="advertisement arm: off=DEFAULT (measured: sig ads cost ~16pp by task 90 and "
                          "cause the over-time decline) | sig=bare-sig status quo | purpose=repaired ads")
     ap.add_argument("--shuffle", type=int, default=-1, help="shuffle tasks with this seed (-1 = corpus order)")
+    ap.add_argument("--dump-raw", type=int, default=0, metavar="N",
+                    help="raw pipeline dump for the first N tasks (prompt/generations/verify verbatim)")
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
+    if a.dump_raw:
+        from v5.memory.store import make_mpnet_embedder
+        from v5.runtime.algo_lm_proposer import make_hf_gen
+        from v5.runtime.algo_mbpp_prep import load_prepped
+        tasks = load_prepped(a.corpus, limit=a.dump_raw, pipeline_only=a.pipeline_only)
+        dump_raw(a.graph, make_mpnet_embedder(), make_hf_gen(a.model, max_new_tokens=400),
+                 tasks, ad_style=a.ad_style, samples=2)
+        return
     if a.run:
         from v5.memory.store import make_mpnet_embedder
         from v5.runtime.algo_lm_proposer import make_hf_gen
