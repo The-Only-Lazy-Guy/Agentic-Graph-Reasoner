@@ -93,6 +93,20 @@ each rung: same GATE (dense verify), same BANK (health-gated graph write), same 
 
 ---
 
+## TRM's ROLE (clarification, user question 2026-07-14)
+
+- Rung A: TRM **is** the decoder — amortized program synthesis (goal → program, 1.00-confidence heads
+  on consolidated families). Not traversal: the point is making the LM unnecessary after first discovery.
+- Rung B: TRM is the **search prior** — beam candidates ordered by its logprobs (verifies 54→5).
+- Rungs C/D: TRM is **inert. It does NOT help the LM reason or decode.** The only TRM↔LM coupling is
+  graph-mediated and OFFLINE (LM discovers → gate → graph → TRM consolidates between rounds). Within a
+  single solve they never talk; the ladder is fallbacks, not collaborators.
+- Possible couplings (none built, deliberately): (1) TRM sketch → LM prompt hints (symbolic, z-wall-safe
+  — but the ads lesson applies: unconfident hints can cost points); (2) TRM as ad-RANKER for the author
+  (Fix C #45 reborn — most defensible, relevant when purpose-ads prove ≥ off); (3) TRM reranks LM
+  pipeline proposals pre-verify (rung C only). Deferred: the long run's bottleneck is rung D, where TRM
+  structurally can't participate until authored atoms become DSL-composable (programs-as-atoms at scale).
+
 ## THE LONG RUN (design)
 
 - **corpus**: MBPP+ (378, epoch-0 sanity: expect ≈78% pre-training) → **APPS-intro class (~2-3k
