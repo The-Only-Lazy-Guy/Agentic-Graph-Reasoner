@@ -84,6 +84,16 @@ Trained: artifacts/grr6_trm.pt, artifacts/grr6_dsl.pt.
 ##   never deployed. The GRR stack IS the distillation channel (graph-mediated: teacher -> gate ->
 ##   symbolic nodes -> rebuild tiny net). Deployed stack = mpnet ~220MB fp16 + TRM <1MB + graph (CPU)
 ##   = <0.5GB. Teacher upgrades are drop-in re-runs with zero deployment change.
+## GRR-14 ABLATION VERDICT (the decline investigation, 3-arm, real 3B, 120 MBPP+ tasks):
+##   off (graph ablated): 80/120 = 67%, curve flat/bumpy — NO decline. sig (status quo bare-sig ads +
+##   hard call-these directive): 46/90 = 51%, marginals 14,12,8,8 — monotonic decline as graph grows.
+##   => the ADVERTISEMENT channel was net-negative (~16pp by task 90) and CAUSED the decline; the
+##   graph's memory role unaffected (80 atoms banked in off). Default now ad-style=off.
+##   plus_only_fail=4 -> dense gate costs only ~3pp vs plain MBPP: true 3B capability ~70%
+##   plain-equivalent (published 7B range); earlier 55% was ads-harm not model weakness.
+##   Reuse metric had false positives (`lst.count(` matched atom `count`) -> fixed; REAL cross-task
+##   reuse on MBPP = 0 so far (unproven). PENDING: purpose arm (repaired ads: sig + purpose line +
+##   soft directive) vs off — can advertisement EVER pay here?
 ## GRR-14 INVENTION RUNG (LM authors NEW ATOMS, real 3B on real MBPP+, 5m17s):
 ##   baseline first (algo_grr_inspect --mbpp-baseline): current ladder on MBPP+ = 1/40 (2%) — outside
 ##   its atom vocabulary the system is dead. With authoring: 39/60 SOLVED (65%, 32x baseline), 39 atoms
