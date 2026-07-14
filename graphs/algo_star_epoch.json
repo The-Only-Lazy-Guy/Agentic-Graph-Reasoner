@@ -4010,6 +4010,26 @@
       },
       "access_count": 0,
       "context_guard": {}
+    },
+    {
+      "id": "impl_check_occurences",
+      "text": "Write a function that takes in a list of tuples and returns a dictionary mapping each unique tuple to the number of times it occurs in the list.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def check_occurences(tuples_list):\n    from collections import defaultdict\n    \n    # Helper function to create a key based on tuple elements\n    def create_key(tuple_item):\n        return tuple(sorted(tuple_item))\n    \n    # Dictionary to store the count of each unique tuple\n    occurrences = defaultdict(int)\n    \n    for tuple_item in tuples_list:\n        key = create_key(tuple_item)\n        occurrences[key] += 1\n        \n    return dict(occurrences)\n\n# Assuming we have a list of tuples as input, here is an example check function\nexample_tuples = [(1, 2), (3, 4), (1, 2), (5, 6), (3, 4), (3, 4)]\nprint(check_occurences(example_tuples))",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T184817Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_107",
+        "grow_patch_id": "impl_check_occurences",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
     }
   ],
   "edges": [
@@ -7225,6 +7245,22 @@
         "grow_lane": "substrate",
         "grow_source_session": "grr14_60",
         "grow_patch_id": "impl_merge_sorted_list->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_check_occurences",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T184817Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_107",
+        "grow_patch_id": "impl_check_occurences->concept_algorithms::part_of",
         "grow_support_score": 1.0
       },
       "confidence": 1.0
