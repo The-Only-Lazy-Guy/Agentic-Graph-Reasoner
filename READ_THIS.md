@@ -84,6 +84,15 @@ Trained: artifacts/grr6_trm.pt, artifacts/grr6_dsl.pt.
 ##   never deployed. The GRR stack IS the distillation channel (graph-mediated: teacher -> gate ->
 ##   symbolic nodes -> rebuild tiny net). Deployed stack = mpnet ~220MB fp16 + TRM <1MB + graph (CPU)
 ##   = <0.5GB. Teacher upgrades are drop-in re-runs with zero deployment change.
+## D2 FREEZES (10-day final-architecture clock, decided 2026-07-15):
+##   TRAINER = gru. Lower-ceiling h2h (48 fams, para 2/3, ceiling 92->84%): gru 84% == vib 84% (dead
+##   tie, mixed per-seed) — VIB's earlier every-seed edge was ceiling-inflated; honest reversal,
+##   simplicity wins, vib stays behind a flag. recursive 83%.
+##   VQ = my implementation BUG, not a concept refutation: the "shrunk residual" term
+##   resid_scale*(mu - mu.detach()) is VALUE-ZERO in forward -> z collapsed to 32 prototypes for 48
+##   fams -> 9%. Correct form: proto + s*(mu - proto). PARKED with bug documented (clock).
+##   HINT = ON (reasoning-state sketch): lm discoveries 6 -> 9 (+50%), zero-shot 24 -> 26/48, third
+##   consecutive positive, never harmful.
 ## GRR-16 SECOND-BRAIN COUPLING (both user ideas, real-3B/real-mpnet measured):
 ##   (a) sketch-hint (TRM thought -> LM prompt as confidence-gated TEXT; latent FiLM/cross-attn/KV
 ##   ruled out earlier: z-wall + amortization-not-capability): intent-tier A/B lm discoveries 6 -> 8,
