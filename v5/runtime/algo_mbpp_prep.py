@@ -85,6 +85,97 @@ def _pipeline_shaped(rec: dict) -> bool:
     return len(args) == 1 and any(k in body for k in ("for ", "sum(", "max(", "min(", "len(", "filter", "map"))
 
 
+def normalize_humanevalplus(raw: dict) -> dict | None:
+    """HumanEval+ (evalplus/humanevalplus): prompt = signature+docstring (IS the task text),
+    canonical_solution = body continuation, test = a script defining check(candidate)."""
+    prompt_code = (raw.get("prompt") or "").rstrip()
+    body = raw.get("canonical_solution") or ""
+    name = (raw.get("entry_point") or "").strip()
+    test = (raw.get("test") or "").strip()
+    if not prompt_code or not body or not name or not test:
+        return None
+    rec = {"text": f"{prompt_code}\n\nComplete/implement `{name}(...)` exactly as specified.",
+           "code": prompt_code.rstrip("\n") + "\n" + body,   # exact one-newline boundary (rstrip once
+                                                             # fused docstring+body onto one line)
+           "asserts": [], "plus_test": test + f"\n\ncheck({name})",
+           "setup": "", "n_plus": test.count("assert"), "name": name, "source": "humanevalplus"}
+    return rec
+
+
+def normalize_apps(raw: dict) -> dict | None:
+    """APPS (codeparrot/apps) CALL-BASED subset only: input_output carries fn_name + I/O pairs ->
+    generated asserts against LeetCode-style `class Solution`. stdin/stdout records are skipped
+    (different harness). Reference = first provided solution; validation drops anything unsound."""
+    try:
+        io = json.loads(raw.get("input_output") or "{}")
+        sols = json.loads(raw.get("solutions") or "[]")
+    except Exception:
+        return None
+    fn = (io.get("fn_name") or "").strip()
+    inputs, outputs = io.get("inputs") or [], io.get("outputs") or []
+    if not fn or not sols or not inputs or len(inputs) != len(outputs):
+        return None
+    code = sols[0]
+    if "class Solution" not in code:
+        code = "class Solution:\n" + "\n".join("    " + ln for ln in code.splitlines())
+    asserts = []
+    for inp, out in list(zip(inputs, outputs))[:24]:
+        if isinstance(out, list) and len(out) == 1:
+            out = out[0]
+        if not isinstance(inp, list):
+            return None
+        asserts.append(f"assert Solution().{fn}(*{inp!r}) == {out!r}")
+    if len(asserts) < 3:
+        return None
+    q = (raw.get("question") or "").strip()
+    rec = {"text": f"{q[:1200]}\n\nWrite a python class `Solution` with a method `{fn}(...)`.",
+           "code": code, "asserts": asserts[:3], "plus_test": "\n".join(asserts[3:]),
+           "setup": "", "n_plus": max(0, len(asserts) - 3), "name": fn, "source": "apps"}
+    return rec
+
+
+def prep_multi(out_path: str = "artifacts/corpus_multi.jsonl", apps_limit: int = 400,
+               timeout: float = 25.0) -> dict:
+    """The DIVERSE open-source corpus (user requirement for the long run): MBPP+ (NL imperative) +
+    HumanEval+ (docstring-driven) + APPS-intro call-based (competitive). One record shape, one
+    reference-must-pass validation, `source` tagged. Report per source."""
+    from datasets import load_dataset
+    kept, stats = [], {}
+
+    def _take(records, norm_fn, src):
+        k = d = 0
+        for raw in records:
+            rec = norm_fn(dict(raw))
+            if rec is None:
+                d += 1
+                continue
+            if not validate(rec, timeout=timeout):
+                d += 1
+                continue
+            rec.setdefault("source", src)
+            rec["pipeline_shaped"] = _pipeline_shaped(rec) if src == "mbppplus" else False
+            kept.append(rec)
+            k += 1
+        stats[src] = dict(kept=k, dropped=d)
+
+    ds = load_dataset("evalplus/mbppplus", split="test")
+    _take(ds, lambda r: (lambda x: (x.update({"source": "mbppplus"}) or x) if x else None)(normalize(r)),
+          "mbppplus")
+    ds = load_dataset("evalplus/humanevalplus", split="test")
+    _take(ds, normalize_humanevalplus, "humanevalplus")
+    ds = load_dataset("codeparrot/apps", "introductory", split="test", trust_remote_code=True)
+    _take(list(ds)[: apps_limit * 4], normalize_apps, "apps")   # call-based is a subset; over-scan
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        for rec in kept:
+            f.write(json.dumps(rec) + "\n")
+    print("  multi-source prep report:", flush=True)
+    for s, st in stats.items():
+        print(f"    {s}: kept {st['kept']} dropped {st['dropped']}", flush=True)
+    print(f"    TOTAL kept {len(kept)} -> {out_path}", flush=True)
+    return dict(stats=stats, total=len(kept), out=out_path)
+
+
 def prep(out_path: str = "artifacts/mbpp_plus_prepped.jsonl", limit: int = 0,
          repo: str = "evalplus/mbppplus", timeout: float = 20.0) -> dict:
     """Download -> normalize -> VALIDATE -> cache. Returns the stats report (also printed)."""
@@ -188,6 +279,27 @@ def _selftest() -> bool:
         print("  [3] cache round-trip -> MBPPTask; the DENSE gate passes the reference and kills the "
               "single-assert overfit -> PASS")
 
+    # [4] DIVERSE-corpus normalizers (offline, fabricated): HumanEval+ shape and APPS call-based shape
+    #     both land in the SAME record contract and pass the SAME validation gate
+    he = {"prompt": "def add_two(x):\n    \"\"\"Return x plus two.\"\"\"\n",
+          "canonical_solution": "    return x + 2\n",
+          "entry_point": "add_two",
+          "test": ("def check(candidate):\n    assert candidate(1) == 3\n    assert candidate(5) == 7\n"
+                   "    assert candidate(-2) == 0\n")}
+    r_he = normalize_humanevalplus(he)
+    assert r_he and r_he["name"] == "add_two" and validate(r_he), r_he
+    assert normalize_humanevalplus({"prompt": "", "canonical_solution": "x"}) is None
+    ap_rec = {"question": "Add two numbers a and b.",
+              "input_output": json.dumps({"fn_name": "add", "inputs": [[1, 2], [3, 4], [0, 0], [5, 5]],
+                                          "outputs": [3, 7, 0, 10]}),
+              "solutions": json.dumps(["class Solution:\n    def add(self, a, b):\n        return a + b"])}
+    r_ap = normalize_apps(ap_rec)
+    assert r_ap and r_ap["name"] == "add" and len(r_ap["asserts"]) == 3 and validate(r_ap), r_ap
+    assert normalize_apps({"input_output": json.dumps({"inputs": ["1"], "outputs": ["2"]}),
+                           "solutions": "[]"}) is None            # stdin/stdout style -> skipped
+    print("  [4] diverse normalizers: HumanEval+ (docstring style) + APPS call-based (LeetCode style) "
+          "-> same record contract, same validation gate; stdin-style skipped -> PASS")
+
     print("\n  ALGO_MBPP_PREP SELFTEST -> PASS  (real open-source tasks, preprocessed + validated, "
           "gate-compatible — the LM-author rung's corpus)")
     return True
@@ -197,11 +309,17 @@ def main():
     ap = argparse.ArgumentParser(description="GRR-13b: MBPP+ preprocessing (normalize/validate/cache).")
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--prep", action="store_true", help="download + preprocess + cache (molab)")
+    ap.add_argument("--prep-multi", action="store_true",
+                    help="the DIVERSE corpus: MBPP+ + HumanEval+ + APPS call-based (molab)")
     ap.add_argument("--out", default="artifacts/mbpp_plus_prepped.jsonl")
     ap.add_argument("--limit", type=int, default=0)
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
+    if a.prep_multi:
+        prep_multi("artifacts/corpus_multi.jsonl" if a.out == "artifacts/mbpp_plus_prepped.jsonl"
+                   else a.out)
+        return
     if a.prep:
         prep(a.out, limit=a.limit)
         return
