@@ -106,6 +106,13 @@ each rung: same GATE (dense verify), same BANK (health-gated graph write), same 
   (Fix C #45 reborn — most defensible, relevant when purpose-ads prove ≥ off); (3) TRM reranks LM
   pipeline proposals pre-verify (rung C only). Deferred: the long run's bottleneck is rung D, where TRM
   structurally can't participate until authored atoms become DSL-composable (programs-as-atoms at scale).
+- **Latent coupling (FiLM / cross-attn / KV injection) — TRIED, measured, ruled out for now**: the
+  cross-attn + KV stack exists (v5/adapter.py, gnn_encoder/subgraph/cross_attention) and its verdict was
+  amortization-not-capability (compose 93→100%, solve FLAT); the z-wall (0.21) says latent carries
+  strategy not content. Decisive point: TRM's "thought" IS a symbolic program — hand it to the LM as
+  TEXT (lossless) beats injecting it as latent (lossy). "TRM second-brain, LM compiler" in its purest
+  form is already live in DSL domains (TRM emits program, deterministic realizer compiles, no LM at all).
+  Latent returns only if a task class shows "symbolic sketch fails, latent helps" — none measured.
 
 ## THE LONG RUN (design)
 
