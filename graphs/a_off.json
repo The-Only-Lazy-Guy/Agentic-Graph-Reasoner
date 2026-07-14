@@ -1,0 +1,3017 @@
+{
+  "metadata": {},
+  "nodes": [
+    {
+      "id": "concept_algorithms",
+      "text": "algorithms",
+      "node_type": "concept",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {},
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_is_not_prime",
+      "text": "Write a python function to identify non-prime numbers.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def is_not_prime(n):\n    \"\"\"Check if a number is not a prime number.\"\"\"\n    if n <= 1:\n        return True\n    if n == 2 or n == 3:\n        return False\n    if n % 2 == 0 or n % 3 == 0:\n        return True\n    i = 5\n    while i * i <= n:\n        if n % i == 0 or n % (i + 2) == 0:\n            return True\n        i += 6\n    return False\n\n# Store helper if needed\n_store_helper: str = \"is_not_prime: Check if a number is not a prime number.\"",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124218Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_1",
+        "grow_patch_id": "impl_is_not_prime",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_differ_At_One_Bit_Pos",
+      "text": "Write a python function to check whether the two numbers differ at one bit position only or not.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def differ_At_One_Bit_Pos(num1, num2):\n    # Calculate the XOR of num1 and num2\n    xor_result = num1 ^ num2\n    \n    # Check if the number of bits set to 1 in xor_result is exactly 1\n    return (xor_result & (xor_result - 1)) == 0 and xor_result != 0",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124230Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_3",
+        "grow_patch_id": "impl_differ_At_One_Bit_Pos",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_square_nums",
+      "text": "Write a function to find squares of individual elements in a list.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def square_nums(nums):\n    return [num ** 2 for num in nums]\n\n# No genuinely reusable helper needed for this specific task.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124238Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_5",
+        "grow_patch_id": "impl_square_nums",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_find_Rotations",
+      "text": "Write a python function to find the minimum number of rotations (greater than 0) required to get the same string.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def find_Rotations(s):\n    \"\"\"\n    Finds the minimum number of rotations required to get the same string starting from any rotation.\n    \"\"\"\n    n = len(s)\n    for k in range(1, n):\n        rotated = s[k:] + s[:k]\n        if rotated == s:\n            return k\n    return n\n\n# Assuming no genuinely reusable helper is needed, no storage required.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124243Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_6",
+        "grow_patch_id": "impl_find_Rotations",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_sort_matrix",
+      "text": "Write a function to sort a given matrix in ascending order according to the sum of its rows.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def sort_matrix(matrix):\n    # Helper function to calculate the sum of each row\n    def row_sums(row):\n        return sum(row)\n    \n    # Sort the matrix based on the sum of each row\n    sorted_matrix = sorted(zip(range(len(matrix)), matrix), key=lambda x: row_sums(x[1]), reverse=False)\n    return [row[1] for row in sorted_matrix]\n\n# Reusable helper function for future tasks\nstore_row_sums: lambda row: sum(row)",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124256Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_8",
+        "grow_patch_id": "impl_sort_matrix",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_find_Volume",
+      "text": "Write a python function to find the volume of a triangular prism.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def find_Volume(base_length, base_width, height):\n    \"\"\"\n    Calculates the volume of a triangular prism.\n    \n    Parameters:\n        base_length (float): The length of the triangle's base.\n        base_width (float): The width of the triangle's base.\n        height (float): The height of the prism.\n    \n    Returns:\n        float: The volume of the triangular prism.\n    \"\"\"\n    # Calculating the area of the triangular base\n    base_area = 0.5 * base_length * base_width\n    \n    # Calculating the volume of the prism\n    volume = base_area * height\n    \n    return volume\n\n# No genuinely reusable helper was created, so no library to store",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124300Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_9",
+        "grow_patch_id": "impl_find_Volume",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_square_perimeter",
+      "text": "Write a function that returns the perimeter of a square given its side length as input.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def square_perimeter(side_length):\n    \"\"\"\n    Calculate the perimeter of a square given its side length.\n    \n    :param side_length: The length of a side of the square.\n    :return: The perimeter of the square.\n    \"\"\"\n    return 4 * side_length\n\n# No genuinely reusable helper was created for this task, so no library to store.\n# If there were a genuine helper, it would be stored here.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124309Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_11",
+        "grow_patch_id": "impl_square_perimeter",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_remove_dirty_chars",
+      "text": "Write a function to remove characters from the first string which are present in the second string.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def remove_dirty_chars(s1, s2):\n    \"\"\"\n    Removes all characters from s1 that appear in s2.\n    \n    :param s1: Source string to process.\n    :param s2: String containing characters to be removed from s1.\n    :return: A new string with characters from s1 removed where they match characters in s2.\n    \"\"\"\n    # Helper function to check if a character is not in s2\n    def is_clean_char(char):\n        return char not in s2\n\n    # Use the helper function to filter characters in s1\n    cleaned_s1 = ''.join(filter(is_clean_char, s1))\n\n    return cleaned_s1\n\n# Store the helper function for future use\nstore_helper = \"is_clean_char: Helper to check if a character is not in s2\"",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124314Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_12",
+        "grow_patch_id": "impl_remove_dirty_chars",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_test_duplicate",
+      "text": "Write a function to find whether a given array of integers contains any duplicate element.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def test_duplicate(nums):\n    def has_duplicates(elements):\n        seen = set()\n        for element in elements:\n            if element in seen:\n                return True\n            seen.add(element)\n        return False\n\n    return has_duplicates(nums)\n\n# Test cases to demonstrate usage\nnums1 = [1, 2, 3, 4]\nnums2 = [1, 2, 3, 1]\n\nprint(test_duplicate(nums1))  # Output: False\nprint(test_duplicate(nums2))  # Output: True",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124320Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_13",
+        "grow_patch_id": "impl_test_duplicate",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_check",
+      "text": "Write a python function to check if a given number is one less than twice its reverse.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def check(number):\n    # Helper function to reverse a number\n    def reverse_number(n):\n        return int(str(n)[::-1])\n    \n    reversed_number = reverse_number(number)\n    twice_reversed_number = 2 * reversed_number\n    \n    return number == twice_reversed_number - 1\n\n# Assuming 'check' is called as follows:\n# check(29) should return True because 29 is one less than twice the reverse of 29 (92).\n# check(30) should return False because 30 is not one less than twice the reverse of 30 (03).\n\n# No genuinely reusable helper needed in this specific case.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124331Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_15",
+        "grow_patch_id": "impl_check",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_find_Max_Num",
+      "text": "Write a python function to find the largest number that can be formed with the given list of digits.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def find_Max_Num(digits):\n    # Helper function to sort digits in descending order\n    def sort_descending(digits):\n        return sorted(digits, reverse=True)\n    \n    # Convert the list of digits into a string to easily manipulate\n    str_digits = ''.join(map(str, digits))\n    \n    # Sort the digits in descending order\n    max_str = sort_descending(list(str_digits))\n    \n    # If all digits are zero, we should return '0' as the result\n    if max_str == ['0']:\n        return '0'\n    \n    # Join the digits back into a single number\n    max_num = int(''.join(max_str))\n    return max_num",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124336Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_16",
+        "grow_patch_id": "impl_find_Max_Num",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_opposite_Signs",
+      "text": "Write a python function to check whether the given two integers have opposite sign or not.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def opposite_Signs(x, y):\n    return x * y < 0",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124339Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_17",
+        "grow_patch_id": "impl_opposite_Signs",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_is_octagonal",
+      "text": "Write a function to find the nth octagonal number.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def is_octagonal(n):\n    \"\"\"\n    Helper function to check if n is an octagonal number.\n    \n    Parameters:\n    - n: integer\n    \n    Returns:\n    - bool: True if n is an octagonal number, False otherwise.\n    \"\"\"\n    if n <= 0:\n        return False\n\n    # Using the inverse formula of the octagonal number sequence:\n    # x = (1 + sqrt(1 + 3 * 8 * n)) / 6\n    # We use this to solve for x, then check if x is an integer.\n    # If it's not, n is not an octagonal number.\n    discriminant = 1 + 24 * n\n    if discriminant < 0:\n        return False\n\n    sqrt_discriminant = int(discriminant**0.5)\n    if sqrt_discriminant * sqrt_discriminant == discriminant:\n        x = (1 + sqrt_discriminant) / 6\n        return x.is_integer()\n    return False\n\n# Assuming we need to find the nth octagonal number\ndef is_octagonal(n):\n    return is_octagonal_helper(n)\n\ndef is_octagonal_helper(n):\n    \"\"\"\n    Find the nth octagonal number using the formula:\n    Octagonal Number = n * (3n - 2)\n    \"\"\"\n    return n * (3 * n - 2)",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124346Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_18",
+        "grow_patch_id": "impl_is_octagonal",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_count_Substrings",
+      "text": "Write a python function to count the number of substrings with the sum of digits equal to their length.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def count_Substrings(s):\n    def has_equal_sum_and_length(substring):\n        return sum(int(char) for char in substring) == len(substring)\n\n    total_count = 0\n    n = len(s)\n    for i in range(n):\n        for j in range(i + 1, n + 1):\n            substring = s[i:j]\n            if has_equal_sum_and_length(substring):\n                total_count += 1\n    return total_count\n\ndef count_substring_with_equal_sum_and_length(substring):\n    return sum(int(char) for char in substring) == len(substring)",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124353Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_19",
+        "grow_patch_id": "impl_count_Substrings",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_count_substring_with_equal_sum_and_length",
+      "text": "Checks if the sum of digits in a given substring equals the length of the substring.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def count_substring_with_equal_sum_and_length(substring):\n    return sum(int(char) for char in substring) == len(substring)",
+        "kind": "authored",
+        "origin": "lm_author_helper",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124353Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_19",
+        "grow_patch_id": "impl_count_substring_with_equal_sum_and_length",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_smallest_num",
+      "text": "Write a python function to find smallest number in a list.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def smallest_num(numbers):\n    return min(numbers)\n\n# STORE smallest_num: finds the smallest number in a list",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124355Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_20",
+        "grow_patch_id": "impl_smallest_num",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_subject_marks",
+      "text": "Write a function to sort a list of tuples using the second value of each tuple.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def subject_marks(subjects):\n    return sorted(subjects, key=lambda x: x[1])\n\n# Helper function (if needed, here it's not strictly necessary but can be reused)\ndef extract_second_value(tup):\n    return tup[1]\n\n# Store the helper function if it's genuinely reusable\nstore = {\"extract_second_value\": \"Extracts the second element from a tuple\"}",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124406Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_22",
+        "grow_patch_id": "impl_subject_marks",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_recursive_list_sum",
+      "text": "Write a function to flatten a list and sum all of its elements.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def recursive_list_sum(lst):\n    def flatten_and_sum_helper(sublist):\n        total = 0\n        for item in sublist:\n            if isinstance(item, list):\n                total += flatten_and_sum_helper(item)\n            else:\n                total += item\n        return total\n\n    return flatten_and_sum_helper(lst)",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124409Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_23",
+        "grow_patch_id": "impl_recursive_list_sum",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_pos_count",
+      "text": "Write a python function to count the number of positive numbers in a list.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def pos_count(numbers):\n    \"\"\"\n    This function takes a list of numbers and returns the count of positive numbers in the list.\n    \"\"\"\n    return sum(1 for n in numbers if n > 0)\n\n# Store the helper function for future use\nstore_positive_check: 'Check if a number is positive'",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124413Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_24",
+        "grow_patch_id": "impl_pos_count",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_bell_number",
+      "text": "Write a function to find the number of ways to partition a set of Bell numbers.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "from math import factorial\n\ndef bell_number(n):\n    # Helper function to calculate binomial coefficients\n    def binom(n, k):\n        return factorial(n) // (factorial(k) * factorial(n - k))\n    \n    bell = [0] * (n + 1)\n    bell[0] = 1\n    \n    for i in range(1, n + 1):\n        bell[i] = 0\n        for j in range(i):\n            bell[i] += bell[j] * binom(i - 1, j)\n    \n    return bell[n]\n\n# Count the number of ways to partition a set of size n\ndef partition_ways(n):\n    total_partitions = sum(bell_number(i) for i in range(n + 1))\n    return total_partitions\n\n# Calculate the nth Bell number\nbell_number(5)\n\n# Store the helper function as it's potentially useful for other problems\nbinom: \"Calculate binomial coefficient C(n, k)\"",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124420Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_25",
+        "grow_patch_id": "impl_bell_number",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_is_Monotonic",
+      "text": "Write a python function to check whether the given array is monotonic or not.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def is_Monotonic(arr):\n    def is_increasing(nums):\n        return all(nums[i] <= nums[i + 1] for i in range(len(nums) - 1))\n\n    def is_decreasing(nums):\n        return all(nums[i] >= nums[i + 1] for i in range(len(nums) - 1))\n\n    return is_increasing(arr) or is_decreasing(arr)\n\n# Store the helper functions\nstore_increasing: 'Checks if an array is monotonically increasing'\nstore_decreasing: 'Checks if an array is monotonically decreasing'",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124426Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_26",
+        "grow_patch_id": "impl_is_Monotonic",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_is_sublist",
+      "text": "Write a function to check whether a list contains the given sublist or not.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def is_sublist(main_list, sub_list):\n    # Helper function to check if a given element is in the main list\n    def is_in(main, elem):\n        return elem in main\n    \n    # Check if the sub_list is present in the main_list\n    for i in range(len(main_list) - len(sub_list) + 1):\n        if all(is_in(main_list[i:i+len(sub_list)], sub_elem) for sub_elem in sub_list):\n            return True\n    return False\n\n# Store genuinely reusable helper\nis_in: \"Check if an element is in the main list\"",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124432Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_27",
+        "grow_patch_id": "impl_is_sublist",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_get_equal",
+      "text": "Write a function to find whether all the given tuples have equal length or not.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def get_equal(tuples_list):\n    if not tuples_list:  # Check if the list is empty\n        return True\n    \n    first_length = len(tuples_list[0])\n    \n    for tup in tuples_list:\n        if len(tup) != first_length:\n            return False\n    return True\n\n# Define a helper function to check the equality of lengths\nsame_length = lambda tups: len(set(map(len, tups))) == 1",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124437Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_28",
+        "grow_patch_id": "impl_get_equal",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_comb_sort",
+      "text": "Write a function to sort a list of elements.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def bubble_sort(arr):\n    n = len(arr)\n    swapped = True\n    gap = n\n    \n    while gap != 1 or swapped == True:\n        gap = max(1, int(gap / 1.3))\n        swapped = False\n        \n        for i in range(n - gap):\n            if arr[i] > arr[i + gap]:\n                arr[i], arr[i + gap] = arr[i + gap], arr[i]\n                swapped = True\n\ndef comb_sort(arr):\n    bubble_sort(arr)\n    return arr",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124442Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_29",
+        "grow_patch_id": "impl_comb_sort",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_find_tuples",
+      "text": "Write a function to find tuples which have all elements divisible by k from the given list of tuples.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def find_tuples(tuples_list, k):\n    def is_divisible_by_k(x):\n        \"\"\"Check if x is divisible by k.\"\"\"\n        return x % k == 0\n    \n    valid_tuples = []\n    for tup in tuples_list:\n        if all(is_divisible_by_k(x) for x in tup):\n            valid_tuples.append(tup)\n    return valid_tuples\n\n# Helper function: is_divisible_by_k\nis_divisible_by_k: \"Check if a number is divisible by k\"",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124500Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_32",
+        "grow_patch_id": "impl_find_tuples",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_is_Diff",
+      "text": "Write a python function to find whether a number is divisible by 11.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def is_Diff(n):\n    def check_divisible_by_11(num):\n        return num % 11 == 0\n    \n    return check_divisible_by_11(n)",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124507Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_33",
+        "grow_patch_id": "impl_is_Diff",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_word_len",
+      "text": "Write a python function to check whether the length of the word is odd or not.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def word_len(word):\n    # Check if the length of the word is odd\n    return len(word) % 2 != 0",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124509Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_34",
+        "grow_patch_id": "impl_word_len",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_tetrahedral_number",
+      "text": "Write a function to find the nth tetrahedral number.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def tetrahedral_number(n):\n    \"\"\"\n    Calculate the nth tetrahedral number.\n    \n    :param n: The order of the tetrahedral number to calculate.\n    :return: The nth tetrahedral number.\n    \"\"\"\n    return n * (n + 1) * (n + 2) // 6\n\n# Store the helper function (if any)\nhelper_name: str = \"triangle_number\"  # Placeholder name, as there's no need for an actual helper function in this case",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124514Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_35",
+        "grow_patch_id": "impl_tetrahedral_number",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_volume_sphere",
+      "text": "Write a function to find the volume of a sphere.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "import math\n\ndef volume_sphere(radius):\n    \"\"\"\n    Calculate the volume of a sphere given its radius.\n    \n    Args:\n    radius (float): The radius of the sphere.\n\n    Returns:\n    float: The volume of the sphere.\n    \"\"\"\n    return (4/3) * math.pi * radius**3\n\n# No need to store an additional helper as the calculation is straightforward and does not warrant a separate function.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124516Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_36",
+        "grow_patch_id": "impl_volume_sphere",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_surfacearea_sphere",
+      "text": "Write a function to find the surface area of a sphere.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "import math\n\ndef surfacearea_sphere(radius):\n    \"\"\"\n    Calculate the surface area of a sphere given its radius.\n    \n    Parameters:\n    radius (float): The radius of the sphere.\n    \n    Returns:\n    float: The surface area of the sphere.\n    \"\"\"\n    return 4 * math.pi * radius ** 2\n\n# Store the helper function\nstore_helper: \"Calculates the surface area of a sphere given its radius.\"",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124524Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_38",
+        "grow_patch_id": "impl_surfacearea_sphere",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_centered_hexagonal_number",
+      "text": "Write a function to find nth centered hexagonal number.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def centered_hexagonal_number(n):\n    \"\"\"\n    Calculate the nth centered hexagonal number.\n    \n    A centered hexagonal number represents a hexagon with a dot in the center and all other dots surrounding the central one in a hexagonal lattice.\n    The formula to compute the nth centered hexagonal number is: 3n^2 - 3n + 1\n    \"\"\"\n    return 3 * n**2 - 3 * n + 1\n\n# No need to store a helper as the calculation can be done directly in `centered_hexagonal_number`",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124529Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_39",
+        "grow_patch_id": "impl_centered_hexagonal_number",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_freq_count",
+      "text": "Write a function to get the frequency of all the elements in a list, returned as a dictionary.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def freq_count(lst):\n    return {item: lst.count(item) for item in set(lst)}",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124536Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_41",
+        "grow_patch_id": "impl_freq_count",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_closest_num",
+      "text": "Write a function to find the closest smaller number than n.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def closest_num(n):\n    def find_closest_smaller(x):\n        return x - 1\n    \n    # Find the closest smaller number than n\n    return find_closest_smaller(n)",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124539Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_42",
+        "grow_patch_id": "impl_closest_num",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_len_log",
+      "text": "Write a python function to find the length of the longest word.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def len_log(word_list):\n    max_length = 0\n    for word in word_list:\n        max_length = max(max_length, len(word))\n    return max_length",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124541Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_43",
+        "grow_patch_id": "impl_len_log",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_find_substring",
+      "text": "Write a function to check if a string is present as a substring in a given list of string values.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def find_substring(main_list, target):\n    \"\"\"\n    Check if the target string is a substring of any string in the main_list.\n    \n    :param main_list: List of strings to search through.\n    :param target: String to search for as a substring.\n    :return: True if target is found as a substring in any element of the main_list, False otherwise.\n    \"\"\"\n    for item in main_list:\n        if target in item:\n            return True\n    return False\n\n# STORE find_substring: Checks if a target string is a substring in any element of the provided list",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124547Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_44",
+        "grow_patch_id": "impl_find_substring",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_power",
+      "text": "Write a function to calculate the value of 'a' to the power 'b'.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def power(a, b):\n    return a ** b\n\n# No genuinely reusable helper needed for this specific task.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124600Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_46",
+        "grow_patch_id": "impl_power",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_index_minimum",
+      "text": "Given a list of tuples, write a function that returns the first value of the tuple with the smallest second value.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def index_minimum(tuples_list):\n    # Find the tuple with the smallest second element\n    min_tuple = min(tuples_list, key=lambda x: x[1])\n    \n    # Return the first value of that tuple\n    return min_tuple[0]",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124604Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_47",
+        "grow_patch_id": "impl_index_minimum",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_Find_Min_Length",
+      "text": "Write a python function to find the length of the smallest list in a list of lists.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def Find_Min_Length(list_of_lists):\n    return min(len(sublist) for sublist in list_of_lists)\n\ndef GetSubListLength(sublist):\n    return len(sublist)",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124607Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_48",
+        "grow_patch_id": "impl_Find_Min_Length",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_divisor",
+      "text": "Write a python function to find the number of divisors of a given integer.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def divisor(n):\n    count = 0\n    for i in range(1, int(n**0.5) + 1):\n        if n % i == 0:\n            count += 1\n            if i != n // i:\n                count += 1\n    return count\n\n# No genuinely reusable helper was found, so no library to define.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124612Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_49",
+        "grow_patch_id": "impl_divisor",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_frequency_lists",
+      "text": "Write a function to find frequency of each element in a flattened list of lists, returned in a dictionary.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def frequency_lists(list_of_lists):\n    def flatten(lst):\n        \"\"\"Flatten a list of lists into a single list.\"\"\"\n        return [item for sublist in lst for item in (flatten(sublist) if isinstance(sublist, list) else [sublist])]\n\n    flat_list = flatten(list_of_lists)\n    freq_dict = {}\n    for item in flat_list:\n        freq_dict[item] = freq_dict.get(item, 0) + 1\n    return freq_dict\n\n# Store the helper function if needed\nstore_helper = None",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124616Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_50",
+        "grow_patch_id": "impl_frequency_lists",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_multiply_num",
+      "text": "Write a function to multiply all the numbers in a list and divide with the length of the list.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def multiply_num(numbers):\n    product = 1\n    for number in numbers:\n        product *= number\n    return product / len(numbers)\n\n# STORE multiply_product_helper: Calculates the product of all elements in a list.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124619Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_51",
+        "grow_patch_id": "impl_multiply_num",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_next_smallest_palindrome",
+      "text": "Write a function to find the next smallest palindrome of a specified integer, returned as an integer.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def is_palindrome(n):\n    return str(n) == str(n)[::-1]\n\ndef next_smallest_palindrome(num):\n    num += 1\n    while not is_palindrome(num):\n        num += 1\n    return num\n\n# STORE is_palindrome: checks if a number is a palindrome",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124627Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_53",
+        "grow_patch_id": "impl_next_smallest_palindrome",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_kth_element",
+      "text": "Write a function to find the kth element in the given array using 1-based indexing.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def kth_element(arr, k):\n    return arr[k - 1]\n\n# No genuinely reusable helper is needed for this specific task.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124630Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_54",
+        "grow_patch_id": "impl_kth_element",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_snake_to_camel",
+      "text": "Write a function to convert a snake case string to camel case string.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def snake_to_camel(snake_str):\n    # Split the string at underscores and capitalize each segment, then join them together\n    return ''.join(word.capitalize() or '_' for word in snake_str.split('_'))\n\n# Store the helper function for future use\nstore_snake_to_camel: \"Convert a snake case string to camel case string\"",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124633Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_55",
+        "grow_patch_id": "impl_snake_to_camel",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_sort_sublists",
+      "text": "Write a function to sort each sublist of strings in a given list of lists.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def sort_sublists(lst):\n    return [sorted(sublist) for sublist in lst]\n\n# No genuinely reusable helper was created in this specific task, so no library will be curated.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124644Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_57",
+        "grow_patch_id": "impl_sort_sublists",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_count",
+      "text": "Write a python function to count true booleans in the given list.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def count(lst):\n    return sum(x for x in lst if isinstance(x, bool) and x)\n\n# Store the helper function as it could be useful for similar computations in the future\ndef is_true_boolean(value):\n    return isinstance(value, bool) and value",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124647Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_58",
+        "grow_patch_id": "impl_count",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_is_true_boolean",
+      "text": "Checks if a value is a boolean and True.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def is_true_boolean(value):\n    return isinstance(value, bool) and value",
+        "kind": "authored",
+        "origin": "lm_author_helper",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124647Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_58",
+        "grow_patch_id": "impl_is_true_boolean",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_merge_sorted_list",
+      "text": "Write a function to merge three lists into a single sorted list.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def merge_sorted_list(lst1, lst2, lst3):\n    \"\"\"\n    Merges three already sorted lists into a single sorted list.\n    \"\"\"\n    merged_list = sorted(lst1 + lst2 + lst3)\n    return merged_list\n\n# No genuinely reusable helper was defined in this specific task.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124701Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_60",
+        "grow_patch_id": "impl_merge_sorted_list",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_tuple_to_int",
+      "text": "Write a function to convert a given tuple of positive integers into a single integer.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def tuple_to_int(tup):\n    return int(''.join(map(str, tup)))",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124720Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_64",
+        "grow_patch_id": "impl_tuple_to_int",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_search",
+      "text": "Write a python function to find the element that appears only once in a sorted array.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def search(arr):\n    \"\"\"\n    Finds the single unique element in a sorted array where every other element appears exactly twice.\n\n    Parameters:\n    arr (List[int]): The input sorted list of integers.\n\n    Returns:\n    int: The single unique element.\n    \"\"\"\n    unique_element = 0\n    for num in arr:\n        unique_element ^= num\n    return unique_element\n\n# No need to define reusable helpers for this specific problem as the solution is self-contained.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124730Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_66",
+        "grow_patch_id": "impl_search",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_find_length",
+      "text": "Write a function to find the maximum difference between the number of 0s and number of 1s in any sub-string of the given binary string.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def find_length(binary_str):\n    n = len(binary_str)\n    max_diff = 0\n\n    def count_zeros_and_ones(s):\n        return s.count('0') - s.count('1')\n\n    for i in range(n):\n        for j in range(i + 1, n + 1):\n            substr = binary_str[i:j]\n            diff = count_zeros_and_ones(substr)\n            max_diff = max(max_diff, diff)\n\n    return max_diff",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124752Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_70",
+        "grow_patch_id": "impl_find_length",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_multiply_int",
+      "text": "Write a function to multiply two integers.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def multiply_int(a, b):\n    return a * b\n\n# No genuinely reusable helper was created, so no need to store anything.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124759Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_72",
+        "grow_patch_id": "impl_multiply_int",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_max_occurrences",
+      "text": "Write a function to find the item with maximum frequency in a given list.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def max_occurrences(lst):\n    from collections import Counter\n    counter = Counter(lst)\n    return max(counter, key=counter.get)\n\n# STORE max_occurrences: finds and returns the item with the maximum occurrences in a list",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124815Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_75",
+        "grow_patch_id": "impl_max_occurrences",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_reverse_vowels",
+      "text": "Write a python function to reverse only the vowels of a given string (where y is not a vowel).",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def reverse_vowels(s):\n    \"\"\"\n    Reverses the vowels in the input string while leaving consonants in place.\n    \"\"\"\n    vowels = \"aeiouAEIOU\"\n    s_list = list(s)\n    left, right = 0, len(s) - 1\n    \n    while left < right:\n        # Move left index forward until a vowel is found\n        while left < right and s[left] not in vowels:\n            left += 1\n        # Move right index backward until a vowel is found\n        while left < right and s[right] not in vowels:\n            right -= 1\n        # Swap the vowels\n        s_list[left], s_list[right] = s_list[right], s_list[left]\n        left, right = left + 1, right - 1\n    \n    return ''.join(s_list)\n\n# No genuinely reusable helper was created for this specific task, so no library to define.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124821Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_76",
+        "grow_patch_id": "impl_reverse_vowels",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_sum_negativenum",
+      "text": "Write a function to calculate the sum of the negative numbers of a given list of numbers.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def sum_negativenum(numbers):\n    return sum(x for x in numbers if x < 0)",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124826Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_78",
+        "grow_patch_id": "impl_sum_negativenum",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_hexagonal_num",
+      "text": "Write a function to find the nth hexagonal number.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def hexagonal_num(n):\n    return n * (2 * n - 1)\n\n# No need for a separate helper in this case as the computation is straightforward and reusable.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124830Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_79",
+        "grow_patch_id": "impl_hexagonal_num",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_zero_count",
+      "text": "Write a function to find the ratio of zeroes to non-zeroes in an array of integers.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def zero_count(arr):\n    zeros = sum(1 for x in arr if x == 0)\n    non_zeros = len(arr) - zeros\n    return zeros / non_zeros if non_zeros != 0 else float('inf')\n\n# zero_count is the only function used here, so no helper is needed.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124833Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_80",
+        "grow_patch_id": "impl_zero_count",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_circle_circumference",
+      "text": "Write a function to find the circumference of a circle.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "import math\n\ndef circle_circumference(radius):\n    \"\"\"\n    Calculates the circumference of a circle given its radius.\n    \"\"\"\n    return 2 * math.pi * radius\n\n# No genuinely reusable helper was necessary for this specific task, so no library will be curated.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124842Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_82",
+        "grow_patch_id": "impl_circle_circumference",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_count_samepair",
+      "text": "Write a function to count number items that are identical in the same position of three given lists.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def count_samepair(list1, list2, list3):\n    \"\"\"\n    Counts the number of positions where the elements in three lists match.\n    \n    :param list1: First list of elements\n    :param list2: Second list of elements\n    :param list3: Third list of elements\n    :return: Count of matching elements at the same positions across the three lists\n    \"\"\"\n    return sum(el1 == el2 == el3 for el1, el2, el3 in zip(list1, list2, list3))\n\n# No genuinely reusable helper defined for future use in this specific task.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124857Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_85",
+        "grow_patch_id": "impl_count_samepair",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_max_Abs_Diff",
+      "text": "Write a python function to find the maximum difference between any two elements in a given array.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def max_Abs_Diff(arr):\n    \"\"\"\n    Finds the maximum absolute difference between any two elements in the array.\n    \n    :param arr: List[int] representing the array of integers.\n    :return: int representing the maximum absolute difference.\n    \"\"\"\n    if len(arr) < 2:\n        return 0\n    \n    min_element = max_element = arr[0]\n    abs_diff = 0\n    \n    for num in arr:\n        if num < min_element:\n            min_element = num\n        elif num > max_element:\n            max_element = num\n        \n        abs_diff = max(abs_diff, abs(num - min_element), abs(num - max_element))\n    \n    return abs_diff\n\n# Store genuinely reusable helper (if any)\n# In this case, no truly reusable helper was defined.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124901Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_86",
+        "grow_patch_id": "impl_max_Abs_Diff",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_remove_elements",
+      "text": "Write a function to remove all elements from a given list present in another list.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def remove_elements(list1, list2):\n    \"\"\"\n    Removes all occurrences of elements found in list2 from list1.\n\n    :param list1: List from which elements will be removed.\n    :param list2: List containing elements to be removed from list1.\n    :return: A new list with elements of list2 removed from list1.\n    \"\"\"\n    return [element for element in list1 if element not in list2]\n\ndef list_difference(x, y):\n    \"\"\"\n    Generates a list containing elements that are in x but not in y.\n\n    :param x: Original list.\n    :param y: Elements to be filtered out of x.\n    :return: A list with elements not in y and in x.\n    \"\"\"\n    return list(set(x) - set(y))",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124911Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_88",
+        "grow_patch_id": "impl_remove_elements",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_sum_series",
+      "text": "Write a function to calculate the sum (n - 2*i) from i=0 to n // 2, for instance n + (n-2) + (n-4)... (until n-x =< 0).",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def sum_series(n):\n    total_sum = 0\n    for i in range(n // 2 + 1):\n        total_sum += n - 2 * i\n    return total_sum\n\n# No genuinely reusable helper needed for this particular task.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124915Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_89",
+        "grow_patch_id": "impl_sum_series",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_find_even_pair",
+      "text": "Write a function that counts the number of pairs of integers in a list that xor to an even number.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def find_even_pair(nums):\n    \"\"\"\n    Counts the number of pairs in the list 'nums' whose XOR value is an even number.\n    \n    Parameters:\n    nums (list): A list of integers.\n    \n    Returns:\n    int: The count of pairs with an even XOR value.\n    \"\"\"\n    def is_even_xor_pair(x, y):\n        \"\"\"Check if the XOR of two numbers is even.\"\"\"\n        return (x ^ y) % 2 == 0\n\n    even_count = 0\n    for i in range(len(nums)):\n        for j in range(i + 1, len(nums)):\n            if is_even_xor_pair(nums[i], nums[j]):\n                even_count += 1\n    return even_count\n\n# No genuinely reusable helper was deemed necessary in this specific task.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124926Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_91",
+        "grow_patch_id": "impl_find_even_pair",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_frequency",
+      "text": "Write a function to count the number of occurrences of a number in a given list.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def frequency(numbers_list, target):\n    return numbers_list.count(target)\n\n# No genuinely reusable helper needed for this task.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124937Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_93",
+        "grow_patch_id": "impl_frequency",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_sum_range_list",
+      "text": "Write a function to find the sum of numbers in a list within a range specified by two indices.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def sum_range_list(nums, start_index, end_index):\n    \"\"\"\n    Calculate the sum of elements in the list 'nums' from index 'start_index' to 'end_index' inclusive.\n    \"\"\"\n    return sum(nums[start_index: end_index+1])\n    \n# Store the helper function as it is a useful sub-computation\nstore_sum_sublist: \"Calculate the sum of a sublist defined by start and end indices\"",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124942Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_94",
+        "grow_patch_id": "impl_sum_range_list",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_perimeter_pentagon",
+      "text": "Write a function to find the perimeter of a regular pentagon from the length of its sides.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def perimeter_pentagon(side_length):\n    \"\"\"\n    Calculate the perimeter of a regular pentagon given the length of its sides.\n    \n    Parameters:\n    side_length (float): The length of each side of the pentagon.\n    \n    Returns:\n    float: The perimeter of the pentagon.\n    \"\"\"\n    perimeter = 5 * side_length\n    return perimeter\n\n# No genuinely reusable helper was created as this problem doesn't require any sub-computation beyond basic arithmetic.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124945Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_95",
+        "grow_patch_id": "impl_perimeter_pentagon",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_count_occurance",
+      "text": "Write a function to count the number of occurence of the string 'std' in a given string.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def count_occurance(input_string):\n    def count_helper(substring, current_index=0):\n        count = 0\n        while True:\n            index = input_string.find(substring, current_index)\n            if index == -1:\n                break\n            count += 1\n            current_index = index + 1\n        return count\n    \n    return count_helper('std')",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124949Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_96",
+        "grow_patch_id": "impl_count_occurance",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_check_type",
+      "text": "Write a function to check if all the elements in tuple have same data type or not.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def check_type(t):\n    first = type(t[0])\n    return all(type(x) == first for x in t)\n\n# No genuinely reusable helper was derived from this specific task.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124954Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_97",
+        "grow_patch_id": "impl_check_type",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_is_majority",
+      "text": "Write a function that takes in a sorted array, its length (n), and an element and returns whether the element is the majority element in the given sorted array. (The majority element is the element th",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def is_majority(arr, n, target):\n    def majority_count(nums, target):\n        count = 0\n        for num in nums:\n            if num == target:\n                count += 1\n        return count\n\n    majority_count_val = majority_count(arr, target)\n    if majority_count_val > n // 2:\n        return True\n    else:\n        return False\n\n# Store the reusable helper function if needed\nstore_helper = \"majority_count: Counts how many times a target element appears in the given array\"",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T125001Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_98",
+        "grow_patch_id": "impl_is_majority",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_count_Set_Bits",
+      "text": "Write a python function to count the number of set bits (binary digits with value 1) in a given number.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def count_Set_Bits(n):\n    \"\"\"\n    Counts the number of set bits (1s) in the binary representation of a given integer n.\n    \"\"\"\n    count = 0\n    while n:\n        n &= n - 1  # Remove the rightmost set bit\n        count += 1\n    return count\n\n# No genuinely reusable helper needed for this specific task",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T125005Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_99",
+        "grow_patch_id": "impl_count_Set_Bits",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_odd_values_string",
+      "text": "Write a python function to remove the characters which have odd index values of a given string.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def odd_values_string(s):\n    \"\"\"\n    Removes characters at odd indices from the input string.\n    \"\"\"\n    return ''.join(c for i, c in enumerate(s) if i % 2 == 0)",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T125008Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_100",
+        "grow_patch_id": "impl_odd_values_string",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_min_of_three",
+      "text": "Write a function to find minimum of three numbers.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def min_of_three(a, b, c):\n    return min(a, min(b, c))\n\n# STORE min: returns the minimum of two numbers\ndef min(x, y):\n    return x if x < y else y",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T125011Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_101",
+        "grow_patch_id": "impl_min_of_three",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_replace_blank",
+      "text": "Write a function that takes in a string and character, replaces blank spaces in the string with the character, and returns the string.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def replace_blank(s, ch):\n    return s.replace(\" \", ch)",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T125017Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_102",
+        "grow_patch_id": "impl_replace_blank",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_lateralsuface_cylinder",
+      "text": "Write a function to find the lateral surface area of a cylinder.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def lateralsuface_cylinder(radius, height):\n    import math\n\n    lateral_surface_area = 2 * math.pi * radius * height\n    return lateral_surface_area",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T125025Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_104",
+        "grow_patch_id": "impl_lateralsuface_cylinder",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_volume_cube",
+      "text": "Write a function to find the volume of a cube given its side length.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def volume_cube(side_length):\n    \"\"\"\n    Calculate the volume of a cube given its side length.\n    \n    Parameters:\n    side_length (float): The length of a side of the cube.\n\n    Returns:\n    float: The volume of the cube.\n    \"\"\"\n    return side_length ** 3\n\n# No genuinely reusable helper was created for this specific task, so no storage needed.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T125027Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_105",
+        "grow_patch_id": "impl_volume_cube",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_number_of_substrings",
+      "text": "Write a python function to count the number of non-empty substrings of a given string.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def number_of_substrings(s):\n    n = len(s)\n    return n * (n + 1) // 2\n\n# No genuinely reusable helper needed for this task.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T125045Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_108",
+        "grow_patch_id": "impl_number_of_substrings",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_count_charac",
+      "text": "Write a function to count the total number of characters in a string.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def count_charac(input_string):\n    return len(input_string)\n\n# No genuinely reusable helper is needed for this task.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T125101Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_111",
+        "grow_patch_id": "impl_count_charac",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_max_sum",
+      "text": "Write a function that takes an array and finds the maximum sum of a bitonic subsequence for the given array, where a sequence is bitonic if it is first increasing and then decreasing.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def max_sum(arr):\n    n = len(arr)\n    \n    # Initialize MIS and MDS arrays\n    mis = [0] * n\n    mds = [0] * n\n    \n    # Calculate MIS\n    for i in range(n):\n        mis[i] = arr[i]\n        for j in range(i):\n            if arr[j] < arr[i]:\n                mis[i] = max(mis[i], mis[j] + arr[i])\n    \n    # Calculate MDS\n    for i in reversed(range(n)):\n        mds[i] = arr[i]\n        for j in reversed(range(i + 1, n)):\n            if arr[j] < arr[i]:\n                mds[i] = max(mds[i], mds[j] + arr[i])\n    \n    # Calculate the maximum sum of bitonic subsequence\n    max_sum_bitonic = 0\n    for i in range(n):\n        max_sum_bitonic = max(max_sum_bitonic, mis[i] + mds[i] - arr[i])\n    \n    return max_sum_bitonic",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T125110Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_113",
+        "grow_patch_id": "impl_max_sum",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_lps",
+      "text": "Write a function to find the length of the longest palindromic subsequence in the given string.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def lps(s):\n    n = len(s)\n    # Initialize DP table with zeros\n    dp = [[0] * n for _ in range(n)]\n\n    # Every single character is a palindrome of length 1\n    for i in range(n):\n        dp[i][i] = 1\n\n    # Fill the DP table\n    for cl in range(2, n + 1):  # cl is the length of the current substring\n        for i in range(n - cl + 1):\n            j = i + cl - 1  # j is the ending index of the current substring\n            if s[i] == s[j] and cl == 2:  # Base case: two same characters\n                dp[i][j] = 2\n            elif s[i] == s[j]:\n                dp[i][j] = dp[i + 1][j - 1] + 2\n            else:\n                dp[i][j] = max(dp[i][j - 1], dp[i + 1][j])\n\n    return dp[0][n - 1]",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T125119Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_114",
+        "grow_patch_id": "impl_lps",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_count_X",
+      "text": "Write a python function that takes in a tuple and an element and counts the occcurences of the element in the tuple.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def count_X(tup, X):\n    return tup.count(X)",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T125122Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_115",
+        "grow_patch_id": "impl_count_X",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_insert_element",
+      "text": "Write a function that takes in a list and an element and inserts the element before each element in the list, and returns the resulting list.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def insert_element(lst, element):\n    result = []\n    for item in lst:\n        result.append(element)\n        result.append(item)\n    return result",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T125126Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_116",
+        "grow_patch_id": "impl_insert_element",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_count_integer",
+      "text": "Write a python function that returns the number of integer elements in a given list.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def count_integer(lst):\n    return sum(isinstance(item, int) for item in lst)",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T125133Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_118",
+        "grow_patch_id": "impl_count_integer",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    }
+  ],
+  "edges": [
+    {
+      "src": "impl_is_not_prime",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124218Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_1",
+        "grow_patch_id": "impl_is_not_prime->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_differ_At_One_Bit_Pos",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124230Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_3",
+        "grow_patch_id": "impl_differ_At_One_Bit_Pos->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_square_nums",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124238Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_5",
+        "grow_patch_id": "impl_square_nums->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_find_Rotations",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124243Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_6",
+        "grow_patch_id": "impl_find_Rotations->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_sort_matrix",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124256Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_8",
+        "grow_patch_id": "impl_sort_matrix->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_find_Volume",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124300Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_9",
+        "grow_patch_id": "impl_find_Volume->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_square_perimeter",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124309Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_11",
+        "grow_patch_id": "impl_square_perimeter->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_remove_dirty_chars",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124314Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_12",
+        "grow_patch_id": "impl_remove_dirty_chars->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_test_duplicate",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124320Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_13",
+        "grow_patch_id": "impl_test_duplicate->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_check",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124331Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_15",
+        "grow_patch_id": "impl_check->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_find_Max_Num",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124336Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_16",
+        "grow_patch_id": "impl_find_Max_Num->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_opposite_Signs",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124339Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_17",
+        "grow_patch_id": "impl_opposite_Signs->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_is_octagonal",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124346Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_18",
+        "grow_patch_id": "impl_is_octagonal->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_count_Substrings",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124353Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_19",
+        "grow_patch_id": "impl_count_Substrings->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_count_substring_with_equal_sum_and_length",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124353Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_19",
+        "grow_patch_id": "impl_count_substring_with_equal_sum_and_length->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_smallest_num",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124355Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_20",
+        "grow_patch_id": "impl_smallest_num->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_subject_marks",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124406Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_22",
+        "grow_patch_id": "impl_subject_marks->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_recursive_list_sum",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124409Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_23",
+        "grow_patch_id": "impl_recursive_list_sum->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_pos_count",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124413Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_24",
+        "grow_patch_id": "impl_pos_count->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_bell_number",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124420Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_25",
+        "grow_patch_id": "impl_bell_number->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_is_Monotonic",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124426Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_26",
+        "grow_patch_id": "impl_is_Monotonic->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_is_sublist",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124432Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_27",
+        "grow_patch_id": "impl_is_sublist->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_get_equal",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124437Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_28",
+        "grow_patch_id": "impl_get_equal->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_comb_sort",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124442Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_29",
+        "grow_patch_id": "impl_comb_sort->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_find_tuples",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124500Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_32",
+        "grow_patch_id": "impl_find_tuples->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_is_Diff",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124507Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_33",
+        "grow_patch_id": "impl_is_Diff->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_word_len",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124509Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_34",
+        "grow_patch_id": "impl_word_len->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_tetrahedral_number",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124514Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_35",
+        "grow_patch_id": "impl_tetrahedral_number->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_volume_sphere",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124516Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_36",
+        "grow_patch_id": "impl_volume_sphere->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_surfacearea_sphere",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124524Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_38",
+        "grow_patch_id": "impl_surfacearea_sphere->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_centered_hexagonal_number",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124529Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_39",
+        "grow_patch_id": "impl_centered_hexagonal_number->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_freq_count",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124536Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_41",
+        "grow_patch_id": "impl_freq_count->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_closest_num",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124539Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_42",
+        "grow_patch_id": "impl_closest_num->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_len_log",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124541Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_43",
+        "grow_patch_id": "impl_len_log->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_find_substring",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124547Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_44",
+        "grow_patch_id": "impl_find_substring->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_power",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124600Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_46",
+        "grow_patch_id": "impl_power->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_index_minimum",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124604Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_47",
+        "grow_patch_id": "impl_index_minimum->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_Find_Min_Length",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124607Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_48",
+        "grow_patch_id": "impl_Find_Min_Length->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_divisor",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124612Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_49",
+        "grow_patch_id": "impl_divisor->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_frequency_lists",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124616Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_50",
+        "grow_patch_id": "impl_frequency_lists->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_multiply_num",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124619Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_51",
+        "grow_patch_id": "impl_multiply_num->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_next_smallest_palindrome",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124627Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_53",
+        "grow_patch_id": "impl_next_smallest_palindrome->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_kth_element",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124630Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_54",
+        "grow_patch_id": "impl_kth_element->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_snake_to_camel",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124633Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_55",
+        "grow_patch_id": "impl_snake_to_camel->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_sort_sublists",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124644Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_57",
+        "grow_patch_id": "impl_sort_sublists->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_count",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124647Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_58",
+        "grow_patch_id": "impl_count->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_is_true_boolean",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124647Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_58",
+        "grow_patch_id": "impl_is_true_boolean->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_merge_sorted_list",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124701Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_60",
+        "grow_patch_id": "impl_merge_sorted_list->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_tuple_to_int",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124720Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_64",
+        "grow_patch_id": "impl_tuple_to_int->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_search",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124730Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_66",
+        "grow_patch_id": "impl_search->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_find_length",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124752Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_70",
+        "grow_patch_id": "impl_find_length->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_find_length",
+      "dst": "impl_count",
+      "relation": "depend",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124752Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_70",
+        "grow_patch_id": "impl_find_length->impl_count::depend",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_multiply_int",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124759Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_72",
+        "grow_patch_id": "impl_multiply_int->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_max_occurrences",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124815Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_75",
+        "grow_patch_id": "impl_max_occurrences->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_reverse_vowels",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124821Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_76",
+        "grow_patch_id": "impl_reverse_vowels->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_sum_negativenum",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124826Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_78",
+        "grow_patch_id": "impl_sum_negativenum->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_hexagonal_num",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124830Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_79",
+        "grow_patch_id": "impl_hexagonal_num->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_zero_count",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124833Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_80",
+        "grow_patch_id": "impl_zero_count->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_circle_circumference",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124842Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_82",
+        "grow_patch_id": "impl_circle_circumference->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_count_samepair",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124857Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_85",
+        "grow_patch_id": "impl_count_samepair->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_max_Abs_Diff",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124901Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_86",
+        "grow_patch_id": "impl_max_Abs_Diff->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_remove_elements",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124911Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_88",
+        "grow_patch_id": "impl_remove_elements->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_sum_series",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124915Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_89",
+        "grow_patch_id": "impl_sum_series->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_find_even_pair",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124926Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_91",
+        "grow_patch_id": "impl_find_even_pair->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_frequency",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124937Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_93",
+        "grow_patch_id": "impl_frequency->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_frequency",
+      "dst": "impl_count",
+      "relation": "depend",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124937Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_93",
+        "grow_patch_id": "impl_frequency->impl_count::depend",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_sum_range_list",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124942Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_94",
+        "grow_patch_id": "impl_sum_range_list->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_perimeter_pentagon",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124945Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_95",
+        "grow_patch_id": "impl_perimeter_pentagon->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_count_occurance",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124949Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_96",
+        "grow_patch_id": "impl_count_occurance->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_check_type",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T124954Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_97",
+        "grow_patch_id": "impl_check_type->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_is_majority",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T125001Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_98",
+        "grow_patch_id": "impl_is_majority->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_count_Set_Bits",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T125005Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_99",
+        "grow_patch_id": "impl_count_Set_Bits->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_odd_values_string",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T125008Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_100",
+        "grow_patch_id": "impl_odd_values_string->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_min_of_three",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T125011Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_101",
+        "grow_patch_id": "impl_min_of_three->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_replace_blank",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T125017Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_102",
+        "grow_patch_id": "impl_replace_blank->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_lateralsuface_cylinder",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T125025Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_104",
+        "grow_patch_id": "impl_lateralsuface_cylinder->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_volume_cube",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T125027Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_105",
+        "grow_patch_id": "impl_volume_cube->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_number_of_substrings",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T125045Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_108",
+        "grow_patch_id": "impl_number_of_substrings->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_count_charac",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T125101Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_111",
+        "grow_patch_id": "impl_count_charac->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_max_sum",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T125110Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_113",
+        "grow_patch_id": "impl_max_sum->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_lps",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T125119Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_114",
+        "grow_patch_id": "impl_lps->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_count_X",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T125122Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_115",
+        "grow_patch_id": "impl_count_X->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_count_X",
+      "dst": "impl_count",
+      "relation": "depend",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T125122Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_115",
+        "grow_patch_id": "impl_count_X->impl_count::depend",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_insert_element",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T125126Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_116",
+        "grow_patch_id": "impl_insert_element->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_count_integer",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T125133Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_118",
+        "grow_patch_id": "impl_count_integer->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    }
+  ]
+}
