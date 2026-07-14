@@ -35,6 +35,65 @@ from v5.runtime.algo_graph_edits import edge_candidate, grow, node_candidate
 from v5.runtime.algo_graph_mg import MGRetriever, _edits_from_solve, _fn_name, seed_graph, solve_mg
 
 
+def _author_prompt_purpose(task, advertised, purposes: dict) -> str:
+    """The FIXED advertisement (--ad-style purpose): each ad = signature + its node's PURPOSE line
+    (the bare-signature prompt showed `get_equal(Input)`-style ads — uninterpretable — plus a HARD
+    'do NOT re-implement' directive: an instruction to prefer functions whose behavior the model
+    cannot know; suspected driver of the accuracy decline as the graph grows). Soft directive."""
+    from v5.runtime.algo_graph_run import _sig
+    parts = [task.text]
+    if advertised:
+        parts.append("\nFunctions already in your library (you MAY call one IF it clearly fits; "
+                     "otherwise ignore them and write your own code):")
+        for name, code in advertised:
+            purpose = (purposes.get(name) or "").strip()
+            parts.append(f"  {_sig(code) or name}" + (f"  # {purpose}" if purpose else ""))
+    parts.append(f"Write `{task.name}(...)` in ONE Python code block.")
+    parts.append("Then, IF you wrote a genuinely reusable helper worth keeping for FUTURE tasks, "
+                 "curate your library — one line each, AFTER the code block:\n"
+                 "  STORE <helper_name>: <one-line purpose of what it computes>\n"
+                 "Only store genuinely reusable helpers; store nothing if none apply (your choice).")
+    return "\n\n".join(parts)
+
+
+def _solve_author(retr: MGRetriever, gen_fn, task, k: int, samples: int, ad_style: str):
+    """solve_mg with a pluggable advertisement style (solve_mg hardcodes the bare-sig prompt).
+    ad_style: off (k=0) | sig (status quo, delegates to solve_mg) | purpose (fixed ads)."""
+    if ad_style == "off":
+        return solve_mg(retr, gen_fn, task, k=0, samples=samples)
+    if ad_style == "sig":
+        return solve_mg(retr, gen_fn, task, k=k, samples=samples)
+    # purpose arm — mirror solve_mg's verify/reward flow with the fixed prompt
+    import re as _re
+    from v5.runtime.algo_graph_run import _task_verify, _top_defs, _code_fingerprint
+    from v5.runtime.derive_reward import _def_names, code_reward, grounded_code
+    from v5.runtime.tool_memory import _extract_code
+    advertised = retr.retrieve(task.text, k=k)
+    purposes = {}
+    for nid in retr.ids:
+        node = retr.graph.nodes[nid]
+        fn = _fn_name(node.metadata.get("code", "")) or nid
+        purposes[fn] = (node.text or "").splitlines()[0][:120]
+    adv_names = [n for n, _ in advertised]
+    prompt = _author_prompt_purpose(task, advertised, purposes)
+    best = ("", [], False, "")
+    for gen in gen_fn([prompt] * samples):
+        code = _extract_code(gen)
+        defined = _def_names(code)
+        called = [n for n in adv_names if n not in defined and _re.search(rf"\b{_re.escape(n)}\s*\(", code)]
+        deps = "\n\n".join(c for n, c in advertised if n in called)
+        if _task_verify(task, code, deps):
+            best = (code, called, True, gen); break
+        if not best[0]:
+            best = (code, called, False, gen)
+    code, reused, verified, raw = best
+    _, used = grounded_code(code, adv_names)
+    new_helpers = [n for n in _top_defs(code) if n != task.name and n not in adv_names]
+    R, _ = code_reward(verified, composed_used=used,
+                       authored_new_verified=len(new_helpers) if verified else 0)
+    return dict(name=task.name, verified=verified, reward=round(R, 3), reused=used, code=code, raw=raw)
+
+
 def _called_atoms(code: str, atom_names) -> list:
     """Atoms the solution CALLS (not re-defines) — the depend edges + the reuse signal."""
     defined = set(re.findall(r"def\s+([A-Za-z_]\w*)\s*\(", code or ""))
@@ -74,21 +133,62 @@ def _bank_solution(graph_path: str, retr: MGRetriever, task, res_solve: dict, ca
     return False, []
 
 
+def _failure_class(t, code: str, deps: str) -> str:
+    """Taxonomy for a miss: no_code | syntax | assert_fail (fails the original asserts) |
+    plus_only_fail (passes the original asserts, fails the DENSE EvalPlus script = the gate catching a
+    benchmark-overfit — plain-MBPP leaderboards would have counted this one as SOLVED)."""
+    from v5.runtime.algo_graph_run import verify_asserts
+    if not code or "def " not in code:
+        return "no_code"
+    try:
+        compile(code, "<gen>", "exec")
+    except SyntaxError:
+        return "syntax"
+    originals = [x for x in t.tests if x.lstrip().startswith("assert")]
+    plus = [x for x in t.tests if not x.lstrip().startswith("assert")]
+    full = (deps + "\n" + code) if deps else code
+    if originals and verify_asserts(full, originals, getattr(t, "setup", "")):
+        return "plus_only_fail" if plus else "assert_fail"
+    return "assert_fail"
+
+
 def run_author_loop(graph_path: str, embed_fn, gen_fn, tasks, k_retrieve: int = 6, samples: int = 4,
-                    reindex_every: int = 5, log: bool = True):
+                    reindex_every: int = 5, log: bool = True,
+                    failure_log: str = "artifacts/grr14_failures.jsonl", ad_style: str = "sig",
+                    shuffle_seed: int | None = None):
     """The loop over real tasks. Returns the report dict. The graph GROWS as it runs — atoms authored
-    for early tasks are advertised (and reused) by later ones."""
+    for early tasks are advertised (and reused) by later ones. k_retrieve=0 disables advertisement
+    entirely (the context-pollution ablation: does accuracy stop declining when the prompt stops
+    growing with the graph?). Failures are classified + logged; the report prints the solve rate per
+    20-task bucket so the over-time curve is visible directly."""
     if not Path(graph_path).exists():
         seed_graph(graph_path, ("concept_algorithms",))
+    if shuffle_seed is not None:                        # the corpus-ORDERING control
+        import random
+        tasks = list(tasks)
+        random.Random(shuffle_seed).shuffle(tasks)
     retr = MGRetriever(MemoryGraph.load_json(graph_path), embed_fn)
     solved = banked = 0
     authored_this_run: set = set()
     reuse_events = []                                   # (task, called earlier-authored atoms)
     since_reindex = 0
+    buckets: list = []                                  # per-20-task solve counts (the decline curve)
+    fail_counts: dict = {}
+    Path(failure_log).parent.mkdir(parents=True, exist_ok=True)
+    flog = open(failure_log, "w", encoding="utf-8")
     for i, t in enumerate(tasks):
-        res = solve_mg(retr, gen_fn, t, k=k_retrieve, samples=samples)
+        if i % 20 == 0:
+            buckets.append(0)
+        res = _solve_author(retr, gen_fn, t, k=k_retrieve, samples=samples, ad_style=ad_style)
+        if not res["verified"]:
+            cls = _failure_class(t, res.get("code", ""), "")
+            fail_counts[cls] = fail_counts.get(cls, 0) + 1
+            flog.write(json.dumps({"i": i, "task": t.name, "class": cls,
+                                   "graph_nodes": len(retr.graph.nodes),
+                                   "code": (res.get("code") or "")[:1500]}) + "\n")
         if res["verified"]:
             solved += 1
+            buckets[-1] += 1
             atom_names = [_fn_name(retr.graph.nodes[nid].metadata.get("code", "")) or nid
                           for nid in retr.ids]
             called = _called_atoms(res["code"], atom_names)
@@ -109,19 +209,28 @@ def run_author_loop(graph_path: str, embed_fn, gen_fn, tasks, k_retrieve: int = 
                   f"cross-task reuse events {len(reuse_events)}", flush=True)
     if since_reindex:
         retr = MGRetriever(MemoryGraph.load_json(graph_path), embed_fn)
+    flog.close()
+    bucket_sizes = [min(20, len(tasks) - 20 * b) for b in range(len(buckets))]
     report = dict(tasks=len(tasks), solved=solved, solve_rate=round(solved / max(1, len(tasks)), 3),
                   banked=banked, reuse_events=len(reuse_events),
-                  reuse_detail=reuse_events[:10], graph_nodes=len(retr.graph.nodes))
+                  reuse_detail=reuse_events[:10], graph_nodes=len(retr.graph.nodes),
+                  curve=[round(s / max(1, n), 2) for s, n in zip(buckets, bucket_sizes)],
+                  failures=fail_counts, k_retrieve=k_retrieve, ad_style=ad_style,
+                  shuffle_seed=shuffle_seed)
     if log:
-        print(f"\n  === GRR-14 report ===", flush=True)
+        print(f"\n  === GRR-14 report (ad_style={ad_style}, k={k_retrieve}, "
+              f"shuffle={shuffle_seed}) ===", flush=True)
         print(f"  solved {solved}/{len(tasks)} ({report['solve_rate']:.0%}) — the no-authoring ladder "
               f"baseline was 2% (1/40)", flush=True)
+        print(f"  SOLVE CURVE per 20 tasks (the over-time question): {report['curve']}", flush=True)
+        print(f"  FAILURE TAXONOMY: {fail_counts}  (plus_only_fail = passed the original asserts, "
+              f"killed by the DENSE gate — a plain-MBPP leaderboard counts those as solved)", flush=True)
         print(f"  atoms banked: {banked} (origin=lm_author, health-gated, depend edges to called atoms)",
               flush=True)
         print(f"  CROSS-TASK REUSE: {len(reuse_events)} events "
               f"{('e.g. ' + '; '.join(f'{n} called {c}' for n, c in reuse_events[:3])) if reuse_events else ''}",
               flush=True)
-        print(f"  graph: {report['graph_nodes']} nodes", flush=True)
+        print(f"  graph: {report['graph_nodes']} nodes | failure detail -> {failure_log}", flush=True)
     return report
 
 
@@ -223,6 +332,9 @@ def main():
     ap.add_argument("--limit", type=int, default=60)
     ap.add_argument("--samples", type=int, default=4)
     ap.add_argument("--pipeline-only", action="store_true", help="restrict to pipeline-shaped tasks")
+    ap.add_argument("--ad-style", default="sig", choices=["off", "sig", "purpose"],
+                    help="advertisement arm: off=graph ablated | sig=status quo | purpose=fixed ads")
+    ap.add_argument("--shuffle", type=int, default=-1, help="shuffle tasks with this seed (-1 = corpus order)")
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
@@ -231,10 +343,11 @@ def main():
         from v5.runtime.algo_lm_proposer import make_hf_gen
         from v5.runtime.algo_mbpp_prep import load_prepped
         tasks = load_prepped(a.corpus, limit=a.limit, pipeline_only=a.pipeline_only)
-        print(f"GRR-14 author loop (real LM {a.model}): {len(tasks)} MBPP+ tasks | graph {a.graph}",
-              flush=True)
+        print(f"GRR-14 author loop (real LM {a.model}): {len(tasks)} MBPP+ tasks | graph {a.graph} | "
+              f"ad_style={a.ad_style} shuffle={a.shuffle}", flush=True)
         run_author_loop(a.graph, make_mpnet_embedder(), make_hf_gen(a.model, max_new_tokens=400),
-                        tasks, samples=a.samples)
+                        tasks, samples=a.samples, ad_style=a.ad_style,
+                        shuffle_seed=None if a.shuffle < 0 else a.shuffle)
         return
     ap.print_help()
 
