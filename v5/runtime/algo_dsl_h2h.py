@@ -191,6 +191,74 @@ def _build_vib(beta: float = 1e-2):
     return VIBProgramDecoder
 
 
+def _build_vq(K: int = 32, beta_commit: float = 0.25, resid_scale: float = 0.25):
+    """GRR-17 row 5 (reviewer table): separate memorizing reusable CONCEPTS (good) from memorizing
+    dataset INSTANCES (bad). Mechanism: the goal encodes against a learned CONCEPT CODEBOOK — z =
+    prototype + a SHRUNK residual. Prototypes are free memory (concepts); instance detail only
+    survives through the small residual channel. VQ-VAE straight-through + commitment loss; decode
+    path = same heads, so inference is architecture-identical to gru reading a cleaner z."""
+    import torch
+    import torch.nn as nn
+    from v5.runtime.algo_dsl_trm import _build as _build_gru
+    _t, _nn, ProgramDecoder = _build_gru()
+
+    class VQProgramDecoder(ProgramDecoder):
+        def __init__(self, d_in=768, d=64, K=K):
+            super().__init__(d_in=d_in, d=d)
+            self.codebook = nn.Parameter(torch.randn(K, d) * 0.5)
+
+        def _quantize(self, mu):
+            dists = ((mu.unsqueeze(0) - self.codebook) ** 2).sum(-1)
+            j = int(dists.argmin())
+            proto = self.codebook[j]
+            # straight-through: forward uses prototype + shrunk residual; grads flow to mu
+            z = mu + (proto - mu).detach() + resid_scale * (mu - mu.detach())
+            commit = ((mu - proto.detach()) ** 2).sum() + beta_commit * ((proto - mu.detach()) ** 2).sum()
+            return z, commit
+
+        def loss(self, goal_vec, atom_vecs, steps, usage_w: float = 0.0):
+            ce = nn.CrossEntropyLoss()
+            mu = self.goal_proj(goal_vec)
+            g, commit = self._quantize(mu)
+            A = self.atom_proj(atom_vecs)
+            state = torch.zeros(self.d)
+            total = torch.zeros(())
+            from v5.runtime.algo_dsl_trm import _REDUCE
+            for op_i, atom_i, agg_i in steps:
+                op_l, agg_l, atom_l = self._heads(g, state, A)
+                total = total + ce(op_l.unsqueeze(0), torch.tensor([op_i]))
+                if op_i == _REDUCE:
+                    total = total + ce(agg_l.unsqueeze(0), torch.tensor([agg_i]))
+                    break
+                total = total + ce(atom_l.unsqueeze(0), torch.tensor([atom_i]))
+                state = self.rnn((self.op_emb(torch.tensor(op_i)) + A[atom_i]).unsqueeze(0),
+                                 state.unsqueeze(0))[0]
+            return total + 0.1 * commit
+
+        def decode(self, goal_vec, atom_vecs, atom_names, max_len=8):
+            # base decode loop, but reading the QUANTIZED goal (the concept, not the instance)
+            import torch as _tt
+            from v5.runtime.algo_dsl import Op as _Op
+            from v5.runtime.algo_dsl_trm import AGGS as _AGGS, OPS as _OPS
+            with _tt.no_grad():
+                g, _ = self._quantize(self.goal_proj(goal_vec))
+                A = self.atom_proj(atom_vecs)
+                state = _tt.zeros(self.d)
+                pipe = []
+                for _ in range(max_len):
+                    op_l, agg_l, atom_l = self._heads(g, state, A)
+                    op = int(op_l.argmax())
+                    if _OPS[op] == "REDUCE":
+                        pipe.append(_Op("REDUCE", _AGGS[int(agg_l.argmax())])); break
+                    ai = int(atom_l.argmax())
+                    pipe.append(_Op(_OPS[op], atom_names[ai]))
+                    state = self.rnn((self.op_emb(_tt.tensor(op)) + A[ai]).unsqueeze(0),
+                                     state.unsqueeze(0))[0]
+            return pipe
+
+    return VQProgramDecoder
+
+
 def _setup(fams, embed_fn):
     atom_names = list(GEN_ATOMS)
     atom_idx = {a: i for i, a in enumerate(atom_names)}
@@ -251,9 +319,11 @@ def h2h(n_families=24, steps=4000, seeds=(1, 2, 3), d=64, T=3, embed_fn=None, fa
         train_texts = {f: v[:k_train] for f, v in allv.items()}
         eval_texts = {f: v[k_train:] for f, v in allv.items()}
     VIBProgramDecoder = _build_vib()
+    VQProgramDecoder = _build_vq()
     archs = {"gru": lambda: ProgramDecoder(d_in=d_in, d=d),
              "recursive": lambda: RecursiveProgramDecoder(d_in=d_in, d=d, T=T),
-             "vib": lambda: VIBProgramDecoder(d_in=d_in, d=d)}
+             "vib": lambda: VIBProgramDecoder(d_in=d_in, d=d),
+             "vq": lambda: VQProgramDecoder(d_in=d_in, d=d)}
     if log:
         for name, mk in archs.items():
             torch.manual_seed(0)
@@ -359,6 +429,20 @@ def _selftest() -> bool:
     assert lv1 < lv0 and pv and pv[-1].kind == "REDUCE", (lv0, lv1, pv)
     print(f"  [2b] VIB bottleneck: CE+beta*KL {lv0:.2f} -> {lv1:.2f}, deterministic decode valid "
           f"(min I(z;task), max I(z;solution)) -> PASS")
+
+    # [2c] VQ concept-bottleneck: trains (CE+commit falls), decode-through-prototype yields a valid
+    #      program (concepts free, instance detail shrunk)
+    VQ = _build_vq(K=16)
+    torch.manual_seed(2)
+    mq = VQ(d_in=d_in, d=48)
+    lq0 = float(mq.loss(torch.as_tensor(tr[0][0]), A, tr[0][1]))
+    optq = torch.optim.Adam(mq.parameters(), lr=1e-3)
+    _sft_steps(mq, optq, tr, A, 500, seed=2)
+    lq1 = float(mq.loss(torch.as_tensor(tr[0][0]), A, tr[0][1]))
+    pq = mq.decode(torch.as_tensor(tr[0][0]), A, atom_names)
+    assert lq1 < lq0 and pq and pq[-1].kind == "REDUCE", (lq0, lq1, pq)
+    print(f"  [2c] VQ concept bottleneck: CE+commit {lq0:.2f} -> {lq1:.2f}, decode-through-prototype "
+          f"valid (concepts memorize free, instances pay) -> PASS")
 
     # [3] a small head-to-head runs end-to-end; both archs learn SOMETHING (>25% at this starved
     #     budget) and the benchmark DISCRIMINATES (nobody saturates — unlike the 6-family suite)

@@ -43,16 +43,24 @@ def proposer_prompt(task_text: str, pred_names, map_names, sketch: dict | None =
     confidence-gated THOUGHT rendered as text — atoms it points at + its (unverified) draft — phrased
     SOFT: the ads lesson says never hand the LM memory with authority it can't check."""
     hint = ""
-    if sketch and (sketch.get("atoms") or sketch.get("draft")):
+    if sketch and (sketch.get("concepts") or sketch.get("plan") or sketch.get("frontier")):
         lines = []
-        if sketch.get("atoms"):
-            lines.append("relevant atoms (with confidence): "
-                         + ", ".join(f"{a} ({p:.2f})" for a, p in sketch["atoms"]))
-        if sketch.get("draft"):
-            lines.append("draft pipeline (UNVERIFIED, may be wrong): "
-                         + " -> ".join(f"{k}({v})" for k, v in sketch["draft"]))
-        hint = ("A small memory model that has solved related tasks suggests (use ONLY if it helps; "
-                "it may be wrong):\n  " + "\n  ".join(lines) + "\n")
+        if sketch.get("concepts"):
+            lines.append("likely-relevant functions (predicted usage prob): "
+                         + ", ".join(f"{a} ({p:.2f})" for a, p in sketch["concepts"]))
+        u = sketch.get("uncertainty") or {}
+        if sketch.get("plan"):
+            lines.append(f"draft pipeline (UNVERIFIED, confidence {u.get('confidence', '?')}): "
+                         + " -> ".join(f"{k}({v})" for k, v in sketch["plan"]))
+        elif sketch.get("frontier"):
+            # the plan was WITHHELD (low confidence) — hand over the DELIBERATION instead
+            fr = sketch["frontier"][:3]
+            lines.append("no confident draft; per-step candidates it was weighing: "
+                         + " | ".join("/".join(f"{a}({p:.2f})" for a, p in st["arg"][:2]) for st in fr))
+        if u.get("step_conf"):
+            lines.append(f"its per-step confidence: {u['step_conf']}")
+        hint = ("A small memory model that has solved related tasks shares its REASONING STATE "
+                "(use ONLY if it helps; it may be wrong):\n  " + "\n  ".join(lines) + "\n")
     return (
         "You translate a task description into a small program PIPELINE with this exact grammar:\n"
         "  PIPE: FILTER(<pred>) -> ... -> MAP(<fn>) -> ... -> REDUCE(<agg>)\n"
@@ -233,13 +241,22 @@ def _selftest() -> bool:
     assert len(ps) == 2 and len(ps[0]) == 3 and len(ps[1]) == 1, ps
     print("  [1] parse: 2 valid kept (dup + unknown atom + MAP-before-FILTER dropped) -> PASS")
 
-    # [1b] GRR-16 sketch hint: present iff given, SOFT phrasing, absent when confidence-gated empty
-    sk = dict(atoms=[("is_odd", 0.62), ("square", 0.31)], draft=[("FILTER", "is_odd"), ("REDUCE", "sum")])
+    # [1b] GRR-17 reasoning-state hint: plan + confidence rendered when present; when the plan is
+    #      WITHHELD the deliberation (frontier candidates + per-step confidence) is rendered instead
+    sk = dict(concepts=[("is_odd", 0.62), ("square", 0.31)],
+              plan=[("FILTER", "is_odd"), ("REDUCE", "sum")],
+              frontier=[{"op": [("FILTER", 0.7)], "arg": [("is_odd", 0.62), ("is_prime", 0.2)]}],
+              uncertainty=dict(step_conf=[0.62, 0.9], confidence=0.56, mean_entropy=0.8))
     p_h = proposer_prompt("t", preds, maps, sketch=sk)
     assert "may be wrong" in p_h and "is_odd (0.62)" in p_h and "FILTER(is_odd) -> REDUCE(sum)" in p_h
-    assert proposer_prompt("t", preds, maps, sketch=dict(atoms=[], draft=None)) == \
+    assert "confidence 0.56" in p_h and "[0.62, 0.9]" in p_h
+    sk_no = dict(sk, plan=None)
+    p_n = proposer_prompt("t", preds, maps, sketch=sk_no)
+    assert "no confident draft" in p_n and "is_odd(0.62)/is_prime(0.20)" in p_n
+    assert proposer_prompt("t", preds, maps, sketch=dict(concepts=[], plan=None, frontier=[])) == \
         proposer_prompt("t", preds, maps)
-    print("  [1b] sketch hint: rendered SOFT with confidences; empty sketch -> identical prompt -> PASS")
+    print("  [1b] reasoning-state hint: plan+confidence rendered; withheld plan -> deliberation "
+          "rendered; empty sketch -> identical prompt -> PASS")
 
     # [2] the stub LM parses REAL factory texts back to verifying pipelines (text only, no reference)
     fams = gen_families(16, seed=3, max_chain=4)

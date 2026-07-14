@@ -60,13 +60,17 @@ def _build():
             self.op_head = nn.Sequential(nn.Linear(2 * d, d), nn.GELU(), nn.Linear(d, len(OPS)))
             self.agg_head = nn.Sequential(nn.Linear(2 * d, d), nn.GELU(), nn.Linear(d, len(AGGS)))
             self.q_atom = nn.Sequential(nn.Linear(2 * d, d), nn.GELU(), nn.Linear(d, d))
+            # GRR-17: the TRM COMPUTES reasoning state, not just answers — usage head predicts which
+            # atoms the VERIFIED solution will use (pointer-style, graph-size-agnostic), trained as an
+            # auxiliary BCE on every trace. Feeds the sketch's "retrieved concepts".
+            self.usage_q = nn.Sequential(nn.Linear(d, d), nn.GELU(), nn.Linear(d, d))
             self.d = d
 
         def _heads(self, g, state, A):
             h = torch.cat([g, state])
             return self.op_head(h), self.agg_head(h), A @ self.q_atom(h)      # op, agg, atom-pointer
 
-        def loss(self, goal_vec, atom_vecs, steps):
+        def loss(self, goal_vec, atom_vecs, steps, usage_w: float = 0.1):
             ce = nn.CrossEntropyLoss()
             g = self.goal_proj(goal_vec)
             A = self.atom_proj(atom_vecs)
@@ -82,6 +86,14 @@ def _build():
                 total = total + ce(atom_l.unsqueeze(0), torch.tensor([atom_i]))
                 arg = A[atom_i]
                 state = self.rnn((self.op_emb(torch.tensor(op_i)) + arg).unsqueeze(0), state.unsqueeze(0))[0]
+            if usage_w:
+                # GRR-17 aux: predict the solution's atom-usage multi-hot from the GOAL alone
+                used = {a for _o, a, _g in steps if a >= 0}
+                target = torch.zeros(A.shape[0])
+                for a in used:
+                    target[a] = 1.0
+                usage_l = A @ self.usage_q(g)
+                total = total + usage_w * nn.functional.binary_cross_entropy_with_logits(usage_l, target)
             return total
 
         def sample(self, goal_vec, atom_vecs, atom_names, temp=1.0, max_len=5):
@@ -306,7 +318,7 @@ def _score_pipe(model, goal_t, A, atom_idx, pipe) -> float:
     verify (exec + oracle calls). The guided search's ordering key."""
     import torch
     with torch.no_grad():
-        return -float(model.loss(goal_t, A, program_to_steps(pipe, atom_idx)))
+        return -float(model.loss(goal_t, A, program_to_steps(pipe, atom_idx), usage_w=0.0))
 
 
 def _score_pipes_batch(model, goal_t, A_raw, atom_idx, pipes) -> list:
@@ -436,37 +448,57 @@ def _beam_search(model, goal_vec, fam, fams, resolve_fn, atom_names, atom_vecs, 
 
 
 def sketch(model, goal_vec, atom_names, atom_vecs, k: int = 4, tau: float = 0.15, max_len: int = 8):
-    """The TRM's THOUGHT as a symbolic, confidence-gated sketch — the 'second brain' handoff to the LM
-    (latent injection measured amortization-not-capability + z-wall; a TRM plan IS a symbolic program,
-    so TEXT is the lossless channel). Returns dict(atoms=[(name, prob)], draft=[(op, arg)] | None).
-    Confidence gate: atoms below tau are DROPPED, a draft whose first-step op-confidence is below tau
-    is withheld entirely — the ads lesson: never hand the LM low-confidence memory with authority."""
+    """GRR-17: the TRM's REASONING STATE as a typed symbolic sketch — deliberation, not a finished
+    guess (reviewer table row 1/2). Returns dict(
+      concepts    = [(atom, prob)]  — the trained USAGE head's prediction of what the verified
+                    solution will use (retrieved concepts, not a decode byproduct),
+      plan        = [(op, arg)] | None — the greedy draft, WITHHELD below the confidence gate,
+      frontier    = per emission step: the live alternatives {op: top-2 (name, p), arg: top-3 (name, p)},
+      uncertainty = {step_conf: [chosen-prob per step], confidence: their product, mean_entropy}
+    ) The frontier + uncertainty are handed over EVEN when the plan is withheld — a partner that knows
+    what it doesn't know is more useful than one that guesses (the ads lesson, upgraded)."""
+    import math
     import torch
     with torch.no_grad():
         g = model.goal_proj(torch.as_tensor(np.asarray(goal_vec, dtype=np.float32)))
         A = model.atom_proj(torch.as_tensor(atom_vecs, dtype=torch.float32))
+        usage_p = torch.sigmoid(A @ model.usage_q(g))
+        top = sorted(zip(atom_names, usage_p.tolist()), key=lambda x: -x[1])[:k]
+        concepts = [(a, round(p, 2)) for a, p in top if p >= tau] or [(top[0][0], round(top[0][1], 2))]
         state = torch.zeros(model.d)
-        ctx = torch.cat([g, state])
-        atom_p = torch.softmax(A @ model.q_atom(ctx), -1)
-        top = sorted(zip(atom_names, atom_p.tolist()), key=lambda x: -x[1])[:k]
-        atoms = [(a, round(p, 2)) for a, p in top if p >= tau]
-        draft, confident = [], True
+        plan, frontier, step_conf, ents, confident = [], [], [], [], True
         for _ in range(max_len):
             ctx = torch.cat([g, state])
             op_l = model.op_head(ctx)
             op_p = torch.softmax(op_l, -1)
+            ents.append(float(-(op_p * (op_p + 1e-9).log()).sum()))
+            top_ops = sorted(zip(OPS, op_p.tolist()), key=lambda x: -x[1])[:2]
+            op = int(op_l.argmax())
             if float(op_p.max()) < tau:
                 confident = False
-                break
-            op = int(op_l.argmax())
             if OPS[op] == "REDUCE":
-                draft.append(("REDUCE", AGGS[int(model.agg_head(ctx).argmax())]))
+                agg_p = torch.softmax(model.agg_head(ctx), -1)
+                top_args = sorted(zip(AGGS, agg_p.tolist()), key=lambda x: -x[1])[:3]
+                frontier.append({"op": [(o, round(p, 2)) for o, p in top_ops],
+                                 "arg": [(a, round(p, 2)) for a, p in top_args]})
+                step_conf.append(round(float(op_p.max() * agg_p.max()), 2))
+                plan.append(("REDUCE", top_args[0][0]))
                 break
-            ai = int((A @ model.q_atom(ctx)).argmax())
-            draft.append((OPS[op], atom_names[ai]))
+            atom_p = torch.softmax(A @ model.q_atom(ctx), -1)
+            top_args = sorted(zip(atom_names, atom_p.tolist()), key=lambda x: -x[1])[:3]
+            frontier.append({"op": [(o, round(p, 2)) for o, p in top_ops],
+                             "arg": [(a, round(p, 2)) for a, p in top_args]})
+            step_conf.append(round(float(op_p.max() * atom_p.max()), 2))
+            ai = int(atom_p.argmax())
+            plan.append((OPS[op], atom_names[ai]))
             state = model.rnn((model.op_emb(torch.tensor(op)) + A[ai]).unsqueeze(0),
                               state.unsqueeze(0))[0]
-        return dict(atoms=atoms, draft=(draft if confident and draft else None))
+        conf = 1.0
+        for c in step_conf:
+            conf *= c
+        return dict(concepts=concepts, plan=(plan if confident and plan else None), frontier=frontier,
+                    uncertainty=dict(step_conf=step_conf, confidence=round(conf, 3),
+                                     mean_entropy=round(sum(ents) / max(1, len(ents)), 2)))
 
 
 def solve_with_search(model, task, fams, atom_names, atom_vecs, resolve_fn, embed_fn, atom_idx,
@@ -831,17 +863,22 @@ def _selftest() -> bool:
         print(f"  [5] guided search: verifies-to-solve {v_cold} (cold net) -> {v_hot} (consolidated); "
               f"solve_with_search via=search -> via=decode (until-solve primitive, amortized) -> PASS")
 
-        # [6] GRR-16 sketch: the consolidated net emits a confident symbolic thought (atoms + draft);
-        #     the confidence gate withholds junk from a cold net's draft or empties the atom list
+        # [6] GRR-17 typed REASONING-STATE sketch: consolidated net -> confident plan + trained-usage
+        #     concepts; a cold net's PLAN is withheld but its DELIBERATION (frontier + uncertainty)
+        #     is still handed over — a partner that knows what it doesn't know
         sk_hot = sketch(cold, gv_lis, atom_names, atom_vecs)          # 'cold' was consolidated in [5]
-        assert sk_hot["draft"] is not None and ("MAP", "lis_length") in sk_hot["draft"], sk_hot
-        assert any(a == "lis_length" for a, _p in sk_hot["atoms"]), sk_hot
+        assert sk_hot["plan"] is not None and ("MAP", "lis_length") in sk_hot["plan"], sk_hot
+        assert any(a == "lis_length" for a, _p in sk_hot["concepts"]), sk_hot
+        assert sk_hot["uncertainty"]["confidence"] > 0.5 and sk_hot["frontier"], sk_hot
         torch_.manual_seed(3)
         frozen = PD(d_in=d_in, d=48)
-        sk_cold = sketch(frozen, gv_lis, atom_names, atom_vecs, tau=0.9)   # absurd bar -> withheld
-        assert sk_cold["draft"] is None and sk_cold["atoms"] == [], sk_cold
-        print(f"  [6] sketch: consolidated net -> confident symbolic thought "
-              f"{sk_hot['draft']}; confidence gate withholds an unconfident one -> PASS")
+        sk_cold = sketch(frozen, gv_lis, atom_names, atom_vecs, tau=0.9)   # absurd bar -> plan withheld
+        assert sk_cold["plan"] is None and sk_cold["frontier"], sk_cold
+        assert sk_cold["uncertainty"]["confidence"] < sk_hot["uncertainty"]["confidence"], \
+            (sk_cold["uncertainty"], sk_hot["uncertainty"])
+        print(f"  [6] reasoning-state sketch: plan {sk_hot['plan']} conf="
+              f"{sk_hot['uncertainty']['confidence']}; unconfident net -> plan WITHHELD, frontier + "
+              f"uncertainty still handed over -> PASS")
 
     print("\n  ALGO_DSL_TRM SELFTEST -> PASS  (the reasoner synthesizes programs; STaR turns recall into "
           "search-and-consolidate reasoning)")
