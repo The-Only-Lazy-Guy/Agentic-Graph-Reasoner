@@ -32,7 +32,7 @@ from pathlib import Path
 
 from graph_core import MemoryGraph
 from v5.runtime.algo_graph_edits import edge_candidate, grow, node_candidate
-from v5.runtime.algo_graph_mg import MGRetriever, _fn_name, seed_graph, solve_mg
+from v5.runtime.algo_graph_mg import MGRetriever, _edits_from_solve, _fn_name, seed_graph, solve_mg
 
 
 def _called_atoms(code: str, atom_names) -> list:
@@ -42,24 +42,36 @@ def _called_atoms(code: str, atom_names) -> list:
             and re.search(rf"\b{re.escape(a)}\s*\(", code or "")]
 
 
-def _bank_solution(graph_path: str, retr: MGRetriever, task, code: str, called: list,
-                   session: str, concept: str = "concept_algorithms") -> bool:
-    """A VERIFIED solution -> an implementation node (origin=lm_author) + depend edges to every called
-    atom + part_of the concept. Health-gated. Returns True iff persisted."""
+def _bank_solution(graph_path: str, retr: MGRetriever, task, res_solve: dict, called: list,
+                   session: str, concept: str = "concept_algorithms"):
+    """A VERIFIED solve -> (a) the solution as an implementation node (origin=lm_author, task text =
+    retrieval key) + depend edges to called atoms; (b) the model's STORE-action HELPERS as their OWN
+    atoms (origin=lm_author_helper) — the reuse-granular units: nobody calls another task's entry
+    point, but everybody calls is_prime. Health-gated. Returns (banked_solution, helper_names)."""
+    code = res_solve["code"]
+    cands, helper_names = [], []
     nid = f"impl_{task.name}"
-    if nid in retr.graph.nodes:
-        return False
-    cands = [node_candidate(nid, code, task.text.splitlines()[0][:200], session,
-                            metadata={"kind": "authored", "origin": "lm_author"})]
-    cands.append(edge_candidate(nid, concept, "part_of", session))
-    for a in called:
-        cands.append(edge_candidate(nid, f"impl_{a}", "depend", session))
+    if nid not in retr.graph.nodes:
+        cands.append(node_candidate(nid, code, task.text.splitlines()[0][:200], session,
+                                    metadata={"kind": "authored", "origin": "lm_author"}))
+        cands.append(edge_candidate(nid, concept, "part_of", session))
+        for a in called:
+            cands.append(edge_candidate(nid, f"impl_{a}", "depend", session))
+    stores, edges = _edits_from_solve(res_solve, task, concept)     # model-chosen helpers (Fix D)
+    for hid, src, purpose in stores:
+        if hid != nid and hid not in retr.graph.nodes:
+            cands.append(node_candidate(hid, src, purpose, session,
+                                        metadata={"kind": "authored", "origin": "lm_author_helper"}))
+            cands.append(edge_candidate(hid, concept, "part_of", session))
+            helper_names.append(hid[len("impl_"):])
+    if not cands:
+        return False, []
     newp = graph_path + ".grown"
-    res = grow(graph_path, newp, cands)
-    if res.get("persisted"):
+    r = grow(graph_path, newp, cands)
+    if r.get("persisted"):
         Path(newp).replace(graph_path)
-        return True
-    return False
+        return True, helper_names
+    return False, []
 
 
 def run_author_loop(graph_path: str, embed_fn, gen_fn, tasks, k_retrieve: int = 6, samples: int = 4,
@@ -83,9 +95,11 @@ def run_author_loop(graph_path: str, embed_fn, gen_fn, tasks, k_retrieve: int = 
             reused_authored = [a for a in called if a in authored_this_run]
             if reused_authored:
                 reuse_events.append((t.name, reused_authored))
-            if _bank_solution(graph_path, retr, t, res["code"], called, f"grr14_{i}"):
+            ok, helper_names = _bank_solution(graph_path, retr, t, res, called, f"grr14_{i}")
+            if ok:
                 banked += 1
                 authored_this_run.add(t.name)
+                authored_this_run.update(helper_names)  # helpers = the reuse-granular atoms
                 since_reindex += 1
                 if since_reindex >= reindex_every:      # new atoms become retrievable for later tasks
                     retr = MGRetriever(MemoryGraph.load_json(graph_path), embed_fn)
@@ -143,34 +157,42 @@ def _selftest() -> bool:
     t3 = MBPPTask("impossible", "Return the 10th busy beaver number.\nWrite `impossible()`.",
                   ["assert impossible() == -1"])
 
+    t4 = MBPPTask("count_odds", "Count the odd numbers in a list.\nWrite `count_odds(xs)`.",
+                  ["assert count_odds([1, 2, 3]) == 2", "assert count_odds([2, 4]) == 0"])
+
     CODE1 = "def digit_total(n):\n    return sum(int(c) for c in str(abs(n)))"
     CODE2 = ("def digit_total_list(xs):\n    return sum(digit_total(x) for x in xs)")  # REUSES t1's atom
+    CODE4 = ("def is_odd_h(n):\n    return n % 2 == 1\n\n"
+             "def count_odds(xs):\n    return sum(1 for x in xs if is_odd_h(x))")
 
     def stub_gen(prompts):
         outs = []
         for p in prompts:
             if "digit_total_list" in p:
-                # the perfect author reuses the ADVERTISED atom iff the prompt shows it
-                outs.append(f"```python\n{CODE2}\n```" if "digit_total" in p.split("Task:")[0] or
-                            "digit_total(" in p else f"```python\n{CODE2}\n```")
+                outs.append(f"```python\n{CODE2}\n```")     # calls the ADVERTISED authored atom
             elif "digit_total" in p:
                 outs.append(f"```python\n{CODE1}\n```")
+            elif "count_odds" in p:
+                # the author CHOOSES to store a helper (Fix D STORE action) -> reuse-granular atom
+                outs.append(f"```python\n{CODE4}\n```\nSTORE is_odd_h: odd-number predicate helper")
             else:
                 outs.append("```python\ndef impossible():\n    return 42\n```")   # fails its assert
         return outs
 
     with tempfile.TemporaryDirectory() as td:
         gp = str(Path(td) / "g.json")
-        report = run_author_loop(gp, embed, stub_gen, [t1, t2, t3], samples=1, reindex_every=1,
+        report = run_author_loop(gp, embed, stub_gen, [t1, t4, t2, t3], samples=1, reindex_every=1,
                                  log=False)
         g = MemoryGraph.load_json(gp)
 
-        # [1] verified solutions banked with provenance; the failed one is NOT
-        assert report["solved"] == 2 and report["banked"] == 2, report
+        # [1] verified solutions banked with provenance; the failed one is NOT; the model's STORE
+        #     helper became its OWN atom (the reuse-granular unit)
+        assert report["solved"] == 3 and report["banked"] == 3, report
         assert "impl_digit_total" in g.nodes and "impl_impossible" not in g.nodes
         assert g.nodes["impl_digit_total"].metadata.get("origin") == "lm_author"
-        print(f"  [1] 2/3 solved -> banked with origin=lm_author; the gate-failing task banked "
-              f"NOTHING -> PASS")
+        assert g.nodes["impl_is_odd_h"].metadata.get("origin") == "lm_author_helper"
+        print(f"  [1] 3/4 solved -> banked with origin=lm_author; STORE helper is_odd_h banked as its "
+              f"OWN atom (origin=lm_author_helper); the gate-failing task banked NOTHING -> PASS")
 
         # [2] cross-task REUSE: t2's solution CALLS t1's authored atom; depend edge landed
         assert report["reuse_events"] == 1 and report["reuse_detail"][0][1] == ["digit_total"], report
