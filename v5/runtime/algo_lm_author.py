@@ -95,10 +95,12 @@ def _solve_author(retr: MGRetriever, gen_fn, task, k: int, samples: int, ad_styl
 
 
 def _called_atoms(code: str, atom_names) -> list:
-    """Atoms the solution CALLS (not re-defines) — the depend edges + the reuse signal."""
+    """Atoms the solution CALLS (not re-defines) — the depend edges + the reuse signal.
+    (?<![\\w.]) guards method calls: `lst.count(x)` must NOT count as calling a banked atom named
+    `count` (\\b matches after '.', which produced false-positive reuse events)."""
     defined = set(re.findall(r"def\s+([A-Za-z_]\w*)\s*\(", code or ""))
     return [a for a in atom_names if a not in defined
-            and re.search(rf"\b{re.escape(a)}\s*\(", code or "")]
+            and re.search(rf"(?<![\w.]){re.escape(a)}\s*\(", code or "")]
 
 
 def _bank_solution(graph_path: str, retr: MGRetriever, task, res_solve: dict, called: list,
@@ -332,8 +334,9 @@ def main():
     ap.add_argument("--limit", type=int, default=60)
     ap.add_argument("--samples", type=int, default=4)
     ap.add_argument("--pipeline-only", action="store_true", help="restrict to pipeline-shaped tasks")
-    ap.add_argument("--ad-style", default="sig", choices=["off", "sig", "purpose"],
-                    help="advertisement arm: off=graph ablated | sig=status quo | purpose=fixed ads")
+    ap.add_argument("--ad-style", default="off", choices=["off", "sig", "purpose"],
+                    help="advertisement arm: off=DEFAULT (measured: sig ads cost ~16pp by task 90 and "
+                         "cause the over-time decline) | sig=bare-sig status quo | purpose=repaired ads")
     ap.add_argument("--shuffle", type=int, default=-1, help="shuffle tasks with this seed (-1 = corpus order)")
     a = ap.parse_args()
     if a.selftest:
