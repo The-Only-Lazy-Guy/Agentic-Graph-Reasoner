@@ -4030,6 +4030,46 @@
       },
       "access_count": 0,
       "context_guard": {}
+    },
+    {
+      "id": "impl_min_product_tuple",
+      "text": "Write a function to find the minimum product from the pairs of tuples within a given list.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def min_product_tuple(tuples_list):\n    products = []\n    \n    for tup in tuples_list:\n        prod = tup[0] * tup[1]\n        products.append(prod)\n        \n    return min(products)\n\n# Example usage:\ntuples_list = [(2, 3), (4, 1), (-1, 5)]\nprint(min_product_tuple(tuples_list))  # Output will be -5",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T185447Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_177",
+        "grow_patch_id": "impl_min_product_tuple",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_median_trapezium",
+      "text": "Write a function to find the median length of a trapezium.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def median_trapezium(base1, base2, height):\n    \"\"\"\n    Calculate the median length of a trapezoid given its two bases and height.\n    \n    Args:\n        base1 (float): Length of the first base.\n        base2 (float): Length of the second base.\n        height (float): Height of the trapezoid.\n        \n    Returns:\n        float: The median length of the trapezoid.\n    \"\"\"\n    return (base1 + base2) / 2\n\n# No genuinely reusable helper needed for this specific problem.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T185604Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_195",
+        "grow_patch_id": "impl_median_trapezium",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
     }
   ],
   "edges": [
@@ -7261,6 +7301,38 @@
         "grow_lane": "substrate",
         "grow_source_session": "grr14_107",
         "grow_patch_id": "impl_check_occurences->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_min_product_tuple",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T185447Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_177",
+        "grow_patch_id": "impl_min_product_tuple->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_median_trapezium",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T185604Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_195",
+        "grow_patch_id": "impl_median_trapezium->concept_algorithms::part_of",
         "grow_support_score": 1.0
       },
       "confidence": 1.0
