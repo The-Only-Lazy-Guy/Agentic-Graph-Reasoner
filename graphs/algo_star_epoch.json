@@ -3970,6 +3970,46 @@
       },
       "access_count": 0,
       "context_guard": {}
+    },
+    {
+      "id": "impl_decimal_to_binary",
+      "text": "Write a function to convert the given decimal number to its binary equivalent, represented as a string with no leading zeros.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def decimal_to_binary(n):\n    return format(n, 'b')\n\n# No need to define a separate helper function as the built-in format() does the job well.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T184247Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_52",
+        "grow_patch_id": "impl_decimal_to_binary",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_merge_sorted_list",
+      "text": "Write a function to merge three lists into a single sorted list.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def merge_sorted_list(list1, list2, list3):\n    merged_list = list1 + list2 + list3\n    return sorted(merged_list)\n\n# No need for a separate helper function as this can be done directly within the main function.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T184328Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_60",
+        "grow_patch_id": "impl_merge_sorted_list",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
     }
   ],
   "edges": [
@@ -7153,6 +7193,38 @@
         "grow_lane": "substrate",
         "grow_source_session": "grr14_42",
         "grow_patch_id": "impl_closest_num->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_decimal_to_binary",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T184247Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_52",
+        "grow_patch_id": "impl_decimal_to_binary->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_merge_sorted_list",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T184328Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_60",
+        "grow_patch_id": "impl_merge_sorted_list->concept_algorithms::part_of",
         "grow_support_score": 1.0
       },
       "confidence": 1.0
