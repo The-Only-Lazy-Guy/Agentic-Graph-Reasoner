@@ -2670,6 +2670,706 @@
       },
       "access_count": 0,
       "context_guard": {}
+    },
+    {
+      "id": "impl_multiple_to_single",
+      "text": "Write a function to join a list of multiple integers into a single integer.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def multiple_to_single(int_list):\n    return int(''.join(map(str, int_list)))\n\n# STORE multiple_to_single: Converts a list of integers to a single integer",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182117Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_200",
+        "grow_patch_id": "impl_multiple_to_single",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_surfacearea_cube",
+      "text": "Write a function to find the surface area of a cube of a given size.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def surfacearea_cube(side_length):\n    \"\"\"\n    Calculate the surface area of a cube with the given side length.\n    The formula used is 6 * side_length^2.\n    \"\"\"\n    return 6 * side_length ** 2\n\n# No genuinely reusable helper needed for this specific problem.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182126Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_202",
+        "grow_patch_id": "impl_surfacearea_cube",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_cube_nums",
+      "text": "Write a function to find cubes of individual elements in a list.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def cube_nums(numbers):\n    \"\"\"\n    Takes a list of numbers and returns a new list with each element cubed.\n    \n    :param numbers: List of numbers\n    :return: List of cubed numbers\n    \"\"\"\n    return [num ** 3 for num in numbers]\n\n# STORE cube_helper: Helper function to cube each element in a list",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182138Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_205",
+        "grow_patch_id": "impl_cube_nums",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_extract_string",
+      "text": "Write a function to extract specified size of strings from a given list of string values.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def extract_string(strings, size):\n    \"\"\"\n    Extracts strings from a list that have a length equal to the specified size.\n    \n    :param strings: List of strings to be filtered.\n    :param size: The exact size of strings to filter by.\n    :return: A list containing strings with the specified size.\n    \"\"\"\n    return [s for s in strings if len(s) == size]\n\n# Store the helper\nstore_extract_string_helper: \"Extracts strings of exact size\"",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182149Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_207",
+        "grow_patch_id": "impl_extract_string",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_remove_whitespaces",
+      "text": "Write a function to remove all whitespaces from the given string.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def remove_whitespaces(s):\n    return s.replace(\" \", \"\")",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182151Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_208",
+        "grow_patch_id": "impl_remove_whitespaces",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_sumofFactors",
+      "text": "Write a python function to find the sum of even factors of a number.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def is_even(n):\n    \"\"\"Check if a number is even.\"\"\"\n    return n % 2 == 0\n\ndef sumofFactors(number):\n    \"\"\"Calculate the sum of all even factors of a given number.\"\"\"\n    even_sum = 0\n    # Start checking from the smallest even factor\n    for i in range(2, number + 1, 2):  # Only iterate through even numbers\n        if number % i == 0:\n            even_sum += i\n    return even_sum\n\n# STORE sumofFactors: Calculates the sum of all even factors of a given number.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182156Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_209",
+        "grow_patch_id": "impl_sumofFactors",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_text_match_wordz",
+      "text": "Write a function that matches a word containing 'z'.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "import re\n\ndef text_match_wordz(text):\n    # Helper function to check if a word contains 'z'\n    def contains_z(word):\n        return 'z' in word\n\n    # Split the input text into words\n    words = text.split()\n\n    # Check each word for the presence of 'z'\n    for word in words:\n        if contains_z(word):\n            return True\n    return False\n\n# Store the helper function for future use\ncontains_z: \"Check if a word contains the letter 'z'\"",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182201Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_210",
+        "grow_patch_id": "impl_text_match_wordz",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_check_monthnumb_number",
+      "text": "Write a function to check whether the given month number contains 31 days or not.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def is_leap_year(year):\n    \"\"\"Helper function to determine if a year is a leap year.\"\"\"\n    return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)\n\ndef check_monthnumb_number(month):\n    \"\"\"Check whether the given month number contains 31 days.\"\"\"\n    if month in {1, 3, 5, 7, 8, 10, 12}:\n        return True\n    elif month in {4, 6, 9, 11}:\n        return False\n    elif month == 2:\n        return is_leap_year(2023)  # Assuming 2023 is the year being checked, as no specific year was provided.\n    else:\n        return False\n\n# Store the helper function(s) if they are genuinely reusable",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182208Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_211",
+        "grow_patch_id": "impl_check_monthnumb_number",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_is_leap_year",
+      "text": "Determines if a given year is a leap year based on the Gregorian calendar rules.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def is_leap_year(year):\n    \"\"\"Helper function to determine if a year is a leap year.\"\"\"\n    return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)",
+        "kind": "authored",
+        "origin": "lm_author_helper",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182208Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_211",
+        "grow_patch_id": "impl_is_leap_year",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_reverse_string_list",
+      "text": "Write a function to reverse each string in a given list of string values.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def reverse_string_list(string_list):\n    return [s[::-1] for s in string_list]\n\n# No genuinely reusable helper needed in this particular task",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182211Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_212",
+        "grow_patch_id": "impl_reverse_string_list",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_Find_Min",
+      "text": "Write a python function to find the sublist having minimum length.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def Find_Min(list_of_lists):\n    # Assuming all sublists have at least one element\n    return min(list_of_lists, key=len)",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182215Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_213",
+        "grow_patch_id": "impl_Find_Min",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_rectangle_area",
+      "text": "Write a function to find the area of a rectangle.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def rectangle_area(length, width):\n    \"\"\"\n    Calculate the area of a rectangle given its length and width.\n    \n    Parameters:\n    length (float): The length of the rectangle.\n    width (float): The width of the rectangle.\n    \n    Returns:\n    float: The area of the rectangle.\n    \"\"\"\n    return length * width\n\n# I did not write a genuinely reusable helper for this task as it is a single-purpose function.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182217Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_214",
+        "grow_patch_id": "impl_rectangle_area",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_Extract",
+      "text": "Write a python function to get the first element of each sublist.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def Extract(sublists):\n    return [sublist[0] for sublist in sublists]",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182225Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_216",
+        "grow_patch_id": "impl_Extract",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_max_subarray_product",
+      "text": "Write a function to find the maximum product subarray of the given array.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def max_subarray_product(nums):\n    if not nums:\n        return 0\n\n    max_product = nums[0]\n    min_product = nums[0]\n    global_max = nums[0]\n\n    for i in range(1, len(nums)):\n        if nums[i] < 0:\n            # Swap max_product and min_product when nums[i] is negative\n            max_product, min_product = min_product, max_product\n\n        # Update max_product and min_product\n        max_product = max(nums[i], max_product * nums[i])\n        min_product = min(nums[i], min_product * nums[i])\n\n        # Update the global maximum product\n        global_max = max(global_max, max_product)\n\n    return global_max",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182238Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_218",
+        "grow_patch_id": "impl_max_subarray_product",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_add_pairwise",
+      "text": "Write a function to find the pairwise addition of the neighboring elements of the given tuple.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def add_pairwise(tup):\n    return tuple(sum(pair) for pair in zip(tup, tup[1:]))",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182254Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_221",
+        "grow_patch_id": "impl_add_pairwise",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_find_remainder",
+      "text": "Write a python function to find the product of the array multiplication modulo n.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def find_remainder(arr, n):\n    # Helper function to compute the product of all elements in an array modulo n\n    def array_product_modulo(arr, n):\n        result = 1\n        for num in arr:\n            result = (result * num) % n\n        return result\n\n    # Compute the product of the array modulo n\n    product_mod_n = array_product_modulo(arr, n)\n    return product_mod_n\n\n# Store the helper function as it is potentially useful for other tasks\narray_product_modulo: \"Compute the product of an array's elements modulo n\"",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182300Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_222",
+        "grow_patch_id": "impl_find_remainder",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_check_Consecutive",
+      "text": "Write a python function to check whether the given list contains consecutive numbers or not.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def check_Consecutive(numbers):\n    \"\"\"\n    Checks if the given list of integers contains consecutive numbers.\n    \n    Args:\n    numbers: A list of integers.\n    \n    Returns:\n    True if the numbers are consecutive, False otherwise.\n    \"\"\"\n    if not numbers: \n        return False\n\n    sorted_numbers = sorted(numbers)\n    min_num, max_num = sorted_numbers[0], sorted_numbers[-1]\n    return all(x == y for x, y in zip(sorted_numbers, range(min_num, max_num + 1)))\n\n# Assuming the function is defined properly elsewhere, we don't need to define a helper for this task.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182303Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_223",
+        "grow_patch_id": "impl_check_Consecutive",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_replace_char",
+      "text": "Write a function to replace characters in a string.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def replace_char(s, old_char, new_char):\n    return s.replace(old_char, new_char)\n\ndef char_occurrence(s, char):\n    return s.count(char)\n\n# Store the helper function\nstore_helper = \"char_occurrence: Counts the number of occurrences of a specific character in a string\"",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182314Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_225",
+        "grow_patch_id": "impl_replace_char",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_big_sum",
+      "text": "Write a python function to find the sum of the largest and smallest value in a given array.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def big_sum(arr):\n    min_val = min(arr)\n    max_val = max(arr)\n    return min_val + max_val",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182323Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_227",
+        "grow_patch_id": "impl_big_sum",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_remove_lowercase",
+      "text": "Write a function to remove lowercase substrings from a given string.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def remove_lowercase(s):\n    return ''.join(c for c in s if not c.islower())\n    ",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182330Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_229",
+        "grow_patch_id": "impl_remove_lowercase",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_first_Digit",
+      "text": "Write a python function to find the first digit of a given number.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def first_Digit(n):\n    \"\"\"\n    Returns the first digit of a given number n.\n    \"\"\"\n    # Remove leading zeros and convert to absolute value to handle negative numbers\n    num = abs(int(str(n)[0]))\n    return num\n\n# Assuming no genuinely reusable helpers were created, this comment will be empty.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182335Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_230",
+        "grow_patch_id": "impl_first_Digit",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_Split",
+      "text": "Write a python function which takes a list of integers and only returns the odd ones.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def Split(numbers):\n    return [num for num in numbers if num % 2 != 0]\n\n# Helper function to filter odd numbers\ndef OddFilter(num):\n    return num % 2 != 0\n\n# Curate our library",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182340Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_231",
+        "grow_patch_id": "impl_Split",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_OddFilter",
+      "text": "Filters out even numbers and returns only odd numbers",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def OddFilter(num):\n    return num % 2 != 0",
+        "kind": "authored",
+        "origin": "lm_author_helper",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182340Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_231",
+        "grow_patch_id": "impl_OddFilter",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_difference",
+      "text": "Write a python function to find the difference between the sum of cubes of the first n natural numbers and the sum of the first n natural numbers.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def difference(n):\n    sum_of_first_n_numbers = sum(range(1, n + 1))\n    sum_of_cubes_of_first_n_numbers = sum(i**3 for i in range(1, n + 1))\n    return sum_of_cubes_of_first_n_numbers - sum_of_first_n_numbers\n\n# No genuinely reusable helper was defined in this example, so no need to store one.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182344Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_232",
+        "grow_patch_id": "impl_difference",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_toggle_string",
+      "text": "Write a function to toggle the case of all characters in a string.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def toggle_string(s):\n    # Helper function to toggle the case of a single character\n    def toggle_char(c):\n        return c.lower() if c.isupper() else c.upper()\n    \n    # Apply the toggle_char function to each character in the string\n    return ''.join(toggle_char(char) for char in s)\n\n# Store the toggle_char function as a reusable helper\ntoggle_char: 'Toggles the case of a single character'",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182351Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_234",
+        "grow_patch_id": "impl_toggle_string",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_digit_distance_nums",
+      "text": "Write a python function to find the sum of the per-digit difference between two integers.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def digit_distance_nums(a, b):\n    def convert_to_digits(n):\n        \"\"\"Converts an integer into a list of its digits.\"\"\"\n        return [int(digit) for digit in str(n)]\n\n    digits_a = convert_to_digits(a)\n    digits_b = convert_to_digits(b)\n    \n    distance_sum = sum(abs(x - y) for x, y in zip(digits_a, digits_b))\n    \n    return distance_sum",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182356Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_235",
+        "grow_patch_id": "impl_digit_distance_nums",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_union_elements",
+      "text": "Write a function to find the union of the elements of two given tuples and output them in sorted order.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def union_elements(t1, t2):\n    # Combine the elements of both tuples into a single set for uniqueness,\n    # then convert back to a sorted tuple\n    return tuple(sorted(set(t1 + t2)))\n    \n# Assuming no existing helper is needed",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182406Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_237",
+        "grow_patch_id": "impl_union_elements",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_Find_Max_Length",
+      "text": "Write a python function to find the length of the longest sublists.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def Find_Max_Length(list_of_lists):\n    \"\"\"\n    Finds the length of the longest sublist within a list of lists.\n\n    Parameters:\n        list_of_lists (list of list): The input list containing sublists.\n\n    Returns:\n        int: The maximum length among all sublists.\n    \"\"\"\n    if not list_of_lists:\n        return 0\n\n    max_length = 0\n    for sublist in list_of_lists:\n        max_length = max(max_length, len(sublist))\n\n    return max_length\n\n# Store the helper function",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182411Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_238",
+        "grow_patch_id": "impl_Find_Max_Length",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_extract_values",
+      "text": "Write a function to extract values between quotation marks from a string.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def extract_values(s):\n    import re\n    pattern = r'\\\"(.*?)\\\"'\n    return re.findall(pattern, s)\n\n# STORE extract_values_helper: One-line regex pattern for extracting quoted text",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182417Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_239",
+        "grow_patch_id": "impl_extract_values",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_split",
+      "text": "Write a python function to split a string into characters.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def split(s):\n    return list(s)\n\n# Store the helper function as it can be reused in other tasks\ndef char_iterator(char):\n    \"\"\"Generator that yields a single character.\"\"\"\n    yield char",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182426Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_241",
+        "grow_patch_id": "impl_split",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_char_iterator",
+      "text": "Generator to yield a single character.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def char_iterator(char):\n    \"\"\"Generator that yields a single character.\"\"\"\n    yield char",
+        "kind": "authored",
+        "origin": "lm_author_helper",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182426Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_241",
+        "grow_patch_id": "impl_char_iterator",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_sum_digits",
+      "text": "Write a function to get the sum of the digits of a non-negative integer.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def sum_digits(n):\n    def add_digits(num):\n        return num if num < 10 else (num % 10) + add_digits(num // 10)\n    \n    return add_digits(n)\n",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182429Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_242",
+        "grow_patch_id": "impl_sum_digits",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_issort_list",
+      "text": "Write a function to check whether a specified list is sorted or not.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def issort_list(lst):\n    return lst == sorted(lst)\n",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182433Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_243",
+        "grow_patch_id": "impl_issort_list",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_empty_list",
+      "text": "Write a function to create a list of N empty dictionaries.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def empty_list(N):\n    return [{} for _ in range(N)]",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182438Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_244",
+        "grow_patch_id": "impl_empty_list",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_unique_product",
+      "text": "Write a python function to calculate the product of the unique numbers in a given list.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def unique_product(nums):\n    from functools import reduce\n    from operator import mul\n    nums = list(set(nums))  # Remove duplicates\n    return reduce(mul, nums, 1)  # Calculate the product\n\nunique_product: 'Calculate the product of unique elements in a list'",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182451Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_247",
+        "grow_patch_id": "impl_unique_product",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
     }
   ],
   "edges": [
@@ -4797,6 +5497,566 @@
         "grow_lane": "substrate",
         "grow_source_session": "grr14_198",
         "grow_patch_id": "impl_neg_nos->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_multiple_to_single",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182117Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_200",
+        "grow_patch_id": "impl_multiple_to_single->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_surfacearea_cube",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182126Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_202",
+        "grow_patch_id": "impl_surfacearea_cube->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_cube_nums",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182138Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_205",
+        "grow_patch_id": "impl_cube_nums->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_extract_string",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182149Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_207",
+        "grow_patch_id": "impl_extract_string->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_remove_whitespaces",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182151Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_208",
+        "grow_patch_id": "impl_remove_whitespaces->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_sumofFactors",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182156Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_209",
+        "grow_patch_id": "impl_sumofFactors->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_text_match_wordz",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182201Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_210",
+        "grow_patch_id": "impl_text_match_wordz->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_check_monthnumb_number",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182208Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_211",
+        "grow_patch_id": "impl_check_monthnumb_number->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_is_leap_year",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182208Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_211",
+        "grow_patch_id": "impl_is_leap_year->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_reverse_string_list",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182211Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_212",
+        "grow_patch_id": "impl_reverse_string_list->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_Find_Min",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182215Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_213",
+        "grow_patch_id": "impl_Find_Min->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_rectangle_area",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182217Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_214",
+        "grow_patch_id": "impl_rectangle_area->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_Extract",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182225Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_216",
+        "grow_patch_id": "impl_Extract->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_max_subarray_product",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182238Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_218",
+        "grow_patch_id": "impl_max_subarray_product->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_add_pairwise",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182254Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_221",
+        "grow_patch_id": "impl_add_pairwise->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_find_remainder",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182300Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_222",
+        "grow_patch_id": "impl_find_remainder->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_check_Consecutive",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182303Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_223",
+        "grow_patch_id": "impl_check_Consecutive->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_replace_char",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182314Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_225",
+        "grow_patch_id": "impl_replace_char->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_big_sum",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182323Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_227",
+        "grow_patch_id": "impl_big_sum->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_remove_lowercase",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182330Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_229",
+        "grow_patch_id": "impl_remove_lowercase->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_first_Digit",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182335Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_230",
+        "grow_patch_id": "impl_first_Digit->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_Split",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182340Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_231",
+        "grow_patch_id": "impl_Split->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_OddFilter",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182340Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_231",
+        "grow_patch_id": "impl_OddFilter->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_difference",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182344Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_232",
+        "grow_patch_id": "impl_difference->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_toggle_string",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182351Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_234",
+        "grow_patch_id": "impl_toggle_string->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_digit_distance_nums",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182356Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_235",
+        "grow_patch_id": "impl_digit_distance_nums->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_union_elements",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182406Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_237",
+        "grow_patch_id": "impl_union_elements->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_Find_Max_Length",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182411Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_238",
+        "grow_patch_id": "impl_Find_Max_Length->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_extract_values",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182417Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_239",
+        "grow_patch_id": "impl_extract_values->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_split",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182426Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_241",
+        "grow_patch_id": "impl_split->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_char_iterator",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182426Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_241",
+        "grow_patch_id": "impl_char_iterator->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_sum_digits",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182429Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_242",
+        "grow_patch_id": "impl_sum_digits->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_issort_list",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182433Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_243",
+        "grow_patch_id": "impl_issort_list->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_empty_list",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182438Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_244",
+        "grow_patch_id": "impl_empty_list->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_unique_product",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T182451Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_247",
+        "grow_patch_id": "impl_unique_product->concept_algorithms::part_of",
         "grow_support_score": 1.0
       },
       "confidence": 1.0
