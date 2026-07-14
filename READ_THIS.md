@@ -80,6 +80,18 @@ Reuses: algo_graph_mg (MGRetriever.resolve_deps), algo_compose_tasks (_REF/_NEED
 algo_graph_edits+graph_grower (health-gated writes), subgraph/gnn_encoder/goal_encoder (read stack).
 Trained: artifacts/grr6_trm.pt, artifacts/grr6_dsl.pt.
 
+## GRR-14 INVENTION RUNG (LM authors NEW ATOMS, real 3B on real MBPP+, 5m17s):
+##   baseline first (algo_grr_inspect --mbpp-baseline): current ladder on MBPP+ = 1/40 (2%) — outside
+##   its atom vocabulary the system is dead. With authoring: 39/60 SOLVED (65%, 32x baseline), 39 atoms
+##   banked (origin=lm_author, health-gated, depend edges). Cross-task reuse was 0 — diagnosed: banking
+##   unit was whole solutions under entry-point names (nobody calls another task's entry point) ->
+##   FIXED: STORE-action helpers now bank as their own atoms (origin=lm_author_helper). Full-378 run
+##   with helper granularity = the real reuse measurement (pending).
+## GRR audit (user ask, algo_grr_inspect, local real mpnet): census 26 nodes = 4% NL-only concept /
+##   35% pure-code atoms / 62% code+SYMBOLIC-pipeline+NL programs; 96% carry executable code; NL is
+##   descriptive retrieval keys, never how-to prose; triviality ~20% (incl. one degenerate-but-CORRECT
+##   minimal count program — MDL ignoring a red-herring hint = the gate working). Raw trace: rebuilt
+##   net decodes consolidated fams at 1.00 head confidence -> realize -> graph-walk deps -> verified.
 ## GRR-13 REASONING-vs-TRANSLATION (intent tier, real 3B, molab): texts describe WHAT never HOW
 ##   ("exactly two positive divisors", zero method vocabulary). RESULT vs method tier:
 ##     lm discoveries 11 -> 7 (-36%) | lm held-out reuse 91% -> 57% | beam control 8 -> 8 (unchanged =
