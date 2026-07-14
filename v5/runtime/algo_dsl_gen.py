@@ -57,10 +57,18 @@ def _reverse_digits(n):
 
 
 def _count_divisors(n):
+    # magnitude guard + O(sqrt(n)): candidate pipes like square->square->count_divisors produce ~1e16
+    # values; the old O(n) loop HUNG the in-process verifier (gen_verify has no subprocess timeout).
+    # The guard changes semantics identically in the atom CODE and this oracle fn -> still consistent.
     n = abs(n)
-    if n == 0:
+    if n == 0 or n > 10**9:
         return 0
-    return sum(1 for d in range(1, n + 1) if n % d == 0)
+    c, d = 0, 1
+    while d * d <= n:
+        if n % d == 0:
+            c += 2 if d * d != n else 1
+        d += 1
+    return c
 
 
 def _collatz_steps(n):
@@ -96,9 +104,11 @@ GEN_ATOMS = {
     "reverse_digits": ("digit reversal — the decimal digits of n reversed as an integer",
                        "def reverse_digits(n):\n    return int(str(abs(n))[::-1])",
                        _reverse_digits, "map"),
-    "count_divisors": ("divisor count — how many positive integers divide n",
-                       "def count_divisors(n):\n    n = abs(n)\n    if n == 0:\n        return 0\n"
-                       "    return sum(1 for d in range(1, n + 1) if n % d == 0)",
+    "count_divisors": ("divisor count — how many positive integers divide n (0 for n over 10^9)",
+                       "def count_divisors(n):\n    n = abs(n)\n    if n == 0 or n > 10**9:\n"
+                       "        return 0\n    c, d = 0, 1\n    while d * d <= n:\n"
+                       "        if n % d == 0:\n            c += 2 if d * d != n else 1\n"
+                       "        d += 1\n    return c",
                        _count_divisors, "map"),
     "collatz_steps": ("Collatz step count — steps for n to reach 1 under the Collatz map",
                       "def collatz_steps(n):\n    n = abs(n) or 1\n    s = 0\n"
