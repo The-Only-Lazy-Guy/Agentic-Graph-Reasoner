@@ -84,6 +84,16 @@ Trained: artifacts/grr6_trm.pt, artifacts/grr6_dsl.pt.
 ##   never deployed. The GRR stack IS the distillation channel (graph-mediated: teacher -> gate ->
 ##   symbolic nodes -> rebuild tiny net). Deployed stack = mpnet ~220MB fp16 + TRM <1MB + graph (CPU)
 ##   = <0.5GB. Teacher upgrades are drop-in re-runs with zero deployment change.
+## GRR-16 SECOND-BRAIN COUPLING (both user ideas, real-3B/real-mpnet measured):
+##   (a) sketch-hint (TRM thought -> LM prompt as confidence-gated TEXT; latent FiLM/cross-attn/KV
+##   ruled out earlier: z-wall + amortization-not-capability): intent-tier A/B lm discoveries 6 -> 8,
+##   zero-shot 26 -> 28/48, FASTER early consolidation, NO harm (ads lesson held via tau-gate + soft
+##   phrasing). Single seed each: suggestive positive, kept ON (--lm-hint).
+##   (b) VIB loss (user objective min I(z;task) max I(z;solution), variational form: stochastic goal
+##   encoder + beta*KL; decode = mu, parameter-identical at inference): held-out phrasings 93.2% vs
+##   gru 91.7% vs recursive 90.1%; vib >= gru in EVERY seed (worst vib >= best gru). Small (+1.6pp at
+##   a 92% ceiling) but sign-consistent + theoretically right -> ADOPTED as trainer arch of choice.
+##   True effect size needs a lower-ceiling benchmark (fewer train phrasings / more fams).
 ## GRR-14 RAW-INSPECTION PAYOFF (user push: inspect the pipeline, don't argue from aggregates):
 ##   raw dump decomposed the 9 zero-solves -> 5 were OUR defects: 2x prep bug (entry `set` extracted
 ##   from `assert set(inner(...))` — model read the intent RIGHT and our harness NameError'd it),
