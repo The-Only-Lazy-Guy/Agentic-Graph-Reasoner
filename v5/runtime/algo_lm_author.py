@@ -91,7 +91,8 @@ def _solve_author(retr: MGRetriever, gen_fn, task, k: int, samples: int, ad_styl
     new_helpers = [n for n in _top_defs(code) if n != task.name and n not in adv_names]
     R, _ = code_reward(verified, composed_used=used,
                        authored_new_verified=len(new_helpers) if verified else 0)
-    return dict(name=task.name, verified=verified, reward=round(R, 3), reused=used, code=code, raw=raw)
+    return dict(name=task.name, verified=verified, reward=round(R, 3), reused=used, code=code, raw=raw,
+                prompt=prompt)
 
 
 def repair_code(code: str, entry: str) -> str:
@@ -225,18 +226,30 @@ def dump_raw(graph_path: str, embed_fn, gen_fn, tasks, out: str = "artifacts/grr
 def run_author_loop(graph_path: str, embed_fn, gen_fn, tasks, k_retrieve: int = 6, samples: int = 4,
                     reindex_every: int = 5, log: bool = True,
                     failure_log: str = "artifacts/grr14_failures.jsonl", ad_style: str = "sig",
-                    shuffle_seed: int | None = None):
+                    shuffle_seed: int | None = None, progress_log: str = "",
+                    traces_log: str = "", resume: bool = False, checkpoint_every: int = 0):
     """The loop over real tasks. Returns the report dict. The graph GROWS as it runs — atoms authored
-    for early tasks are advertised (and reused) by later ones. k_retrieve=0 disables advertisement
-    entirely (the context-pollution ablation: does accuracy stop declining when the prompt stops
-    growing with the graph?). Failures are classified + logged; the report prints the solve rate per
-    20-task bucket so the over-time curve is visible directly."""
+    for early tasks are advertised (and reused) by later ones. Failures are classified + logged; the
+    report prints the solve rate per 20-task bucket.
+
+    LONG-RUN infrastructure (D3, molab resets every ~4h are a HARD design input):
+      progress_log      per-task outcome jsonl (append) — the resume ledger
+      resume=True       skip tasks already attempted per the ledger (a lost box costs minutes, not runs)
+      traces_log        (prompt -> verified code) jsonl for SOLVED tasks — the STaR training set
+      checkpoint_every  every N attempted tasks: flush logs + git-commit graph+logs locally (NO push —
+                        pushing needs the user's credentials)"""
+    import subprocess
     if not Path(graph_path).exists():
         seed_graph(graph_path, ("concept_algorithms",))
     if shuffle_seed is not None:                        # the corpus-ORDERING control
         import random
         tasks = list(tasks)
         random.Random(shuffle_seed).shuffle(tasks)
+    attempted_before: set = set()
+    if resume and progress_log and Path(progress_log).exists():
+        with open(progress_log, encoding="utf-8") as f:
+            attempted_before = {json.loads(line)["task"] for line in f if line.strip()}
+        tasks = [t for t in tasks if t.name not in attempted_before]
     retr = MGRetriever(MemoryGraph.load_json(graph_path), embed_fn)
     solved = banked = 0
     authored_this_run: set = set()
@@ -246,10 +259,31 @@ def run_author_loop(graph_path: str, embed_fn, gen_fn, tasks, k_retrieve: int = 
     fail_counts: dict = {}
     Path(failure_log).parent.mkdir(parents=True, exist_ok=True)
     flog = open(failure_log, "w", encoding="utf-8")
+    plog = open(progress_log, "a", encoding="utf-8") if progress_log else None
+    tlog = open(traces_log, "a", encoding="utf-8") if traces_log else None
+
+    def _checkpoint(i):
+        for h in (flog, plog, tlog):
+            if h:
+                h.flush()
+        try:
+            paths = [graph_path, failure_log] + [p for p in (progress_log, traces_log) if p]
+            subprocess.run(["git", "add", "-f", *paths], capture_output=True, timeout=60)
+            subprocess.run(["git", "commit", "-m", f"checkpoint: author loop @{i} "
+                            f"(solved {solved}, banked {banked})"], capture_output=True, timeout=60)
+        except Exception:
+            pass                                        # checkpointing must never kill the run
+
     for i, t in enumerate(tasks):
         if i % 20 == 0:
             buckets.append(0)
         res = _solve_author(retr, gen_fn, t, k=k_retrieve, samples=samples, ad_style=ad_style)
+        if plog:
+            plog.write(json.dumps({"task": t.name, "solved": bool(res["verified"])}) + "\n")
+        if tlog and res["verified"]:
+            tlog.write(json.dumps({"task": t.name, "prompt": res["prompt"], "code": res["code"]}) + "\n")
+        if checkpoint_every and (i + 1) % checkpoint_every == 0:
+            _checkpoint(i + 1)
         if not res["verified"]:
             cls = _failure_class(t, res.get("code", ""), "")
             fail_counts[cls] = fail_counts.get(cls, 0) + 1
@@ -279,7 +313,12 @@ def run_author_loop(graph_path: str, embed_fn, gen_fn, tasks, k_retrieve: int = 
                   f"cross-task reuse events {len(reuse_events)}", flush=True)
     if since_reindex:
         retr = MGRetriever(MemoryGraph.load_json(graph_path), embed_fn)
+    if checkpoint_every:
+        _checkpoint(len(tasks))
     flog.close()
+    for h in (plog, tlog):
+        if h:
+            h.close()
     bucket_sizes = [min(20, len(tasks) - 20 * b) for b in range(len(buckets))]
     report = dict(tasks=len(tasks), solved=solved, solve_rate=round(solved / max(1, len(tasks)), 3),
                   banked=banked, reuse_events=len(reuse_events),
@@ -419,6 +458,11 @@ def main():
     ap.add_argument("--shuffle", type=int, default=-1, help="shuffle tasks with this seed (-1 = corpus order)")
     ap.add_argument("--dump-raw", type=int, default=0, metavar="N",
                     help="raw pipeline dump for the first N tasks (prompt/generations/verify verbatim)")
+    ap.add_argument("--progress-log", default="artifacts/grr14_progress.jsonl")
+    ap.add_argument("--traces-log", default="artifacts/grr14_traces.jsonl")
+    ap.add_argument("--resume", action="store_true", help="skip tasks already in the progress ledger")
+    ap.add_argument("--checkpoint-every", type=int, default=50,
+                    help="git-commit graph+logs locally every N tasks (0 = off; never pushes)")
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
@@ -439,7 +483,9 @@ def main():
               f"ad_style={a.ad_style} shuffle={a.shuffle}", flush=True)
         run_author_loop(a.graph, make_mpnet_embedder(), make_hf_gen(a.model, max_new_tokens=400),
                         tasks, samples=a.samples, ad_style=a.ad_style,
-                        shuffle_seed=None if a.shuffle < 0 else a.shuffle)
+                        shuffle_seed=None if a.shuffle < 0 else a.shuffle,
+                        progress_log=a.progress_log, traces_log=a.traces_log, resume=a.resume,
+                        checkpoint_every=a.checkpoint_every)
         return
     ap.print_help()
 
