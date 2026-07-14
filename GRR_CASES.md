@@ -114,6 +114,21 @@ each rung: same GATE (dense verify), same BANK (health-gated graph write), same 
   form is already live in DSL domains (TRM emits program, deterministic realizer compiles, no LM at all).
   Latent returns only if a task class shows "symbolic sketch fails, latent helps" — none measured.
 
+## REVIEWER TABLE (user, 2026-07-14) — accepted design corrections (task #77)
+
+1. Sketch must carry the REASONING STATE (plan, frontier = top-K alternatives, uncertainty = entropy,
+   retrieved concepts), not a finished draft guess.
+2. TRM must COMPUTE that state: aux heads — predict the verified solution's atom-usage (harvest label)
+   + verify-success probability (calibrated uncertainty). Interface can't fix representation.
+3. Prompt-injection wins while state is cheaply verbalizable; the LATENT channel's niche opens only
+   when state is inefficiently verbalizable (hundreds of atoms / continuous scores) — the sharpened
+   revisit gate.
+4. Bottleneck refinement: VQ/prototype prior (concept codebook) instead of N(0,I) — reusable CONCEPTS
+   memorize free, instance-deviations pay KL. Latent twin of the GRR-1 fuzz gate.
+5. Endgame: planner-with-holes on rung D — TRM plans, binds known parts to atoms, leaves HOLES; the LM
+   only compiles holes; gate verifies; graph banks. (Already the reality in DSL domains, where the
+   realizer is deterministic and no LM runs at all.)
+
 ## THE LONG RUN (design)
 
 - **corpus**: MBPP+ (378, epoch-0 sanity: expect ≈78% pre-training) → **APPS-intro class (~2-3k
