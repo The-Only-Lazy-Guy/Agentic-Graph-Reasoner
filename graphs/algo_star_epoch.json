@@ -4090,6 +4090,46 @@
       },
       "access_count": 0,
       "context_guard": {}
+    },
+    {
+      "id": "impl_find_dissimilar",
+      "text": "Write a function to find the dissimilar elements in the given two tuples.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def find_dissimilar(tup1, tup2):\n    set1 = set(tup1)\n    set2 = set(tup2)\n    \n    # Find elements that are in either set but not in both (using symmetric difference)\n    dissimilar = tuple(set1 ^ set2)\n    \n    return dissimilar\n\n# No need to define a helper function as per the instruction, as the provided solution directly achieves the task.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T185949Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_251",
+        "grow_patch_id": "impl_find_dissimilar",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_reverse_words",
+      "text": "Write a function to reverse words seperated by spaces in a given string.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def reverse_words(s):\n    # Split the input string into words\n    words = s.split()\n    \n    # Reverse the list of words\n    reversed_words = words[::-1]\n    \n    # Join the reversed list of words back into a single string with spaces\n    reversed_string = ' '.join(reversed_words)\n    \n    return reversed_string\n\n# No genuinely reusable helper needed for this task, so no need to define or store one.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T190141Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_272",
+        "grow_patch_id": "impl_reverse_words",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
     }
   ],
   "edges": [
@@ -7369,6 +7409,38 @@
         "grow_lane": "substrate",
         "grow_source_session": "grr14_228",
         "grow_patch_id": "impl_is_lower->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_find_dissimilar",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T185949Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_251",
+        "grow_patch_id": "impl_find_dissimilar->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_reverse_words",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T190141Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_272",
+        "grow_patch_id": "impl_reverse_words->concept_algorithms::part_of",
         "grow_support_score": 1.0
       },
       "confidence": 1.0
