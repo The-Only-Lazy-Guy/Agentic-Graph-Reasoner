@@ -213,8 +213,9 @@ _INTENT_MAP = {
                        "flip the order of its digits"],
     "count_divisors": ["count how many positive whole numbers divide it evenly",
                        "count its positive divisors"],
-    "collatz_steps": ["count the steps it needs to reach one when you repeatedly halve evens and "
-                      "triple-plus-one odds", "count its hailstone steps down to one"],
+    "collatz_steps": ["count the steps it needs to reach one when you repeatedly halve it if divisible "
+                      "by two and otherwise triple it and add one",
+                      "count its hailstone steps down to one"],
     "double": ["add it to itself", "take it twice over"],
 }
 _INTENT_AGG = {"sum": ["give the grand total of the results", "add all the results up and report that"],
@@ -225,7 +226,9 @@ _INTENT_AGG = {"sum": ["give the grand total of the results", "add all the resul
 
 def pipe_text_intent(pipe, vi: int = 0) -> str:
     """Intent-tier phrasing #vi: describes the GOAL step by step in plain language, forward order,
-    with NO method vocabulary (no atom names/phrases). Deterministic per (pipe, vi)."""
+    with NO method vocabulary (no atom names/phrases). Deterministic per (pipe, vi). Sentence FRAMES
+    x synonym pools guarantee enough distinct variants even for the smallest families (a no-filter
+    count family has no pred/map synonyms to vary — the frame must carry the variety)."""
     rng = np.random.default_rng(77_000 + vi * 613 + len(pipe) * 17 +
                                 sum(ord(c) for op in pipe for c in op.arg))
     pick = lambda opts: opts[int(rng.integers(0, len(opts)))]
@@ -234,10 +237,19 @@ def pipe_text_intent(pipe, vi: int = 0) -> str:
     agg = pipe[-1].arg
     kept = ("every entry " + " and ".join(pick(_INTENT_PRED[p]) for p in preds)) if preds \
         else "every entry"
+    aggp = pick(_INTENT_AGG[agg])
     if agg in ("count", "len"):
-        return f"go through the list and, considering {kept}, {pick(_INTENT_AGG[agg])}."
+        frames = [f"go through the list and, considering {kept}, {aggp}.",
+                  f"scan the entries; among {kept}, {aggp}.",
+                  f"looking only at {kept}, {aggp}.",
+                  f"inspect the list, keep {kept} in mind, and {aggp}."]
+        return pick(frames)
     steps = "; then ".join(pick(_INTENT_MAP[m]) for m in maps)      # forward order, plain words
-    return f"for {kept} in the list: {steps}; finally {pick(_INTENT_AGG[agg])}."
+    frames = [f"for {kept} in the list: {steps}; finally {aggp}.",
+              f"take {kept} from the list, {steps}, and then {aggp}.",
+              f"process {kept} as follows: {steps}. afterwards {aggp}.",
+              f"with {kept}: {steps}. when done, {aggp}."]
+    return pick(frames)
 
 
 def pipe_text_intent_variants(pipe, k: int) -> list:
@@ -420,16 +432,19 @@ def _selftest() -> bool:
           "synonyms + structure flips + hint dropout) -> PASS")
 
     # [7] INTENT tier: distinct deterministic variants that contain ZERO method vocabulary — the
-    #     reasoning-vs-translation axis (an LM must know "exactly two divisors" IS primality)
+    #     reasoning-vs-translation axis (an LM must know "exactly two divisors" IS primality).
+    #     k=5 for EVERY family incl. the smallest (the loop's real demand — a no-filter count family
+    #     once produced only 2 variants and crashed the molab run: frames must carry the variety)
     method_vocab = {p.lower() for p in _PHRASE.values()} | \
         {s.lower() for v in _SYN_PHRASE.values() for s in v}
-    for fam, pipe in list(fams.items())[:8]:
-        vs = pipe_text_intent_variants(pipe, 3)
-        assert len(vs) == 3 == len(set(vs)) and vs == pipe_text_intent_variants(pipe, 3), (fam, vs)
-        for t in vs:
-            assert not any(w in t.lower() for w in method_vocab), (fam, t)
-    print("  [7] intent tier: 3 distinct deterministic phrasings/family, ZERO method vocabulary "
-          "(describes WHAT, never HOW) -> PASS")
+    for fam_seed in (0, 3):
+        for fam, pipe in gen_families(24, seed=fam_seed).items():
+            vs = pipe_text_intent_variants(pipe, 5)
+            assert len(vs) == 5 == len(set(vs)) and vs == pipe_text_intent_variants(pipe, 5), (fam, vs)
+            for t in vs:
+                assert not any(w in t.lower() for w in method_vocab), (fam, t)
+    print("  [7] intent tier: 5 distinct deterministic phrasings for EVERY family (both fam seeds), "
+          "ZERO method vocabulary (describes WHAT, never HOW) -> PASS")
 
     print("\n  ALGO_DSL_GEN SELFTEST -> PASS  (a benchmark that can finally discriminate architectures)")
     return True

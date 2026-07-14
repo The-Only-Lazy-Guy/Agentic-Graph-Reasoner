@@ -98,10 +98,11 @@ def factory_domain(n_families=24, fam_seed=0, para_train=3, para_eval=2, beam=12
         if tier == "intent":                              # instances cycle the intent train phrasings
             rng = _np.random.default_rng(seed)
             for fam, pipe in pipes.items():
+                train = allv[fam][:para_train] or allv[fam]      # robust to short variant lists
                 for i in range(max(3, para_train)):
                     lst = _rand_list(rng)
                     by.setdefault(fam, []).append(
-                        GenTask(fam, allv[fam][i % para_train],
+                        GenTask(fam, train[i % len(train)],
                                 [f"assert {fam}({lst!r}) == {interpret(pipe, lst)!r}"]))
         else:
             for t in gen_tasks(pipes, n_per=max(3, para_train), seed=seed, paraphrase_k=para_train):
@@ -122,7 +123,8 @@ def factory_domain(n_families=24, fam_seed=0, para_train=3, para_eval=2, beam=12
         texts_of={f: allv[f][:para_train] for f in pipes},   # the goal REGION the graph must remember
         make_is_general=lambda _resolve_fn: (lambda p, f: pipe_is_general(p, pipes, f, n=24)),
         tasks_by_fam=tasks_by_fam,
-        eval_texts=lambda _seed: {f: allv[f][para_train:] for f in pipes},   # HELD-OUT phrasings
+        # HELD-OUT phrasings (falls back to the last variant if a family produced few — never empty)
+        eval_texts=lambda _seed: {f: (allv[f][para_train:] or allv[f][-1:]) for f in pipes},
         seed_graph=seed_graph,
         curriculum=lambda r: min(maxlen - 1, 2 + r), beam=beam, explore=explore,
         all_texts=[t for vs in allv.values() for t in vs],   # warm the embed cache in ONE batched encode
