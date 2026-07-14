@@ -84,6 +84,15 @@ Trained: artifacts/grr6_trm.pt, artifacts/grr6_dsl.pt.
 ##   never deployed. The GRR stack IS the distillation channel (graph-mediated: teacher -> gate ->
 ##   symbolic nodes -> rebuild tiny net). Deployed stack = mpnet ~220MB fp16 + TRM <1MB + graph (CPU)
 ##   = <0.5GB. Teacher upgrades are drop-in re-runs with zero deployment change.
+## GRR-14 RAW-INSPECTION PAYOFF (user push: inspect the pipeline, don't argue from aggregates):
+##   raw dump decomposed the 9 zero-solves -> 5 were OUR defects: 2x prep bug (entry `set` extracted
+##   from `assert set(inner(...))` — model read the intent RIGHT and our harness NameError'd it),
+##   1x case mismatch (find_volume vs find_Volume), 2x prose-in-code-fence (extractor swallowed prose).
+##   Fixes (entry-name from reference defs; repair_code = compile-trim + case alias; gate untouched):
+##   67% -> 78% (93/120), syntax failures 10 -> 0, curve flat. ~82% plain-MBPP-equivalent, stock 3B,
+##   best-of-4-with-verifier. Honest residual: 21 assert_fails (~17%) = the real capability gap —
+##   the "undertrained" hypothesis now testable clean (STaR/LoRA on the 93 verified solutions).
+##   REAL cross-task reuse on MBPP: 0 (post-regex-fix) — still unproven.
 ## GRR-14 ABLATION VERDICT (the decline investigation, 3-arm, real 3B, 120 MBPP+ tasks):
 ##   off (graph ablated): 80/120 = 67%, curve flat/bumpy — NO decline. sig (status quo bare-sig ads +
 ##   hard call-these directive): 46/90 = 51%, marginals 14,12,8,8 — monotonic decline as graph grows.
