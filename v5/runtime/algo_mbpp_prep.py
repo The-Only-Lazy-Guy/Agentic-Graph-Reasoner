@@ -32,12 +32,21 @@ from v5.runtime.algo_graph_run import MBPPTask, verify_asserts
 
 
 def _entry_name(rec: dict) -> str:
-    """Entry-point fn: from the first original assert, else the last def in the reference code."""
-    for t in rec.get("asserts") or []:
-        m = re.search(r"assert\s+([A-Za-z_]\w*)\s*\(", t)
-        if m:
-            return m.group(1)
+    """Entry-point fn. PRIORITY: a name that is BOTH defined in the reference code AND called in the
+    asserts (raw-dump bug: `assert set(similar_elements(...))` extracted `set` — a wrapper builtin —
+    so the prompt asked the model to write set(...) while the tests called similar_elements)."""
     defs = re.findall(r"def\s+([A-Za-z_]\w*)\s*\(", rec.get("code") or "")
+    called = []
+    for t in rec.get("asserts") or []:
+        called += re.findall(r"([A-Za-z_]\w*)\s*\(", t)
+    import builtins
+    blt = set(dir(builtins))
+    for name in called:                              # first assert-called name that the reference DEFINES
+        if name in defs:
+            return name
+    for name in called:                              # else: first non-builtin called name
+        if name not in blt and name != "assert":
+            return name
     return defs[-1] if defs else ""
 
 

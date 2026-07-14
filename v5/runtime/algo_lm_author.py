@@ -32,7 +32,7 @@ from pathlib import Path
 
 from graph_core import MemoryGraph
 from v5.runtime.algo_graph_edits import edge_candidate, grow, node_candidate
-from v5.runtime.algo_graph_mg import MGRetriever, _edits_from_solve, _fn_name, seed_graph, solve_mg
+from v5.runtime.algo_graph_mg import MGRetriever, _edits_from_solve, _fn_name, seed_graph
 
 
 def _author_prompt_purpose(task, advertised, purposes: dict) -> str:
@@ -57,30 +57,30 @@ def _author_prompt_purpose(task, advertised, purposes: dict) -> str:
 
 
 def _solve_author(retr: MGRetriever, gen_fn, task, k: int, samples: int, ad_style: str):
-    """solve_mg with a pluggable advertisement style (solve_mg hardcodes the bare-sig prompt).
-    ad_style: off (k=0) | sig (status quo, delegates to solve_mg) | purpose (fixed ads)."""
-    if ad_style == "off":
-        return solve_mg(retr, gen_fn, task, k=0, samples=samples)
-    if ad_style == "sig":
-        return solve_mg(retr, gen_fn, task, k=k, samples=samples)
-    # purpose arm — mirror solve_mg's verify/reward flow with the fixed prompt
+    """The author solve with pluggable advertisement (off | sig | purpose) and the raw-dump-diagnosed
+    REPAIRS applied uniformly (repair_code: prose-in-fence trim + entry-name alias; the gate still
+    decides). Mirrors solve_mg's verify/reward flow."""
     import re as _re
-    from v5.runtime.algo_graph_run import _task_verify, _top_defs, _code_fingerprint
+    from v5.runtime.algo_graph_run import _author_prompt, _task_verify, _top_defs
     from v5.runtime.derive_reward import _def_names, code_reward, grounded_code
     from v5.runtime.tool_memory import _extract_code
-    advertised = retr.retrieve(task.text, k=k)
-    purposes = {}
-    for nid in retr.ids:
-        node = retr.graph.nodes[nid]
-        fn = _fn_name(node.metadata.get("code", "")) or nid
-        purposes[fn] = (node.text or "").splitlines()[0][:120]
+    advertised = [] if ad_style == "off" else retr.retrieve(task.text, k=k)
+    if ad_style == "purpose" and advertised:
+        purposes = {}
+        for nid in retr.ids:
+            node = retr.graph.nodes[nid]
+            fn = _fn_name(node.metadata.get("code", "")) or nid
+            purposes[fn] = (node.text or "").splitlines()[0][:120]
+        prompt = _author_prompt_purpose(task, advertised, purposes)
+    else:
+        prompt = _author_prompt(task, advertised)
     adv_names = [n for n, _ in advertised]
-    prompt = _author_prompt_purpose(task, advertised, purposes)
     best = ("", [], False, "")
     for gen in gen_fn([prompt] * samples):
-        code = _extract_code(gen)
+        code = repair_code(_extract_code(gen), task.name)
         defined = _def_names(code)
-        called = [n for n in adv_names if n not in defined and _re.search(rf"\b{_re.escape(n)}\s*\(", code)]
+        called = [n for n in adv_names if n not in defined
+                  and _re.search(rf"(?<![\w.]){_re.escape(n)}\s*\(", code)]
         deps = "\n\n".join(c for n, c in advertised if n in called)
         if _task_verify(task, code, deps):
             best = (code, called, True, gen); break
@@ -92,6 +92,37 @@ def _solve_author(retr: MGRetriever, gen_fn, task, k: int, samples: int, ad_styl
     R, _ = code_reward(verified, composed_used=used,
                        authored_new_verified=len(new_helpers) if verified else 0)
     return dict(name=task.name, verified=verified, reward=round(R, 3), reused=used, code=code, raw=raw)
+
+
+def repair_code(code: str, entry: str) -> str:
+    """Two raw-dump-diagnosed repairs, model untouched:
+    1) prose-in-codeblock: the model writes explanation lines INSIDE the fence (sort_matrix ended with
+       'Returns a sorted matrix based on...') -> trim trailing lines until the block compiles.
+    2) name mismatch: the model defines find_volume for `find_Volume(...)` (snake_case instinct) ->
+       if the entry is missing but exactly one def matches case-insensitively (or there is exactly one
+       top-level def), append an alias binding. The GATE still decides — a wrong-logic alias fails."""
+    if not code:
+        return code
+    lines = code.rstrip().splitlines()
+    for _ in range(min(15, len(lines) - 1)):
+        try:
+            compile("\n".join(lines), "<gen>", "exec")
+            break
+        except SyntaxError:
+            lines = lines[:-1]
+    else:
+        try:
+            compile("\n".join(lines), "<gen>", "exec")
+        except SyntaxError:
+            return code                                  # unrecoverable — leave for the taxonomy
+    fixed = "\n".join(lines)
+    defs = re.findall(r"^def\s+([A-Za-z_]\w*)\s*\(", fixed, re.M)
+    if entry and entry not in defs and defs:
+        ci = [d for d in defs if d.lower() == entry.lower()]
+        target = ci[0] if len(ci) == 1 else (defs[-1] if len(defs) == 1 else None)
+        if target:
+            fixed += f"\n\n{entry} = {target}"
+    return fixed
 
 
 def _called_atoms(code: str, atom_names) -> list:
@@ -174,15 +205,17 @@ def dump_raw(graph_path: str, embed_fn, gen_fn, tasks, out: str = "artifacts/grr
             gens = gen_fn([prompt] * samples)
             rec = {"i": i, "task": t.name, "text": t.text, "prompt": prompt, "samples": []}
             for g in gens:
-                code = _extract_code(g)
+                raw_code = _extract_code(g)
+                code = repair_code(raw_code, t.name)
                 defined = _def_names(code)
                 called = [n for n, _c in advertised if n not in defined
                           and _re.search(rf"(?<![\w.]){_re.escape(n)}\s*\(", code)]
                 deps = "\n\n".join(c for n, c in advertised if n in called)
                 full = (deps + "\n" + code) if deps else code
                 ok, err = verify_asserts_detail(full, t.tests, getattr(t, "setup", ""))
-                rec["samples"].append({"generation": g, "extracted_code": code, "called": called,
-                                       "verified": ok, "error": err})
+                rec["samples"].append({"generation": g, "extracted_code": raw_code,
+                                       "repaired_code": code if code != raw_code else None,
+                                       "called": called, "verified": ok, "error": err})
             f.write(json.dumps(rec) + "\n")
             print(f"  [{i+1}/{len(tasks)}] {t.name}: "
                   f"{sum(s['verified'] for s in rec['samples'])}/{len(gens)} samples verified", flush=True)
@@ -282,6 +315,17 @@ def _selftest() -> bool:
     import numpy as np
     from v5.runtime.algo_graph_run import MBPPTask
     print("algo_lm_author --selftest: author -> dense gate -> bank(origin) -> cross-task reuse\n")
+
+    # [0] repair_code — the raw-dump-diagnosed fixes: prose trimmed, case alias appended, junk untouched
+    r1 = repair_code("def f(x):\n    return x + 1\nThis returns x plus one.", "f")
+    assert r1.rstrip().endswith("return x + 1"), r1
+    r2 = repair_code("def find_volume(a, b):\n    return a * b", "find_Volume")
+    assert r2.endswith("find_Volume = find_volume"), r2
+    ns: dict = {}
+    exec(r2, ns); assert ns["find_Volume"](3, 4) == 12
+    assert repair_code("not code at all ][", "f") == "not code at all ]["
+    print("  [0] repair_code: prose-in-fence trimmed, snake_case aliased to the required entry name, "
+          "unrecoverable input left for the taxonomy -> PASS")
 
     # keyword-keyed stub embed (a fake random embedder retrieves nothing — t2 must FIND t1's atom)
     rng = np.random.default_rng(0)
