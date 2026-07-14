@@ -138,6 +138,59 @@ def _build_recursive():
 # The head-to-head harness — same traces, same budget, multi-seed, per-length-bucket report.
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _build_vib(beta: float = 1e-2):
+    """User objective: MINIMIZE I(z; task) while MAXIMIZING I(z; solution) — the information
+    bottleneck, in its variational form (VIB): the goal ENCODER becomes stochastic
+    z ~ N(mu(x), sigma(x)); the program-decode CE (already the training loss) lower-bounds
+    I(z; solution); beta * KL(q(z|x) || N(0, I)) upper-bounds I(z; task) — bits about the task
+    only flow through z if they pay for themselves in solution accuracy. Predicted effect: z sheds
+    task-SURFACE (phrasing idiosyncrasies) -> better held-out-paraphrase generalization; the h2h
+    paraphrase regime is the exact instrument that tests it."""
+    import torch
+    import torch.nn as nn
+    from v5.runtime.algo_dsl_trm import _build as _build_gru
+    _t, _nn, ProgramDecoder = _build_gru()
+
+    class VIBProgramDecoder(ProgramDecoder):
+        def __init__(self, d_in=768, d=64, beta=beta):
+            super().__init__(d_in=d_in, d=d)
+            self.logvar_head = nn.Linear(d_in, d)          # sigma(x): the bottleneck's width
+            self.beta = beta
+
+        def _encode(self, goal_vec, stochastic: bool):
+            mu = self.goal_proj(goal_vec)
+            if not stochastic:
+                return mu, torch.zeros(())
+            logvar = self.logvar_head(goal_vec).clamp(-8, 4)
+            z = mu + torch.exp(0.5 * logvar) * torch.randn_like(mu)
+            kl = 0.5 * (torch.exp(logvar) + mu ** 2 - 1.0 - logvar).sum()
+            return z, kl
+
+        def loss(self, goal_vec, atom_vecs, steps):
+            # base CE computed with a SAMPLED z + the KL bits-tax (train-time only)
+            ce = nn.CrossEntropyLoss()
+            g, kl = self._encode(goal_vec, stochastic=True)
+            A = self.atom_proj(atom_vecs)
+            state = torch.zeros(self.d)
+            total = torch.zeros(())
+            from v5.runtime.algo_dsl_trm import _REDUCE
+            for op_i, atom_i, agg_i in steps:
+                op_l, agg_l, atom_l = self._heads(g, state, A)
+                total = total + ce(op_l.unsqueeze(0), torch.tensor([op_i]))
+                if op_i == _REDUCE:
+                    total = total + ce(agg_l.unsqueeze(0), torch.tensor([agg_i]))
+                    break
+                total = total + ce(atom_l.unsqueeze(0), torch.tensor([atom_i]))
+                state = self.rnn((self.op_emb(torch.tensor(op_i)) + A[atom_i]).unsqueeze(0),
+                                 state.unsqueeze(0))[0]
+            return total + self.beta * kl
+
+        # decode/sample: deterministic mu (inference reads the bottleneck's center) — inherited
+        # methods call goal_proj directly, which IS mu. Nothing to override.
+
+    return VIBProgramDecoder
+
+
 def _setup(fams, embed_fn):
     atom_names = list(GEN_ATOMS)
     atom_idx = {a: i for i, a in enumerate(atom_names)}
@@ -197,8 +250,10 @@ def h2h(n_families=24, steps=4000, seeds=(1, 2, 3), d=64, T=3, embed_fn=None, fa
         allv = {f: pipe_text_variants(p, k_train + k_eval) for f, p in fams.items()}
         train_texts = {f: v[:k_train] for f, v in allv.items()}
         eval_texts = {f: v[k_train:] for f, v in allv.items()}
+    VIBProgramDecoder = _build_vib()
     archs = {"gru": lambda: ProgramDecoder(d_in=d_in, d=d),
-             "recursive": lambda: RecursiveProgramDecoder(d_in=d_in, d=d, T=T)}
+             "recursive": lambda: RecursiveProgramDecoder(d_in=d_in, d=d, T=T),
+             "vib": lambda: VIBProgramDecoder(d_in=d_in, d=d)}
     if log:
         for name, mk in archs.items():
             torch.manual_seed(0)
@@ -290,6 +345,20 @@ def _selftest() -> bool:
     a0, a2 = outs[0][2], outs[-1][2]
     assert len(outs) == 3 and float((a0 - a2).abs().max()) > 1e-4
     print(f"  [2] recursion live: 3 inner iterations, atom logits move between them -> PASS")
+
+    # [2b] VIB (the min I(z;task) / max I(z;solution) bottleneck): trains (CE+KL falls, KL finite),
+    #      decodes a valid program deterministically from mu
+    VIB = _build_vib(beta=1e-2)
+    torch.manual_seed(1)
+    mv = VIB(d_in=d_in, d=48)
+    lv0 = float(mv.loss(torch.as_tensor(tr[0][0]), A, tr[0][1]))
+    optv = torch.optim.Adam(mv.parameters(), lr=1e-3)
+    _sft_steps(mv, optv, tr, A, 500, seed=1)
+    lv1 = float(mv.loss(torch.as_tensor(tr[0][0]), A, tr[0][1]))
+    pv = mv.decode(torch.as_tensor(tr[0][0]), A, atom_names)
+    assert lv1 < lv0 and pv and pv[-1].kind == "REDUCE", (lv0, lv1, pv)
+    print(f"  [2b] VIB bottleneck: CE+beta*KL {lv0:.2f} -> {lv1:.2f}, deterministic decode valid "
+          f"(min I(z;task), max I(z;solution)) -> PASS")
 
     # [3] a small head-to-head runs end-to-end; both archs learn SOMETHING (>25% at this starved
     #     budget) and the benchmark DISCRIMINATES (nobody saturates — unlike the 6-family suite)
