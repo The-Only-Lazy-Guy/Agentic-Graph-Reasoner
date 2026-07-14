@@ -3890,6 +3890,86 @@
       },
       "access_count": 0,
       "context_guard": {}
+    },
+    {
+      "id": "impl_bell_number",
+      "text": "Write a function to find the number of ways to partition a set of Bell numbers.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "import math\n\ndef bell_number(n):\n    # Helper function to compute binomial coefficients C(n, k)\n    def binom(n, k):\n        return math.comb(n, k)\n    \n    # Bell triangle approach to compute Bell numbers\n    bell = [[0 for i in range(n+1)] for j in range(n+1)]\n    bell[0][0] = 1\n    \n    for i in range(1, n+1):\n        bell[i][0] = bell[i-1][i-1]\n        for j in range(1, i+1):\n            bell[i][j] = bell[i-1][j-1] + bell[i][j-1]\n    \n    return bell[n][0]\n\n# Store the helper function for future use if needed\nstore_binom: \"Compute binomial coefficient C(n, k)\"",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T184018Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_25",
+        "grow_patch_id": "impl_bell_number",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_is_sublist",
+      "text": "Write a function to check whether a list contains the given sublist or not.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def is_sublist(main_list, sub_list):\n    len_sub_list = len(sub_list)\n    \n    # Helper function to check if a slice of main_list matches sub_list\n    def does_slice_match(slice_start):\n        return main_list[slice_start:slice_start + len_sub_list] == sub_list\n    \n    # Iterate through possible starting indices for the sub_list in main_list\n    for i in range(len(main_list) - len_sub_list + 1):\n        if does_slice_match(i):\n            return True\n            \n    return False\n\n# No need to define a separate helper function as the check is performed within the main function.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T184026Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_27",
+        "grow_patch_id": "impl_is_sublist",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_get_equal",
+      "text": "Write a function to find whether all the given tuples have equal length or not.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def get_equal(tuples_list):\n    # Helper function to check the length of the first tuple\n    def check_length(tuple1):\n        return len(tuple1)\n    \n    # Get the length of the first tuple for comparison\n    first_tuple_length = check_length(tuples_list[0])\n    \n    # Check if all tuples have the same length as the first one\n    for tup in tuples_list:\n        if len(tup) != first_tuple_length:\n            return False\n    return True\n\n# Assuming we have a list of tuples\ntuples_list = [(1, 2), (3, 4), (5, 6)]\nresult = get_equal(tuples_list)\nprint(result)  # Output: True\n\n# Helper function to check the length of the first tuple\ncheck_length = lambda t: len(t)",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T184033Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_28",
+        "grow_patch_id": "impl_get_equal",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_closest_num",
+      "text": "Write a function to find the closest smaller number than n.",
+      "node_type": "implementation",
+      "confidence": 0.5,
+      "importance": 0.5,
+      "metadata": {
+        "code": "import math\n\ndef closest_num(n):\n    def find_less_than_x(x):\n        return x - 1\n    \n    # Find the largest number less than n\n    return find_less_than_x(n)\n\n# No genuinely reusable helper was defined this time, so no need to curate the library.",
+        "kind": "authored",
+        "origin": "lm_author",
+        "auto_grown": true,
+        "batch_id": "grow_20260714T184205Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_42",
+        "grow_patch_id": "impl_closest_num",
+        "grow_support_score": 1.0
+      },
+      "access_count": 0,
+      "context_guard": {}
     }
   ],
   "edges": [
@@ -7009,6 +7089,70 @@
         "grow_lane": "substrate",
         "grow_source_session": "grr14_294",
         "grow_patch_id": "impl_move_zero->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_bell_number",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T184018Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_25",
+        "grow_patch_id": "impl_bell_number->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_is_sublist",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T184026Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_27",
+        "grow_patch_id": "impl_is_sublist->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_get_equal",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T184033Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_28",
+        "grow_patch_id": "impl_get_equal->concept_algorithms::part_of",
+        "grow_support_score": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_closest_num",
+      "dst": "concept_algorithms",
+      "relation": "part_of",
+      "strength": 0.5,
+      "directed": true,
+      "metadata": {
+        "auto_grown": true,
+        "batch_id": "grow_20260714T184205Z",
+        "grow_lane": "substrate",
+        "grow_source_session": "grr14_42",
+        "grow_patch_id": "impl_closest_num->concept_algorithms::part_of",
         "grow_support_score": 1.0
       },
       "confidence": 1.0
