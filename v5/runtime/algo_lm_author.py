@@ -76,14 +76,20 @@ def _solve_author(retr: MGRetriever, gen_fn, task, k: int, samples: int, ad_styl
         prompt = _author_prompt(task, advertised)
     adv_names = [n for n, _ in advertised]
     best = ("", [], False, "")
-    for gen in gen_fn([prompt] * samples):
+    attempts = []                                       # the DISCOVERY trajectory (search trace):
+    for gen in gen_fn([prompt] * samples):              # every attempt + its verifier verdict/error
         code = repair_code(_extract_code(gen), task.name)
         defined = _def_names(code)
         called = [n for n in adv_names if n not in defined
                   and _re.search(rf"(?<![\w.]){_re.escape(n)}\s*\(", code)]
         deps = "\n\n".join(c for n, c in advertised if n in called)
         if _task_verify(task, code, deps):
+            attempts.append({"gen": gen, "verified": True, "error": ""})
             best = (code, called, True, gen); break
+        from v5.runtime.algo_graph_run import verify_asserts_detail
+        _ok, err = verify_asserts_detail((deps + "\n" + code) if deps else code, task.tests,
+                                         getattr(task, "setup", ""))
+        attempts.append({"gen": gen, "verified": False, "error": err})
         if not best[0]:
             best = (code, called, False, gen)
     code, reused, verified, raw = best
@@ -92,7 +98,7 @@ def _solve_author(retr: MGRetriever, gen_fn, task, k: int, samples: int, ad_styl
     R, _ = code_reward(verified, composed_used=used,
                        authored_new_verified=len(new_helpers) if verified else 0)
     return dict(name=task.name, verified=verified, reward=round(R, 3), reused=used, code=code, raw=raw,
-                prompt=prompt)
+                prompt=prompt, attempts=attempts)
 
 
 def repair_code(code: str, entry: str) -> str:
@@ -281,7 +287,12 @@ def run_author_loop(graph_path: str, embed_fn, gen_fn, tasks, k_retrieve: int = 
         if plog:
             plog.write(json.dumps({"task": t.name, "solved": bool(res["verified"])}) + "\n")
         if tlog and res["verified"]:
-            tlog.write(json.dumps({"task": t.name, "prompt": res["prompt"], "code": res["code"]}) + "\n")
+            # the STaR record carries the WHOLE discovery, not just the answer (targeting the answer
+            # alone measurably hurt: holdout 70 -> 62.5): raw = winning generation with its reasoning
+            # text; attempts = the search trace (failed tries + verifier errors) ending in the success
+            tlog.write(json.dumps({"task": t.name, "prompt": res["prompt"], "code": res["code"],
+                                   "raw": res.get("raw", ""),
+                                   "attempts": res.get("attempts", [])}) + "\n")
         if checkpoint_every and (i + 1) % checkpoint_every == 0:
             _checkpoint(i + 1)
         if not res["verified"]:

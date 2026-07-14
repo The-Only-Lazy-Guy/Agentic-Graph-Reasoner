@@ -43,10 +43,36 @@ def load_traces(path: str, dedup: bool = True) -> list:
     return out
 
 
+def format_completion(rec: dict, style: str) -> str:
+    """The STaR target (user diagnosis after the epoch-0 holdout drop: answer-only targets teach the
+    SOLUTION, not the DISCOVERY — code-only SFT amputated the model's own reasoning text and shifted
+    it toward emit-code-immediately).
+      answer     ```code``` only                        (the failed control)
+      rationale  the winning generation VERBATIM        (its reasoning text + code)
+      discovery  the search trace: each failed attempt + the verifier's error, ending in the verified
+                 generation — the model learns HOW the solution was found."""
+    if style == "answer":
+        return f"```python\n{rec['code']}\n```"
+    if style == "rationale":
+        return rec.get("raw") or f"```python\n{rec['code']}\n```"
+    if style == "discovery":
+        atts = rec.get("attempts") or []
+        if len(atts) <= 1:
+            return rec.get("raw") or f"```python\n{rec['code']}\n```"
+        parts = []
+        for i, a in enumerate(atts):
+            parts.append(f"Attempt {i + 1}:\n{a['gen']}")
+            if not a["verified"]:
+                parts.append(f"Verifier: FAILED — {a.get('error') or 'assertion failed'}\n"
+                             f"Revising based on the error.")
+        return "\n\n".join(parts)
+    raise ValueError(style)
+
+
 def train_lora(model_name: str, traces: list, out_dir: str, base_adapter: str = "",
                lr: float = 1e-4, epochs: int = 2, r_lora: int = 8, max_len: int = 1024,
-               seed: int = 0) -> str:
-    """Rejection-SFT: CE on the COMPLETION tokens of (chat-formatted prompt -> verified code).
+               seed: int = 0, trace_style: str = "rationale") -> str:
+    """Rejection-SFT: CE on the COMPLETION tokens of (chat-formatted prompt -> trace_style target).
     Returns the saved adapter dir. Same recipe class as train_star_mg (validated)."""
     import os
     import random
@@ -80,7 +106,7 @@ def train_lora(model_name: str, traces: list, out_dir: str, base_adapter: str = 
         for rec in data:
             msgs = [{"role": "user", "content": rec["prompt"]}]
             ptxt = tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
-            comp = f"```python\n{rec['code']}\n```" + tok.eos_token
+            comp = format_completion(rec, trace_style) + tok.eos_token
             pids = tok(ptxt, return_tensors="pt", add_special_tokens=False).input_ids
             cids = tok(comp, return_tensors="pt", add_special_tokens=False).input_ids
             ids = torch.cat([pids, cids], dim=1)[:, -max_len:].to(dev)
@@ -155,7 +181,7 @@ def eval_holdout(gen_fn, tasks, samples: int = 4) -> dict:
 def run_epochs(model_name: str, corpus: str, n_epochs: int = 2, limit: int = 300, holdout_n: int = 40,
                graph_path: str = "graphs/algo_star_epoch.json", work: str = "artifacts/star_epoch",
                samples: int = 4, train_fn=train_lora, gen_factory=make_hf_gen_adapter,
-               author_fn=None, log: bool = True):
+               author_fn=None, log: bool = True, trace_style: str = "rationale"):
     """The orchestrator. Holdout = the LAST holdout_n corpus tasks — never authored on, never banked,
     never trained on; evaluated with each epoch's adapter. train_fn/gen_factory/author_fn are
     injectable for the no-GPU selftest."""
@@ -177,7 +203,7 @@ def run_epochs(model_name: str, corpus: str, n_epochs: int = 2, limit: int = 300
                      traces_log=f"{work}/traces.jsonl", resume=True, checkpoint_every=50,
                      failure_log=f"{work}/failures_e{e}.jsonl", log=log)
         traces = load_traces(f"{work}/traces.jsonl")
-        adapter = train_fn(model_name, traces, f"{work}/adapter_e{e}")
+        adapter = train_fn(model_name, traces, f"{work}/adapter_e{e}", trace_style=trace_style)
         gen2 = gen_factory(model_name, adapter)
         hold1 = eval_holdout(gen2, holdout, samples=samples)
         history.append(dict(epoch=e, holdout_before=hold0, holdout_after=hold1,
@@ -268,6 +294,26 @@ def _selftest() -> bool:
         print("  [3] frozen holdout evaluated pre/post each epoch (taxonomy incl. plus_only gate "
               "integrity) and never banked -> PASS")
 
+        # [4] trace records carry the DISCOVERY (raw + attempts), and the three STaR targets format
+        #     correctly — the answer-only control, the rationale, and the search trace
+        recs = load_traces(f"{work}/traces.jsonl")
+        assert all("raw" in r and "attempts" in r for r in recs), recs[:1]
+        demo = dict(task="t", prompt="p", code="def f():\n    return 1",
+                    raw="Thinking: try returning 1.\n```python\ndef f():\n    return 1\n```",
+                    attempts=[{"gen": "```python\ndef f():\n    return 0\n```", "verified": False,
+                               "error": "AssertionError: out: 0, exp: 1"},
+                              {"gen": "Fix: return 1.\n```python\ndef f():\n    return 1\n```",
+                               "verified": True, "error": ""}])
+        a_ans = format_completion(demo, "answer")
+        a_rat = format_completion(demo, "rationale")
+        a_dis = format_completion(demo, "discovery")
+        assert a_ans.startswith("```python") and "Thinking" not in a_ans
+        assert "Thinking: try returning 1." in a_rat
+        assert "Attempt 1" in a_dis and "AssertionError: out: 0, exp: 1" in a_dis \
+            and "Attempt 2" in a_dis and "Fix: return 1." in a_dis
+        print("  [4] STaR targets: answer=code-only (failed control) | rationale=reasoning+code | "
+              "discovery=attempts+verifier-errors->success (learns HOW, not just WHAT) -> PASS")
+
     print("\n  ALGO_STAR_EPOCH SELFTEST -> PASS  (the gate decides what enters the WEIGHTS, exactly "
           "as it decides what enters the graph)")
     return True
@@ -283,12 +329,15 @@ def main():
     ap.add_argument("--holdout", type=int, default=40)
     ap.add_argument("--graph", default="graphs/algo_star_epoch.json")
     ap.add_argument("--work", default="artifacts/star_epoch")
+    ap.add_argument("--trace-style", default="rationale", choices=["answer", "rationale", "discovery"],
+                    help="STaR target: answer (failed control) | rationale (winning gen verbatim) | "
+                         "discovery (search trace: attempts + verifier errors -> success)")
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
     if a.epochs:
         run_epochs(a.model, a.corpus, n_epochs=a.epochs, limit=a.limit, holdout_n=a.holdout,
-                   graph_path=a.graph, work=a.work)
+                   graph_path=a.graph, work=a.work, trace_style=a.trace_style)
         return
     ap.print_help()
 
