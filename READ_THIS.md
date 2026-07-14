@@ -80,6 +80,17 @@ Reuses: algo_graph_mg (MGRetriever.resolve_deps), algo_compose_tasks (_REF/_NEED
 algo_graph_edits+graph_grower (health-gated writes), subgraph/gnn_encoder/goal_encoder (read stack).
 Trained: artifacts/grr6_trm.pt, artifacts/grr6_dsl.pt.
 
+## GRR-12 LM PROPOSER (real Qwen2.5-3B-Instruct + real mpnet, 24 fams, 6m28s incl. model download):
+##   escalation ladder decode -> beam+eps -> LM (task TEXT only -> candidate pipelines -> SAME verify
+##   gate, MDL-first, origin=lm). RESULT: 19/24 banked — the twice-measured blind-search ceiling (15/24)
+##   BROKEN by language understanding. Provenance: lm 11 discovered -> 11 reused (20/22 held-out inst,
+##   incl. the gen5/gen6 deep resisters), beam 8 -> 8 (14/16). Round 0 alone: 19 discoveries.
+##   "LM teaches ONCE, graph+TRM remember FOREVER" = demonstrated with a real model.
+##   zero-shot 15/24 fams (34/48 inst); rebuild 12/24 (31/48). Open: 5 fams resist LM k=6; late-find
+##   under-consolidation (19 banked vs 15 full-zero-shot). Next: LM authors NEW ATOMS (step 2), then
+##   reconsolidation (#71).
+##   Repro: --loop --factory --families 24 --rounds 8 --budget 800 --n-wake 3 --sft-steps 1200 \
+##          --explore 8 --lm Qwen/Qwen2.5-3B-Instruct --lm-k 6
 ## GRR-9c FACTORY LOOP (real mpnet, 24 generated fams, paraphrased goals):
 ##   beam-only STALLED at 10/24 (rich-get-richer, twice reproduced) -> EPSILON slots fix discovery.
 ##   PERF: 1h40m -> 3m46s (~26x): vectorized level scoring (_score_pipes_batch, one forward per level;
