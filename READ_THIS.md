@@ -80,6 +80,15 @@ Reuses: algo_graph_mg (MGRetriever.resolve_deps), algo_compose_tasks (_REF/_NEED
 algo_graph_edits+graph_grower (health-gated writes), subgraph/gnn_encoder/goal_encoder (read stack).
 Trained: artifacts/grr6_trm.pt, artifacts/grr6_dsl.pt.
 
+## GRR-13 REASONING-vs-TRANSLATION (intent tier, real 3B, molab): texts describe WHAT never HOW
+##   ("exactly two positive divisors", zero method vocabulary). RESULT vs method tier:
+##     lm discoveries 11 -> 7 (-36%) | lm held-out reuse 91% -> 57% | beam control 8 -> 8 (unchanged =
+##     experiment valid). VERDICT: the 3B genuinely REASONS (7 fams from pure intent, incl 4-step
+##     chains) but translation carried ~40% of method-tier performance. The delta is now a measured
+##     benchmark for bigger models (drop-in via --lm).
+## GRR-13b MBPP+ PREPPED (real open-source corpus): 378/378 kept, 0 dropped at validation (every
+##   reference passes its full EvalPlus test script in subprocess); pipeline-shaped 163 / LM-author
+##   territory 215. artifacts/mbpp_plus_prepped.jsonl COMMITTED (survives resets). Step-2 hunting ground.
 ## GRR-12 LM PROPOSER (real Qwen2.5-3B-Instruct + real mpnet, 24 fams, 6m28s incl. model download):
 ##   escalation ladder decode -> beam+eps -> LM (task TEXT only -> candidate pipelines -> SAME verify
 ##   gate, MDL-first, origin=lm). RESULT: 19/24 banked — the twice-measured blind-search ceiling (15/24)
