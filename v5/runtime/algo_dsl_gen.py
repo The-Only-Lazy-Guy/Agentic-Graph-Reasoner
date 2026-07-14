@@ -195,6 +195,61 @@ def pipe_text_variants(pipe, k: int) -> list:
     return out
 
 
+# INTENT tier — the reasoning-vs-translation axis. Method-tier texts transliterate the pipeline ("the
+# sum of the digit-sum of the primes"), so an LM can solve them by TRANSLATION. Intent-tier texts
+# describe WHAT, never HOW: no atom-phrase vocabulary at all — solving them requires crossing the
+# intent->method gap (knowing "exactly two divisors" IS primality). First-encounter solve rate on
+# intent texts vs method texts = the measured reasoning delta.
+_INTENT_PRED = {
+    "is_prime": ["having exactly two positive divisors", "with no divisors besides one and itself"],
+    "is_odd": ["not divisible by two", "leaving a remainder when halved"],
+    "is_square": ["equal to some whole number multiplied by itself",
+                  "expressible as a whole number times itself"],
+}
+_INTENT_MAP = {
+    "digit_sum": ["add its decimal digits together", "total up each digit it is written with"],
+    "square": ["multiply it by itself", "take its product with itself"],
+    "reverse_digits": ["write its digits in the opposite order and read the number that forms",
+                       "flip the order of its digits"],
+    "count_divisors": ["count how many positive whole numbers divide it evenly",
+                       "count its positive divisors"],
+    "collatz_steps": ["count the steps it needs to reach one when you repeatedly halve evens and "
+                      "triple-plus-one odds", "count its hailstone steps down to one"],
+    "double": ["add it to itself", "take it twice over"],
+}
+_INTENT_AGG = {"sum": ["give the grand total of the results", "add all the results up and report that"],
+               "max": ["report the biggest result you got", "give only the largest of the results"],
+               "count": ["say how many entries qualified", "report the number of entries that qualified"],
+               "len": ["say how many entries qualified", "report the number of entries that qualified"]}
+
+
+def pipe_text_intent(pipe, vi: int = 0) -> str:
+    """Intent-tier phrasing #vi: describes the GOAL step by step in plain language, forward order,
+    with NO method vocabulary (no atom names/phrases). Deterministic per (pipe, vi)."""
+    rng = np.random.default_rng(77_000 + vi * 613 + len(pipe) * 17 +
+                                sum(ord(c) for op in pipe for c in op.arg))
+    pick = lambda opts: opts[int(rng.integers(0, len(opts)))]
+    preds = [op.arg for op in pipe if op.kind == "FILTER"]
+    maps = [op.arg for op in pipe if op.kind == "MAP"]
+    agg = pipe[-1].arg
+    kept = ("every entry " + " and ".join(pick(_INTENT_PRED[p]) for p in preds)) if preds \
+        else "every entry"
+    if agg in ("count", "len"):
+        return f"go through the list and, considering {kept}, {pick(_INTENT_AGG[agg])}."
+    steps = "; then ".join(pick(_INTENT_MAP[m]) for m in maps)      # forward order, plain words
+    return f"for {kept} in the list: {steps}; finally {pick(_INTENT_AGG[agg])}."
+
+
+def pipe_text_intent_variants(pipe, k: int) -> list:
+    out, vi = [], 0
+    while len(out) < k and vi < k * 20:
+        t = pipe_text_intent(pipe, vi)
+        if t not in out:
+            out.append(t)
+        vi += 1
+    return out
+
+
 def interpret(pipe, lst) -> int:
     """The ORACLE: interpret the pipeline with oracle fns (canonical semantics — filters on the raw
     element, maps composed — matching realize_program)."""
@@ -363,6 +418,18 @@ def _selftest() -> bool:
         assert vs == pipe_text_variants(pipe, 5), "variants must be deterministic"
     print("  [6] paraphrase variants: 5 distinct deterministic phrasings/family (variant 0 = canonical; "
           "synonyms + structure flips + hint dropout) -> PASS")
+
+    # [7] INTENT tier: distinct deterministic variants that contain ZERO method vocabulary — the
+    #     reasoning-vs-translation axis (an LM must know "exactly two divisors" IS primality)
+    method_vocab = {p.lower() for p in _PHRASE.values()} | \
+        {s.lower() for v in _SYN_PHRASE.values() for s in v}
+    for fam, pipe in list(fams.items())[:8]:
+        vs = pipe_text_intent_variants(pipe, 3)
+        assert len(vs) == 3 == len(set(vs)) and vs == pipe_text_intent_variants(pipe, 3), (fam, vs)
+        for t in vs:
+            assert not any(w in t.lower() for w in method_vocab), (fam, t)
+    print("  [7] intent tier: 3 distinct deterministic phrasings/family, ZERO method vocabulary "
+          "(describes WHAT, never HOW) -> PASS")
 
     print("\n  ALGO_DSL_GEN SELFTEST -> PASS  (a benchmark that can finally discriminate architectures)")
     return True

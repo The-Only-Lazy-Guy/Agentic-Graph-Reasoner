@@ -79,19 +79,33 @@ def hand6_domain():
 
 
 def factory_domain(n_families=24, fam_seed=0, para_train=3, para_eval=2, beam=12, max_chain=4,
-                   explore=6):
+                   explore=6, tier: str = "method"):
     """The scale-up domain: algo_dsl_gen factory families, paraphrased goals, beam search.
-    Zero-shot eval decodes HELD-OUT phrasings (never trained on) — generalization, not point recall."""
-    from v5.runtime.algo_dsl_gen import (GEN_ATOMS, gen_families, gen_tasks, pipe_is_general,
+    Zero-shot eval decodes HELD-OUT phrasings (never trained on) — generalization, not point recall.
+    tier="intent" swaps EVERY text for the intent tier (WHAT, never HOW — zero method vocabulary):
+    first-encounter solve there vs method tier = the measured reasoning-vs-translation delta."""
+    from v5.runtime.algo_dsl_gen import (GEN_ATOMS, GenTask, _rand_list, gen_families, gen_tasks,
+                                         interpret, pipe_is_general, pipe_text_intent_variants,
                                          pipe_text_variants)
     pipes = gen_families(n_families, seed=fam_seed, max_chain=max_chain)
     fams = {f: ("list", None) for f in pipes}
-    allv = {f: pipe_text_variants(p, para_train + para_eval) for f, p in pipes.items()}
+    variants_fn = pipe_text_intent_variants if tier == "intent" else pipe_text_variants
+    allv = {f: variants_fn(p, para_train + para_eval) for f, p in pipes.items()}
 
     def tasks_by_fam(seed):
+        import numpy as _np
         by = {}
-        for t in gen_tasks(pipes, n_per=max(3, para_train), seed=seed, paraphrase_k=para_train):
-            by.setdefault(t.name, []).append(t)
+        if tier == "intent":                              # instances cycle the intent train phrasings
+            rng = _np.random.default_rng(seed)
+            for fam, pipe in pipes.items():
+                for i in range(max(3, para_train)):
+                    lst = _rand_list(rng)
+                    by.setdefault(fam, []).append(
+                        GenTask(fam, allv[fam][i % para_train],
+                                [f"assert {fam}({lst!r}) == {interpret(pipe, lst)!r}"]))
+        else:
+            for t in gen_tasks(pipes, n_per=max(3, para_train), seed=seed, paraphrase_k=para_train):
+                by.setdefault(t.name, []).append(t)
         return by
 
     def seed_graph(path):
@@ -458,6 +472,8 @@ def main():
     ap.add_argument("--beam", type=int, default=12)
     ap.add_argument("--explore", type=int, default=6,
                     help="epsilon slots in the beam (random extensions kept besides the top-B)")
+    ap.add_argument("--intent", action="store_true",
+                    help="intent-tier texts (WHAT, never HOW) — the reasoning-vs-translation test")
     ap.add_argument("--graph", default="graphs/algo_grr_loop.json")
     ap.add_argument("--rounds", type=int, default=3)
     ap.add_argument("--budget", type=int, default=1500)
@@ -472,7 +488,7 @@ def main():
     if a.loop or a.rebuild:
         if a.factory:
             domain = factory_domain(a.families, a.fam_seed, a.para_train, a.para_eval, a.beam,
-                                    explore=a.explore)
+                                    explore=a.explore, tier="intent" if a.intent else "method")
         else:
             domain = hand6_domain()
         if not Path(a.graph).exists():
