@@ -185,3 +185,245 @@ Trained: artifacts/grr6_trm.pt, artifacts/grr6_dsl.pt.
 ##   (15 nodes 22 edges, 6 program nodes banked) — committed? artifacts/ dies at box reset; the graph
 ##   json is re-derivable in ~2 min via --loop (deterministic search), so no artifact dependency.
 ## NEXT = SCALE-UP: more dataset + RL-with-LM synergy (LM authors new atoms) + hierarchical tasks.
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GRR-Tool — TRM-Driven Reasoner with Tool MLPs (design, 2026-07-15)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Core idea
+TRMReasoner (tiny ~7M net) produces step-by-step reasoning traces (latent states z_1..z_T).
+Each step: tool MLPs consume the TRM's reasoning state → execute graph operations → results
+feed back into the next step. The final trace is fed to the LM which decodes it into
+answers + code + explanations. The LM is the *realizer*; the TRM is the *reasoner*.
+
+Each graph node has:
+- `text`: concise purpose string (the retrieval key, e.g. "computes prime factorization")
+- `metadata.code`: executable implementation
+- `depend` edges: which atoms this one calls (composition structure)
+The step-by-step *reasoning* lives in the TRM trace (z_t states), NOT in the nodes.
+Nodes carry what they DO and their DEPENDENCIES — the TRM figures out the ORDER/WHY.
+
+### Inference is a CLOSED LOOP (not linear)
+
+```
+TRM reasons with tools ──→ LM decodes code ──→ Verify ──→ Solved? ──→ DONE (→ SLEEP)
+       ↑                                                        │
+       │                                  ┌─────────────────────┘
+       │                                  │ (fail: error + failed code + partial trace)
+       └────────── FEED BACK ─────────────┘
+                         
+```
+
+The TRM gets to "think again" with failure context. This mirrors the existing
+`solve_with_search` pattern (algo_dsl_trm.py:551): decode → if fail → search →
+if found → consolidate → if still fail → LM proposer. The new tool MLPs make
+the TRM's reasoning visible and steerable at each step, but the outer closed
+loop stays the same.
+
+### Node explanations (what each atom carries)
+
+Each implementation node stores:
+- `text`: one-line purpose (retrieval key, ~200 chars)
+- `metadata.code`: the full implementation
+- `metadata.kind`: "authored" | "program" | "helper"
+- `depend` edges: closure of atoms this one calls
+- `part_of` edge: which concept domain it belongs to
+
+The step-by-step *explanation of how to use it* is NOT stored in the node —
+it emerges from the TRM's reasoning trace during inference. The TRM learns
+WHEN and WHY to call each atom; the atom only stores WHAT it does.
+
+## Key design decisions (agreed 2026-07-15)
+1. TRM scratchpad z_t should represent *search state, partial hypotheses, uncertainty* —
+   not just a blended feature. Accomplished by: larger d (256+), auxiliary prediction
+   heads (confidence, usefulness, "did the last retrieval help?") that force the latent
+   to encode these quantities.
+2. Tool MLPs are NOT one affine transform — they use residual blocks or small
+   transformer blocks (Linear → GELU → Linear → GELU → residual), ~10K params each.
+3. Retrieval is ITERATIVE, not one-shot cosine. MLP_ret produces a query vector →
+   TraversalRanker retrieves → result feeds back → TRM decides "good enough" or
+   "another hop" → MLP_stop gates whether to continue. This makes retrieval compositional:
+   "need theorem A → need theorem B → need impl C".
+4. Health gate is PROBABILISTIC: write_prob = σ(α·confidence + β·novelty + γ·verification - δ).
+   Verified solutions still usually write, but the TRM can choose NOT to bank something
+   it's unsure about. Prevents pollution even when the test gate passes (degenerate
+   solutions). Learned, not hardcoded.
+
+## Architecture
+
+```
+Task text ──→ mpnet ──→ x_vec [768]
+                           │
+                    ┌──────▼──────────┐
+                    │ TRMReasoner      │  T recursion steps (d=256)
+                    │ z_t: search      │  each step: attend atoms,
+                    │ state, partial   │  refine scratchpad, produce
+                    │ hypotheses,      │  tool-feedback vector for
+                    │ uncertainty      │  next step
+                    └──────┬──────────┘
+                           │
+              ┌────────────┼─────────────┐
+              │            │             │
+         ┌────▼────┐ ┌────▼──────┐ ┌────▼──────┐
+         │Residual  │ │Residual   │ │Residual   │ ...
+         │MLP_ret   │ │MLP_write  │ │MLP_edge   │
+         │(3 layer) │ │(3 layer)  │ │(3 layer)  │
+         └────┬────┘ └────┬──────┘ └────┬──────┘
+              │            │             │
+         ┌────▼────┐ ┌────▼──────┐ ┌────▼──────┐
+         │Traversal│ │  LM       │ │  grow     │
+         │Ranker   │ │  decodes  │ │(edits)    │
+         │(iter-   │ │  code     │ │           │
+         │ ative)  │ │  text     │ │           │
+         └────┬────┘ └───────────┘ └───────────┘
+              │            │             │
+              └────────────┼─────────────┘
+                           │ Each tool result feeds BACK
+                           ▼ into next TRM step (z_{t+1})
+                      ┌──────────┐
+                      │  Graph   │  MemoryGraph (nodes + edges)
+                      │  (CPU)   │  persistence, retrieval, composition
+                      └──────────┘
+                           │
+                    TRM trace (z_1..z_T + tool outputs)
+                           │
+                           ▼
+                    LM decodes final answer + code + explanation
+```
+
+## Components
+
+### TRMReasoner (algo_trm.py)
+- `d=256` (was 64), `T=5` (was 3)
+- `forward(x_vec, atom_vecs, tool_feedback=T×d_feedback tensor)`:
+  For t=1..T:
+    y_t = atom_pointer(x, A, z_{t-1})
+    z_t = f([x, ysum, z_{t-1}, fb_t])
+  Returns: (z_1..z_T, y_1..y_T, per-step auxiliary predictions)
+- Auxiliary heads (deep supervision targets):
+  - `confidence_t`: scalar (how sure the plan so far is correct)
+  - `usefulness_t`: scalar (did the last retrieval/add/write help?)
+  - `stop_t`: binary (should we halt and decode?)
+
+### Tool MLPs (algo_trm.py — ToolHead base)
+- `ToolHead(d_in, d_out, hidden=None)`: 3-layer residual MLP
+  `Linear(d_in, h) → GELU → Linear(h, h) → GELU → Linear(h, d_out)` + optional skip
+- `RetrievalHead(d, d_feedback)`: produces (query_vec, stop_logit, feedback_vec)
+- `WriteHead(d, d_feedback)`: produces (write_latent, node_pointer, feedback_vec)
+- `EdgeHead(d, d_feedback)`: produces (src_ptr, dst_ptr, relation_logits, feedback_vec)
+
+### TraversalRanker wrapper (algo_graph_mg.py or new)
+- `TRMRetriever(retriever, embed_fn)`: called by MLP_ret
+  - `retrieve(query_vec, k)`: cosine search + optional multi-hop refinement
+  - Returns: (atom_ids, code_embeddings, metadata) → packed into feedback vector
+
+### Probabilistic health gate (algo_graph_edits.py)
+- `write_prob = sigmoid(α·confidence + β·novelty + γ·verification - δ)`
+- Sample: write ~ Bernoulli(write_prob)
+- confidence = TRM's own confidence head (learned)
+- novelty = 1 - cosine_sim(code, existing atoms) (deterministic)
+- verification = 1 if code passes tests else 0
+- α, β, γ, δ: learned scalars (or fixed hyperparameters initially)
+
+### LM trace decoder (algo_lm_author.py or new)
+- Collects TRM trace: [(z_1, tool_outputs_1), ..., (z_T, tool_outputs_T)]
+- Formats as structured text: each step's search state, retrieved atoms, write decisions
+- Feeds as prompt to LM → LM generates code + explanation
+- On VERIFY FAIL: error message + failed code + partial trace feeds back into TRM
+  as a special "failure context" vector → TRM re-reasons with this context →
+  new trace → LM decodes updated code → verify again (closed loop)
+- SFT on (trace, verified_code) pairs
+
+### Closed-loop inference (one task)
+
+```
+1. EMBED task text → x_vec [768]
+
+2. TRM REASON (T steps, with tool MLPs):
+   For t = 1..T:
+     a. Attend to atoms → y_t
+     b. Refine z_t with tool_feedback from previous step
+     c. Auxiliary heads: confidence_t, usefulness_t, stop_t
+     d. Tool MLPs: retrieve, write, edge proposals → feedback for next step
+   Output: TRM trace (z_1..z_T, y_1..y_T, tool_outputs_1..T)
+
+3. LM DECODE: trace → structured prompt → LM generates code + helpers + explanation
+
+4. EXECUTE VERIFY: run code against tests
+
+5. LOOP BACK IF FAIL:
+   If verify fails:
+     a. Collect: error message + failed code + partial trace
+     b. Format as failure context (embedded or tokenized)
+     c. Prepend to TRM input for a NEW reasoning pass
+     d. Go to step 2 (TRM reasons again WITH failure context)
+     e. Budget: max N retries per task
+
+6. SLEEP (if solved):
+   Build candidates: new atom node + part_of + depend edges
+   Probabilistic gate: write_prob = σ(α·conf + β·novelty + γ·1.0 - δ)
+   grow() → health gate → persist
+```
+
+## Building Blocks That Exist
+| Block | File | Status |
+|-------|------|--------|
+| TRMReasoner | algo_trm.py | T-step recursion, atom-pointer — needs expansion |
+| ProgramDecoder | algo_dsl_trm.py | GRU decoder with heads — reference pattern |
+| MGRetriever | algo_graph_mg.py | Cosine retrieval on impl embeddings |
+| TraversalRanker | traversal_ranker.py | Multi-hop latent retrieval with RefinerNet |
+| node/edge_candidate, grow | algo_graph_edits.py | Health-gated graph writes |
+| LM author | algo_lm_author.py | LM decodes code from prompt |
+| MemoryGraph | graph_core.py | Typed nodes/edges, JSON persist |
+
+### Per-round training flow (STaR)
+
+```
+for each round:
+
+  ┌─ WAKE ─────────────────────────────────────────────────────┐
+  │  For each task in batch:                                   │
+  │    solved = False                                          │
+  │    retries = 0                                             │
+  │    while not solved and retries < max_retries:             │
+  │      TRM reason with tools  ──→ trace                      │
+  │      LM decode trace ──→ code                              │
+  │      Execute verify                                        │
+  │      if verified: solved = True; collect (trace, code)     │
+  │      else: feed error back to TRM; retries += 1            │
+  │                                                            │
+  │    if solved:                                              │
+  │      add to SFT pool (deep supervision on TRM steps)       │
+  │      bank solution: probabilistic gate → grow → graph      │
+  └────────────────────────────────────────────────────────────┘
+  
+  ┌─ CONSOLIDATE ──────────────────────────────────────────────┐
+  │  SFT TRM on pool (deep supervision over all T steps)       │
+  │  SFT LM on (trace → verified_code) pairs                   │
+  └────────────────────────────────────────────────────────────┘
+  
+  ┌─ SLEEP ────────────────────────────────────────────────────┐
+  │  For each newly banked atom:                               │
+  │    write node + part_of + depend edges to graph JSON       │
+  │  Re-index retriever                                        │
+  └────────────────────────────────────────────────────────────┘
+  
+  ┌─ MEASURE ──────────────────────────────────────────────────┐
+  │  Zero-shot decode on held-out (no search, no retries)      │
+  │  Track: solved rate, verifies-to-solve, graph size         │
+  └────────────────────────────────────────────────────────────┘
+```
+
+The compounding effect: each round, the graph has MORE atoms → TRM retrieves more
+relevant context → composes better → solves harder tasks → banks more atoms.
+Zero-shot rises; verifies-to-solve falls. Rebuild: fresh net + same graph → same
+solve rate (graph IS the memory).
+
+## Build Order (implemented below in algo_trm.py)
+1. TRMReasoner: larger d, tool-feedback input, auxiliary heads
+2. ToolHead base class with residual blocks
+3. RetrievalHead + TRMRetriever wrapper
+4. TRMWithTools orchestrator + selftest
+5. Probabilistic health gate (deferred to graph write integration)
+6. LM trace decoder (deferred to LM integration phase)

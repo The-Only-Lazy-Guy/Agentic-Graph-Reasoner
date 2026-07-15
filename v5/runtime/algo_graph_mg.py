@@ -157,7 +157,48 @@ class MGRetriever:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SOLVE + GROW — retrieve -> author -> verify -> reward -> model edits -> health-gated grow
+# TRM-Driven Retrieval Adapter
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TRMRetriever:
+    """Iterative retrieval driven by TRM query vectors.
+
+    Wraps MGRetriever (or any object with retrieve_vec). At each TRM step,
+    the RetrievalHead produces a query vector → retrieve_vec → results are
+    embedded and packed into a feedback vector for the next TRM step.
+
+    Supports iterative multi-hop: the same query vector can trigger multiple
+    retrieval rounds if the RetrievalHead's stop gate says "continue".
+
+    Args:
+        retriever: object with retrieve_vec(vec, k) -> [(name, code), ...]
+        embed_fn: function mapping {key: text} -> {key: vec}
+        k: number of atoms to retrieve per query
+        d_feedback: dimension of the feedback vector
+    """
+    def __init__(self, retriever: MGRetriever, embed_fn, k: int = 6, d_feedback: int = 64):
+        self.retriever = retriever
+        self.embed_fn = embed_fn
+        self.k = k
+        self.d_feedback = d_feedback
+        self._last_results: list[tuple[str, str]] = []
+
+    def retrieve(self, query_vec) -> list[tuple[str, str]]:
+        """One retrieval round.
+
+        Args:
+            query_vec: [d_emb] query vector from RetrievalHead
+
+        Returns:
+            results: [(name, code), ...] top-k retrieved atoms
+        """
+        results = self.retriever.retrieve_vec(query_vec, k=self.k)
+        self._last_results = results
+        return results
+
+    @property
+    def last_results(self) -> list[tuple[str, str]]:
+        return self._last_results
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def solve_mg(retriever: MGRetriever, gen_fn, task, k: int = 6, samples: int = 1):
