@@ -44,6 +44,7 @@ from v5.runtime.algo_graph_mg import (
 def _author_prompt_purpose(task, advertised, purposes: dict) -> str:
     """Full-code advertisement with import framing and purpose annotations."""
     parts = [task.text]
+    adv_names = [n for n, _ in advertised]
     if advertised:
         parts.append("# ── Already imported — call these by name, do NOT redefine ──")
         for name, code in advertised:
@@ -52,8 +53,12 @@ def _author_prompt_purpose(task, advertised, purposes: dict) -> str:
                 parts.append(f"# {purpose}\n```python\n{code}\n```")
             else:
                 parts.append(f"```python\n{code}\n```")
-    parts.append(f"\nWrite `{task.name}(...)` in ONE Python code block. You may use the imported "
-                 f"functions above — they are already defined and ready to call.")
+    if task.name in adv_names:
+        parts.append(f"\nThe function `{task.name}` is already defined above — you do NOT need to "
+                     f"write it. Call it or use it directly as needed.")
+    else:
+        parts.append(f"\nWrite `{task.name}(...)` in ONE Python code block. You may use the imported "
+                     f"functions above — they are already defined and ready to call.")
     return "\n\n".join(parts)
 
 
@@ -266,7 +271,7 @@ def _failure_class(t, code: str, deps: str) -> str:
 
 
 def dump_raw(graph_path: str, embed_fn, gen_fn, tasks, out: str = "artifacts/grr14_raw.jsonl",
-             k_retrieve: int = 6, samples: int = 2, ad_style: str = "off"):
+             k_retrieve: int = 3, samples: int = 2, ad_style: str = "off"):
     """THE RAW PIPELINE, per task, nothing aggregated: exact prompt -> every generation verbatim ->
     extracted code -> per-sample verify verdict + failing line (stderr). Written to jsonl for
     inspection. This is the what-exactly-happened view; run it BEFORE arguing about causes."""
@@ -302,7 +307,7 @@ def dump_raw(graph_path: str, embed_fn, gen_fn, tasks, out: str = "artifacts/grr
     print(f"  raw dump -> {out}", flush=True)
 
 
-def run_author_loop(graph_path: str, embed_fn, gen_fn, tasks, k_retrieve: int = 6, samples: int = 4,
+def run_author_loop(graph_path: str, embed_fn, gen_fn, tasks, k_retrieve: int = 3, samples: int = 4,
                     reindex_every: int = 5, log: bool = True,
                     failure_log: str = "artifacts/grr14_failures.jsonl", ad_style: str = "sig",
                     shuffle_seed: int | None = None, progress_log: str = "",

@@ -251,12 +251,17 @@ def _task_verify(task, code: str, deps_code: str = "") -> bool:
 def _author_prompt(task, advertised: list[tuple[str, str]]) -> str:
     """Show full atom code with import framing — the model sees actual implementations it can call."""
     parts = [task.text]
+    adv_names = [n for n, _ in advertised]
     if advertised:
         parts.append("# ── Already imported — call these by name, do NOT redefine ──")
         for name, code in advertised:
             parts.append(f"```python\n{code}\n```")
-    parts.append(f"\nWrite `{task.name}(...)` in ONE Python code block. You may use the imported "
-                 f"functions above — they are already defined and ready to call.")
+    if task.name in adv_names:
+        parts.append(f"\nThe function `{task.name}` is already defined above — you do NOT need to "
+                     f"write it. Call it or use it directly as needed.")
+    else:
+        parts.append(f"\nWrite `{task.name}(...)` in ONE Python code block. You may use the imported "
+                     f"functions above — they are already defined and ready to call.")
     return "\n\n".join(parts)
 
 
