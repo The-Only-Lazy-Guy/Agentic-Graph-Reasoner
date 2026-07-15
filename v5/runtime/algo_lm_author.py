@@ -150,6 +150,9 @@ def _bank_solution(graph_path: str, retr: MGRetriever, task, res_solve: dict, ca
     code = res_solve["code"]
     cands, helper_names = [], []
     nid = f"impl_{task.name}"
+    
+    atom_names = [_fn_name(retr.graph.nodes[n].metadata.get("code", "")) or n for n in retr.ids]
+    
     if nid not in retr.graph.nodes:
         cands.append(node_candidate(nid, code, task.text.splitlines()[0][:200], session,
                                     metadata={"kind": "authored", "origin": "lm_author"}))
@@ -158,11 +161,21 @@ def _bank_solution(graph_path: str, retr: MGRetriever, task, res_solve: dict, ca
             cands.append(edge_candidate(nid, f"impl_{a}", "depend", session))
     stores, edges = _edits_from_solve(res_solve, task, concept)     # model-chosen helpers (Fix D)
     for hid, src, purpose in stores:
-        if hid != nid and hid not in retr.graph.nodes:
-            cands.append(node_candidate(hid, src, purpose, session,
-                                        metadata={"kind": "authored", "origin": "lm_author_helper"}))
-            cands.append(edge_candidate(hid, concept, "part_of", session))
-            helper_names.append(hid[len("impl_"):])
+        if hid != nid:
+            if hid not in retr.graph.nodes:
+                cands.append(node_candidate(hid, src, purpose, session,
+                                            metadata={"kind": "authored", "origin": "lm_author_helper"}))
+                cands.append(edge_candidate(hid, concept, "part_of", session))
+                helper_names.append(hid[len("impl_"):])
+                h_called = _called_atoms(src, atom_names)
+                for a in h_called:
+                    if a != hid[len("impl_"):]:
+                        cands.append(edge_candidate(hid, f"impl_{a}", "depend", session))
+            cands.append(edge_candidate(nid, hid, "depend", session))
+            
+    for u, v, rel in edges:
+        cands.append(edge_candidate(u, v, rel, session))
+        
     if not cands:
         return False, []
     newp = graph_path + ".grown"
