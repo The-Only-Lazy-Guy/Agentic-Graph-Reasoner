@@ -449,7 +449,8 @@ def _get_prompt(retr: MGRetriever, task, k: int, ad_style: str) -> str:
         for nid in retr.ids:
             node = retr.graph.nodes[nid]
             fn = _fn_name(node.metadata.get("code", "")) or nid
-            purposes[fn] = (node.text or "").splitlines()[0][:120]
+            lines = (node.text or "").splitlines()
+            purposes[fn] = lines[0][:120] if lines else fn
         return _author_prompt_purpose(task, advertised, purposes)
     return _author_prompt(task, advertised)
 
