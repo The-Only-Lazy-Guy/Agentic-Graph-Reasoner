@@ -141,41 +141,95 @@ def _called_atoms(code: str, atom_names) -> list:
             and re.search(rf"(?<![\w.]){re.escape(a)}\s*\(", code or "")]
 
 
+# ── concept auto-classifier ─────────────────────────────────────────────────
+_CONCEPT_KEYWORDS: list[tuple[str, str]] = [
+    ("concept_number_theory",  r"prime|factor|divisib|digit|fibonacci|modulo|gcd|lcm|parity|odd|even"),
+    ("concept_strings",        r"string|char|palindrome|anagram|substring|uppercase|lowercase|trim|regex|word|sentence"),
+    ("concept_lists",          r"list|array|tuple|sequence|element|index|subarray|flatten|nested|matrix"),
+    ("concept_math",           r"area|volume|perimeter|angle|triangle|circle|square|cube|root|power|log|ceil|floor"),
+    ("concept_search_sort",    r"sort|search|binary.search|merge|heap|queue|stack|topolog|permut|combin"),
+    ("concept_algorithms",     r""),            # default / catch-all
+]
+
+
+def _classify_concept(task_text: str) -> str:
+    """Map a task's natural-language description to the best-fit concept node id.
+    Simple ordered keyword match — first match wins, 'concept_algorithms' is the fallback."""
+    t = task_text.lower()
+    for concept_id, pattern in _CONCEPT_KEYWORDS:
+        if pattern and re.search(pattern, t):
+            return concept_id
+    return "concept_algorithms"
+
+
+# ── fn_name -> node_id reverse index ────────────────────────────────────────
+
+def _fn_to_nid_map(graph) -> dict[str, str]:
+    """Build {fn_name: node_id} from the live MemoryGraph so depend-edge targets use the real
+    node ID (not the assumed impl_{fn_name} which diverges whenever the LM renamed its entry
+    point — 23 such mismatches confirmed in the 68% run graph)."""
+    mapping: dict[str, str] = {}
+    for nid, node in graph.nodes.items():
+        if node.node_type != "implementation":
+            continue
+        code = node.metadata.get("code", "")
+        fn = _fn_name(code)
+        if fn:
+            mapping[fn] = nid
+    return mapping
+
+
 def _bank_solution(graph_path: str, retr: MGRetriever, task, res_solve: dict, called: list,
-                   session: str, concept: str = "concept_algorithms"):
+                   session: str, concept: str | None = None):
     """A VERIFIED solve -> (a) the solution as an implementation node (origin=lm_author, task text =
-    retrieval key) + depend edges to called atoms; (b) the model's STORE-action HELPERS as their OWN
-    atoms (origin=lm_author_helper) — the reuse-granular units: nobody calls another task's entry
-    point, but everybody calls is_prime. Health-gated. Returns (banked_solution, helper_names)."""
+    retrieval key) + depend edges to called atoms using the CORRECT target node IDs (via fn->nid
+    reverse index, not assumed impl_{fn}); (b) the model's STORE-action HELPERS as their OWN atoms;
+    (c) the task is auto-classified to one of 6 concept nodes instead of always concept_algorithms.
+    Health-gated. Returns (banked_solution, helper_names)."""
     code = res_solve["code"]
     cands, helper_names = [], []
     nid = f"impl_{task.name}"
-    
-    atom_names = [_fn_name(retr.graph.nodes[n].metadata.get("code", "")) or n for n in retr.ids]
-    
+
+    # auto-classify to the right concept (the 68% run had 371/371 atoms under concept_algorithms)
+    concept = concept or _classify_concept(task.text)
+    # ensure the concept node exists (it may be absent in graphs seeded with only one concept)
+    if concept not in retr.graph.nodes:
+        concept = "concept_algorithms"    # safe fallback — always present in seed
+
+    # build fn_name -> real node_id map so depend edges land on actual nodes, not guessed impl_{fn}
+    fn_to_nid = _fn_to_nid_map(retr.graph)
+    atom_names = list(fn_to_nid.keys())   # fn names that actually exist in the graph
+
     if nid not in retr.graph.nodes:
         cands.append(node_candidate(nid, code, task.text.splitlines()[0][:200], session,
                                     metadata={"kind": "authored", "origin": "lm_author"}))
         cands.append(edge_candidate(nid, concept, "part_of", session))
         for a in called:
-            cands.append(edge_candidate(nid, f"impl_{a}", "depend", session))
-    stores, edges = _edits_from_solve(res_solve, task, concept)     # model-chosen helpers (Fix D)
+            target_nid = fn_to_nid.get(a)          # use the REAL node id, not f"impl_{a}"
+            if target_nid and target_nid != nid:
+                cands.append(edge_candidate(nid, target_nid, "depend", session))
+
+    stores, edges = _edits_from_solve(res_solve, task, concept)  # model-chosen helpers (Fix D)
     for hid, src, purpose in stores:
         if hid != nid:
+            h_concept = _classify_concept(purpose + " " + task.text)
+            if h_concept not in retr.graph.nodes:
+                h_concept = concept
             if hid not in retr.graph.nodes:
                 cands.append(node_candidate(hid, src, purpose, session,
                                             metadata={"kind": "authored", "origin": "lm_author_helper"}))
-                cands.append(edge_candidate(hid, concept, "part_of", session))
+                cands.append(edge_candidate(hid, h_concept, "part_of", session))
                 helper_names.append(hid[len("impl_"):])
                 h_called = _called_atoms(src, atom_names)
                 for a in h_called:
-                    if a != hid[len("impl_"):]:
-                        cands.append(edge_candidate(hid, f"impl_{a}", "depend", session))
+                    target_nid = fn_to_nid.get(a)
+                    if target_nid and target_nid not in (nid, hid):
+                        cands.append(edge_candidate(hid, target_nid, "depend", session))
             cands.append(edge_candidate(nid, hid, "depend", session))
-            
+
     for u, v, rel in edges:
         cands.append(edge_candidate(u, v, rel, session))
-        
+
     if not cands:
         return False, []
     newp = graph_path + ".grown"

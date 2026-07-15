@@ -166,16 +166,19 @@ def _edits_from_solve(res, task, concept_id: str = "concept_algorithms"):
     return stores, edges
 
 
-def seed_graph(path: str, concepts=("concept_algorithms",)):
-    """A base MemoryGraph with concept nodes so atoms attach via part_of + cold-start isn't empty."""
+_SEED_CONCEPTS = ("concept_algorithms", "concept_number_theory", "concept_strings",
+                  "concept_lists", "concept_math", "concept_search_sort")
+
+
+def seed_graph(path: str, concepts: tuple = None):
+    """A base MemoryGraph with concept nodes so atoms attach via part_of + cold-start isn't empty.
+    Defaults to all 6 domain concept nodes so _classify_concept can route atoms to the right hub."""
+    if concepts is None:
+        concepts = _SEED_CONCEPTS
     nodes = [{"id": c, "text": c.replace("concept_", "").replace("_", " "), "node_type": "concept"}
              for c in concepts]
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     Path(path).write_text(json.dumps({"metadata": {}, "nodes": nodes, "edges": []}), encoding="utf-8")
-
-
-_SEED_CONCEPTS = ("concept_algorithms", "concept_number_theory", "concept_strings",
-                  "concept_lists", "concept_math", "concept_search_sort")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
