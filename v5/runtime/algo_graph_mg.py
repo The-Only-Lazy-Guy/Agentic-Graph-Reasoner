@@ -27,7 +27,9 @@ derive_reward, tool_compose.verify_fn, algo_graph_run (tasks/prompt/verify/parse
 from __future__ import annotations
 
 import argparse
+import builtins
 import json
+import keyword
 import re
 import sys
 from pathlib import Path
@@ -47,6 +49,32 @@ def _fn_name(code: str) -> str:
     return m.group(1) if m else ""
 
 
+_UNSAFE_REUSE_NAMES = set(dir(builtins)) | set(keyword.kwlist) | {"self", "cls"}
+
+
+def _is_safe_atom_name(name: str) -> bool:
+    """True iff a function name is safe to treat as a graph-callable atom.
+
+    Builtin-colliding atoms such as `sum` are valid task entry points, but they are
+    unsafe as reusable graph atoms: ordinary Python code that calls builtin sum()
+    would otherwise look like cross-task reuse and can create giant false hubs.
+    """
+    return bool(
+        name
+        and re.match(r"^[A-Za-z_]\w*$", name)
+        and not name.startswith("_")
+        and name not in _UNSAFE_REUSE_NAMES
+    )
+
+
+def _calls_atom(code: str, name: str) -> bool:
+    """Detect a real unqualified call to a safe graph atom, not a method/builtin."""
+    return bool(
+        _is_safe_atom_name(name)
+        and re.search(rf"(?<![\w.]){re.escape(name)}\s*\(", code or "")
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # RETRIEVAL on MemoryGraph — embed impl-node text + cosine (retrieval_eval mechanism)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -58,8 +86,13 @@ class MGRetriever:
         self._index()
 
     def _index(self):
-        impls = [(nid, n) for nid, n in self.graph.nodes.items()
-                 if n.node_type == "implementation" and n.metadata.get("code")]
+        impls = []
+        for nid, n in self.graph.nodes.items():
+            if n.node_type != "implementation" or not n.metadata.get("code"):
+                continue
+            if not _is_safe_atom_name(_fn_name(n.metadata.get("code", ""))):
+                continue
+            impls.append((nid, n))
         self.ids = [nid for nid, _ in impls]
         if self.ids:
             vecs = self.embed_fn({nid: n.text for nid, n in impls})
@@ -96,7 +129,7 @@ class MGRetriever:
         for nid in self.ids:
             c = self.graph.nodes[nid].metadata.get("code", "")
             fn = _fn_name(c)
-            if fn:
+            if _is_safe_atom_name(fn):
                 d[fn] = c
         return d
 
@@ -112,7 +145,7 @@ class MGRetriever:
             needed.add(fn)
             body = code_by_fn[fn]
             for other in code_by_fn:                       # any other impl fn this one calls
-                if other != fn and other not in needed and re.search(rf"\b{re.escape(other)}\s*\(", body):
+                if other != fn and other not in needed and _calls_atom(body, other):
                     frontier.append(other)
         return needed
 
@@ -134,7 +167,7 @@ def solve_mg(retriever: MGRetriever, gen_fn, task, k: int = 6, samples: int = 1)
     for gen in gen_fn([_author_prompt(task, advertised)] * samples):
         code = _extract_code(gen)
         defined = _def_names(code)
-        called = [n for n in adv_names if n not in defined and re.search(rf"\b{re.escape(n)}\s*\(", code)]
+        called = [n for n in adv_names if n not in defined and _calls_atom(code, n)]
         deps = "\n\n".join(c for n, c in advertised if n in called)
         if _task_verify(task, code, deps):
             best = (code, called, True, gen); break
@@ -232,7 +265,7 @@ def train_star_mg(model_name, rounds, tasks, graph_path, k=8, batch=16, lr=1e-4,
             pids = encode(_author_prompt(task, adv))
             out = model.generate(pids, do_sample=False, max_new_tokens=460, pad_token_id=tok.eos_token_id)
             code = _extract_code(tok.decode(out[0, pids.shape[1]:], skip_special_tokens=True))
-            called = [n for n in names if re.search(rf"\b{re.escape(n)}\s*\(", code)]
+            called = [n for n in names if _calls_atom(code, n)]
             deps = "\n\n".join(c for n, c in adv if n in called)
             ok = _task_verify(task, code, deps)
             solved += ok; reused += ok and bool(grounded_code(code, names)[1])
@@ -253,7 +286,7 @@ def train_star_mg(model_name, rounds, tasks, graph_path, k=8, batch=16, lr=1e-4,
             for j in range(k):
                 gen = tok.decode(outs[j, pids.shape[1]:], skip_special_tokens=True)
                 code = _extract_code(gen)
-                called = [n for n in names if n not in _def_names(code) and re.search(rf"\b{re.escape(n)}\s*\(", code)]
+                called = [n for n in names if n not in _def_names(code) and _calls_atom(code, n)]
                 deps = "\n\n".join(c for n, c in adv if n in called)
                 if not _task_verify(task, code, deps):
                     continue
@@ -304,6 +337,19 @@ def _selftest() -> bool:
     print("algo_graph_mg --selftest: retrieve(MemoryGraph)->solve->model-edit->grow->retrieve-again\n")
     embed = make_fake_embedder()
     with tempfile.TemporaryDirectory() as td:
+        unsafe = str(Path(td) / "unsafe.json")
+        Path(unsafe).write_text(json.dumps({"metadata": {}, "edges": [], "nodes": [
+            {"id": "concept_algorithms", "text": "algorithms", "node_type": "concept"},
+            {"id": "impl_sum", "text": "unsafe builtin collision", "node_type": "implementation",
+             "metadata": {"code": "def sum(xs):\n    return 0"}},
+            {"id": "impl_digit_total", "text": "sum decimal digits", "node_type": "implementation",
+             "metadata": {"code": "def digit_total(n):\n    return 0"}},
+        ]}), encoding="utf-8")
+        r_unsafe = MGRetriever(MemoryGraph.load_json(unsafe), embed)
+        assert "impl_sum" not in r_unsafe.ids and "impl_digit_total" in r_unsafe.ids
+        assert not _calls_atom("def f(xs):\n    return sum(xs)", "sum")
+        print("  [0] unsafe atom names: builtin-colliding impl_sum is not retrievable/callable -> PASS")
+
         base = str(Path(td) / "g0.json")
         seed_graph(base, ("concept_number_theory",))
         g = MemoryGraph.load_json(base)
