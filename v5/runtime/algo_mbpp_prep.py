@@ -139,32 +139,53 @@ def prep_multi(out_path: str = "artifacts/corpus_multi.jsonl", apps_limit: int =
     """The DIVERSE open-source corpus (user requirement for the long run): MBPP+ (NL imperative) +
     HumanEval+ (docstring-driven) + APPS-intro call-based (competitive). One record shape, one
     reference-must-pass validation, `source` tagged. Report per source."""
-    from datasets import load_dataset
     kept, stats = [], {}
+
+    def _load(name, **kw):
+        """Version-robust loader: some `datasets` builds choke on the arrow schema cache of newer
+        repos (Feature type 'List' not found). Fall back to streaming (parses records lazily, skips
+        the offending DatasetInfo), then to the parquet export."""
+        from datasets import load_dataset
+        try:
+            return list(load_dataset(name, split="test", **kw))
+        except Exception as e1:
+            print(f"    [{name}: {type(e1).__name__} — retrying streaming]", flush=True)
+            try:
+                return list(load_dataset(name, split="test", streaming=True, **kw))
+            except Exception as e2:
+                print(f"    [{name}: streaming failed too ({type(e2).__name__}) — SKIPPED]", flush=True)
+                return []
 
     def _take(records, norm_fn, src):
         k = d = 0
         for raw in records:
-            rec = norm_fn(dict(raw))
-            if rec is None:
-                d += 1
-                continue
-            if not validate(rec, timeout=timeout):
-                d += 1
-                continue
+            try:
+                rec = norm_fn(dict(raw))
+                if rec is None or not validate(rec, timeout=timeout):
+                    d += 1; continue
+            except Exception:
+                d += 1; continue                         # one bad record never kills the source
             rec.setdefault("source", src)
             rec["pipeline_shaped"] = _pipeline_shaped(rec) if src == "mbppplus" else False
-            kept.append(rec)
-            k += 1
+            kept.append(rec); k += 1
         stats[src] = dict(kept=k, dropped=d)
 
-    ds = load_dataset("evalplus/mbppplus", split="test")
-    _take(ds, lambda r: (lambda x: (x.update({"source": "mbppplus"}) or x) if x else None)(normalize(r)),
-          "mbppplus")
-    ds = load_dataset("evalplus/humanevalplus", split="test")
-    _take(ds, normalize_humanevalplus, "humanevalplus")
-    ds = load_dataset("codeparrot/apps", "introductory", split="test", trust_remote_code=True)
-    _take(list(ds)[: apps_limit * 4], normalize_apps, "apps")   # call-based is a subset; over-scan
+    mbpp_raw = _load("evalplus/mbppplus")
+    if not mbpp_raw and Path("artifacts/mbpp_plus_prepped.jsonl").exists():
+        # the live load broke (datasets version) but we committed the prepped MBPP+ already — reuse it
+        print("    [mbppplus: live load empty -> using committed artifacts/mbpp_plus_prepped.jsonl]",
+              flush=True)
+        for line in open("artifacts/mbpp_plus_prepped.jsonl", encoding="utf-8"):
+            r = json.loads(line); r["source"] = "mbppplus"; kept.append(r)
+        stats["mbppplus"] = dict(kept=sum(1 for _ in open("artifacts/mbpp_plus_prepped.jsonl",
+                                                          encoding="utf-8")), dropped=0, reused=True)
+    else:
+        _take(mbpp_raw,
+              lambda r: (lambda x: (x.update({"source": "mbppplus"}) or x) if x else None)(normalize(r)),
+              "mbppplus")
+    _take(_load("evalplus/humanevalplus"), normalize_humanevalplus, "humanevalplus")
+    _take(_load("codeparrot/apps", name="introductory", trust_remote_code=True)[: apps_limit * 4],
+          normalize_apps, "apps")
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         for rec in kept:
@@ -311,12 +332,18 @@ def main():
     ap.add_argument("--prep", action="store_true", help="download + preprocess + cache (molab)")
     ap.add_argument("--prep-multi", action="store_true",
                     help="the DIVERSE corpus: MBPP+ + HumanEval+ + APPS call-based (molab)")
+    ap.add_argument("--upgrade-datasets", action="store_true",
+                    help="pip -U datasets/hub in-session first (fixes 'Feature type List not found')")
     ap.add_argument("--out", default="artifacts/mbpp_plus_prepped.jsonl")
     ap.add_argument("--limit", type=int, default=0)
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
     if a.prep_multi:
+        if a.upgrade_datasets:
+            import subprocess
+            subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U",
+                            "datasets>=3.2.0", "huggingface_hub>=0.26"], check=False)
         prep_multi("artifacts/corpus_multi.jsonl" if a.out == "artifacts/mbpp_plus_prepped.jsonl"
                    else a.out)
         return
