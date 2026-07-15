@@ -42,23 +42,18 @@ from v5.runtime.algo_graph_mg import (
 
 
 def _author_prompt_purpose(task, advertised, purposes: dict) -> str:
-    """The FIXED advertisement (--ad-style purpose): each ad = signature + its node's PURPOSE line
-    (the bare-signature prompt showed `get_equal(Input)`-style ads — uninterpretable — plus a HARD
-    'do NOT re-implement' directive: an instruction to prefer functions whose behavior the model
-    cannot know; suspected driver of the accuracy decline as the graph grows). Soft directive."""
-    from v5.runtime.algo_graph_run import _sig
+    """Full-code advertisement with import framing and purpose annotations."""
     parts = [task.text]
     if advertised:
-        parts.append("\nFunctions already in your library (you MAY call one IF it clearly fits; "
-                     "otherwise ignore them and write your own code):")
+        parts.append("# ── Already imported — call these by name, do NOT redefine ──")
         for name, code in advertised:
             purpose = (purposes.get(name) or "").strip()
-            parts.append(f"  {_sig(code) or name}" + (f"  # {purpose}" if purpose else ""))
-    parts.append(f"Write `{task.name}(...)` in ONE Python code block.")
-    parts.append("Then, IF you wrote a genuinely reusable helper worth keeping for FUTURE tasks, "
-                 "curate your library — one line each, AFTER the code block:\n"
-                 "  STORE <helper_name>: <one-line purpose of what it computes>\n"
-                 "Only store genuinely reusable helpers; store nothing if none apply (your choice).")
+            if purpose:
+                parts.append(f"# {purpose}\n```python\n{code}\n```")
+            else:
+                parts.append(f"```python\n{code}\n```")
+    parts.append(f"\nWrite `{task.name}(...)` in ONE Python code block. You may use the imported "
+                 f"functions above — they are already defined and ready to call.")
     return "\n\n".join(parts)
 
 

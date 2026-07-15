@@ -249,21 +249,14 @@ def _task_verify(task, code: str, deps_code: str = "") -> bool:
 
 
 def _author_prompt(task, advertised: list[tuple[str, str]]) -> str:
-    """Light supervision: OFFER the model options (call a stored node / define a reusable helper /
-    note a strategy) — never force one. `advertised` = [(name, code)] retrieved from memory."""
+    """Show full atom code with import framing — the model sees actual implementations it can call."""
     parts = [task.text]
     if advertised:
-        parts.append("\nReusable functions already in your library (already DEFINED — CALL them by "
-                     "name, do NOT re-implement their logic):")
+        parts.append("# ── Already imported — call these by name, do NOT redefine ──")
         for name, code in advertised:
-            parts.append(f"  {_sig(code) or name}")
-    parts.append("\nYou may CALL the functions above, and DEFINE a new small reusable helper for any "
-                 "sub-computation — your choice.")
-    parts.append(f"Write `{task.name}(...)` in ONE Python code block.")
-    parts.append("Then, IF you wrote a genuinely reusable helper worth keeping for FUTURE tasks, "
-                 "curate your library — one line each, AFTER the code block:\n"
-                 "  STORE <helper_name>: <one-line purpose of what it computes>\n"
-                 "Only store genuinely reusable helpers; store nothing if none apply (your choice).")
+            parts.append(f"```python\n{code}\n```")
+    parts.append(f"\nWrite `{task.name}(...)` in ONE Python code block. You may use the imported "
+                 f"functions above — they are already defined and ready to call.")
     return "\n\n".join(parts)
 
 
@@ -332,7 +325,7 @@ def _stub_gen(prompts: list[str]) -> list[str]:
     for p in prompts:
         name = re.findall(r"Write `([a-z_][a-z0-9_]*)\(", p)[-1]
         needs, body = _STUB_BODY[name]
-        block = p.split("Reusable functions", 1)[1].split("You may CALL", 1)[0] if "Reusable functions" in p else ""
+        block = p.split("Already imported", 1)[1].split("Write `", 1)[0] if "Already imported" in p else ""
         pieces = []
         if needs and not re.search(r"\bbuild_adj\s*\(", block):
             pieces.append(_BUILD_ADJ)
