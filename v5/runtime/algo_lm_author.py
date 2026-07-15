@@ -544,7 +544,7 @@ def main():
     ap.add_argument("--corpus", default="artifacts/mbpp_plus_prepped.jsonl")
     ap.add_argument("--graph", default="graphs/algo_mbpp_author.json")
     ap.add_argument("--limit", type=int, default=60)
-    ap.add_argument("--samples", type=int, default=4)
+    ap.add_argument("--samples", type=int, default=5)
     ap.add_argument("--pipeline-only", action="store_true", help="restrict to pipeline-shaped tasks")
     ap.add_argument("--ad-style", default="off", choices=["off", "sig", "purpose"],
                     help="advertisement arm: off=DEFAULT (measured: sig ads cost ~16pp by task 90 and "
@@ -567,7 +567,7 @@ def main():
         from v5.runtime.algo_mbpp_prep import load_prepped
         tasks = load_prepped(a.corpus, limit=a.dump_raw, pipeline_only=a.pipeline_only)
         dump_raw(a.graph, make_mpnet_embedder(), make_hf_gen(a.model, max_new_tokens=400, lora_path=a.lora),
-                 tasks, ad_style=a.ad_style, samples=2)
+                 tasks, ad_style=a.ad_style, samples=a.samples)
         return
     if a.run:
         from v5.memory.store import make_mpnet_embedder
