@@ -141,19 +141,19 @@ def prep_multi(out_path: str = "artifacts/corpus_multi.jsonl", apps_limit: int =
     reference-must-pass validation, `source` tagged. Report per source."""
     kept, stats = [], {}
 
-    def _load(name, **kw):
+    def _load(repo, *args, **kw):
         """Version-robust loader: some `datasets` builds choke on the arrow schema cache of newer
-        repos (Feature type 'List' not found). Fall back to streaming (parses records lazily, skips
-        the offending DatasetInfo), then to the parquet export."""
+        repos (Feature type 'List' not found). Fall back to streaming, then skip. `*args` carries a
+        positional config name (e.g. APPS 'introductory') without colliding with our own params."""
         from datasets import load_dataset
         try:
-            return list(load_dataset(name, split="test", **kw))
+            return list(load_dataset(repo, *args, split="test", **kw))
         except Exception as e1:
-            print(f"    [{name}: {type(e1).__name__} — retrying streaming]", flush=True)
+            print(f"    [{repo}: {type(e1).__name__} — retrying streaming]", flush=True)
             try:
-                return list(load_dataset(name, split="test", streaming=True, **kw))
+                return list(load_dataset(repo, *args, split="test", streaming=True, **kw))
             except Exception as e2:
-                print(f"    [{name}: streaming failed too ({type(e2).__name__}) — SKIPPED]", flush=True)
+                print(f"    [{repo}: streaming failed too ({type(e2).__name__}) — SKIPPED]", flush=True)
                 return []
 
     def _take(records, norm_fn, src):
@@ -184,7 +184,7 @@ def prep_multi(out_path: str = "artifacts/corpus_multi.jsonl", apps_limit: int =
               lambda r: (lambda x: (x.update({"source": "mbppplus"}) or x) if x else None)(normalize(r)),
               "mbppplus")
     _take(_load("evalplus/humanevalplus"), normalize_humanevalplus, "humanevalplus")
-    _take(_load("codeparrot/apps", name="introductory", trust_remote_code=True)[: apps_limit * 4],
+    _take(_load("codeparrot/apps", "introductory", trust_remote_code=True)[: apps_limit * 4],
           normalize_apps, "apps")
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
