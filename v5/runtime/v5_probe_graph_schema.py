@@ -213,13 +213,14 @@ def main():
     ap = argparse.ArgumentParser(description="Probe graph schema capabilities")
     ap.add_argument("--real", action="store_true", help="use real HF model (GPU)")
     ap.add_argument("--model", default="Qwen/Qwen2.5-3B-Instruct")
+    ap.add_argument("--lora", help="LoRA adapter path")
     ap.add_argument("--out", default="artifacts/schema_probe.jsonl")
     a = ap.parse_args()
     
     if a.real:
         # Lazy import only on GPU
         from v5.runtime.algo_lm_proposer import make_hf_gen
-        gen_fn = make_hf_gen(a.model, temperature=0.7, max_new_tokens=300)
+        gen_fn = make_hf_gen(a.model, temperature=0.7, max_new_tokens=300, lora_path=a.lora)
     else:
         gen_fn = stub_gen
     
