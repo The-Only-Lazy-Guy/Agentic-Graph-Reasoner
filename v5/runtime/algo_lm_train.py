@@ -55,7 +55,13 @@ from typing import Deque
 
 from graph_core import MemoryGraph
 from v5.runtime.algo_graph_edits import edge_candidate, grow, node_candidate
-from v5.runtime.algo_graph_mg import MGRetriever, _edits_from_solve, _fn_name, seed_graph
+from v5.runtime.algo_graph_mg import (
+    MGRetriever,
+    _edits_from_solve,
+    _fn_name,
+    _is_safe_atom_name,
+    seed_graph,
+)
 from v5.runtime.algo_lm_author import (
     _bank_solution, _called_atoms, _failure_class, repair_code,
     _author_prompt_purpose, _solve_author,
@@ -124,8 +130,13 @@ class IncrementalMGRetriever(MGRetriever):
 
     def _index(self):
         import numpy as np
-        impls = [(nid, n) for nid, n in self.graph.nodes.items()
-                 if n.node_type == "implementation" and n.metadata.get("code")]
+        impls = []
+        for nid, n in self.graph.nodes.items():
+            if n.node_type != "implementation" or not n.metadata.get("code"):
+                continue
+            if not _is_safe_atom_name(_fn_name(n.metadata.get("code", ""))):
+                continue
+            impls.append((nid, n))
         self.ids = [nid for nid, _ in impls]
         if not self.ids:
             self.mat = np.zeros((0, 1), dtype=np.float32)
@@ -159,6 +170,34 @@ def _chunked_gen(gen_fn, prompt: str, k: int, chunk: int = 2) -> list[str]:
     return outs
 
 
+def _graph_shape(graph: MemoryGraph) -> dict:
+    rels = collections.Counter(e.relation for e in graph.edges)
+    impl_ids = {nid for nid, n in graph.nodes.items() if n.node_type == "implementation"}
+    deg = collections.Counter()
+    for e in graph.edges:
+        if e.src in impl_ids:
+            deg[e.src] += 1
+        if e.dst in impl_ids:
+            deg[e.dst] += 1
+    top_impl = deg.most_common(3)
+    return {
+        "nodes": len(graph.nodes),
+        "edges": len(graph.edges),
+        "part_of": rels.get("part_of", 0),
+        "depend": rels.get("depend", 0),
+        "top_impl": top_impl,
+        "max_impl_degree": top_impl[0][1] if top_impl else 0,
+    }
+
+
+def _shape_line(shape: dict) -> str:
+    top = ",".join(f"{nid}:{deg}" for nid, deg in shape["top_impl"]) or "-"
+    return (
+        f"edges={shape['edges']} part_of={shape['part_of']} depend={shape['depend']} "
+        f"top_impl={top}"
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # MAIN UNFROZEN TRAINING LOOP
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -177,7 +216,7 @@ def train_unfrozen(
     r_lora: int = 16,
     replay_cap: int = 500,
     replay_frac: float = 0.4,
-    ad_style: str = "off",
+    ad_style: str = "purpose",
     lora_only_warmup_rounds: int = 2,
     max_tokens: int = 1024,
     out_lora: str = "artifacts/grr14b_lora",
@@ -232,8 +271,9 @@ def train_unfrozen(
 
     # ── graph + retriever ────────────────────────────────────────────────────
     if not Path(graph_path).exists():
-        seed_graph(graph_path, ("concept_algorithms",))
+        seed_graph(graph_path)
     retr = IncrementalMGRetriever(MemoryGraph.load_json(graph_path), embed_fn)
+    log(f"  graph shape @start: {_shape_line(_graph_shape(retr.graph))}", flush=True)
 
     # ── gen_fn wraps the FROZEN model.generate for the attempt phase ─────────
     @torch.no_grad()
@@ -304,19 +344,27 @@ def train_unfrozen(
     # ── authored-atoms tracking (for reuse counting) ─────────────────────────
     authored_this_run: set = set()
     reuse_events: list = []
+    solved_set: set[str] = set()
+    rng = random.Random(42)
 
     # ══════════════════════════════════════════════════════════════════════
     # ROUND LOOP
     # ══════════════════════════════════════════════════════════════════════
-    rng = random.Random(42)
     for rnd in range(rounds):
 
         # ── unfreezing schedule ──────────────────────────────────────────
         if rnd == lora_only_warmup_rounds:
             log(f"  [round {rnd}] warmup done — all trainable params unfrozen", flush=True)
 
-        # ── sample a batch of tasks ──────────────────────────────────────
-        batch_tasks = rng.choices(tasks, k=batch_size)
+        # ── curriculum sample: 75% unsolved, 25% any ─────────────────────
+        unsolved = [t for t in tasks if t.name not in solved_set]
+        n_unsolved = min(int(batch_size * 0.75), len(unsolved)) if unsolved else 0
+        n_any = batch_size - n_unsolved
+        batch_tasks = (
+            (rng.sample(unsolved, n_unsolved) if n_unsolved else [])
+            + rng.choices(tasks, k=n_any)
+        )
+        rng.shuffle(batch_tasks)
         new_pairs: list[tuple[str, str]] = []
         solved_this_round = 0
 
@@ -331,6 +379,7 @@ def train_unfrozen(
 
             if res["verified"]:
                 solved_this_round += 1
+                solved_set.add(task.name)
                 # ── bank into graph ──────────────────────────────────────
                 atom_names = [_fn_name(retr.graph.nodes[n].metadata.get("code", "")) or n
                               for n in retr.ids]
@@ -353,19 +402,24 @@ def train_unfrozen(
         batch_pairs = new_pairs + _replay_sample(n_replay)
         rng.shuffle(batch_pairs)
 
-        # ── gradient step ────────────────────────────────────────────────
-        loss = _sft_step(batch_pairs)
+        # ── multi-step SFT ───────────────────────────────────────────────
+        sft_steps = max(1, min(12, len(batch_pairs) // 4))
+        losses = []
+        for _ in range(sft_steps):
+            mini = rng.sample(batch_pairs, min(len(batch_pairs), max(4, batch_size)))
+            losses.append(_sft_step(mini))
+        loss = sum(losses) / len(losses)
 
         # ── add new successes to replay ──────────────────────────────────
-        # only direct (non-reflection) pairs go into replay to avoid compounding errors
         for p, t in new_pairs:
             if _REFLECTION_SEP not in p:
                 replay.append((p, t))
 
+        shape = _graph_shape(retr.graph)
         log(
             f"  [round {rnd+1}/{rounds}] solved {solved_this_round}/{batch_size} "
-            f"| sft_pairs={len(batch_pairs)} (replay={n_replay}) | loss={loss:.3f} "
-            f"| graph={len(retr.graph.nodes)} nodes "
+            f"| sft_pairs={len(batch_pairs)} (steps={sft_steps}) | loss={loss:.3f} "
+            f"| graph={len(retr.graph.nodes)} nodes | depend_edges={shape['depend']} "
             f"| reuse_events={len(reuse_events)}",
             flush=True,
         )
@@ -374,8 +428,13 @@ def train_unfrozen(
     Path(out_lora).mkdir(parents=True, exist_ok=True)
     model.save_pretrained(out_lora)
     log(f"\n  LoRA saved -> {out_lora}", flush=True)
+    shape = _graph_shape(retr.graph)
     log(f"  Graph: {len(retr.graph.nodes)} nodes | authored this run: {len(authored_this_run)}"
         f" | reuse events: {len(reuse_events)}", flush=True)
+    log(f"  Graph shape: {_shape_line(shape)}", flush=True)
+    if shape["depend"] == 0 and shape["part_of"] > 0:
+        log("  WARNING: taxonomy-only graph (part_of edges, no depend edges); "
+            "this run did not create composition/reuse topology.", flush=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -384,10 +443,8 @@ def train_unfrozen(
 
 def _get_prompt(retr: MGRetriever, task, k: int, ad_style: str) -> str:
     from v5.runtime.algo_graph_run import _author_prompt
-    if ad_style == "off":
-        return _author_prompt(task, [])
     advertised = retr.retrieve(task.text, k=k)
-    if ad_style == "purpose":
+    if ad_style in ("off", "purpose"):
         purposes = {}
         for nid in retr.ids:
             node = retr.graph.nodes[nid]
@@ -404,7 +461,7 @@ def _solve_from_gens(retr: MGRetriever, gens: list[str], task, k: int, ad_style:
     from v5.runtime.derive_reward import _def_names, code_reward, grounded_code
     from v5.runtime.tool_memory import _extract_code
 
-    advertised = [] if ad_style == "off" else retr.retrieve(task.text, k=k)
+    advertised = retr.retrieve(task.text, k=k)
     adv_names = [n for n, _ in advertised]
     prompt = _get_prompt(retr, task, k, ad_style)
 
@@ -413,7 +470,7 @@ def _solve_from_gens(retr: MGRetriever, gens: list[str], task, k: int, ad_style:
     for gen in gens:
         code = repair_code(_extract_code(gen), task.name)
         defined = _def_names(code)
-        called = [n for n in adv_names if n not in defined
+        called = [n for n in adv_names if n not in defined and _is_safe_atom_name(n)
                   and re.search(rf"(?<![\w.]){re.escape(n)}\s*\(", code)]
         deps = "\n\n".join(c for n, c in advertised if n in called)
         if _task_verify(task, code, deps):
@@ -482,6 +539,8 @@ def _selftest() -> bool:
         gp = Path(td) / "g.json"
         gp.write_text(_json.dumps({"metadata": {}, "nodes": [
             {"id": "concept_algorithms", "text": "algorithms", "node_type": "concept"},
+            {"id": "impl_sum", "text": "unsafe builtin collision", "node_type": "implementation",
+             "metadata": {"code": "def sum(xs):\n    return 0"}},
             {"id": "impl_foo", "text": "foo purpose",  "node_type": "implementation",
              "metadata": {"code": "def foo(): pass"}},
         ], "edges": []}))
@@ -489,10 +548,13 @@ def _selftest() -> bool:
         inc = IncrementalMGRetriever(g, tracked_embed)
         first_call_ids = set(call_log[-1])
         assert "impl_foo" in first_call_ids, "initial index should embed impl_foo"
+        assert "impl_sum" not in inc.ids, "builtin-colliding impl_sum must not be retrievable"
 
         # simulate a grown graph with a new node
         gp.write_text(_json.dumps({"metadata": {}, "nodes": [
             {"id": "concept_algorithms", "text": "algorithms", "node_type": "concept"},
+            {"id": "impl_sum", "text": "unsafe builtin collision", "node_type": "implementation",
+             "metadata": {"code": "def sum(xs):\n    return 0"}},
             {"id": "impl_foo", "text": "foo purpose",  "node_type": "implementation",
              "metadata": {"code": "def foo(): pass"}},
             {"id": "impl_bar", "text": "bar purpose",  "node_type": "implementation",
@@ -539,7 +601,8 @@ def main():
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--r-lora", type=int, default=16)
     ap.add_argument("--replay-cap", type=int, default=500)
-    ap.add_argument("--ad-style", default="off", choices=["off", "sig", "purpose"])
+    ap.add_argument("--ad-style", default="purpose", choices=["off", "sig", "purpose"],
+                    help="'purpose'=soft ads with purpose text; 'off'=soft ads sig-only; 'sig'=hard directive")
     ap.add_argument("--warmup-rounds", type=int, default=2,
                     help="rounds where only LoRA (not MoLoRA) params update")
     ap.add_argument("--out-lora", default="artifacts/grr14b_lora")

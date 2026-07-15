@@ -32,7 +32,13 @@ from pathlib import Path
 
 from graph_core import MemoryGraph
 from v5.runtime.algo_graph_edits import edge_candidate, grow, node_candidate
-from v5.runtime.algo_graph_mg import MGRetriever, _edits_from_solve, _fn_name, seed_graph
+from v5.runtime.algo_graph_mg import (
+    MGRetriever,
+    _edits_from_solve,
+    _fn_name,
+    _is_safe_atom_name,
+    seed_graph,
+)
 
 
 def _author_prompt_purpose(task, advertised, purposes: dict) -> str:
@@ -80,7 +86,7 @@ def _solve_author(retr: MGRetriever, gen_fn, task, k: int, samples: int, ad_styl
     for gen in gen_fn([prompt] * samples):              # every attempt + its verifier verdict/error
         code = repair_code(_extract_code(gen), task.name)
         defined = _def_names(code)
-        called = [n for n in adv_names if n not in defined
+        called = [n for n in adv_names if n not in defined and _is_safe_atom_name(n)
                   and _re.search(rf"(?<![\w.]){_re.escape(n)}\s*\(", code)]
         deps = "\n\n".join(c for n, c in advertised if n in called)
         if _task_verify(task, code, deps):
@@ -135,9 +141,10 @@ def repair_code(code: str, entry: str) -> str:
 def _called_atoms(code: str, atom_names) -> list:
     """Atoms the solution CALLS (not re-defines) — the depend edges + the reuse signal.
     (?<![\\w.]) guards method calls: `lst.count(x)` must NOT count as calling a banked atom named
-    `count` (\\b matches after '.', which produced false-positive reuse events)."""
+    `count` (\\b matches after '.', which produced false-positive reuse events). Builtin-colliding
+    names such as `sum` are also ignored: ordinary builtin calls are not graph reuse."""
     defined = set(re.findall(r"def\s+([A-Za-z_]\w*)\s*\(", code or ""))
-    return [a for a in atom_names if a not in defined
+    return [a for a in atom_names if a not in defined and _is_safe_atom_name(a)
             and re.search(rf"(?<![\w.]){re.escape(a)}\s*\(", code or "")]
 
 
@@ -174,7 +181,7 @@ def _fn_to_nid_map(graph) -> dict[str, str]:
             continue
         code = node.metadata.get("code", "")
         fn = _fn_name(code)
-        if fn:
+        if _is_safe_atom_name(fn):
             mapping[fn] = nid
     return mapping
 
@@ -201,34 +208,38 @@ def _bank_solution(graph_path: str, retr: MGRetriever, task, res_solve: dict, ca
     atom_names = list(fn_to_nid.keys())   # fn names that actually exist in the graph
 
     if nid not in retr.graph.nodes:
-        cands.append(node_candidate(nid, code, task.text.splitlines()[0][:200], session,
-                                    metadata={"kind": "authored", "origin": "lm_author"}))
-        cands.append(edge_candidate(nid, concept, "part_of", session))
-        for a in called:
-            target_nid = fn_to_nid.get(a)          # use the REAL node id, not f"impl_{a}"
-            if target_nid and target_nid != nid:
-                cands.append(edge_candidate(nid, target_nid, "depend", session))
+        # dedup: skip if a node with the same entry fn name already exists
+        entry_fn = _fn_name(code)
+        if not entry_fn or entry_fn not in fn_to_nid:
+            cands.append(node_candidate(nid, code, task.text.splitlines()[0][:200], session,
+                                        metadata={"kind": "authored", "origin": "lm_author"}))
+            cands.append(edge_candidate(nid, concept, "part_of", session))
+            for a in called:
+                target_nid = fn_to_nid.get(a)          # use the REAL node id, not f"impl_{a}"
+                if target_nid and target_nid != nid:
+                    cands.append(edge_candidate(nid, target_nid, "depend", session))
 
-    stores, edges = _edits_from_solve(res_solve, task, concept)  # model-chosen helpers (Fix D)
+    stores, _legacy_edges = _edits_from_solve(res_solve, task, concept)  # model-chosen helpers (Fix D)
     for hid, src, purpose in stores:
-        if hid != nid:
+        if hid not in retr.graph.nodes:
+            h_name = hid[len("impl_"):]
+            # dedup: skip if a node with the same helper fn_name already exists
+            if h_name in fn_to_nid:
+                continue
             h_concept = _classify_concept(purpose + " " + task.text)
             if h_concept not in retr.graph.nodes:
                 h_concept = concept
-            if hid not in retr.graph.nodes:
-                cands.append(node_candidate(hid, src, purpose, session,
-                                            metadata={"kind": "authored", "origin": "lm_author_helper"}))
-                cands.append(edge_candidate(hid, h_concept, "part_of", session))
-                helper_names.append(hid[len("impl_"):])
-                h_called = _called_atoms(src, atom_names)
-                for a in h_called:
-                    target_nid = fn_to_nid.get(a)
-                    if target_nid and target_nid not in (nid, hid):
-                        cands.append(edge_candidate(hid, target_nid, "depend", session))
-            cands.append(edge_candidate(nid, hid, "depend", session))
-
-    for u, v, rel in edges:
-        cands.append(edge_candidate(u, v, rel, session))
+            cands.append(node_candidate(hid, src, purpose, session,
+                                        metadata={"kind": "authored", "origin": "lm_author_helper"}))
+            cands.append(edge_candidate(hid, h_concept, "part_of", session))
+            helper_names.append(h_name)
+            h_called = _called_atoms(src, atom_names)
+            for a in h_called:
+                target_nid = fn_to_nid.get(a)
+                if target_nid and target_nid not in (nid, hid):
+                    cands.append(edge_candidate(hid, target_nid, "depend", session))
+            if nid in retr.graph.nodes or (entry_fn and entry_fn not in fn_to_nid):
+                cands.append(edge_candidate(nid, hid, "depend", session))
 
     if not cands:
         return False, []
@@ -282,7 +293,7 @@ def dump_raw(graph_path: str, embed_fn, gen_fn, tasks, out: str = "artifacts/grr
                 raw_code = _extract_code(g)
                 code = repair_code(raw_code, t.name)
                 defined = _def_names(code)
-                called = [n for n, _c in advertised if n not in defined
+                called = [n for n, _c in advertised if n not in defined and _is_safe_atom_name(n)
                           and _re.search(rf"(?<![\w.]){_re.escape(n)}\s*\(", code)]
                 deps = "\n\n".join(c for n, c in advertised if n in called)
                 full = (deps + "\n" + code) if deps else code
@@ -443,6 +454,11 @@ def _selftest() -> bool:
     assert repair_code("not code at all ][", "f") == "not code at all ]["
     print("  [0] repair_code: prose-in-fence trimmed, snake_case aliased to the required entry name, "
           "unrecoverable input left for the taxonomy -> PASS")
+
+    assert _called_atoms("def f(xs):\n    return sum(xs)", ["sum"]) == []
+    assert _called_atoms("def f(xs):\n    return digit_total(xs[0])", ["digit_total"]) == ["digit_total"]
+    assert _called_atoms("def f(lst):\n    return lst.count(1)", ["count"]) == []
+    print("  [0b] _called_atoms ignores builtins + method calls, keeps real graph calls -> PASS")
 
     # keyword-keyed stub embed (a fake random embedder retrieves nothing — t2 must FIND t1's atom)
     rng = np.random.default_rng(0)

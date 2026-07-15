@@ -91,9 +91,20 @@ def _code_fingerprint(src: str, fn_name: str, timeout: float = 5.0) -> str | Non
 
 
 def _parse_store_actions(gen: str) -> list[tuple[str, str]]:
-    """The MODEL chooses what to store: lines of the form `STORE <name>: <purpose>`."""
-    return [(m.group(1), m.group(2).strip())
-            for m in re.finditer(r"^\s*STORE\s+([A-Za-z_]\w*)\s*:\s*(.+)$", gen or "", re.M)]
+    """The MODEL chooses what to store: lines of the form `STORE <name>: <purpose>`.
+    Also catches common model output variants: commented-out STORE, `store` lowercase,
+    `store_<name> = "<purpose>"` assignment pattern."""
+    pats = [
+        r"^\s*#?\s*STORE\s+([A-Za-z_]\w*)\s*:\s*(.+)",
+        r"^\s*#?\s*store\s+([A-Za-z_]\w*)\s*:\s*(.+)",
+        r"""^\s*store_([A-Za-z_]\w*)\s*=\s*["'](.+?)["']""",
+    ]
+    for pat in pats:
+        hits = [(m.group(1), m.group(2).strip())
+                for m in re.finditer(pat, gen or "", re.M)]
+        if hits:
+            return hits
+    return []
 
 
 def apply_model_stores(tm: TotalMemory, code: str, actions: list[tuple[str, str]]) -> tuple[list, list]:
