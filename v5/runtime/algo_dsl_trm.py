@@ -501,15 +501,61 @@ def sketch(model, goal_vec, atom_names, atom_vecs, k: int = 4, tau: float = 0.15
                                      mean_entropy=round(sum(ents) / max(1, len(ents)), 2)))
 
 
+def plan_with_holes(sk: dict, tau_fix: float = 0.55):
+    """GRR-17 row 6 (reviewer table): TRM PLANS, the LM/search only fills HOLES, the gate verifies.
+    From a sketch, build a TEMPLATE: each step's OP is committed (structure is the planner's job);
+    its ARG is FIXED if the step's confidence >= tau_fix, else a HOLE (None). A template with fewer
+    holes = a smaller search than the whole pipeline — the planner commits what it's sure of and asks
+    only about the rest. Returns [(op, arg|None)] or None if there's no structure to plan over."""
+    frontier = sk.get("frontier") or []
+    if not frontier:
+        return None
+    confs = (sk.get("uncertainty") or {}).get("step_conf") or [0.0] * len(frontier)
+    tmpl = []
+    for st, c in zip(frontier, confs):
+        op = st["op"][0][0]
+        arg = st["arg"][0][0] if (c >= tau_fix and st.get("arg")) else None
+        tmpl.append((op, arg))
+    return tmpl
+
+
+def fill_holes(template, fam, fams, resolve_fn, atom_names, n_verify: int = 32, is_general=None,
+               budget: int = 400):
+    """Search ONLY the holes of a planner template (fixed steps kept), verify each completion through
+    the SAME gate. Returns (pipe, verifies_used). The hole space = product over holes of {atoms for a
+    transform-arg | aggs for a REDUCE-arg}, far smaller than the full pipeline enumeration when the
+    planner fixed most steps."""
+    import itertools
+    chk = is_general or _default_is_general(fams, resolve_fn, n_verify)
+    choices = []                                          # per position: [candidate args] (1 if fixed)
+    for op, arg in template:
+        if arg is not None:
+            choices.append([arg])
+        elif op == "REDUCE":
+            choices.append(list(AGGS))
+        else:
+            choices.append(list(atom_names))
+    used = 0
+    for combo in itertools.product(*choices):
+        if used >= budget:
+            break
+        used += 1
+        pipe = [Op(op, a) for (op, _o), a in zip(template, combo)]
+        if pipe[-1].kind != "REDUCE":                     # template must end in REDUCE to realize
+            continue
+        if chk(pipe, fam):
+            return [pipe], used
+    return [], used
+
+
 def solve_with_search(model, task, fams, atom_names, atom_vecs, resolve_fn, embed_fn, atom_idx,
                       opt=None, sft_steps=150, budget=None, max_transforms=2, n_verify=32,
-                      lr=5e-4, seed=0, is_general=None, beam=0, explore=0):
+                      lr=5e-4, seed=0, is_general=None, beam=0, explore=0, holes=False):
     """The TRM inference primitive — the design's retrieve -> reason -> VERIFY -> update -> retry-until-
-    solve, embodied: (1) DECODE (recall) + verify-general; (2) on fail, net-GUIDED SEARCH under a verify
-    budget (exhaustive-guided by default; `beam=B` switches to beam search for deep programs);
-    (3) CONSOLIDATE the discovery (SFT) so the next decode on this family jumps straight there.
-    `is_general(pipe, fam)` plugs a domain verifier (factory families). Returns
-    dict(solved, pipe, via='decode'|'search'|None, verifies)."""
+    solve, embodied: (1) DECODE (recall) + verify-general; (2) on fail, PLANNER-WITH-HOLES if holes=True
+    (TRM commits its confident skeleton, only the holes are searched — reviewer row 6) then net-GUIDED
+    SEARCH; (3) CONSOLIDATE the discovery (SFT) so the next decode jumps straight there.
+    `is_general(pipe, fam)` plugs a domain verifier. Returns dict(solved, pipe, via, verifies)."""
     import torch
     gv = np.asarray(list(embed_fn({"q": task.text}).values())[0], dtype=np.float32)
     A = torch.as_tensor(atom_vecs, dtype=torch.float32)
@@ -517,6 +563,19 @@ def solve_with_search(model, task, fams, atom_names, atom_vecs, resolve_fn, embe
     pipe = model.decode(torch.as_tensor(gv), A, atom_names, max_len=max_transforms + 2)
     if chk(pipe, task.name):
         return dict(solved=True, pipe=pipe, via="decode", verifies=1, origin=None)
+    if holes:                                            # PLANNER-WITH-HOLES: fix the confident steps,
+        sk = sketch(model, gv, atom_names, atom_vecs)    # search only the holes
+        tmpl = plan_with_holes(sk)
+        if tmpl:
+            found_h, used_h = fill_holes(tmpl, task.name, fams, resolve_fn, atom_names,
+                                         n_verify=n_verify, is_general=is_general)
+            if found_h:
+                if opt is None:
+                    opt = torch.optim.Adam(model.parameters(), lr=lr)
+                _sft_steps(model, opt, [(gv, program_to_steps(found_h[0], atom_idx))], A, sft_steps,
+                           seed=seed)
+                return dict(solved=True, pipe=found_h[0], via="search", verifies=used_h + 1,
+                            origin="holes")
     kw = dict(max_transforms=max_transforms, n_verify=n_verify, budget=budget, is_general=is_general)
     if beam:
         kw["B"], kw["explore"], kw["seed"] = beam, explore, seed
@@ -879,6 +938,19 @@ def _selftest() -> bool:
         print(f"  [6] reasoning-state sketch: plan {sk_hot['plan']} conf="
               f"{sk_hot['uncertainty']['confidence']}; unconfident net -> plan WITHHELD, frontier + "
               f"uncertainty still handed over -> PASS")
+
+        # [7] GRR-17 PLANNER-WITH-HOLES (reviewer row 6): TRM commits its confident skeleton, only the
+        #     holes are searched, the gate verifies. A confident plan -> 0 holes -> 1 verify; a forced
+        #     hole (agg unknown) -> search ONLY that dimension (<=4 aggs), not the whole pipeline.
+        tmpl_full = plan_with_holes(sk_hot, tau_fix=0.4)
+        f_full, v_full = fill_holes(tmpl_full, "max_lis", fams, resolve_fn, atom_names)
+        assert f_full and v_full <= 2, (tmpl_full, v_full)
+        tmpl_hole = [("MAP", "lis_length"), ("REDUCE", None)]     # the aggregator is the hole
+        f_hole, v_hole = fill_holes(tmpl_hole, "max_lis", fams, resolve_fn, atom_names)
+        assert f_hole and f_hole[0][-1].arg == "max" and v_hole <= len(AGGS), (f_hole, v_hole)
+        print(f"  [7] planner-with-holes: committed plan -> {v_full} verify; agg-hole filled in "
+              f"{v_hole} (<= {len(AGGS)} aggs, not the full pipeline) -> TRM plans, holes filled, gate "
+              f"verifies -> PASS")
 
     print("\n  ALGO_DSL_TRM SELFTEST -> PASS  (the reasoner synthesizes programs; STaR turns recall into "
           "search-and-consolidate reasoning)")

@@ -79,7 +79,7 @@ def hand6_domain():
 
 
 def factory_domain(n_families=24, fam_seed=0, para_train=3, para_eval=2, beam=12, max_chain=4,
-                   explore=6, tier: str = "method"):
+                   explore=6, tier: str = "method", holes=False):
     """The scale-up domain: algo_dsl_gen factory families, paraphrased goals, beam search.
     Zero-shot eval decodes HELD-OUT phrasings (never trained on) — generalization, not point recall.
     tier="intent" swaps EVERY text for the intent tier (WHAT, never HOW — zero method vocabulary):
@@ -126,7 +126,7 @@ def factory_domain(n_families=24, fam_seed=0, para_train=3, para_eval=2, beam=12
         # HELD-OUT phrasings (falls back to the last variant if a family produced few — never empty)
         eval_texts=lambda _seed: {f: (allv[f][para_train:] or allv[f][-1:]) for f in pipes},
         seed_graph=seed_graph,
-        curriculum=lambda r: min(maxlen - 1, 2 + r), beam=beam, explore=explore,
+        curriculum=lambda r: min(maxlen - 1, 2 + r), beam=beam, explore=explore, holes=holes,
         all_texts=[t for vs in allv.values() for t in vs],   # warm the embed cache in ONE batched encode
         lm_vocab=([a for a, v in GEN_ATOMS.items() if v[3] == "pred"],
                   [a for a, v in GEN_ATOMS.items() if v[3] == "map"]),   # proposer vocabulary
@@ -255,7 +255,8 @@ def wake_sleep_loop(graph_path: str, embed_fn, rounds: int = 3, budget: int = 15
                                         budget=0 if fam in failed_this_round else budget,
                                         max_transforms=mt, seed=seed + r,
                                         is_general=chk, beam=domain["beam"],
-                                        explore=domain.get("explore", 0))
+                                        explore=domain.get("explore", 0),
+                                        holes=domain.get("holes", False))
                 if not res["solved"] and fam not in failed_this_round:
                     failed_this_round.add(fam)
                     if lm_gen is not None and domain.get("lm_vocab") and fam not in known:
@@ -483,6 +484,8 @@ def main():
                     help="epsilon slots in the beam (random extensions kept besides the top-B)")
     ap.add_argument("--intent", action="store_true",
                     help="intent-tier texts (WHAT, never HOW) — the reasoning-vs-translation test")
+    ap.add_argument("--holes", action="store_true",
+                    help="planner-with-holes: TRM commits its confident skeleton, only holes searched")
     ap.add_argument("--graph", default="graphs/algo_grr_loop.json")
     ap.add_argument("--rounds", type=int, default=3)
     ap.add_argument("--budget", type=int, default=1500)
@@ -499,7 +502,8 @@ def main():
     if a.loop or a.rebuild:
         if a.factory:
             domain = factory_domain(a.families, a.fam_seed, a.para_train, a.para_eval, a.beam,
-                                    explore=a.explore, tier="intent" if a.intent else "method")
+                                    explore=a.explore, tier="intent" if a.intent else "method",
+                                    holes=a.holes)
         else:
             domain = hand6_domain()
         if not Path(a.graph).exists():
