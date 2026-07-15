@@ -557,6 +557,7 @@ def main():
     ap.add_argument("--resume", action="store_true", help="skip tasks already in the progress ledger")
     ap.add_argument("--checkpoint-every", type=int, default=50,
                     help="git-commit graph+logs locally every N tasks (0 = off; never pushes)")
+    ap.add_argument("--lora", default="", help="trained PEFT adapter dir (loaded on top of --model)")
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
@@ -565,7 +566,7 @@ def main():
         from v5.runtime.algo_lm_proposer import make_hf_gen
         from v5.runtime.algo_mbpp_prep import load_prepped
         tasks = load_prepped(a.corpus, limit=a.dump_raw, pipeline_only=a.pipeline_only)
-        dump_raw(a.graph, make_mpnet_embedder(), make_hf_gen(a.model, max_new_tokens=400),
+        dump_raw(a.graph, make_mpnet_embedder(), make_hf_gen(a.model, max_new_tokens=400, lora_path=a.lora),
                  tasks, ad_style=a.ad_style, samples=2)
         return
     if a.run:
@@ -574,8 +575,8 @@ def main():
         from v5.runtime.algo_mbpp_prep import load_prepped
         tasks = load_prepped(a.corpus, limit=a.limit, pipeline_only=a.pipeline_only)
         print(f"GRR-14 author loop (real LM {a.model}): {len(tasks)} MBPP+ tasks | graph {a.graph} | "
-              f"ad_style={a.ad_style} shuffle={a.shuffle}", flush=True)
-        run_author_loop(a.graph, make_mpnet_embedder(), make_hf_gen(a.model, max_new_tokens=400),
+              f"ad_style={a.ad_style} shuffle={a.shuffle} lora={'yes' if a.lora else 'no'}", flush=True)
+        run_author_loop(a.graph, make_mpnet_embedder(), make_hf_gen(a.model, max_new_tokens=400, lora_path=a.lora),
                         tasks, samples=a.samples, ad_style=a.ad_style,
                         shuffle_seed=None if a.shuffle < 0 else a.shuffle,
                         progress_log=a.progress_log, traces_log=a.traces_log, resume=a.resume,

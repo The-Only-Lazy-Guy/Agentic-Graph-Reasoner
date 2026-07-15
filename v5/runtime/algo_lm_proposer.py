@@ -137,9 +137,10 @@ def propose_and_verify(gen_fn, task_text: str, fam: str, is_general, pred_names,
 # Real-LM generation (molab) — batched sampling on the GPU that finally gets used
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def make_hf_gen(model_name: str, temperature: float = 0.8, max_new_tokens: int = 160):
+def make_hf_gen(model_name: str, temperature: float = 0.8, max_new_tokens: int = 160,
+                lora_path: str = ""):
     """gen_fn(prompts)->texts backed by a real HF causal LM (lazy-loaded once). Batches all prompts in
-    one padded generate call."""
+    one padded generate call. If lora_path is given, loads the PEFT adapter on top."""
     import os
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -149,7 +150,12 @@ def make_hf_gen(model_name: str, temperature: float = 0.8, max_new_tokens: int =
         tok.pad_token = tok.eos_token
     model = AutoModelForCausalLM.from_pretrained(
         model_name, torch_dtype=torch.bfloat16, device_map="auto", trust_remote_code=trust)
-    model.eval()
+    if lora_path:
+        from peft import PeftModel
+        model = PeftModel.from_pretrained(model, lora_path)
+        model.eval()
+    else:
+        model.eval()
 
     def gen(prompts):
         msgs = [tok.apply_chat_template([{"role": "user", "content": p}], tokenize=False,
