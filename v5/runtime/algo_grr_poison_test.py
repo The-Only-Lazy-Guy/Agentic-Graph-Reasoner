@@ -362,14 +362,44 @@ def _selftest() -> bool:
     return ok
 
 
+def inspect_derive(lm_name: str) -> None:
+    """Raw-pipeline dump on the derive-territory rounds (R3 + R4): print whether derive fired, the
+    ACTUAL code the frozen LM produced, and what helper-granular banking extracts. Diagnoses the
+    banked=0 / no-compounding gap without arguing from aggregates."""
+    from v5.runtime.algo_grr_membrane import make_frozen_gen, make_lm_compiler, MembraneSolver
+    graph = load_seed()
+    gen = make_frozen_gen(lm_name, temperature=0.6, max_new_tokens=280)
+    compile_fn = make_lm_compiler(gen)
+    rounds = curriculum()
+    for ri in (2, 3):                       # R3 derive, R4 reuse
+        for t in rounds[ri]:
+            solver = MembraneSolver(graph, compile_fn)
+            r = solver.solve(t)
+            picked = [graph.nodes[s].metadata.get("entry", s) for s in r["selected"]]
+            print("=" * 72)
+            print(f"R{ri+1}  {t['entry']}  |  {t['text']}")
+            print(f"  solved={r['solved']}  derived={r['derived']}  selected={picked}  "
+                  f"lm_calls={len(solver.compile_inputs)}")
+            print("  --- CODE PRODUCED ---")
+            print("  " + (r["code"] or "").replace("\n", "\n  "))
+            if r["solved"]:
+                banked = bank_helper_granular(graph, r["code"], t["entry"])
+                print(f"  --- BANKED: {[graph.nodes[b].metadata.get('entry', b) for b in banked]} "
+                      f"(graph now {len(graph.nodes)} nodes)")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--run", action="store_true", help="two-arm run (stub unless --lm given)")
+    ap.add_argument("--inspect", action="store_true", help="raw-dump R3/R4 derive code (needs --lm)")
     ap.add_argument("--lm", default="", help="frozen 3B for the NEW arm (molab)")
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
+    if a.inspect:
+        inspect_derive(a.lm or "Qwen/Qwen2.5-3B-Instruct")
+        return
     if a.run:
         if a.lm:
             from v5.runtime.algo_grr_membrane import make_frozen_gen
