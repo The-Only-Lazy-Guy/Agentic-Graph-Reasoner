@@ -89,6 +89,40 @@ def _called(code: str, name: str) -> bool:
     return calls - defs > 0
 
 
+def reuse_set(code: str, entry: str, atom_entries: set[str]) -> list[str]:
+    """Atom entry-names REACHABLE from `entry` through the call graph (BFS over FunctionDef bodies).
+
+    This is the true reuse unit: an atom that merely appears in the concatenated closure (e.g. a
+    composite the retriever tried whose body calls `sum_divisors`) but is NOT reachable from the
+    entry does not count -> no spurious depend edge is banked. Falls back to a flat call scan if the
+    code does not parse."""
+    import ast
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return [a for a in atom_entries if _called(code, a)]
+    calls: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            named = {n.func.id for n in ast.walk(node)
+                     if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+            calls[node.name] = named
+    seen: set[str] = set()
+    stack = [entry]
+    reached: list[str] = []
+    while stack:
+        fn = stack.pop()
+        if fn in seen:
+            continue
+        seen.add(fn)
+        for c in calls.get(fn, ()):
+            if c in atom_entries and c not in reached:
+                reached.append(c)
+            if c in calls and c not in seen:
+                stack.append(c)
+    return reached
+
+
 def verify_code(code: str, entry: str, tests: list[tuple]) -> tuple[float, str]:
     """Returns (fraction of tests passing, detail). Any exception -> that test fails."""
     if not tests:
@@ -125,7 +159,14 @@ _TOK = re.compile(r"[a-z0-9]+")
 
 
 def _tokens(s: str) -> list[str]:
-    return _TOK.findall(s.lower())
+    # light plural-fold so "anagram"=="anagrams", "string"=="strings" match in the cosine baseline
+    # (a real embedder is stemming-invariant; the TRM policy makes this moot).
+    out = []
+    for t in _TOK.findall(s.lower()):
+        if len(t) >= 5 and t.endswith("s") and not t.endswith("ss"):
+            t = t[:-1]
+        out.append(t)
+    return out
 
 
 class TokenRetriever:
@@ -187,6 +228,98 @@ def make_stub_compiler(recipes: dict[str, str]) -> Callable[[dict], str]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Frozen-LM compiler — the REAL frozen 3B as `compile(spec)->code` (molab)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _sig(code: str) -> str:
+    """Extract the `name(params)` signature from an atom's source (first def line)."""
+    m = re.search(r"def\s+([A-Za-z_]\w*)\s*\(([^)]*)\)", code or "")
+    return f"{m.group(1)}({m.group(2)})" if m else ""
+
+
+def render_compile_prompt(spec: dict) -> str:
+    """Render the CURATED spec into the frozen compiler's prompt. Only spec['atoms'] appear —
+    the graph never reaches the LM (the membrane). Atoms are framed as already-defined helpers the
+    model composes; it writes ONLY the entry glue. Verified atom code is prepended by the caller, so
+    the LM cannot corrupt the atoms."""
+    lines = [
+        "You are a code compiler. Write ONE Python function that solves the task by COMPOSING the "
+        "helper functions provided below. Do not reimplement a helper — call it.",
+        "",
+        f"Task: {spec['task_text']}",
+        f"Required function name: {spec['entry']}",
+    ]
+    atoms = spec.get("atoms", [])
+    if atoms:
+        lines += ["", "Already-defined helper functions you may call (do NOT redefine them):"]
+        for a in atoms:
+            lines.append(f"  # {a['purpose']}")
+            lines.append(f"  {_sig(a['code']) or a['name']}")
+    else:
+        lines += ["", "No helper functions are available — write the full solution yourself."]
+    tests = spec.get("tests", [])[:4]
+    if tests:
+        lines += ["", "It must satisfy:"]
+        for args, expected in tests:
+            inner = ", ".join(repr(x) for x in args)
+            lines.append(f"  {spec['entry']}({inner}) == {expected!r}")
+    fail = spec.get("failure")
+    if fail:
+        lines += ["", "Your previous attempt FAILED. Code:", "```python", str(fail.get("code", "")),
+                  "```", f"Error: {fail.get('error', '')}", "Fix it."]
+    if spec.get("derive"):
+        lines += ["", "None of the helpers cover the core step — write the complete solution."]
+    lines += ["", f"Return ONLY the function `{spec['entry']}` in a ```python code block."]
+    return "\n".join(lines)
+
+
+def _extract_code(text: str) -> str:
+    """Pull code from a fenced ```python block, else from the first top-level def onward."""
+    m = re.search(r"```(?:python)?\s*(.+?)```", text, re.S)
+    if m:
+        return m.group(1).strip()
+    i = text.find("def ")
+    return text[i:].strip() if i >= 0 else text.strip()
+
+
+def _strip_redefs(glue: str, atom_names: set[str]) -> str:
+    """Remove any top-level `def <atom>` blocks the LM redefined — the graph's verified atoms are
+    authoritative. A block runs from `def name(` to the next top-level `def`/EOF."""
+    if not atom_names:
+        return glue
+    lines = glue.splitlines()
+    out: list[str] = []
+    skip = False
+    for ln in lines:
+        m = re.match(r"def\s+([A-Za-z_]\w*)\s*\(", ln)
+        if m:
+            skip = m.group(1) in atom_names
+        elif skip and ln and not ln[0].isspace() and not re.match(r"def\s", ln):
+            skip = False
+        if not skip:
+            out.append(ln)
+    return "\n".join(out)
+
+
+def make_lm_compiler(gen_fn: Callable[[list[str]], list[str]]) -> Callable[[dict], str]:
+    """Wrap a FROZEN generation fn (e.g. algo_lm_proposer.make_hf_gen) as `compile(spec)->code`.
+
+    The LM writes only the entry glue over the curated helpers; the verified atom closure is prepended
+    from the graph so the atoms cannot be corrupted. The LM is NEVER trained (frozen compiler)."""
+    from v5.runtime.algo_lm_author import repair_code  # light import
+
+    def compile_fn(spec: dict) -> str:
+        prompt = render_compile_prompt(spec)
+        text = gen_fn([prompt])[0]
+        glue = repair_code(_extract_code(text), spec["entry"])
+        atom_names = {a["name"] for a in spec.get("atoms", [])}
+        glue = _strip_redefs(glue, atom_names)
+        closure = "\n\n".join(a["code"].rstrip("\n") for a in spec.get("atoms", []))
+        return (closure + "\n\n" + glue) if closure else glue
+    return compile_fn
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # The membrane solver
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -201,10 +334,16 @@ class MembraneSolver:
 
     def __init__(self, graph: MemoryGraph, compile_fn: Callable[[dict], str],
                  retriever: TokenRetriever | None = None,
+                 policy_fn: Callable | None = None,
                  k: int = 3, max_hops: int = 6, max_retries: int = 2):
         self.graph = graph
         self.compile_fn = compile_fn
         self.retriever = retriever or TokenRetriever(graph)
+        # policy_fn(task, selected, graph, retriever) -> [(node_id, score), ...].
+        # Default = the untrained iterative-cosine baseline. The trained TRM policy (build B) drops
+        # in here with the SAME signature and retrieves the COMPLEMENT of the partial program.
+        self.policy_fn = policy_fn or (lambda task, selected, graph, retr:
+                                       retr.rank(task["text"], exclude=set(selected)))
         self.k = k
         self.max_hops = max_hops
         self.max_retries = max_retries
@@ -241,10 +380,9 @@ class MembraneSolver:
         # (a composition where neither atom alone yields partial credit still climbs); realized
         # coverage is the STOP signal, and un-called atoms are pruned at the end. Adding a
         # definition never lowers coverage, so speculative add is monotone-safe.
-        query = task["text"]
         for hop in range(self.max_hops):
-            ranked = self.retriever.rank(query, exclude=set(selected))
-            cand = next((c for c, s in ranked if s > min_score), None)
+            ranked = self.policy_fn(task, selected, self.graph, self.retriever)
+            cand = next((c for c, s in ranked if s > min_score and c not in selected), None)
             if cand is None:
                 break                                  # ret_stop: nothing else relevant to try
             selected.append(cand)
@@ -279,12 +417,15 @@ class MembraneSolver:
             if frac >= 1.0:
                 cur_cov, cur_code, cur_detail, derived = frac, code, detail, True
 
-        # PRUNE: on a solve, keep only atoms actually CALLED in the verified code. Speculatively
-        # tried-but-unused atoms (e.g. a high-similarity poison the gate never let compile) drop
-        # out here -> they are never banked. Minimal spec = the reuse-bearing unit.
+        # PRUNE to the true reuse unit: over the full dependency CLOSURE of the selected atoms
+        # (a selected atom can pull others transitively), keep exactly those whose entry is CALLED
+        # in the verified code. Speculatively-tried-but-unused atoms — including a high-similarity
+        # poison the gate never let compile — drop out here and are never banked.
         if cur_cov >= 1.0 and selected:
-            selected = [nid for nid in selected
-                        if _called(cur_code, self.graph.nodes[nid].metadata.get("entry", nid))]
+            closure = resolve_closure(self.graph, selected)
+            ent = {nid: self.graph.nodes[nid].metadata.get("entry", nid) for nid in closure}
+            reached = set(reuse_set(cur_code, task["entry"], set(ent.values())))
+            selected = [nid for nid in closure if ent[nid] in reached]
 
         return {"solved": cur_cov >= 1.0, "coverage": cur_cov, "code": cur_code,
                 "detail": cur_detail, "selected": selected, "derived": derived, "trace": trace}
@@ -392,16 +533,115 @@ def _selftest() -> bool:
           f"solved={pr['solved']} -> {'PASS' if poison_rejected and poison_was_tempting else 'FAIL'}")
     ok_all &= (poison_rejected and poison_was_tempting)
 
+    # ── [5] frozen-LM compiler wrapper: membrane prompt + strip_redefs + verify (fake gen) ────
+    is_prime_atom = {"name": "is_prime", "purpose": graph.nodes["impl_is_prime"].text,
+                     "code": graph.nodes["impl_is_prime"].metadata["code"]}
+    spec = {"task_text": "check whether a number is prime", "entry": "checkprime",
+            "tests": [((7,), True), ((8,), False)], "atoms": [is_prime_atom]}
+    prompt = render_compile_prompt(spec)
+    membrane_ok = ("is_prime" in prompt and "reverse_digits" not in prompt
+                   and "divisors" not in prompt)          # only the curated atom reaches the LM
+    # fake frozen LM: redefines is_prime WRONGLY + writes the entry -> strip_redefs must drop the redef
+    fake_gen = lambda prompts: ["```python\ndef is_prime(n):\n    return False\n"
+                                "def checkprime(n):\n    return is_prime(n)\n```"]
+    code = make_lm_compiler(fake_gen)(spec)
+    frac, _ = verify_code(code, "checkprime", spec["tests"])
+    authoritative = code.count("def is_prime(") == 1 and frac >= 1.0   # graph's atom won, LM redef gone
+    print(f"  [5] frozen-LM compiler: membrane={membrane_ok}, atom-authoritative={authoritative}, "
+          f"verify={frac:.2f} -> {'PASS' if membrane_ok and authoritative else 'FAIL'}")
+    ok_all &= (membrane_ok and authoritative)
+
     print(f"\n  ALGO_GRR_MEMBRANE SELFTEST -> {'PASS' if ok_all else 'FAIL'}")
     return ok_all
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RUN — drive the membrane on a task set with the FROZEN 3B (molab)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def run_tasks(graph: MemoryGraph, tasks: list[dict], compile_fn: Callable[[dict], str],
+              verbose: bool = True) -> dict:
+    """Solve each task through the membrane; report solve-rate, reuse, and per-task LM calls."""
+    solver = MembraneSolver(graph, compile_fn)
+    solved = 0
+    reuse_events = 0
+    lm_calls_before = 0
+    per = []
+    for t in tasks:
+        n0 = len(solver.compile_inputs)
+        r = solver.solve(t)
+        lm_calls = len(solver.compile_inputs) - n0
+        picked = [graph.nodes[s].metadata.get("entry", s) for s in r["selected"]]
+        reuse_events += len(picked)
+        solved += int(r["solved"])
+        per.append({"entry": t["entry"], "solved": r["solved"], "atoms": picked,
+                    "lm_calls": lm_calls, "derived": r["derived"]})
+        if verbose:
+            print(f"  {t['entry']:16s} solved={r['solved']!s:5s} atoms={picked} "
+                  f"lm_calls={lm_calls} derived={r['derived']}")
+    out = {"n": len(tasks), "solved": solved, "reuse_events": reuse_events,
+           "avg_lm_calls": sum(p["lm_calls"] for p in per) / max(1, len(per)), "per": per}
+    if verbose:
+        print(f"\n  solved {solved}/{len(tasks)}  reuse_events={reuse_events}  "
+              f"avg_lm_calls={out['avg_lm_calls']:.2f}")
+    return out
+
+
+# Demo task set for --run: NL purpose + entry + I/O tests, solvable by composing seed atoms.
+DEMO_TASKS = [
+    dict(text="check whether a number is prime", entry="is_it_prime",
+         tests=[((7,), True), ((8,), False), ((2,), True), ((1,), False)]),
+    dict(text="reverse the digits of an integer", entry="rev_int",
+         tests=[((123,), 321), ((100,), 1), ((5,), 5)]),
+    dict(text="largest sum of a contiguous subarray (kadane)", entry="best_run",
+         tests=[(([-2, 1, -3, 4, -1, 2, 1, -5, 4],), 6), (([1, 2, 3],), 6), (([-1, -2],), -1)]),
+    dict(text="count how many divisors of n are prime numbers", entry="count_prime_divisors",
+         tests=[((12,), 2), ((30,), 3), ((7,), 1), ((1,), 0)]),
+    dict(text="least common multiple of two integers", entry="lcm_of",
+         tests=[((4, 6), 12), ((3, 5), 15), ((7, 7), 7)]),
+    dict(text="check if a string is an anagram of another", entry="are_anagrams",
+         tests=[(("listen", "silent"), True), (("abc", "abd"), False)]),
+]
+
+
+def _load_seed(path: str) -> MemoryGraph:
+    return MemoryGraph.load_json(path)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--run", action="store_true", help="drive the membrane on a task set (frozen 3B)")
+    ap.add_argument("--graph", default="graphs/grr_seed_clean.json")
+    ap.add_argument("--lm", default="Qwen/Qwen2.5-3B-Instruct", help="frozen compiler model")
+    ap.add_argument("--stub", action="store_true", help="use the no-GPU stub compiler instead of the LM")
     a = ap.parse_args()
+
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
+
+    if a.run:
+        graph = _load_seed(a.graph)
+        if a.stub:
+            # deterministic stub: recipes for the demo tasks (no GPU) — smoke the loop end to end
+            compile_fn = make_stub_compiler({
+                "is_it_prime": "def is_it_prime(n):\n    return is_prime(n)\n",
+                "rev_int": "def rev_int(n):\n    return reverse_digits(n)\n",
+                "best_run": "def best_run(xs):\n    return max_subarray_sum(xs)\n",
+                "count_prime_divisors": "def count_prime_divisors(n):\n"
+                                        "    return sum(1 for d in divisors(n) if is_prime(d))\n",
+                "lcm_of": "def lcm_of(a, b):\n    return lcm(a, b)\n",
+                "are_anagrams": "def are_anagrams(a, b):\n    return is_anagram(a, b)\n",
+            })
+        else:
+            from v5.runtime.algo_lm_proposer import make_hf_gen
+            gen = make_hf_gen(a.lm, temperature=0.6, max_new_tokens=220)
+            compile_fn = make_lm_compiler(gen)
+        print(f"membrane --run: graph={a.graph} lm={'stub' if a.stub else a.lm} "
+              f"tasks={len(DEMO_TASKS)}\n")
+        run_tasks(graph, DEMO_TASKS, compile_fn)
+        return
+
     ap.print_help()
 
 
