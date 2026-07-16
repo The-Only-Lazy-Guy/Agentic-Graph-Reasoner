@@ -1,0 +1,733 @@
+{
+  "metadata": {
+    "seed": "grr_seed_clean",
+    "built_by": "algo_grr_seed",
+    "design": "frozen-compiler + TRM-membrane",
+    "n_atoms": 21,
+    "n_concepts": 4,
+    "note": "verified primitive helpers; helper-granular; real depend topology"
+  },
+  "nodes": [
+    {
+      "id": "concept_number_theory",
+      "text": "number theory \u2014 primes, divisors, digits, gcd/lcm",
+      "node_type": "concept",
+      "confidence": 0.5,
+      "importance": 0.6,
+      "metadata": {},
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "concept_lists",
+      "text": "list processing \u2014 dedup, flatten, count, scan, subarray",
+      "node_type": "concept",
+      "confidence": 0.5,
+      "importance": 0.6,
+      "metadata": {},
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "concept_strings",
+      "text": "string processing \u2014 reversal, palindrome, character frequency, anagram",
+      "node_type": "concept",
+      "confidence": 0.5,
+      "importance": 0.6,
+      "metadata": {},
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "concept_search",
+      "text": "searching and merging over ordered data",
+      "node_type": "concept",
+      "confidence": 0.5,
+      "importance": 0.6,
+      "metadata": {},
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_is_prime",
+      "text": "primality test \u2014 True iff n is a prime number",
+      "node_type": "implementation",
+      "confidence": 0.9,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def is_prime(n):\n    if n < 2:\n        return False\n    i = 2\n    while i * i <= n:\n        if n % i == 0:\n            return False\n        i += 1\n    return True\n",
+        "entry": "is_prime",
+        "kind": "atom",
+        "origin": "seed",
+        "concept": "number_theory",
+        "depends": []
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_gcd",
+      "text": "greatest common divisor of a and b",
+      "node_type": "implementation",
+      "confidence": 0.9,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def gcd(a, b):\n    while b:\n        a, b = b, a % b\n    return a\n",
+        "entry": "gcd",
+        "kind": "atom",
+        "origin": "seed",
+        "concept": "number_theory",
+        "depends": []
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_lcm",
+      "text": "least common multiple of a and b",
+      "node_type": "implementation",
+      "confidence": 0.9,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def lcm(a, b):\n    return a * b // gcd(a, b)\n",
+        "entry": "lcm",
+        "kind": "atom",
+        "origin": "seed",
+        "concept": "number_theory",
+        "depends": [
+          "gcd"
+        ]
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_divisors",
+      "text": "sorted list of all positive divisors of n",
+      "node_type": "implementation",
+      "confidence": 0.9,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def divisors(n):\n    out = []\n    i = 1\n    while i * i <= n:\n        if n % i == 0:\n            out.append(i)\n            if i != n // i:\n                out.append(n // i)\n        i += 1\n    return sorted(out)\n",
+        "entry": "divisors",
+        "kind": "atom",
+        "origin": "seed",
+        "concept": "number_theory",
+        "depends": []
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_sum_divisors",
+      "text": "sum of all positive divisors of n",
+      "node_type": "implementation",
+      "confidence": 0.9,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def sum_divisors(n):\n    return sum(divisors(n))\n",
+        "entry": "sum_divisors",
+        "kind": "atom",
+        "origin": "seed",
+        "concept": "number_theory",
+        "depends": [
+          "divisors"
+        ]
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_is_perfect",
+      "text": "True iff n equals the sum of its proper divisors (perfect number)",
+      "node_type": "implementation",
+      "confidence": 0.9,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def is_perfect(n):\n    return n > 0 and sum_divisors(n) - n == n\n",
+        "entry": "is_perfect",
+        "kind": "atom",
+        "origin": "seed",
+        "concept": "number_theory",
+        "depends": [
+          "sum_divisors"
+        ]
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_digit_sum",
+      "text": "sum of the decimal digits of a non-negative integer n",
+      "node_type": "implementation",
+      "confidence": 0.9,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def digit_sum(n):\n    s = 0\n    n = abs(n)\n    while n:\n        s += n % 10\n        n //= 10\n    return s\n",
+        "entry": "digit_sum",
+        "kind": "atom",
+        "origin": "seed",
+        "concept": "number_theory",
+        "depends": []
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_reverse_digits",
+      "text": "integer formed by reversing the decimal digits of n",
+      "node_type": "implementation",
+      "confidence": 0.9,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def reverse_digits(n):\n    r = 0\n    n = abs(n)\n    while n:\n        r = r * 10 + n % 10\n        n //= 10\n    return r\n",
+        "entry": "reverse_digits",
+        "kind": "atom",
+        "origin": "seed",
+        "concept": "number_theory",
+        "depends": []
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_is_palindrome_number",
+      "text": "True iff the integer n reads the same forwards and backwards",
+      "node_type": "implementation",
+      "confidence": 0.9,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def is_palindrome_number(n):\n    return n >= 0 and n == reverse_digits(n)\n",
+        "entry": "is_palindrome_number",
+        "kind": "atom",
+        "origin": "seed",
+        "concept": "number_theory",
+        "depends": [
+          "reverse_digits"
+        ]
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_unique",
+      "text": "list with duplicates removed, preserving first-seen order",
+      "node_type": "implementation",
+      "confidence": 0.9,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def unique(xs):\n    seen = set()\n    out = []\n    for x in xs:\n        if x not in seen:\n            seen.add(x)\n            out.append(x)\n    return out\n",
+        "entry": "unique",
+        "kind": "atom",
+        "origin": "seed",
+        "concept": "lists",
+        "depends": []
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_flatten",
+      "text": "flatten a list of lists by one level",
+      "node_type": "implementation",
+      "confidence": 0.9,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def flatten(xss):\n    out = []\n    for xs in xss:\n        for x in xs:\n            out.append(x)\n    return out\n",
+        "entry": "flatten",
+        "kind": "atom",
+        "origin": "seed",
+        "concept": "lists",
+        "depends": []
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_count_occurrences",
+      "text": "number of times value v appears in list xs",
+      "node_type": "implementation",
+      "confidence": 0.9,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def count_occurrences(xs, v):\n    c = 0\n    for x in xs:\n        if x == v:\n            c += 1\n    return c\n",
+        "entry": "count_occurrences",
+        "kind": "atom",
+        "origin": "seed",
+        "concept": "lists",
+        "depends": []
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_most_common",
+      "text": "the element that appears most often in xs (first on ties)",
+      "node_type": "implementation",
+      "confidence": 0.9,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def most_common(xs):\n    best = None\n    best_c = -1\n    for x in xs:\n        c = count_occurrences(xs, x)\n        if c > best_c:\n            best_c = c\n            best = x\n    return best\n",
+        "entry": "most_common",
+        "kind": "atom",
+        "origin": "seed",
+        "concept": "lists",
+        "depends": [
+          "count_occurrences"
+        ]
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_running_max",
+      "text": "prefix maxima \u2014 list whose i-th element is max(xs[:i+1])",
+      "node_type": "implementation",
+      "confidence": 0.9,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def running_max(xs):\n    out = []\n    m = None\n    for x in xs:\n        m = x if m is None else (x if x > m else m)\n        out.append(m)\n    return out\n",
+        "entry": "running_max",
+        "kind": "atom",
+        "origin": "seed",
+        "concept": "lists",
+        "depends": []
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_max_subarray_sum",
+      "text": "largest sum of any contiguous subarray (Kadane)",
+      "node_type": "implementation",
+      "confidence": 0.9,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def max_subarray_sum(xs):\n    best = xs[0]\n    cur = xs[0]\n    for x in xs[1:]:\n        cur = x if cur < 0 else cur + x\n        if cur > best:\n            best = cur\n    return best\n",
+        "entry": "max_subarray_sum",
+        "kind": "atom",
+        "origin": "seed",
+        "concept": "lists",
+        "depends": []
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_reverse_string",
+      "text": "the string s reversed",
+      "node_type": "implementation",
+      "confidence": 0.9,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def reverse_string(s):\n    return s[::-1]\n",
+        "entry": "reverse_string",
+        "kind": "atom",
+        "origin": "seed",
+        "concept": "strings",
+        "depends": []
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_is_palindrome",
+      "text": "True iff string s reads the same forwards and backwards",
+      "node_type": "implementation",
+      "confidence": 0.9,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def is_palindrome(s):\n    return s == reverse_string(s)\n",
+        "entry": "is_palindrome",
+        "kind": "atom",
+        "origin": "seed",
+        "concept": "strings",
+        "depends": [
+          "reverse_string"
+        ]
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_char_freq",
+      "text": "dict mapping each character of s to its count",
+      "node_type": "implementation",
+      "confidence": 0.9,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def char_freq(s):\n    d = {}\n    for ch in s:\n        d[ch] = d.get(ch, 0) + 1\n    return d\n",
+        "entry": "char_freq",
+        "kind": "atom",
+        "origin": "seed",
+        "concept": "strings",
+        "depends": []
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_is_anagram",
+      "text": "True iff strings a and b are anagrams of each other",
+      "node_type": "implementation",
+      "confidence": 0.9,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def is_anagram(a, b):\n    return char_freq(a) == char_freq(b)\n",
+        "entry": "is_anagram",
+        "kind": "atom",
+        "origin": "seed",
+        "concept": "strings",
+        "depends": [
+          "char_freq"
+        ]
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_binary_search",
+      "text": "index of target t in sorted list xs, or -1 if absent",
+      "node_type": "implementation",
+      "confidence": 0.9,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def binary_search(xs, t):\n    lo, hi = 0, len(xs) - 1\n    while lo <= hi:\n        mid = (lo + hi) // 2\n        if xs[mid] == t:\n            return mid\n        if xs[mid] < t:\n            lo = mid + 1\n        else:\n            hi = mid - 1\n    return -1\n",
+        "entry": "binary_search",
+        "kind": "atom",
+        "origin": "seed",
+        "concept": "search",
+        "depends": []
+      },
+      "access_count": 0,
+      "context_guard": {}
+    },
+    {
+      "id": "impl_merge_sorted",
+      "text": "merge two sorted lists a and b into one sorted list",
+      "node_type": "implementation",
+      "confidence": 0.9,
+      "importance": 0.5,
+      "metadata": {
+        "code": "def merge_sorted(a, b):\n    i = j = 0\n    out = []\n    while i < len(a) and j < len(b):\n        if a[i] <= b[j]:\n            out.append(a[i]); i += 1\n        else:\n            out.append(b[j]); j += 1\n    out.extend(a[i:]); out.extend(b[j:])\n    return out\n",
+        "entry": "merge_sorted",
+        "kind": "atom",
+        "origin": "seed",
+        "concept": "search",
+        "depends": []
+      },
+      "access_count": 0,
+      "context_guard": {}
+    }
+  ],
+  "edges": [
+    {
+      "src": "impl_is_prime",
+      "dst": "concept_number_theory",
+      "relation": "part_of",
+      "strength": 1.0,
+      "directed": true,
+      "metadata": {
+        "origin": "seed"
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_gcd",
+      "dst": "concept_number_theory",
+      "relation": "part_of",
+      "strength": 1.0,
+      "directed": true,
+      "metadata": {
+        "origin": "seed"
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_lcm",
+      "dst": "concept_number_theory",
+      "relation": "part_of",
+      "strength": 1.0,
+      "directed": true,
+      "metadata": {
+        "origin": "seed"
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_lcm",
+      "dst": "impl_gcd",
+      "relation": "depend",
+      "strength": 1.0,
+      "directed": true,
+      "metadata": {
+        "origin": "seed"
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_divisors",
+      "dst": "concept_number_theory",
+      "relation": "part_of",
+      "strength": 1.0,
+      "directed": true,
+      "metadata": {
+        "origin": "seed"
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_sum_divisors",
+      "dst": "concept_number_theory",
+      "relation": "part_of",
+      "strength": 1.0,
+      "directed": true,
+      "metadata": {
+        "origin": "seed"
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_sum_divisors",
+      "dst": "impl_divisors",
+      "relation": "depend",
+      "strength": 1.0,
+      "directed": true,
+      "metadata": {
+        "origin": "seed"
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_is_perfect",
+      "dst": "concept_number_theory",
+      "relation": "part_of",
+      "strength": 1.0,
+      "directed": true,
+      "metadata": {
+        "origin": "seed"
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_is_perfect",
+      "dst": "impl_sum_divisors",
+      "relation": "depend",
+      "strength": 1.0,
+      "directed": true,
+      "metadata": {
+        "origin": "seed"
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_digit_sum",
+      "dst": "concept_number_theory",
+      "relation": "part_of",
+      "strength": 1.0,
+      "directed": true,
+      "metadata": {
+        "origin": "seed"
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_reverse_digits",
+      "dst": "concept_number_theory",
+      "relation": "part_of",
+      "strength": 1.0,
+      "directed": true,
+      "metadata": {
+        "origin": "seed"
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_is_palindrome_number",
+      "dst": "concept_number_theory",
+      "relation": "part_of",
+      "strength": 1.0,
+      "directed": true,
+      "metadata": {
+        "origin": "seed"
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_is_palindrome_number",
+      "dst": "impl_reverse_digits",
+      "relation": "depend",
+      "strength": 1.0,
+      "directed": true,
+      "metadata": {
+        "origin": "seed"
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_unique",
+      "dst": "concept_lists",
+      "relation": "part_of",
+      "strength": 1.0,
+      "directed": true,
+      "metadata": {
+        "origin": "seed"
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_flatten",
+      "dst": "concept_lists",
+      "relation": "part_of",
+      "strength": 1.0,
+      "directed": true,
+      "metadata": {
+        "origin": "seed"
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_count_occurrences",
+      "dst": "concept_lists",
+      "relation": "part_of",
+      "strength": 1.0,
+      "directed": true,
+      "metadata": {
+        "origin": "seed"
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_most_common",
+      "dst": "concept_lists",
+      "relation": "part_of",
+      "strength": 1.0,
+      "directed": true,
+      "metadata": {
+        "origin": "seed"
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_most_common",
+      "dst": "impl_count_occurrences",
+      "relation": "depend",
+      "strength": 1.0,
+      "directed": true,
+      "metadata": {
+        "origin": "seed"
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_running_max",
+      "dst": "concept_lists",
+      "relation": "part_of",
+      "strength": 1.0,
+      "directed": true,
+      "metadata": {
+        "origin": "seed"
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_max_subarray_sum",
+      "dst": "concept_lists",
+      "relation": "part_of",
+      "strength": 1.0,
+      "directed": true,
+      "metadata": {
+        "origin": "seed"
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_reverse_string",
+      "dst": "concept_strings",
+      "relation": "part_of",
+      "strength": 1.0,
+      "directed": true,
+      "metadata": {
+        "origin": "seed"
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_is_palindrome",
+      "dst": "concept_strings",
+      "relation": "part_of",
+      "strength": 1.0,
+      "directed": true,
+      "metadata": {
+        "origin": "seed"
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_is_palindrome",
+      "dst": "impl_reverse_string",
+      "relation": "depend",
+      "strength": 1.0,
+      "directed": true,
+      "metadata": {
+        "origin": "seed"
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_char_freq",
+      "dst": "concept_strings",
+      "relation": "part_of",
+      "strength": 1.0,
+      "directed": true,
+      "metadata": {
+        "origin": "seed"
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_is_anagram",
+      "dst": "concept_strings",
+      "relation": "part_of",
+      "strength": 1.0,
+      "directed": true,
+      "metadata": {
+        "origin": "seed"
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_is_anagram",
+      "dst": "impl_char_freq",
+      "relation": "depend",
+      "strength": 1.0,
+      "directed": true,
+      "metadata": {
+        "origin": "seed"
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_binary_search",
+      "dst": "concept_search",
+      "relation": "part_of",
+      "strength": 1.0,
+      "directed": true,
+      "metadata": {
+        "origin": "seed"
+      },
+      "confidence": 1.0
+    },
+    {
+      "src": "impl_merge_sorted",
+      "dst": "concept_search",
+      "relation": "part_of",
+      "strength": 1.0,
+      "directed": true,
+      "metadata": {
+        "origin": "seed"
+      },
+      "confidence": 1.0
+    }
+  ]
+}

@@ -197,6 +197,48 @@ Each step: tool MLPs consume the TRM's reasoning state → execute graph operati
 feed back into the next step. The final trace is fed to the LM which decodes it into
 answers + code + explanations. The LM is the *realizer*; the TRM is the *reasoner*.
 
+## POISON DIAGNOSIS + frozen-compiler resolution (2026-07-16)
+The failure both the old STaR loop AND a naive GRR-Tool share: **the graph poisons the LM as
+STaR progresses** (solve-rate declines over rounds). Traced to TWO channels, both = LM absorbing the graph:
+  - **Channel 1 — WEIGHT poison (the STaR LoRA, commit 425d649 unfrozen loop):** each epoch SFTs the
+    LM on its own verified traces. Narrow verified set -> memorization collapse (the 210-variant augment
+    271a48b was fighting exactly this), plus_only overfit, catastrophic forgetting; graph-conditioned
+    traces bake shifting graph-dependency into weights.
+  - **Channel 2 — CONTEXT poison (graph-in-prompt):** as the graph grows, more atoms flood the prompt;
+    a wrong retrieved atom drags the LM. This is what the measured "advertisement net-negative / over-time
+    decline" (GRR-14 ablation, ~16pp) actually was — context distraction, not the graph's memory role.
+RESOLUTION (user's principle, made literal): **LM = FROZEN COMPILER, un-poisonable. ALL learning lives
+in TRM + graph.** LM is a pure stateless `compile(spec)->code`; weights NEVER change -> no gradient path
+graph->LM -> Channel 1 dead. **The TRM is the MEMBRANE:** graph never touches the LM directly — the TRM
+retrieves, tentatively composes, verifies partial coverage, and hands the LM ONLY a clean curated spec
+(subgoals + chosen atoms + wiring + holes), never a raw top-k dump -> Channel 2 dead. A bad atom now only
+costs if the TRM retrieves it AND it survives the hard verify gate (which already rejects 31% overfit);
+compiling a bad spec -> verify fails -> not banked. Loop self-cleans. Authoring novel primitives uses the
+FROZEN LM's capability ("LM teaches once, graph remembers forever" = teaching accumulates in the GRAPH, not
+LM weights) -> zero LM training ever. Two dead components deleted from the original design: (a) WriteHead's
+"latent for LM code generation" = the measured z-wall / amortization-not-capability, replaced by DISCRETE
+atom-pointer + spec (text only, never a latent handoff); (b) gameable health-gate scalars (learnable delta
+can open the gate on unverified code) -> gate is VERIFICATION-DOMINATED, novelty is tie-break only.
+COMPOUNDING TARGET MOVES: solve-rate rises not because the LM improves (poisons) but because the graph
+covers more subgoals -> TRM composes more from memory -> **LM does strictly LESS per task** (token-burden
+falls as the graph grows, instead of flooding). rebuild-net already proves the graph is the memory.
+FALSIFIABLE NEXT TEST (two-arm, over STaR rounds, same seed graph): OLD (LoRA-trained LM + raw graph-in-
+prompt) should DECLINE; NEW (frozen LM + TRM membrane) should be FLAT-OR-RISING with per-task LM tokens
+FALLING. If NEW doesn't beat OLD over rounds, the frozen-membrane premise is wrong.
+
+## CLEAN SEED GRAPH (2026-07-16) — replaces the polluted grown graphs
+The grown graphs (grr_grown 377n, grown_graph* 4-13MB) are POLLUTED: whole task-solutions banked under
+entry-point names (`impl_similar_elements` = raw MBPP prompt + full solution), reusable helpers TRAPPED as
+nested inner fns, and topology FLAT (**371 part_of, ZERO depend** -> nothing composes -> cross-task reuse
+mechanically 0). New clean substrate: `v5/runtime/algo_grr_seed.py` -> `graphs/grr_seed_clean.json`:
+**25 nodes (21 verified primitive atoms + 4 concept hubs), 28 edges (21 part_of + 7 REAL depend), 0 dangling.**
+Every atom is fuzz-verified against its dep-closure before it enters the graph (the store-gate), helper-
+granular (is_prime/gcd/lcm->gcd/divisors/sum_divisors->divisors/is_palindrome_number->reverse_digits/
+is_anagram->char_freq/most_common->count_occurrences/is_perfect->sum_divisors...), text = concise PURPOSE
+key (never a task prompt). Loads through graph_core.MemoryGraph unchanged (all 28 edges kept). Selftest:
+`python -m v5.runtime.algo_grr_seed --selftest` (21/21 atoms pass, no GPU). This is the reuse-bearing
+starting topology the TRM membrane composes over.
+
 Each graph node has:
 - `text`: concise purpose string (the retrieval key, e.g. "computes prime factorization")
 - `metadata.code`: executable implementation
