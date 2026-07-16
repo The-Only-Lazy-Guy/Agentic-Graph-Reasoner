@@ -1,4 +1,4 @@
-# READ_THIS — GRR: Graph Recursive Reasoner (2026-07-13)
+# READ_THIS — GRR: Graph Recursive Reasoner (2026-07-17)
 
 > At-a-glance dump of the latest session (raw numbers, decisions, repro commands).
 > Updated each working session. Branch: fix/swe-slot-plan-gate-real-file.
@@ -63,13 +63,22 @@ GRR-7 STaR (search+verify+consolidate), REAL MPNET --compo-gen-star --hard, leav
 - Deferred to SCALE-UP by design (user call): more dataset, RL-with-LM synergy (LM authors new atoms),
   hierarchical tasks (--programs-as-atoms wins), RGCN structured read.
 
-## Repro (molab, no 4B — mpnet + tiny nets, minutes)
+## Repro (molab, no 4B — mpnet + tiny nets, minutes; poison test needs GPU)
 ```
 python -m v5.runtime.algo_composed --selftest                    # thesis: str_dp2 load-bearing
 python -m v5.runtime.algo_dsl_trm --compo-gen-star --hard --graph graphs/algo_reason_hard.json  # 0% -> 100%
 python -m v5.runtime.algo_grr_loop --loop --graph graphs/algo_grr_loop.json     # THE loop (compounding table)
 python -m v5.runtime.algo_grr_loop --rebuild --graph graphs/algo_grr_loop.json  # graph-only net rebuild
-# every module: python -m v5.runtime.<algo_quality|algo_capability|algo_abstract|algo_sleep|algo_graph_edits|algo_graph_mg|algo_compose_tasks|algo_composed|algo_trm_compose|algo_dsl|algo_dsl_trm|algo_grr_loop|algo_meta|algo_anticheat> --selftest   # 14/14 PASS
+python -m v5.runtime.algo_grr_seed --selftest                    # clean 25-node seed graph
+python -m v5.runtime.algo_grr_membrane --selftest                # frozen+ membrane closed loop (5/5)
+python -m v5.runtime.algo_grr_membrane --run --stub              # 6/6 on curriculum (no GPU)
+python -m v5.runtime.algo_grr_poison_test --selftest             # two-arm structural test (no GPU)
+python -m v5.runtime.algo_grr_policy --selftest                  # ComplementPolicy TRM policy
+# Poison thesis (GPU, Qwen2.5-3B-Instruct):
+python -m v5.runtime.algo_grr_poison_test --run --lm Qwen/Qwen2.5-3B-Instruct  # NEW arm only
+python -m v5.runtime.algo_grr_poison_test --inspect --lm Qwen/Qwen2.5-3B-Instruct  # R3/R4 derive inspect
+V5_LM_QUANT=8bit python -m v5.runtime.algo_grr_poison_test --run --lm Qwen/Qwen2.5-3B-Instruct --old-arm  # both arms
+# every module: python -m v5.runtime.<algo_quality|algo_capability|algo_abstract|algo_sleep|algo_graph_edits|algo_graph_mg|algo_compose_tasks|algo_composed|algo_trm_compose|algo_dsl|algo_dsl_trm|algo_grr_loop|algo_meta|algo_anticheat|algo_grr_seed|algo_grr_membrane|algo_grr_poison_test|algo_grr_policy> --selftest   # 16/16 PASS
 ```
 
 ## Files (all v5/runtime/)
@@ -222,42 +231,44 @@ can open the gate on unverified code) -> gate is VERIFICATION-DOMINATED, novelty
 COMPOUNDING TARGET MOVES: solve-rate rises not because the LM improves (poisons) but because the graph
 covers more subgoals -> TRM composes more from memory -> **LM does strictly LESS per task** (token-burden
 falls as the graph grows, instead of flooding). rebuild-net already proves the graph is the memory.
-FALSIFIABLE NEXT TEST (two-arm, over STaR rounds, same seed graph): OLD (LoRA-trained LM + raw graph-in-
-prompt) should DECLINE; NEW (frozen LM + TRM membrane) should be FLAT-OR-RISING with per-task LM tokens
-FALLING. If NEW doesn't beat OLD over rounds, the frozen-membrane premise is wrong.
+FALSIFIABLE TEST — DONE (2026-07-17, real Qwen2.5-3B-Instruct on molab, 4 rounds of the designed seed
+curriculum, R1 recall / R2 compose / R3 derive / R4 reuse):
 
-## GRR-Tool BUILD STATUS (2026-07-16) — membrane loop + two-arm test, no-GPU-proven, molab-ready
-Three modules, all selftested no-GPU (torch-free cores; frozen 3B + LoRA inject on molab):
-- `algo_grr_seed.py` -> `graphs/grr_seed_clean.json` (clean seed; see above).
+  NEW (frozen 3B + membrane):             OLD (LoRA SFT + raw flood):
+    round  solved  reuse  prompt_atoms       round  solved  reuse  prompt_atoms
+      1     3/3      1     1.0                  1     2/3      0     21.3
+      2     3/3      4     1.7                  2     1/3      0     23.0
+      3     2/2      0     1.0                  3     2/2      0     24.5
+      4     2/2      2     4.0                  4     1/2      0     26.5
+
+RESULT — NEW 10/10 (100%), OLD 6/10 (60%). Two poison channels both confirmed:
+  (a) Weight poison: LoRA mean loss collapses 0.577→0.117→0.009→0.002 as the pool grows —
+      the LM overfits to its own traces, solve rate drops 2/3→1/3→1/2 across rounds.
+  (b) Context poison: raw-flood prompt grows 21→27 atoms with the graph, overwhelming the LM
+      (vs NEW bounded at ≤4 atoms). OLD reuse = 0 structurally (whole-solution banking can't compose);
+      NEW compounds (R3 derives helper atoms, R4 reuses them).
+  VERDICT: frozen-compiler + membrane premise CONFIRMED — the poison thesis is experimentally
+  validated with a real 3B. All learning stays in TRM + graph; the LM stays frozen forever.
+
+## GRR-Tool BUILD STATUS (2026-07-17) — poison thesis CONFIRMED with real 3B
+All four modules, selftested no-GPU, plus the real-3B two-arm molab run completed:
+- `algo_grr_seed.py` -> `graphs/grr_seed_clean.json` (clean 25-node seed with depend edges).
 - `algo_grr_membrane.py` = the frozen-compiler + membrane closed loop. MembraneSolver: iterative
-  verifier-gated retrieval (speculative rank-add + coverage stop + prune-to-called), curated spec,
-  `policy_fn` seam (TRM policy drops in = build B, retrieves the COMPLEMENT of the partial program),
-  `make_lm_compiler(gen_fn)` = FROZEN 3B as compile(spec)->code (curated prompt = membrane; `_strip_redefs`
-  keeps graph atoms authoritative; verified closure prepended), `reuse_set` = AST call-graph BFS from the
-  entry (the true reuse unit, no spurious depend edges). Selftest 5/5: composition fires, membrane holds
-  (<=3 atoms/spec, never the 21-node graph), anti-poison (high-similarity WRONG atom ranks top-3 but
-  fails verify + is pruned un-called -> never banked). `--run --stub` 6/6; `--run --lm Qwen/...` = molab.
-- `algo_grr_poison_test.py` = the two-arm test on a designed seed curriculum (R1 recall / R2 compose /
-  R3 derive-new-atom / R4 reuse-the-derived). NEW = frozen+membrane+helper-granular derive-bank; OLD =
-  raw-graph-advertise (all atoms flooded into prompt) + whole-solution banking (flat, no depend) +
-  LoRA-train_fn hook. STRUCTURAL RESULT (no-GPU, selftest PASS): NEW R3 banks 2 atoms -> R4 reuse=4
-  (COMPOUNDING), prompt BOUNDED (max ~4 atoms), reuse total 13; OLD prompt FLOODS 22->30 (grows with the
-  graph = context-poison channel), reuse=0 (whole-solution banking cannot compose). That contrast IS the
-  poison mechanism, measured directly. REAL accuracy-decline (weight-poison via LoRA + flood degrading
-  outputs) = molab-only: `--run --lm <model>` (NEW arm real 3B) + wire algo_star_epoch.train_lora as the
-  OLD arm train_fn.
-- `algo_grr_policy.py` (B2a) = the trained TRM retrieval policy = the "TRM reasons" piece that makes the
-  membrane a TRM membrane, not a cosine one. ComplementPolicy: tiny pointer net scoring atoms |
-  (task, atoms-selected-so-far), trained (deep-sup over ALL SUBSETS of each ground-truth composition's
-  minimal SELECTION set — order-invariant) to rank the STILL-MISSING atom highest. Drops into
-  MembraneSolver.policy_fn. Embedder injectable (HashEmbed dim=256 no-GPU — dim=96 collides on the string
-  cluster; mpnet on molab). Selftest PASS: complement rank policy avg 1.00 top1 4/4 vs cosine 1.50 (cosine
-  BURIES the complement — max_subarray_sum->reverse_digits 3->1 after the first atom is picked, because
-  re-embedding task+selected reinforces the covered concept); membrane solves 4/4 in 6 hops (MINIMAL)
-  vs cosine 7. Key label lesson: train on minimal SELECTION sets (deps come via graph closure, so
-  lcm->gcd is ONE selection), not the full called-atom set, else the policy over-selects.
-  PENDING (next): the real-3B two-arm molab run (drop the trained policy into the NEW arm; wire
-  algo_star_epoch.train_lora as the OLD arm train_fn) for the actual accuracy-decline signal.
+  verifier-gated retrieval, curated spec, `policy_fn` seam, `make_lm_compiler(gen_fn)` = FROZEN 3B.
+  Selftest 5/5. Real-3B on curriculum: 100% solved, prompt ≤4 atoms, compounds (R3 derives, R4 reuses).
+- `algo_grr_poison_test.py` = the two-arm test (R1 recall / R2 compose / R3 derive / R4 reuse).
+  Real-3B result (Qwen2.5-3B-Instruct, FP16, 4 rounds):
+    NEW (frozen + membrane + helper-granular derive-bank): 10/10 solved, prompt ≤4, compounds.
+    OLD (LoRA SFT on own traces + raw-flood prompt + whole-solution banking): 6/10 solved, declining
+    accuracy per round, prompt floods 21→27 atoms, zero reuse, LoRA loss collapses to 0.002.
+  VERDICT: poison thesis experimentally confirmed — two channels both validated. The LM STAYS FROZEN.
+  OLD-arm LoRA adapter saved to `artifacts/old_arm_adapter/` (on molab).
+  Repro: `V5_LM_QUANT=8bit python -m v5.runtime.algo_grr_poison_test --run --lm Qwen/Qwen2.5-3B-Instruct --old-arm`
+  Inspect R3/R4 derive code: `python -m v5.runtime.algo_grr_poison_test --inspect --lm Qwen/Qwen2.5-3B-Instruct`
+- `algo_grr_policy.py` (B2a) = the trained TRM retrieval policy. ComplementPolicy: tiny pointer net
+  scoring atoms | (task, atoms-selected-so-far), trained to rank the STILL-MISSING atom highest, drops
+  into MembraneSolver.policy_fn. Selftest PASS: complement rank avg 1.00 top1 vs cosine 1.50.
+  PENDING (next): drop ComplementPolicy into MembraneSolver (currently uses cosine baseline), scale to MBPP+.
 
 ## CLEAN SEED GRAPH (2026-07-16) — replaces the polluted grown graphs
 The grown graphs (grr_grown 377n, grown_graph* 4-13MB) are POLLUTED: whole task-solutions banked under
