@@ -201,14 +201,16 @@ def make_curriculum_stub(tasks_flat: list[dict]) -> Callable[[dict], str]:
     return compile_fn
 
 
-def run_new_arm(rounds: list[list[dict]], compile_fn: Callable[[dict], str]) -> list[dict]:
+def run_new_arm(rounds: list[list[dict]], compile_fn: Callable[[dict], str],
+                policy_fn: Callable | None = None) -> list[dict]:
+    """policy_fn = the trained ComplementPolicy (make_graph_policy_fn); None = cosine baseline."""
     graph = load_seed()
     flat = [t for r in rounds for t in r]
     metrics = []
     for ri, tasks in enumerate(rounds):
         solved = reuse_events = lm_calls = banked = prompt_atoms = 0
         for t in tasks:
-            solver = MembraneSolver(graph, compile_fn)     # rebuilt on the CURRENT graph
+            solver = MembraneSolver(graph, compile_fn, policy_fn=policy_fn)   # CURRENT graph
             n0 = len(solver.compile_inputs)
             r = solver.solve(t)
             lm_calls += len(solver.compile_inputs) - n0
@@ -527,6 +529,8 @@ def main() -> None:
                     help="4-arm channel isolation: neither / context-only / weight-only / both")
     ap.add_argument("--old-lora", default="artifacts/old_arm_adapter",
                     help="LoRA adapter dir for the OLD arm")
+    ap.add_argument("--policy", action="store_true",
+                    help="NEW arm: use the trained ComplementPolicy (not cosine) for retrieval")
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
@@ -560,9 +564,14 @@ def main() -> None:
     if a.run:
         from v5.runtime.algo_grr_membrane import make_frozen_gen, make_lm_compiler
         rounds = curriculum()
+        policy_fn = None
+        if a.policy:                                    # item 1: ComplementPolicy in the live loop
+            from v5.runtime.algo_grr_policy import train_and_make_policy
+            _model, policy_fn = train_and_make_policy(load_seed())
+            print("[policy] trained ComplementPolicy on seed graph -> NEW-arm retrieval")
         if a.lm:
             gen = make_frozen_gen(a.lm, temperature=0.6, max_new_tokens=220)
-            new_m = run_new_arm(rounds, make_lm_compiler(gen))
+            new_m = run_new_arm(rounds, make_lm_compiler(gen), policy_fn=policy_fn)
             _fmt("NEW (frozen 3B + membrane):", new_m)
             if a.old_arm:
                 print("\n--- Running OLD arm (LoRA-poisoned) ---")

@@ -147,7 +147,9 @@ def train_policy(graph: MemoryGraph, train_tasks, embed_fn, d: int = 64,
 
 def make_policy_fn(model, ctx, embed_fn):
     """Wrap a trained ComplementPolicy as a MembraneSolver.policy_fn:
-    (task, selected, graph, retriever) -> [(node_id, sigmoid_score), ...] ranked."""
+    (task, selected, graph, retriever) -> [(node_id, sigmoid_score), ...] ranked.
+    FIXED atom set (ctx) — for a static graph. For the live loop where the graph GROWS, use
+    make_graph_policy_fn instead (it re-embeds the current graph so derived atoms are scored)."""
     import torch
     atom_ids, idx, A = ctx["atom_ids"], ctx["idx"], ctx["A"]
     d_in = ctx["d_in"]
@@ -161,6 +163,38 @@ def make_policy_fn(model, ctx, embed_fn):
         ranked = sorted(zip(atom_ids, scores), key=lambda z: -z[1])
         return ranked
     return policy_fn
+
+
+def make_graph_policy_fn(model, embed_fn, cos_w: float = 0.5):
+    """DEPLOYABLE policy_fn — re-embeds the CURRENT graph each call (so atoms DERIVED and banked during
+    the loop are scored too) and RESIDUALS over cosine: final = cos_w·cosine(task,atom) + policy_sigmoid.
+    The learned policy dominates the COMPLEMENT conditioning (its win: it lifts the atom the partial
+    program still needs, which cosine buries), while cosine supplies base relevance so a brand-NEW atom
+    the net never trained on stays findable. This is the version dropped into MembraneSolver."""
+    import torch
+
+    def policy_fn(task, selected, graph, retriever):
+        impl = [nid for nid in graph.nodes if graph.nodes[nid].node_type == "implementation"]
+        if not impl:
+            return []
+        A = torch.tensor(np.stack([embed_fn(graph.nodes[nid].text) for nid in impl]))
+        x = torch.tensor(embed_fn(task["text"]))
+        sel_ix = [impl.index(s) for s in selected if s in impl]
+        sel_vec = A[sel_ix].mean(0) if sel_ix else torch.zeros(A.shape[1])
+        with torch.no_grad():
+            pol = torch.sigmoid(model(x, A, sel_vec)).tolist()
+        cos = dict(retriever.rank(task["text"]))          # base relevance (novel-atom-safe)
+        scored = [(nid, cos_w * cos.get(nid, 0.0) + pol[i]) for i, nid in enumerate(impl)]
+        return sorted(scored, key=lambda z: -z[1])
+    return policy_fn
+
+
+def train_and_make_policy(graph, embed_fn=None, tasks=None, **kw):
+    """Convenience: train ComplementPolicy on `graph` and return (model, deployable policy_fn).
+    Default embedder = HashEmbed(256) (no deps; mpnet can be injected on molab)."""
+    embed_fn = embed_fn or HashEmbed(dim=256)
+    model, _ctx = train_policy(graph, tasks or TRAIN_TASKS, embed_fn, **kw)
+    return model, make_graph_policy_fn(model, embed_fn)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -190,7 +224,7 @@ def _selftest() -> bool:
     ok = True
 
     model, ctx = train_policy(graph, TRAIN_TASKS, embed, steps=2000, seed=0)
-    policy_fn = make_policy_fn(model, ctx, embed)
+    policy_fn = make_graph_policy_fn(model, embed)     # the DEPLOYABLE growth-aware path
     cosine = TokenRetriever(graph)
 
     # ── [1] complement rank: after selecting the FIRST atom, where is the missing SECOND? ────
@@ -247,6 +281,25 @@ def _selftest() -> bool:
           f"cosine {cos_solved}/{len(tasks)} in {cos_hops} hops -> "
           f"{'PASS' if pol_solved == len(tasks) and pol_hops <= cos_hops else 'FAIL'}")
     ok &= (pol_solved == len(tasks) and pol_hops <= cos_hops)
+
+    # ── [3] GROWTH-aware: a NEWLY-BANKED atom (not in training) is scored by the deployable policy ──
+    from graph_core import Node
+    g2 = _seed_graph()
+    g2.nodes["impl_nth_fibonacci"] = Node(
+        id="impl_nth_fibonacci", text="the n-th fibonacci number", node_type="implementation",
+        metadata={"code": "def nth_fibonacci(n):\n    a,b=0,1\n    for _ in range(n): a,b=b,a+b\n    return a\n",
+                  "entry": "nth_fibonacci", "kind": "atom", "origin": "derived"})
+    g2._rebuild_index()
+    ranked = make_graph_policy_fn(model, embed)({"text": "the n-th fibonacci number"}, [], g2, TokenRetriever(g2))
+    ids = [nid for nid, _s in ranked]
+    scored_new = "impl_nth_fibonacci" in ids
+    rank_new = (ids.index("impl_nth_fibonacci") + 1) if scored_new else 999
+    # deployable bar = FINDABLE within the membrane's hop budget (6), not necessarily #1: the net never
+    # trained on this atom, and the loop's verifier-gated speculative-add resolves the rest.
+    findable = scored_new and rank_new <= 6
+    print(f"  [3] growth-aware: derived atom scored={scored_new}, rank={rank_new} (<=6 findable) "
+          f"-> {'PASS' if findable else 'FAIL'}")
+    ok &= findable
 
     print(f"\n  ALGO_GRR_POLICY SELFTEST -> {'PASS' if ok else 'FAIL'}")
     return ok
