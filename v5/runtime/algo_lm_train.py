@@ -418,7 +418,7 @@ def train_unfrozen(
         shape = _graph_shape(retr.graph)
         log(
             f"  [round {rnd+1}/{rounds}] solved {solved_this_round}/{batch_size} "
-            f"| sft_pairs={len(batch_pairs)} (steps={sft_steps}) | loss={loss:.3f} "
+            f"| sft_pairs={len(batch_pairs)} (steps={sft_steps}) | loss={loss:.6f} "
             f"| graph={len(retr.graph.nodes)} nodes | depend_edges={shape['depend']} "
             f"| reuse_events={len(reuse_events)}",
             flush=True,
