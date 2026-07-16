@@ -412,9 +412,31 @@ def main():
         return
 
     print(f"Loading model {args.model}...")
-    from v5.runtime.algo_lm_proposer import make_hf_gen
+    from v5.lm_loader import load_frozen_lm
     from v5.memory.store import make_mpnet_embedder
-    gen_fn, tokenizer = make_hf_gen(args.model, lora_path=args.lora)
+    from peft import PeftModel
+    import torch
+    from transformers import AutoTokenizer
+    base = load_frozen_lm(args.model)
+    if args.lora:
+        model = PeftModel.from_pretrained(base, args.lora)
+        model.eval()
+    else:
+        model = base
+    tok = AutoTokenizer.from_pretrained(args.model)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+
+    def gen_fn(prompts):
+        msgs = [tok.apply_chat_template([{"role": "user", "content": p}], tokenize=False,
+                                        add_generation_prompt=True) for p in prompts]
+        enc = tok(msgs, return_tensors="pt", padding=True, padding_side="left").to(model.device)
+        with torch.no_grad():
+            out = model.generate(**enc, do_sample=True, temperature=0.8, top_p=0.95,
+                                 max_new_tokens=160, pad_token_id=tok.pad_token_id)
+        return [tok.decode(out[i, enc["input_ids"].shape[1]:], skip_special_tokens=True)
+                for i in range(len(prompts))]
+
     embed_fn = make_mpnet_embedder()
 
     metrics = run_benchmark(chains, args.graph, embed_fn, gen_fn,
