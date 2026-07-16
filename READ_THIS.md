@@ -200,11 +200,40 @@ Trained: artifacts/grr6_trm.pt, artifacts/grr6_dsl.pt.
 # GRR-Tool — TRM-Driven Reasoner with Tool MLPs (design, 2026-07-15)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-## Core idea
+# ═══════════════════════════════════════════════════════════════════════════════
+# FINAL ARCHITECTURE — LOCKED 2026-07-17 (poison thesis confirmed, real 3B)
+# ═══════════════════════════════════════════════════════════════════════════════
+The design is CONCLUDED. It solves the problem that broke every prior version (the graph poisoning the
+LM as STaR progresses), it compounds (graph grows via derive -> later tasks reuse), and it fits <=6GB.
+
+  task ─mpnet─▶ TRM MEMBRANE (owned, ALL learning here) ─curated spec─▶ FROZEN 3B compiler ─▶ VERIFY
+                │ ComplementPolicy retrieve → verifier-gated compose → curate    (NEVER trained)    │
+                └──────────────────────────────────────────────────◀── fail: re-reason ────────────┘
+                                     GRAPH ◀── SLEEP: bank helper-granular atom ──┘ pass
+                                  (memory; grows; compounds via reuse)
+  Deploy: mpnet 220MB + TRM <1MB + 3B@4bit ~2.2GB + graph(CPU) ≈ 2.5GB.  Teacher: 32B → SAME gate → graph.
+
+INVARIANTS (do not violate):
+  - LM weights NEVER change (frozen compiler) — no gradient path graph→LM.
+  - The graph NEVER reaches the LM directly — only a curated ≤K-atom spec (the membrane).
+  - The hard verify gate is the ONLY writer to the graph; the LM never writes/runs its own grader.
+  - All learning lives in the TRM (retrieval/compose policy) + the graph (verified atoms).
+
+CHECKLIST TO FINAL (scale + hardening, NOT redesign), ranked:
+  1. Wire ComplementPolicy into MembraneSolver (retrieval quality) — IN PROGRESS.
+  2. Fuzz-gate derived helpers (GRR-1 random-input bar on banked derived atoms → kill pollution).
+  3. Scale to MBPP+ (real open-source corpus = the generalization proof + factoring/reuse stress test).
+  4. Clean measurement (greedy decode + multiple seeds + more tasks).
+THE open risk #3 stresses: does the frozen 3B still FACTOR reusable helpers + do they GENERALIZE on
+diverse tasks? (seed domain is small+related so reuse fires easily; MBPP+ is the real test.)
+
+## Core idea (SUPERSEDED by the LOCKED architecture above — kept for history)
 TRMReasoner (tiny ~7M net) produces step-by-step reasoning traces (latent states z_1..z_T).
 Each step: tool MLPs consume the TRM's reasoning state → execute graph operations → results
 feed back into the next step. The final trace is fed to the LM which decodes it into
 answers + code + explanations. The LM is the *realizer*; the TRM is the *reasoner*.
+[NOTE: the latent-trace-to-LM handoff here is the z-wall (dead); the LOCKED design hands the LM a
+ TEXT spec of chosen atoms, never a latent. WriteHead-latent + gameable health-gate scalars are deleted.]
 
 ## POISON DIAGNOSIS + frozen-compiler resolution (2026-07-16)
 The failure both the old STaR loop AND a naive GRR-Tool share: **the graph poisons the LM as
