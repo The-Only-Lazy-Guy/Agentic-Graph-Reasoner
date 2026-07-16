@@ -245,8 +245,19 @@ Three modules, all selftested no-GPU (torch-free cores; frozen 3B + LoRA inject 
   graph = context-poison channel), reuse=0 (whole-solution banking cannot compose). That contrast IS the
   poison mechanism, measured directly. REAL accuracy-decline (weight-poison via LoRA + flood degrading
   outputs) = molab-only: `--run --lm <model>` (NEW arm real 3B) + wire algo_star_epoch.train_lora as the
-  OLD arm train_fn. PENDING (build B / next): the TRM policy training (deep-sup on membrane pointer-
-  sequences + coverage-delta) to drop into policy_fn; then the real-3B two-arm molab run.
+  OLD arm train_fn.
+- `algo_grr_policy.py` (B2a) = the trained TRM retrieval policy = the "TRM reasons" piece that makes the
+  membrane a TRM membrane, not a cosine one. ComplementPolicy: tiny pointer net scoring atoms |
+  (task, atoms-selected-so-far), trained (deep-sup over ALL SUBSETS of each ground-truth composition's
+  minimal SELECTION set — order-invariant) to rank the STILL-MISSING atom highest. Drops into
+  MembraneSolver.policy_fn. Embedder injectable (HashEmbed dim=256 no-GPU — dim=96 collides on the string
+  cluster; mpnet on molab). Selftest PASS: complement rank policy avg 1.00 top1 4/4 vs cosine 1.50 (cosine
+  BURIES the complement — max_subarray_sum->reverse_digits 3->1 after the first atom is picked, because
+  re-embedding task+selected reinforces the covered concept); membrane solves 4/4 in 6 hops (MINIMAL)
+  vs cosine 7. Key label lesson: train on minimal SELECTION sets (deps come via graph closure, so
+  lcm->gcd is ONE selection), not the full called-atom set, else the policy over-selects.
+  PENDING (next): the real-3B two-arm molab run (drop the trained policy into the NEW arm; wire
+  algo_star_epoch.train_lora as the OLD arm train_fn) for the actual accuracy-decline signal.
 
 ## CLEAN SEED GRAPH (2026-07-16) — replaces the polluted grown graphs
 The grown graphs (grr_grown 377n, grown_graph* 4-13MB) are POLLUTED: whole task-solutions banked under
