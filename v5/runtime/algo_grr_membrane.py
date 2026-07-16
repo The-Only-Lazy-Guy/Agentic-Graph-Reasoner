@@ -268,7 +268,13 @@ def render_compile_prompt(spec: dict) -> str:
         lines += ["", "Your previous attempt FAILED. Code:", "```python", str(fail.get("code", "")),
                   "```", f"Error: {fail.get('error', '')}", "Fix it."]
     if spec.get("derive"):
-        lines += ["", "None of the helpers cover the core step — write the complete solution."]
+        lines += [
+            "",
+            "None of the helpers covers the core operation. Factor it out: first define a SMALL, "
+            "GENERAL, reusable helper function named for WHAT IT COMPUTES (not for this task, e.g. "
+            "`sum_of_squares`/`nth_fibonacci`, never `solve`/the task name), then define "
+            f"`{spec['entry']}` to CALL that helper. The helper must be reusable by other tasks — "
+            "no task-specific constants baked in."]
     lines += ["", f"Return ONLY the function `{spec['entry']}` in a ```python code block."]
     return "\n".join(lines)
 
