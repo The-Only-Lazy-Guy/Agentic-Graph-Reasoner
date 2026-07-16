@@ -260,12 +260,20 @@ COMPOUNDING CONFIRMED IN RAW (2026-07-17, --inspect on the real 3B — not from 
   our sandbox = anti-cheat hygiene); (ii) membrane.bankable_pure_defs banks a helper even when the LM
   NESTS it inside the entry (AST purity walk; capturing closures rejected) -> robust compounding that
   does NOT depend on the LM factoring top-level. poison_test selftest now 5 checks (incl. nested-banking).
-CHANNEL ISOLATION (built, --isolate, molab-pending): the OLD arm bundles BOTH poisons (flood + LoRA move
-  together each round), so the 2-arm run only proves "combined old-design declines". run_old_arm now takes
-  prompt_fn; --isolate runs 4 arms — NEW(neither) / CONTEXT-only(flood, frozen) / WEIGHT-only(bounded,
-  LoRA) / OLD(both) — so each channel is confirmed INDEPENDENTLY. Repro:
+CHANNEL ISOLATION — MEASURED (2026-07-17, --isolate, clean 2x2, 3 OLD-variants share ONE compile path so
+  only prompt{bounded|flood} x train{off|on} differ; an untrained LoRA is zero-init == frozen):
+    NEW          (neither: frozen + membrane) : 10/10  compounds (graph 25->27)
+    CONTEXT-only (flood prompt, frozen)       :  3/10  <- flood ALONE drops it 10->3
+    WEIGHT-only  (bounded prompt, LoRA SFT)   :  6/10  <- LoRA  ALONE drops it 10->6
+    OLD          (both: flood + LoRA)         :  1/10  <- channels STACK, worst
+  BOTH channels are independently load-bearing (each < NEW) and they stack -> "both channels confirmed"
+  HOLDS. (A first buggy run had CONTEXT-only 0/10 — artifact of a mismatched compile path, fixed 09ba327;
+  it also showed WEIGHT-only 9/10, which was noise.) HONEST NOISE CAVEAT: single seed, 10 tasks, temperature
+  0.6 -> the per-round curves are NON-MONOTONIC and the RNG floor is +-1-2 tasks (R1 OLD 0/3 vs CONTEXT-only
+  1/3 is the IDENTICAL config = pure sampling noise). So the DIRECTION (NEW >> each single poison >> both) is
+  robust and the mechanism is real, but this is a MECHANISM DEMO, not a clean dose-response curve. To harden:
+  greedy decode (do_sample=False) + multiple seeds + more tasks. Repro:
   `V5_LM_QUANT=8bit python -m v5.runtime.algo_grr_poison_test --run --lm Qwen/Qwen2.5-3B-Instruct --isolate`.
-  Honest caveat on the 2-arm numbers above: single seed, 10 tasks — a MECHANISM demo, not a statistic.
 
 ## GRR-Tool BUILD STATUS (2026-07-17) — poison thesis CONFIRMED with real 3B
 All four modules, selftested no-GPU, plus the real-3B two-arm molab run completed:
