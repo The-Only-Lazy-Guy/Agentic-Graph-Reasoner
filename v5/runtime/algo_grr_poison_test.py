@@ -150,11 +150,15 @@ def _extract_defs(code: str) -> dict[str, str]:
     return out
 
 
-def bank_helper_granular(graph: MemoryGraph, code: str, entry: str) -> list[str]:
+def bank_helper_granular(graph: MemoryGraph, code: str, entry: str,
+                         type_pool: list | None = None) -> list[str]:
     """NEW-arm SLEEP: bank each NEW, USED, self-contained helper as its OWN atom with part_of + depend
     edges. Uses bankable_pure_defs so a helper the LM NESTED inside the entry is still banked (robust
-    compounding — no dependency on the frozen LM factoring top-level). Returns banked node ids."""
-    from v5.runtime.algo_grr_membrane import bankable_pure_defs, _called
+    compounding — no dependency on the frozen LM factoring top-level). If type_pool is given, each
+    helper must also pass fuzz_gate_helper (generality: no-crash + non-degenerate + deterministic on
+    fresh random inputs) — kills the constant/identity-poison class at the store-gate. Returns banked
+    node ids."""
+    from v5.runtime.algo_grr_membrane import bankable_pure_defs, _called, fuzz_gate_helper
     existing = _atom_entries(graph)          # entry-name -> node id
     exclude = set(existing.keys()) | {entry}
     # pure defs (top-level or nested) that are new AND actually called somewhere (not dead code)
@@ -164,6 +168,10 @@ def bank_helper_granular(graph: MemoryGraph, code: str, entry: str) -> list[str]
         nid = f"impl_{name}"
         if nid in graph.nodes:
             continue
+        if type_pool is not None:
+            ok, _reason = fuzz_gate_helper(src, name, type_pool)
+            if not ok:
+                continue                     # generality gate rejects -> not banked (anti-pollution)
         concept = _classify(name + " " + src)
         graph.nodes[nid] = Node(
             id=nid, text=f"{name.replace('_', ' ')}", node_type="implementation",
@@ -216,9 +224,11 @@ def run_new_arm(rounds: list[list[dict]], compile_fn: Callable[[dict], str],
             lm_calls += len(solver.compile_inputs) - n0
             prompt_atoms += max((len(s["atoms"]) for s in solver.compile_inputs), default=0)
             if r["solved"]:
+                from v5.runtime.algo_grr_membrane import _infer_type_pool
                 solved += 1
                 reuse_events += len(r["selected"])
-                banked += len(bank_helper_granular(graph, r["code"], t["entry"]))
+                banked += len(bank_helper_granular(graph, r["code"], t["entry"],
+                                                   type_pool=_infer_type_pool(t["tests"])))
         n = len(tasks)
         metrics.append(dict(round=ri + 1, solved=solved, n=n, reuse=reuse_events, banked=banked,
                             avg_lm_calls=lm_calls / n, avg_prompt_atoms=prompt_atoms / n,
@@ -392,6 +402,24 @@ def _selftest() -> bool:
     print(f"  [5] robust banking: nested helper banked={got_nested} ({b1}), "
           f"capturing-closure rejected={guarded} -> {'PASS' if got_nested and guarded else 'FAIL'}")
     ok &= got_nested and guarded
+
+    # [6] generality gate: a DEGENERATE helper (constant output) is REJECTED; a real one is banked.
+    g6 = load_seed()
+    degen = ("def t_z(n):\n"
+             "    def always_true(x):\n"
+             "        return True\n"          # constant -> degenerate poison class
+             "    return always_true(n)\n")
+    b_deg = bank_helper_granular(g6, degen, "t_z", type_pool=[int])
+    real = ("def t_w(n):\n"
+            "    def triple(x):\n"
+            "        return x * 3\n"          # varies with input -> general
+            "    return triple(n)\n")
+    b_real = bank_helper_granular(g6, real, "t_w", type_pool=[int])
+    rej = "impl_always_true" not in b_deg
+    acc = "impl_triple" in b_real
+    print(f"  [6] generality gate: degenerate rejected={rej} (banked {b_deg}), real accepted={acc} "
+          f"({b_real}) -> {'PASS' if rej and acc else 'FAIL'}")
+    ok &= rej and acc
 
     print(f"\n  ALGO_GRR_POISON_TEST SELFTEST -> {'PASS' if ok else 'FAIL'}")
     return ok

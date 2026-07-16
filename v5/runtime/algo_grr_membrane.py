@@ -90,6 +90,78 @@ def _called(code: str, name: str) -> bool:
     return calls - defs > 0
 
 
+def _infer_type_pool(test_inputs) -> list:
+    """Python types seen across a task's test argument values (e.g. [int], [str], [list])."""
+    pool = []
+    for args, _expected in (test_inputs or []):
+        for a in args:
+            t = type(a)
+            if t not in pool:
+                pool.append(t)
+    return pool or [int]
+
+
+def _rand_val(t, rng):
+    if t is str:
+        return "".join(rng.choice("abcde") for _ in range(rng.randint(0, 6)))
+    if t is bool:
+        return rng.choice([True, False])
+    if t in (list, tuple):
+        return [rng.randint(0, 20) for _ in range(rng.randint(0, 6))]
+    if t is float:
+        return round(rng.uniform(0, 40), 2)
+    return rng.randint(0, 40)                              # int / fallback
+
+
+def fuzz_gate_helper(helper_src: str, name: str, type_pool: list, n: int = 14,
+                     seed: int = 0) -> tuple[bool, str]:
+    """Generality gate for a DERIVED helper (no oracle available). Runs it on fresh RANDOM inputs
+    (typed from the task's inputs) and rejects the pollution classes the store-gate must stop:
+      - CRASHES on most inputs  -> fragile / wrong-shape,
+      - CONSTANT output across varied inputs -> degenerate (the `return True` / identity-poison class),
+      - NON-DETERMINISTIC       -> not a pure function.
+    Returns (ok, reason). This is the GRR-1 fuzz bar adapted to oracle-free novel atoms."""
+    import random
+    import ast as _ast
+    try:
+        tree = _ast.parse(helper_src)
+        fnode = next((x for x in _ast.walk(tree) if isinstance(x, _ast.FunctionDef) and x.name == name), None)
+        if fnode is None:
+            return False, "helper def not found"
+        arity = len(fnode.args.posonlyargs) + len(fnode.args.args)
+        ns: dict = {}
+        exec(compile(helper_src, f"<gate:{name}>", "exec"), ns)
+        fn = ns[name]
+    except Exception as e:  # noqa: BLE001
+        return False, f"compile error: {e!r}"
+    rng = random.Random(seed)
+    outs, crashes, sample = [], 0, None
+    for _ in range(n):
+        types = [rng.choice(type_pool) for _ in range(max(1, arity))]
+        args = tuple(_rand_val(t, rng) for t in types)
+        try:
+            out = fn(*args)
+        except Exception:  # noqa: BLE001
+            crashes += 1
+            continue
+        outs.append(repr(out))
+        if sample is None:
+            sample = args
+    if crashes > n // 2:
+        return False, f"crashes on {crashes}/{n} random inputs (fragile)"
+    if not outs:
+        return False, "no successful runs"
+    if len(set(outs)) <= 1:
+        return False, f"constant output {outs[0]} across varied inputs (degenerate)"
+    if sample is not None:                                 # determinism
+        try:
+            if repr(fn(*sample)) != repr(fn(*sample)):
+                return False, "non-deterministic"
+        except Exception:  # noqa: BLE001
+            pass
+    return True, f"{len(set(outs))} distinct outputs over {n - crashes} runs"
+
+
 def bankable_pure_defs(code: str, exclude: set[str]) -> dict[str, str]:
     """Every FunctionDef (top-level OR NESTED) that is SELF-CONTAINED (pure) and whose name is not in
     `exclude`. Pure = every free Load-name is a builtin or another def's name in this code — i.e. it

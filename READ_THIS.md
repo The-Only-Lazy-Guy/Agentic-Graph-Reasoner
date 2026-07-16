@@ -220,8 +220,13 @@ INVARIANTS (do not violate):
   - All learning lives in the TRM (retrieval/compose policy) + the graph (verified atoms).
 
 CHECKLIST TO FINAL (scale + hardening, NOT redesign), ranked:
-  1. Wire ComplementPolicy into MembraneSolver (retrieval quality) — IN PROGRESS.
-  2. Fuzz-gate derived helpers (GRR-1 random-input bar on banked derived atoms → kill pollution).
+  1. [DONE] ComplementPolicy in MembraneSolver — make_graph_policy_fn (growth-aware, re-embeds the
+     current graph so DERIVED atoms are scored; residual over cosine so novel atoms stay findable);
+     run_new_arm policy_fn + --policy flag. No-GPU: policy NEW arm 10/10, compounds. commit cb04595.
+  2. [DONE] Fuzz-gate derived helpers — membrane.fuzz_gate_helper: runs a novel helper on fresh RANDOM
+     typed inputs, rejects CRASH>half / CONSTANT-output (the return-True/identity-poison class) /
+     NON-DETERMINISTIC. Wired into bank_helper_granular (type_pool from the task inputs). poison selftest
+     [6]: degenerate rejected, real accepted; compounding intact.
   3. Scale to MBPP+ (real open-source corpus = the generalization proof + factoring/reuse stress test).
   4. Clean measurement (greedy decode + multiple seeds + more tasks).
 THE open risk #3 stresses: does the frozen 3B still FACTOR reusable helpers + do they GENERALIZE on
