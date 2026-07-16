@@ -402,6 +402,7 @@ def make_old_arm_lm(model_name: str, adapter_dir: str = "artifacts/old_arm_adapt
 
     The model + optimizer are captured in closures, persisting across rounds.
     """
+    import os
     import torch
     from transformers import AutoTokenizer
     from peft import LoraConfig, get_peft_model
