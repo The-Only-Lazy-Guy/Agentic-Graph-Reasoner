@@ -23,6 +23,7 @@ The LM compile_fn is injectable too:
 from __future__ import annotations
 
 import argparse
+import ast
 import math
 import re
 import sys
@@ -249,6 +250,15 @@ def render_compile_prompt(spec: dict) -> str:
         "TOP-LEVEL, GENERAL function with a descriptive name (e.g. `sum_of_squares`, "
         "`nth_fibonacci`) — do NOT inline it, and do NOT nest it inside the entry function.",
         f"- Finally define `{spec['entry']}` to CALL those functions.",
+        "- Output ONLY function definitions. No test code, no print(), no calls at module level.",
+        "",
+        "Required shape (helpers at top level, NOT nested inside the entry):",
+        "```python",
+        "def sum_of_squares(k):        # general top-level helper",
+        "    return sum(i * i for i in range(1, k + 1))",
+        "def solve_it(n):              # entry calls the helper",
+        "    return sum_of_squares(n)",
+        "```",
         "",
         f"Task: {spec['task_text']}",
         f"Entry function name: {spec['entry']}",
@@ -282,6 +292,24 @@ def render_compile_prompt(spec: dict) -> str:
     lines += ["", "Return ALL the functions (top-level helpers first, then the entry) in one "
               "```python code block."]
     return "\n".join(lines)
+
+
+def strip_module_exec(code: str) -> str:
+    """Keep only top-level defs/imports; drop stray executable statements (print/check()/__main__
+    blocks) the LM appends. Hygiene (our verify calls the entry) + anti-cheat: the LM must never run
+    its OWN test harness inside our sandbox. Preserves original source of each kept node."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return code
+    keep = []
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                             ast.Import, ast.ImportFrom)):
+            seg = ast.get_source_segment(code, node)
+            if seg:
+                keep.append(seg)
+    return "\n\n".join(keep) if keep else code
 
 
 def _extract_code(text: str) -> str:
@@ -353,6 +381,7 @@ def make_lm_compiler(gen_fn: Callable[[list[str]], list[str]]) -> Callable[[dict
         glue = repair_code(_extract_code(text), spec["entry"])
         atom_names = {a["name"] for a in spec.get("atoms", [])}
         glue = _strip_redefs(glue, atom_names)
+        glue = strip_module_exec(glue)          # drop the LM's own print()/check() calls
         closure = "\n\n".join(a["code"].rstrip("\n") for a in spec.get("atoms", []))
         return (closure + "\n\n" + glue) if closure else glue
     return compile_fn
