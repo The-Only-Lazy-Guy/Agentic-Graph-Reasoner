@@ -291,7 +291,7 @@ def run_old_arm(rounds: list[list[dict]],
                                   if graph.nodes[nid].metadata.get("origin") == "old_whole"}
                 reuse_events += len(reuse_set(code, t["entry"], banked_entries))
                 bank_whole_solution(graph, code, t)
-                verified_pool.append({"task": t, "code": code})
+                verified_pool.append({"task": t, "code": code, "prompt": prompt})
         if train_fn is not None:            # molab: LoRA SFT on own verified traces (weight poison)
             train_fn(verified_pool)
         n = len(tasks)
@@ -388,12 +388,99 @@ def inspect_derive(lm_name: str) -> None:
                       f"(graph now {len(graph.nodes)} nodes)")
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# OLD-arm LM factory — stateful LoRA-poisoned LM (the poison arm for molab)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def make_old_arm_lm(model_name: str, adapter_dir: str = "artifacts/old_arm_adapter",
+                     r_lora: int = 8, lr: float = 1e-4, epochs: int = 2,
+                     temperature: float = 0.6, max_new_tokens: int = 220):
+    """Return (compile_fn, train_fn) for the OLD arm's LoRA-poisoned LM.
+
+    compile_fn(prompt, graph, task) -> generated code (uses current LoRA weights)
+    train_fn(verified_pool)          -> LoRA SFT on verified traces (updates weights)
+
+    The model + optimizer are captured in closures, persisting across rounds.
+    """
+    import torch
+    from transformers import AutoTokenizer
+    from peft import LoraConfig, get_peft_model
+    from v5.lm_loader import load_frozen_lm
+
+    trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
+    tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=trust)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+
+    base = load_frozen_lm(model_name)
+    target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+    model = get_peft_model(base, LoraConfig(r=r_lora, lora_alpha=2 * r_lora, lora_dropout=0.0,
+                                            task_type="CAUSAL_LM", target_modules=target_modules))
+    dev = next(model.parameters()).device
+    opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=lr)
+    ce = torch.nn.CrossEntropyLoss()
+
+    def compile_fn(prompt: str, graph: MemoryGraph, task: dict) -> str:
+        """Generate code using the LM (with current LoRA weights)."""
+        from v5.runtime.tool_memory import _extract_code
+        model.eval()
+        msgs = tok.apply_chat_template([{"role": "user", "content": prompt}],
+                                       tokenize=False, add_generation_prompt=True)
+        enc = tok([msgs], return_tensors="pt", padding=True, padding_side="left").to(dev)
+        with torch.no_grad():
+            out = model.generate(**enc, do_sample=True, temperature=temperature, top_p=0.95,
+                                 max_new_tokens=max_new_tokens, pad_token_id=tok.pad_token_id)
+        raw = tok.decode(out[0, enc["input_ids"].shape[1]:], skip_special_tokens=True)
+        return _extract_code(raw) or raw
+
+    def train_fn(verified_pool: list[dict]) -> None:
+        """LoRA SFT on verified traces — the weight-poison mechanism."""
+        if not verified_pool:
+            return
+        model.train()
+        import random
+        rng = random.Random(0)
+        traces = []
+        for rec in verified_pool:
+            code_block = "```python\n" + rec["code"] + "\n```"
+            text = code_block + tok.eos_token
+            traces.append({"prompt": rec.get("prompt", rec["task"]["text"]), "code": text, "raw": text})
+        for ep in range(epochs):
+            rng.shuffle(traces)
+            losses = []
+            for tr in traces:
+                ptxt = tok.apply_chat_template([{"role": "user", "content": tr["prompt"]}],
+                                               tokenize=False, add_generation_prompt=True)
+                pids = tok(ptxt, return_tensors="pt", add_special_tokens=False).input_ids.to(dev)
+                cids = tok(tr["code"], return_tensors="pt", add_special_tokens=False).input_ids.to(dev)
+                ids = torch.cat([pids, cids], dim=1)[:, -2048:].to(dev)
+                n_c = min(cids.shape[1], ids.shape[1] - 1)
+                logits = model(ids).logits
+                loss = ce(logits[:, -n_c - 1:-1].reshape(-1, logits.shape[-1]).float(),
+                          ids[:, -n_c:].reshape(-1))
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad], 1.0)
+                opt.step()
+                opt.zero_grad()
+                losses.append(float(loss.detach()))
+            print(f"  [old-arm lora ep {ep}] mean loss {sum(losses)/max(1,len(losses)):.3f} "
+                  f"({len(traces)} traces)", flush=True)
+        Path(adapter_dir).mkdir(parents=True, exist_ok=True)
+        model.save_pretrained(adapter_dir)
+        model.eval()
+
+    return compile_fn, train_fn
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--run", action="store_true", help="two-arm run (stub unless --lm given)")
     ap.add_argument("--inspect", action="store_true", help="raw-dump R3/R4 derive code (needs --lm)")
     ap.add_argument("--lm", default="", help="frozen 3B for the NEW arm (molab)")
+    ap.add_argument("--old-arm", action="store_true", help="also run the OLD arm with LoRA training")
+    ap.add_argument("--old-lora", default="artifacts/old_arm_adapter",
+                    help="LoRA adapter dir for the OLD arm")
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
@@ -401,13 +488,18 @@ def main() -> None:
         inspect_derive(a.lm or "Qwen/Qwen2.5-3B-Instruct")
         return
     if a.run:
+        from v5.runtime.algo_grr_membrane import make_frozen_gen, make_lm_compiler
+        rounds = curriculum()
         if a.lm:
-            from v5.runtime.algo_grr_membrane import make_frozen_gen
-            rounds = curriculum()
             gen = make_frozen_gen(a.lm, temperature=0.6, max_new_tokens=220)
             new_m = run_new_arm(rounds, make_lm_compiler(gen))
             _fmt("NEW (frozen 3B + membrane):", new_m)
-            print("\n(OLD arm with LoRA train_fn = molab, wire algo_star_epoch.train_lora)")
+            if a.old_arm:
+                print("\n--- Running OLD arm (LoRA-poisoned) ---")
+                compile_old, train_old = make_old_arm_lm(
+                    a.lm, adapter_dir=a.old_lora, epochs=2)
+                old_m = run_old_arm(rounds, compile_old, train_fn=train_old)
+                _fmt("OLD (LoRA SFT + raw graph flood):", old_m)
         else:
             two_arm(verbose=True)
         return
