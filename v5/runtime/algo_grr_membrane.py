@@ -243,11 +243,15 @@ def render_compile_prompt(spec: dict) -> str:
     model composes; it writes ONLY the entry glue. Verified atom code is prepended by the caller, so
     the LM cannot corrupt the atoms."""
     lines = [
-        "You are a code compiler. Write ONE Python function that solves the task by COMPOSING the "
-        "helper functions provided below. Do not reimplement a helper — call it.",
+        "You are a code compiler. Solve the task by COMPOSING small functions. Rules:",
+        "- CALL a provided helper wherever it applies; never reimplement one.",
+        "- For any sub-computation NOT covered by a provided helper, define it as a SEPARATE, "
+        "TOP-LEVEL, GENERAL function with a descriptive name (e.g. `sum_of_squares`, "
+        "`nth_fibonacci`) — do NOT inline it, and do NOT nest it inside the entry function.",
+        f"- Finally define `{spec['entry']}` to CALL those functions.",
         "",
         f"Task: {spec['task_text']}",
-        f"Required function name: {spec['entry']}",
+        f"Entry function name: {spec['entry']}",
     ]
     atoms = spec.get("atoms", [])
     if atoms:
@@ -275,7 +279,8 @@ def render_compile_prompt(spec: dict) -> str:
             "`sum_of_squares`/`nth_fibonacci`, never `solve`/the task name), then define "
             f"`{spec['entry']}` to CALL that helper. The helper must be reusable by other tasks — "
             "no task-specific constants baked in."]
-    lines += ["", f"Return ONLY the function `{spec['entry']}` in a ```python code block."]
+    lines += ["", "Return ALL the functions (top-level helpers first, then the entry) in one "
+              "```python code block."]
     return "\n".join(lines)
 
 
