@@ -301,6 +301,34 @@ def _strip_redefs(glue: str, atom_names: set[str]) -> str:
     return "\n".join(out)
 
 
+def make_frozen_gen(model_name: str, temperature: float = 0.6, max_new_tokens: int = 220):
+    """gen_fn(prompts)->texts on a FROZEN LM loaded via v5.lm_loader.load_frozen_lm.
+
+    Use this over algo_lm_proposer.make_hf_gen on molab: make_hf_gen loads with device_map="auto",
+    which SEGFAULTS on the box mid-weight-load (accelerate auto-placement, commit 0a1223a). load_frozen_lm
+    loads then does an explicit .to(device) — the proven path. Model stays frozen (no training)."""
+    import os
+    import torch
+    from transformers import AutoTokenizer
+    from v5.lm_loader import load_frozen_lm
+    trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
+    tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=trust)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+    model = load_frozen_lm(model_name)
+
+    def gen(prompts: list[str]) -> list[str]:
+        msgs = [tok.apply_chat_template([{"role": "user", "content": p}], tokenize=False,
+                                        add_generation_prompt=True) for p in prompts]
+        enc = tok(msgs, return_tensors="pt", padding=True, padding_side="left").to(model.device)
+        with torch.no_grad():
+            out = model.generate(**enc, do_sample=True, temperature=temperature, top_p=0.95,
+                                 max_new_tokens=max_new_tokens, pad_token_id=tok.pad_token_id)
+        return [tok.decode(out[i, enc["input_ids"].shape[1]:], skip_special_tokens=True)
+                for i in range(len(prompts))]
+    return gen
+
+
 def make_lm_compiler(gen_fn: Callable[[list[str]], list[str]]) -> Callable[[dict], str]:
     """Wrap a FROZEN generation fn (e.g. algo_lm_proposer.make_hf_gen) as `compile(spec)->code`.
 
@@ -634,8 +662,7 @@ def main() -> None:
                 "are_anagrams": "def are_anagrams(a, b):\n    return is_anagram(a, b)\n",
             })
         else:
-            from v5.runtime.algo_lm_proposer import make_hf_gen
-            gen = make_hf_gen(a.lm, temperature=0.6, max_new_tokens=220)
+            gen = make_frozen_gen(a.lm, temperature=0.6, max_new_tokens=220)
             compile_fn = make_lm_compiler(gen)
         print(f"membrane --run: graph={a.graph} lm={'stub' if a.stub else a.lm} "
               f"tasks={len(DEMO_TASKS)}\n")

@@ -372,9 +372,9 @@ def main() -> None:
         sys.exit(0 if _selftest() else 1)
     if a.run:
         if a.lm:
-            from v5.runtime.algo_lm_proposer import make_hf_gen
+            from v5.runtime.algo_grr_membrane import make_frozen_gen
             rounds = curriculum()
-            gen = make_hf_gen(a.lm, temperature=0.6, max_new_tokens=220)
+            gen = make_frozen_gen(a.lm, temperature=0.6, max_new_tokens=220)
             new_m = run_new_arm(rounds, make_lm_compiler(gen))
             _fmt("NEW (frozen 3B + membrane):", new_m)
             print("\n(OLD arm with LoRA train_fn = molab, wire algo_star_epoch.train_lora)")
