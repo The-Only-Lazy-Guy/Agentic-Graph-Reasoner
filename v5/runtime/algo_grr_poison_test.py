@@ -540,20 +540,22 @@ def main() -> None:
         from v5.runtime.algo_grr_membrane import make_frozen_gen, make_lm_compiler
         rounds = curriculum()
         gen = make_frozen_gen(a.lm, temperature=0.6, max_new_tokens=220)
-        # 2x2: {context poison off/on} x {weight poison off/on}. Vary ONE at a time from NEW.
+        # Clean 2x2 {context off/on} x {weight off/on}. The three OLD-variants share ONE compile
+        # path (make_old_arm_lm; an untrained LoRA is zero-init == frozen), so the ONLY differences
+        # are prompt (bounded vs flood) and whether train_fn runs. NEW is the frozen+membrane arm.
         new_m = run_new_arm(rounds, make_lm_compiler(gen))
-        _fmt("NEW        (neither poison: frozen + membrane)", new_m)
-        flood_m = run_old_arm(rounds, make_frozen_old_compile(gen),
-                              train_fn=None, prompt_fn=_raw_prompt)
-        _fmt("CONTEXT-only (flood prompt, frozen LM)", flood_m)
+        _fmt("NEW         (neither: frozen + membrane)", new_m)
+        c_ctx, _t = make_old_arm_lm(a.lm, adapter_dir=a.old_lora + "_context", epochs=2)
+        flood_m = run_old_arm(rounds, c_ctx, train_fn=None, prompt_fn=_raw_prompt)
+        _fmt("CONTEXT-only (flood prompt, untrained LoRA=frozen)", flood_m)
         c_lo, t_lo = make_old_arm_lm(a.lm, adapter_dir=a.old_lora + "_loraonly", epochs=2)
         lora_m = run_old_arm(rounds, c_lo, train_fn=t_lo, prompt_fn=_bounded_prompt)
         _fmt("WEIGHT-only  (bounded prompt, LoRA SFT)", lora_m)
         c_b, t_b = make_old_arm_lm(a.lm, adapter_dir=a.old_lora + "_both", epochs=2)
         both_m = run_old_arm(rounds, c_b, train_fn=t_b, prompt_fn=_raw_prompt)
-        _fmt("OLD        (both poisons: flood + LoRA)", both_m)
-        print("\nRead: CONTEXT-only and WEIGHT-only should EACH decline vs NEW -> each channel "
-              "independently confirmed; OLD (both) is the worst.")
+        _fmt("OLD          (both: flood + LoRA)", both_m)
+        print("\nRead: same compile path across the 3 OLD-variants; only prompt + training differ. "
+              "Whichever of CONTEXT-only / WEIGHT-only declines vs NEW is the load-bearing channel.")
         return
     if a.run:
         from v5.runtime.algo_grr_membrane import make_frozen_gen, make_lm_compiler
