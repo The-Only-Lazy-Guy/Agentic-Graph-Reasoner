@@ -250,6 +250,23 @@ RESULT — NEW 10/10 (100%), OLD 6/10 (60%). Two poison channels both confirmed:
   VERDICT: frozen-compiler + membrane premise CONFIRMED — the poison thesis is experimentally
   validated with a real 3B. All learning stays in TRM + graph; the LM stays frozen forever.
 
+COMPOUNDING CONFIRMED IN RAW (2026-07-17, --inspect on the real 3B — not from aggregates):
+  R3 t_sumsq -> frozen 3B factors a TOP-LEVEL `sum_of_squares` -> BANKED, graph 25->26.
+  R4 t_sumsq_rev -> solve selects=['sum_of_squares'] = REUSES the R3-banked atom (the payoff, VISIBLE).
+  R4 t_fib_prime -> factors + BANKS `fib`, reuses is_prime, graph ->27.
+  Graph grew 25->27, two derived atoms banked, one reused across rounds. Earlier runs had banked=0
+  (3B wrote MONOLITHIC/NESTED code); two fixes closed it: (i) compose prompt demands TOP-LEVEL factoring
+  + one-shot shape + strip_module_exec (drops the LM's own print()/check() so its grader never runs in
+  our sandbox = anti-cheat hygiene); (ii) membrane.bankable_pure_defs banks a helper even when the LM
+  NESTS it inside the entry (AST purity walk; capturing closures rejected) -> robust compounding that
+  does NOT depend on the LM factoring top-level. poison_test selftest now 5 checks (incl. nested-banking).
+CHANNEL ISOLATION (built, --isolate, molab-pending): the OLD arm bundles BOTH poisons (flood + LoRA move
+  together each round), so the 2-arm run only proves "combined old-design declines". run_old_arm now takes
+  prompt_fn; --isolate runs 4 arms — NEW(neither) / CONTEXT-only(flood, frozen) / WEIGHT-only(bounded,
+  LoRA) / OLD(both) — so each channel is confirmed INDEPENDENTLY. Repro:
+  `V5_LM_QUANT=8bit python -m v5.runtime.algo_grr_poison_test --run --lm Qwen/Qwen2.5-3B-Instruct --isolate`.
+  Honest caveat on the 2-arm numbers above: single seed, 10 tasks — a MECHANISM demo, not a statistic.
+
 ## GRR-Tool BUILD STATUS (2026-07-17) — poison thesis CONFIRMED with real 3B
 All four modules, selftested no-GPU, plus the real-3B two-arm molab run completed:
 - `algo_grr_seed.py` -> `graphs/grr_seed_clean.json` (clean 25-node seed with depend edges).
