@@ -226,6 +226,28 @@ FALSIFIABLE NEXT TEST (two-arm, over STaR rounds, same seed graph): OLD (LoRA-tr
 prompt) should DECLINE; NEW (frozen LM + TRM membrane) should be FLAT-OR-RISING with per-task LM tokens
 FALLING. If NEW doesn't beat OLD over rounds, the frozen-membrane premise is wrong.
 
+## GRR-Tool BUILD STATUS (2026-07-16) — membrane loop + two-arm test, no-GPU-proven, molab-ready
+Three modules, all selftested no-GPU (torch-free cores; frozen 3B + LoRA inject on molab):
+- `algo_grr_seed.py` -> `graphs/grr_seed_clean.json` (clean seed; see above).
+- `algo_grr_membrane.py` = the frozen-compiler + membrane closed loop. MembraneSolver: iterative
+  verifier-gated retrieval (speculative rank-add + coverage stop + prune-to-called), curated spec,
+  `policy_fn` seam (TRM policy drops in = build B, retrieves the COMPLEMENT of the partial program),
+  `make_lm_compiler(gen_fn)` = FROZEN 3B as compile(spec)->code (curated prompt = membrane; `_strip_redefs`
+  keeps graph atoms authoritative; verified closure prepended), `reuse_set` = AST call-graph BFS from the
+  entry (the true reuse unit, no spurious depend edges). Selftest 5/5: composition fires, membrane holds
+  (<=3 atoms/spec, never the 21-node graph), anti-poison (high-similarity WRONG atom ranks top-3 but
+  fails verify + is pruned un-called -> never banked). `--run --stub` 6/6; `--run --lm Qwen/...` = molab.
+- `algo_grr_poison_test.py` = the two-arm test on a designed seed curriculum (R1 recall / R2 compose /
+  R3 derive-new-atom / R4 reuse-the-derived). NEW = frozen+membrane+helper-granular derive-bank; OLD =
+  raw-graph-advertise (all atoms flooded into prompt) + whole-solution banking (flat, no depend) +
+  LoRA-train_fn hook. STRUCTURAL RESULT (no-GPU, selftest PASS): NEW R3 banks 2 atoms -> R4 reuse=4
+  (COMPOUNDING), prompt BOUNDED (max ~4 atoms), reuse total 13; OLD prompt FLOODS 22->30 (grows with the
+  graph = context-poison channel), reuse=0 (whole-solution banking cannot compose). That contrast IS the
+  poison mechanism, measured directly. REAL accuracy-decline (weight-poison via LoRA + flood degrading
+  outputs) = molab-only: `--run --lm <model>` (NEW arm real 3B) + wire algo_star_epoch.train_lora as the
+  OLD arm train_fn. PENDING (build B / next): the TRM policy training (deep-sup on membrane pointer-
+  sequences + coverage-delta) to drop into policy_fn; then the real-3B two-arm molab run.
+
 ## CLEAN SEED GRAPH (2026-07-16) — replaces the polluted grown graphs
 The grown graphs (grr_grown 377n, grown_graph* 4-13MB) are POLLUTED: whole task-solutions banked under
 entry-point names (`impl_similar_elements` = raw MBPP prompt + full solution), reusable helpers TRAPPED as
