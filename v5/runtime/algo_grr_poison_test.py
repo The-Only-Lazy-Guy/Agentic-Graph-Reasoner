@@ -151,30 +151,30 @@ def _extract_defs(code: str) -> dict[str, str]:
 
 
 def bank_helper_granular(graph: MemoryGraph, code: str, entry: str) -> list[str]:
-    """NEW-arm SLEEP: bank each NEW helper (reachable from entry, not the entry, not an existing
-    atom) as its OWN verified atom with part_of + depend edges. Returns banked node ids."""
+    """NEW-arm SLEEP: bank each NEW, USED, self-contained helper as its OWN atom with part_of + depend
+    edges. Uses bankable_pure_defs so a helper the LM NESTED inside the entry is still banked (robust
+    compounding — no dependency on the frozen LM factoring top-level). Returns banked node ids."""
+    from v5.runtime.algo_grr_membrane import bankable_pure_defs, _called
     existing = _atom_entries(graph)          # entry-name -> node id
-    defs = _extract_defs(code)
-    # call graph (for depend edges + reachability)
-    reach = reuse_set(code, entry, set(defs.keys()))   # atoms/helpers reachable from entry
+    exclude = set(existing.keys()) | {entry}
+    # pure defs (top-level or nested) that are new AND actually called somewhere (not dead code)
+    pure = {n: s for n, s in bankable_pure_defs(code, exclude).items() if _called(code, n)}
     banked: list[str] = []
-    for name in reach:
-        if name == entry or name in existing or name not in defs:
-            continue
+    for name, src in pure.items():
         nid = f"impl_{name}"
         if nid in graph.nodes:
             continue
-        concept = _classify(name + " " + defs[name])
+        concept = _classify(name + " " + src)
         graph.nodes[nid] = Node(
             id=nid, text=f"{name.replace('_', ' ')}", node_type="implementation",
             confidence=0.9, importance=0.5,
-            metadata={"code": defs[name], "entry": name, "kind": "atom", "origin": "derived",
+            metadata={"code": src, "entry": name, "kind": "atom", "origin": "derived",
                       "concept": concept},
         )
         graph.edges.append(Edge(src=nid, dst=concept, relation="part_of", strength=1.0,
                                 metadata={"origin": "derived"}))
-        # depend edges: helpers/atoms THIS helper calls
-        called = {n.func.id for n in ast.walk(ast.parse(defs[name]))
+        # depend edges: existing atoms / sibling new helpers THIS helper calls
+        called = {n.func.id for n in ast.walk(ast.parse(src))
                   if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
         for c in called:
             dep_nid = existing.get(c) or (f"impl_{c}" if f"impl_{c}" in graph.nodes else None)
@@ -245,13 +245,19 @@ def make_raw_stub(tasks_flat: list[dict]) -> Callable[[str, MemoryGraph, dict], 
 
 
 def _raw_prompt(graph: MemoryGraph, task: dict) -> tuple[str, int]:
-    """OLD arm prompt: ADVERTISE every banked atom (the measured net-negative channel) + task.
+    """FLOOD prompt: ADVERTISE every banked atom (the measured net-negative channel) + task.
     Returns (prompt, n_advertised). n_advertised GROWS with the graph -> context flood."""
     impls = [nid for nid in graph.nodes if graph.nodes[nid].node_type == "implementation"]
     ads = "\n".join(f"- {graph.nodes[nid].metadata.get('entry', nid)}: {graph.nodes[nid].text}"
                     for nid in impls)
     prompt = f"Available functions:\n{ads}\n\nTask: {task['text']}\nWrite {task['entry']}."
     return prompt, len(impls)
+
+
+def _bounded_prompt(graph: MemoryGraph, task: dict) -> tuple[str, int]:
+    """BOUNDED prompt: task only, no graph advertisement. Holds the context channel FIXED so a run
+    with LoRA training isolates the WEIGHT-poison channel."""
+    return f"Task: {task['text']}\nWrite a Python function `{task['entry']}`.", 0
 
 
 def bank_whole_solution(graph: MemoryGraph, code: str, task: dict) -> None:
@@ -271,14 +277,17 @@ def bank_whole_solution(graph: MemoryGraph, code: str, task: dict) -> None:
 
 def run_old_arm(rounds: list[list[dict]],
                 compile_fn: Callable[[str, MemoryGraph, dict], str],
-                train_fn: Callable[[list], None] | None = None) -> list[dict]:
+                train_fn: Callable[[list], None] | None = None,
+                prompt_fn: Callable[[MemoryGraph, dict], tuple[str, int]] = _raw_prompt) -> list[dict]:
+    """train_fn=None => no weight poison; prompt_fn=_bounded_prompt => no context poison. Vary ONE
+    to isolate a single channel (flood-only / lora-only)."""
     graph = load_seed()
     verified_pool: list[dict] = []
     metrics = []
     for ri, tasks in enumerate(rounds):
         solved = reuse_events = prompt_atoms = 0
         for t in tasks:
-            prompt, n_ads = _raw_prompt(graph, t)
+            prompt, n_ads = prompt_fn(graph, t)
             prompt_atoms += n_ads
             code = compile_fn(prompt, graph, t)
             frac, _ = verify_code(code, t["entry"], t["tests"])
@@ -358,6 +367,30 @@ def _selftest() -> bool:
           f"-> {'PASS' if new_reuse_total > 0 and old_reuse_total == 0 else 'FAIL'}")
     ok &= new_reuse_total > 0 and old_reuse_total == 0
 
+    # [5] robust banking: a helper the LM NESTED inside the entry is still banked (real-3B fix);
+    #     a capturing closure is NOT (purity guard) — no half-defined atom pollutes the graph.
+    g = load_seed()
+    n0 = len(g.nodes)
+    nested = ("def t_fib(n):\n"
+              "    def nth_fibonacci(n):\n"
+              "        a, b = 0, 1\n"
+              "        for _ in range(n):\n"
+              "            a, b = b, a + b\n"
+              "        return a\n"
+              "    return nth_fibonacci(n)\n")
+    b1 = bank_helper_granular(g, nested, "t_fib")
+    got_nested = "impl_nth_fibonacci" in b1 and len(g.nodes) == n0 + 1
+    capturing = ("def t_y(n):\n"
+                 "    k = n + 1\n"
+                 "    def bad(m):\n"          # captures enclosing local k -> NOT standalone
+                 "        return m + k\n"
+                 "    return bad(2)\n")
+    b2 = bank_helper_granular(g, capturing, "t_y")
+    guarded = "impl_bad" not in b2
+    print(f"  [5] robust banking: nested helper banked={got_nested} ({b1}), "
+          f"capturing-closure rejected={guarded} -> {'PASS' if got_nested and guarded else 'FAIL'}")
+    ok &= got_nested and guarded
+
     print(f"\n  ALGO_GRR_POISON_TEST SELFTEST -> {'PASS' if ok else 'FAIL'}")
     return ok
 
@@ -391,6 +424,16 @@ def inspect_derive(lm_name: str) -> None:
 # ═══════════════════════════════════════════════════════════════════════════════
 # OLD-arm LM factory — stateful LoRA-poisoned LM (the poison arm for molab)
 # ═══════════════════════════════════════════════════════════════════════════════
+
+def make_frozen_old_compile(gen: Callable[[list[str]], list[str]]) -> Callable[[str, MemoryGraph, dict], str]:
+    """OLD-arm compile_fn backed by a FROZEN LM (no LoRA). Used for the flood-only isolation arm:
+    context poison ON (flood prompt), weight poison OFF (frozen)."""
+    from v5.runtime.algo_grr_membrane import _extract_code, strip_module_exec
+
+    def compile_fn(prompt: str, graph: MemoryGraph, task: dict) -> str:
+        return strip_module_exec(_extract_code(gen([prompt])[0]))
+    return compile_fn
+
 
 def make_old_arm_lm(model_name: str, adapter_dir: str = "artifacts/old_arm_adapter",
                      r_lora: int = 8, lr: float = 1e-4, epochs: int = 2,
@@ -480,6 +523,8 @@ def main() -> None:
     ap.add_argument("--inspect", action="store_true", help="raw-dump R3/R4 derive code (needs --lm)")
     ap.add_argument("--lm", default="", help="frozen 3B for the NEW arm (molab)")
     ap.add_argument("--old-arm", action="store_true", help="also run the OLD arm with LoRA training")
+    ap.add_argument("--isolate", action="store_true",
+                    help="4-arm channel isolation: neither / context-only / weight-only / both")
     ap.add_argument("--old-lora", default="artifacts/old_arm_adapter",
                     help="LoRA adapter dir for the OLD arm")
     a = ap.parse_args()
@@ -487,6 +532,28 @@ def main() -> None:
         sys.exit(0 if _selftest() else 1)
     if a.inspect:
         inspect_derive(a.lm or "Qwen/Qwen2.5-3B-Instruct")
+        return
+    if a.isolate:
+        if not a.lm:
+            print("--isolate needs --lm <model>")
+            return
+        from v5.runtime.algo_grr_membrane import make_frozen_gen, make_lm_compiler
+        rounds = curriculum()
+        gen = make_frozen_gen(a.lm, temperature=0.6, max_new_tokens=220)
+        # 2x2: {context poison off/on} x {weight poison off/on}. Vary ONE at a time from NEW.
+        new_m = run_new_arm(rounds, make_lm_compiler(gen))
+        _fmt("NEW        (neither poison: frozen + membrane)", new_m)
+        flood_m = run_old_arm(rounds, make_frozen_old_compile(gen),
+                              train_fn=None, prompt_fn=_raw_prompt)
+        _fmt("CONTEXT-only (flood prompt, frozen LM)", flood_m)
+        c_lo, t_lo = make_old_arm_lm(a.lm, adapter_dir=a.old_lora + "_loraonly", epochs=2)
+        lora_m = run_old_arm(rounds, c_lo, train_fn=t_lo, prompt_fn=_bounded_prompt)
+        _fmt("WEIGHT-only  (bounded prompt, LoRA SFT)", lora_m)
+        c_b, t_b = make_old_arm_lm(a.lm, adapter_dir=a.old_lora + "_both", epochs=2)
+        both_m = run_old_arm(rounds, c_b, train_fn=t_b, prompt_fn=_raw_prompt)
+        _fmt("OLD        (both poisons: flood + LoRA)", both_m)
+        print("\nRead: CONTEXT-only and WEIGHT-only should EACH decline vs NEW -> each channel "
+              "independently confirmed; OLD (both) is the worst.")
         return
     if a.run:
         from v5.runtime.algo_grr_membrane import make_frozen_gen, make_lm_compiler

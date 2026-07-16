@@ -90,6 +90,48 @@ def _called(code: str, name: str) -> bool:
     return calls - defs > 0
 
 
+def bankable_pure_defs(code: str, exclude: set[str]) -> dict[str, str]:
+    """Every FunctionDef (top-level OR NESTED) that is SELF-CONTAINED (pure) and whose name is not in
+    `exclude`. Pure = every free Load-name is a builtin or another def's name in this code — i.e. it
+    captures nothing from an enclosing function's locals, so it is valid as a standalone top-level atom.
+    Returns {name: dedented top-level source}. This lets the membrane bank a reusable helper even when a
+    frozen LM NESTS it inside the entry (which a 3B does ~half the time) — robust compounding without
+    depending on the LM factoring top-level."""
+    import builtins
+    import textwrap
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return {}
+    all_defs = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    known = all_defs | set(dir(builtins))
+    out: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef) or node.name in exclude:
+            continue
+        bound, used = set(), set()
+        args = node.args
+        for a in list(args.posonlyargs) + list(args.args) + list(args.kwonlyargs):
+            bound.add(a.arg)
+        if args.vararg:
+            bound.add(args.vararg.arg)
+        if args.kwarg:
+            bound.add(args.kwarg.arg)
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Name):
+                (bound if isinstance(sub.ctx, ast.Store) else used).add(sub.id)
+            elif isinstance(sub, ast.arg):
+                bound.add(sub.arg)
+            elif isinstance(sub, ast.FunctionDef) and sub is not node:
+                bound.add(sub.name)
+        if used - bound - known:            # captures an enclosing local -> not standalone
+            continue
+        seg = ast.get_source_segment(code, node)
+        if seg:
+            out[node.name] = textwrap.dedent(seg)
+    return out
+
+
 def reuse_set(code: str, entry: str, atom_entries: set[str]) -> list[str]:
     """Atom entry-names REACHABLE from `entry` through the call graph (BFS over FunctionDef bodies).
 
