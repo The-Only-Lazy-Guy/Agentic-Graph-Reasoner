@@ -385,12 +385,16 @@ def render_compile_prompt(spec: dict) -> str:
             lines.append(f"  {_sig(a['code']) or a['name']}")
     else:
         lines += ["", "No helper functions are available — write the full solution yourself."]
-    tests = spec.get("tests", [])[:4]
-    if tests:
-        lines += ["", "It must satisfy:"]
-        for args, expected in tests:
-            inner = ", ".join(repr(x) for x in args)
-            lines.append(f"  {spec['entry']}({inner}) == {expected!r}")
+    examples = spec.get("examples")               # MBPP+ assert strings (already valid python)
+    if examples:
+        lines += ["", "It must satisfy:"] + [f"  {e}" for e in examples[:4]]
+    else:
+        tests = spec.get("tests", [])[:4]
+        if tests:
+            lines += ["", "It must satisfy:"]
+            for args, expected in tests:
+                inner = ", ".join(repr(x) for x in args)
+                lines.append(f"  {spec['entry']}({inner}) == {expected!r}")
     fail = spec.get("failure")
     if fail:
         lines += ["", "Your previous attempt FAILED. Code:", "```python", str(fail.get("code", "")),
@@ -539,17 +543,23 @@ class MembraneSolver:
                   "code": self.graph.nodes[nid].metadata.get("code", "")}
                  for nid in closure]
         spec = {"task_text": task["text"], "entry": task["entry"],
-                "tests": task["tests"], "atoms": atoms}
+                "tests": task.get("tests", []), "atoms": atoms}
+        if task.get("examples"):
+            spec["examples"] = task["examples"]       # MBPP+ assert strings for the prompt
         if failure:
             spec["failure"] = failure
         return spec
 
     def _coverage(self, task: dict, selected: list[str], failure: dict | None = None) -> tuple[float, str, str]:
-        """Compile the curated spec and verify -> (fraction_pass, code, detail)."""
+        """Compile the curated spec and verify -> (fraction_pass, code, detail). A task may carry a
+        `verify_fn(code)->(frac,detail)` (e.g. MBPP+ asserts) OR tuple `tests`."""
         spec = self._curate(task, selected, failure)
         self.compile_inputs.append(spec)              # audit every LM input
         code = self.compile_fn(spec)
-        frac, detail = verify_code(code, task["entry"], task["tests"])
+        if task.get("verify_fn") is not None:
+            frac, detail = task["verify_fn"](code)
+        else:
+            frac, detail = verify_code(code, task["entry"], task["tests"])
         return frac, code, detail
 
     # ── the loop ───────────────────────────────────────────────────────────────

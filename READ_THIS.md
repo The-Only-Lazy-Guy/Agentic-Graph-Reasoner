@@ -227,7 +227,12 @@ CHECKLIST TO FINAL (scale + hardening, NOT redesign), ranked:
      typed inputs, rejects CRASH>half / CONSTANT-output (the return-True/identity-poison class) /
      NON-DETERMINISTIC. Wired into bank_helper_granular (type_pool from the task inputs). poison selftest
      [6]: degenerate rejected, real accepted; compounding intact.
-  3. Scale to MBPP+ (real open-source corpus = the generalization proof + factoring/reuse stress test).
+  3. [INFRA BUILT, molab run pending] Scale to MBPP+ — algo_grr_mbpp.py: loader (assert-verify +
+     type-inference for the fuzz-gate), membrane generalized to assert-based tasks (task.verify_fn +
+     examples-in-prompt), corpus driver measuring solve + cross-task reuse (+derived_reuse, the
+     compounding signal) as the graph grows. No-GPU selftest PASS (references pass own asserts 8/8,
+     driver runs). THE run: `python -m v5.runtime.algo_grr_mbpp --run --lm Qwen/Qwen2.5-3B-Instruct
+     --limit 120 [--policy]`. This is the real generalization proof + factoring/reuse stress test.
   4. Clean measurement (greedy decode + multiple seeds + more tasks).
 THE open risk #3 stresses: does the frozen 3B still FACTOR reusable helpers + do they GENERALIZE on
 diverse tasks? (seed domain is small+related so reuse fires easily; MBPP+ is the real test.)
