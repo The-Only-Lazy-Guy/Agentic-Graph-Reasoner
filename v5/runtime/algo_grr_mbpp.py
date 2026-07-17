@@ -124,6 +124,10 @@ def run_mbpp(graph, tasks: list[dict], compile_fn, policy_fn=None, retriever=Non
         solver = MembraneSolver(graph, compile_fn, retriever=retriever, policy_fn=policy_fn,
                                 max_hops=max_hops, max_retries=max_retries)
         r = solver.solve(t)
+        if verbose:
+            n_lm = len(solver.compile_inputs)
+            print(f"  [{i+1:4d}/{len(tasks)}] {t['entry']:40s} "
+                  f"{'OK' if r['solved'] else 'FAIL':4s}  lm_calls={n_lm}", flush=True)
         if r["solved"]:
             solved += 1
             # cross-task reuse = graph atoms CALLED in the verified solution
