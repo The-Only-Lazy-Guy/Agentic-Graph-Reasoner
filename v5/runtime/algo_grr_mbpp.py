@@ -44,6 +44,8 @@ COMMON = ("import math\nimport re\nimport itertools\nimport functools\n"
 # only fire between Python bytecodes, never inside a C call).
 _HARD_WORKER = r"""
 import sys, json
+if hasattr(sys, "set_int_max_str_digits"):
+    sys.set_int_max_str_digits(200000)
 d = json.load(sys.stdin)
 ns = {}
 try:

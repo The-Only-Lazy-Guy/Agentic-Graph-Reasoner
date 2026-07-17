@@ -35,6 +35,12 @@ _ROOT = str(Path(__file__).resolve().parents[2])
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+# LM code can produce big ints; Python 3.11 caps int<->str at 4300 digits and RAISES otherwise.
+# Raise the cap so a legit big-int result doesn't crash a verify/fuzz (the fuzz gate still try/excepts
+# the truly astronomical ones as fragile).
+if hasattr(sys, "set_int_max_str_digits"):
+    sys.set_int_max_str_digits(200000)
+
 from graph_core import MemoryGraph, Node, Edge  # type: ignore  # noqa: E402
 
 
@@ -177,7 +183,11 @@ def fuzz_gate_helper(helper_src: str, name: str, type_pool: list, n: int = 14,
         if out is _HANG:                     # infinite loop on this input -> fragile
             crashes += 1
             continue
-        outs.append(repr(out))
+        try:
+            outs.append(repr(out))           # a >4300-digit int (n**n**n on n=40) blows up repr -> fragile
+        except Exception:  # noqa: BLE001
+            crashes += 1
+            continue
         if sample is None:
             sample = args
     # anti-pollution intent = catch the CONSTANT / return-True poison class. Only reject on crashes if
