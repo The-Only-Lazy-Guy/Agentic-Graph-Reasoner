@@ -169,7 +169,18 @@ def bank_helper_granular(graph: MemoryGraph, code: str, entry: str,
         if nid in graph.nodes:
             continue
         if type_pool is not None:
-            ok, _reason = fuzz_gate_helper(src, name, type_pool)
+            # dependency closure so a COMPOSED helper's calls resolve in the gate (else NameError ->
+            # false "fragile" reject that would suppress banking of reuse-bearing helpers)
+            from v5.runtime.algo_grr_membrane import realize_closure_code
+            called = {n.func.id for n in ast.walk(ast.parse(src))
+                      if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+            dep_parts = []
+            for c in called:
+                if c in pure and c != name:
+                    dep_parts.append(pure[c])
+                elif c in existing:                    # transitive closure so a->b->c all resolve
+                    dep_parts.append(realize_closure_code(graph, [existing[c]]))
+            ok, _reason = fuzz_gate_helper(src, name, type_pool, deps_code="\n".join(dep_parts))
             if not ok:
                 continue                     # generality gate rejects -> not banked (anti-pollution)
         concept = _classify(name + " " + src)

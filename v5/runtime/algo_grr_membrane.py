@@ -140,13 +140,15 @@ def _rand_val(t, rng):
 
 
 def fuzz_gate_helper(helper_src: str, name: str, type_pool: list, n: int = 14,
-                     seed: int = 0) -> tuple[bool, str]:
+                     seed: int = 0, deps_code: str = "") -> tuple[bool, str]:
     """Generality gate for a DERIVED helper (no oracle available). Runs it on fresh RANDOM inputs
     (typed from the task's inputs) and rejects the pollution classes the store-gate must stop:
       - CRASHES on most inputs  -> fragile / wrong-shape,
       - CONSTANT output across varied inputs -> degenerate (the `return True` / identity-poison class),
       - NON-DETERMINISTIC       -> not a pure function.
-    Returns (ok, reason). This is the GRR-1 fuzz bar adapted to oracle-free novel atoms."""
+    `deps_code` = source of the atoms/helpers this one CALLS (its dependency closure) so a COMPOSED
+    helper resolves its calls instead of NameError-ing (else composed helpers are falsely rejected as
+    fragile). Returns (ok, reason). GRR-1 fuzz bar adapted to oracle-free novel atoms."""
     import random
     import ast as _ast
     try:
@@ -156,7 +158,8 @@ def fuzz_gate_helper(helper_src: str, name: str, type_pool: list, n: int = 14,
             return False, "helper def not found"
         arity = len(fnode.args.posonlyargs) + len(fnode.args.args)
         ns: dict = {}
-        exec(compile(helper_src, f"<gate:{name}>", "exec"), ns)
+        exec(compile((deps_code + "\n" + helper_src) if deps_code else helper_src,
+                     f"<gate:{name}>", "exec"), ns)
         fn = ns[name]
     except Exception as e:  # noqa: BLE001
         return False, f"compile error: {e!r}"
@@ -177,11 +180,13 @@ def fuzz_gate_helper(helper_src: str, name: str, type_pool: list, n: int = 14,
         outs.append(repr(out))
         if sample is None:
             sample = args
-    if crashes > n // 2:
-        return False, f"crashes on {crashes}/{n} random inputs (fragile)"
+    # anti-pollution intent = catch the CONSTANT / return-True poison class. Only reject on crashes if
+    # NOTHING ran (broken/mistyped) — a multi-arg helper that is merely type-SENSITIVE (works under one
+    # arg-typing, crashes under another) must not be false-rejected, or banking of legit helpers is
+    # suppressed. Degeneracy needs >=3 successful runs to judge.
     if not outs:
-        return False, "no successful runs"
-    if len(set(outs)) <= 1:
+        return False, f"no successful run over {n} typed inputs (broken or mistyped)"
+    if len(outs) >= 3 and len(set(outs)) <= 1:
         return False, f"constant output {outs[0]} across varied inputs (degenerate)"
     if sample is not None:                                 # determinism
         try:
