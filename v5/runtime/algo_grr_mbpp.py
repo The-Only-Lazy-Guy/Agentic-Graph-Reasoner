@@ -108,16 +108,20 @@ def load_mbpp(path: str = CORPUS, limit: int | None = None) -> list[dict]:
 # Corpus driver — membrane over the stream; measures cross-task reuse as the graph grows
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def run_mbpp(graph, tasks: list[dict], compile_fn, policy_fn=None, chunk: int = 30,
+def run_mbpp(graph, tasks: list[dict], compile_fn, policy_fn=None, retriever=None, chunk: int = 30,
              max_hops: int = 4, max_retries: int = 1, verbose: bool = True) -> dict:
     # trimmed hop/retry budget: most MBPP+ tasks don't match a seed atom, so an unbounded retrieval
     # loop just burns LM calls before deriving. Fewer hops -> faster corpus pass; the derive path
     # (LM writes from scratch) is where diverse tasks are solved anyway.
+    # ONE cached retriever reused across the whole corpus (goal 2) — no per-task O(atoms) rebuild.
+    if retriever is None:
+        from v5.runtime.algo_grr_retrieval import CachedTokenRetriever
+        retriever = CachedTokenRetriever(graph)
     seed_ids = {nid for nid in graph.nodes if graph.nodes[nid].node_type == "implementation"}
     solved = reuse = banked = derived_reuse = 0
     per = []
     for i, t in enumerate(tasks):
-        solver = MembraneSolver(graph, compile_fn, policy_fn=policy_fn,
+        solver = MembraneSolver(graph, compile_fn, retriever=retriever, policy_fn=policy_fn,
                                 max_hops=max_hops, max_retries=max_retries)
         r = solver.solve(t)
         if r["solved"]:
@@ -184,6 +188,8 @@ def main() -> None:
     ap.add_argument("--lm", default="", help="frozen 3B (molab); omit = stub=reference smoke")
     ap.add_argument("--limit", type=int, default=120)
     ap.add_argument("--policy", action="store_true", help="use trained ComplementPolicy retrieval")
+    ap.add_argument("--topo", action="store_true",
+                    help="use topology-aware retrieval (depend-neighbour boost — structural, no net)")
     ap.add_argument("--corpus", default=CORPUS)
     a = ap.parse_args()
 
@@ -193,8 +199,14 @@ def main() -> None:
     if a.run:
         tasks = load_mbpp(a.corpus, limit=a.limit)
         graph = load_seed()
+        from v5.runtime.algo_grr_retrieval import CachedTokenRetriever
+        retriever = CachedTokenRetriever(graph)          # one cached retriever for the whole corpus
         policy_fn = None
-        if a.policy:
+        if a.topo:                                       # structural, generalising (goal 1)
+            from v5.runtime.algo_grr_retrieval import make_topology_policy
+            policy_fn = make_topology_policy(graph)
+            print("[topo] depend-neighbour boost -> membrane retrieval")
+        elif a.policy:                                   # seed-trained net (OOD on MBPP+; see READ_THIS)
             from v5.runtime.algo_grr_policy import train_and_make_policy
             _m, policy_fn = train_and_make_policy(load_seed())
             print("[policy] ComplementPolicy on seed graph -> membrane retrieval")
@@ -204,8 +216,9 @@ def main() -> None:
         else:
             compile_fn = make_stub_compiler({t["entry"]: t["reference"] for t in tasks})
             print("(stub = reference code; use --lm for the real generalization test)")
-        print(f"MBPP+ run: {len(tasks)} tasks, lm={a.lm or 'stub'}, policy={a.policy}\n")
-        res = run_mbpp(graph, tasks, compile_fn, policy_fn=policy_fn)
+        print(f"MBPP+ run: {len(tasks)} tasks, lm={a.lm or 'stub'}, "
+              f"retrieval={'topo' if a.topo else 'policy' if a.policy else 'cosine'}\n")
+        res = run_mbpp(graph, tasks, compile_fn, policy_fn=policy_fn, retriever=retriever)
         print(f"\nSOLVED {res['solved']}/{res['n']} ({100*res['solved']//res['n']}%) | "
               f"banked {res['banked']} atoms | cross-task reuse {res['reuse']} "
               f"(of derived atoms: {res['derived_reuse']}) | graph {res['graph_nodes']} nodes")

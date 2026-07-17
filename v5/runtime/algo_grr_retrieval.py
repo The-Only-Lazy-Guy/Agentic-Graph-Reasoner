@@ -14,8 +14,9 @@ Drops into MembraneSolver.policy_fn like any retrieval policy.
 from __future__ import annotations
 
 import argparse
+import math
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 _ROOT = str(Path(__file__).resolve().parents[2])
@@ -23,7 +24,66 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from graph_core import MemoryGraph  # type: ignore  # noqa: E402
-from v5.runtime.algo_grr_membrane import TokenRetriever  # noqa: E402
+from v5.runtime.algo_grr_membrane import TokenRetriever, _tokens  # noqa: E402
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CachedTokenRetriever — scalable cosine (goal 2): tokenize each atom ONCE, reuse across
+# tasks, incrementally add only NEW (banked) atoms. Same .rank() interface as TokenRetriever.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class CachedTokenRetriever:
+    """Drop-in for TokenRetriever that CACHES per-atom token vectors. TokenRetriever re-tokenizes every
+    atom on construction, and the membrane builds a fresh retriever per task -> O(atoms x tasks). This
+    tokenizes each atom once and, when the graph GROWS (banking), only tokenizes the new atoms. idf is
+    recomputed on growth (cheap counting, not re-tokenization). Reuse ONE instance across the corpus."""
+
+    def __init__(self, graph: MemoryGraph):
+        self.graph = graph
+        self._vecs: dict[str, Counter] = {}
+        self._idf: dict[str, float] = {}
+        self._impl: list[str] = []
+        self.tok_calls = 0                # instrumentation: how many atoms were tokenized
+        self._sync()
+
+    def _sync(self) -> None:
+        impl = [nid for nid, n in self.graph.nodes.items() if n.node_type == "implementation"]
+        new = [nid for nid in impl if nid not in self._vecs]
+        for nid in new:
+            self._vecs[nid] = Counter(_tokens(self.graph.nodes[nid].text))
+            self.tok_calls += 1
+        for nid in list(self._vecs):      # drop removed nodes
+            if nid not in self.graph.nodes:
+                del self._vecs[nid]
+        if new or len(impl) != len(self._impl):
+            df: Counter = Counter()
+            for v in self._vecs.values():
+                df.update(v.keys())
+            n = max(1, len(self._vecs))
+            self._idf = {t: math.log(1.0 + n / (1 + c)) for t, c in df.items()}
+        self._impl = impl
+
+    def _w(self, counter: Counter) -> dict[str, float]:
+        default = math.log(1.0 + max(1, len(self._impl)))
+        return {t: c * self._idf.get(t, default) for t, c in counter.items()}
+
+    @staticmethod
+    def _cos(a: dict[str, float], b: dict[str, float]) -> float:
+        if not a or not b:
+            return 0.0
+        dot = sum(a[t] * b.get(t, 0.0) for t in a)
+        na = math.sqrt(sum(x * x for x in a.values()))
+        nb = math.sqrt(sum(x * x for x in b.values()))
+        return dot / (na * nb) if na and nb else 0.0
+
+    def rank(self, query_text: str, exclude: set | None = None):
+        self._sync()                      # picks up newly-banked atoms (tokenizes only those)
+        exclude = exclude or set()
+        q = self._w(Counter(_tokens(query_text)))
+        scored = [(nid, self._cos(q, self._w(self._vecs[nid])))
+                  for nid in self._impl if nid not in exclude]
+        scored.sort(key=lambda z: -z[1])
+        return scored
 
 
 def _cosine_base(retriever: TokenRetriever):
@@ -186,6 +246,28 @@ def _selftest() -> bool:
     print(f"  [4] depend-closure ablation: with-edges runs={ok_with}, without-edges runs={ok_without} "
           f"-> {'PASS' if ok_with and not ok_without else 'FAIL'}")
     ok &= ok_with and not ok_without
+
+    # [5] SCALABILITY — CachedTokenRetriever tokenizes each atom ONCE, only new atoms on growth,
+    #     and gives the SAME ranking as the plain retriever.
+    g5 = _seed_graph()
+    n_impl = sum(1 for n in g5.nodes.values() if n.node_type == "implementation")
+    cr = CachedTokenRetriever(g5)
+    q = "check whether a number is prime"
+    top_cached = cr.rank(q)[0][0]
+    top_plain = TokenRetriever(g5).rank(q)[0][0]
+    calls_after_build = cr.tok_calls
+    _ = cr.rank("least common multiple")           # second query -> NO re-tokenization
+    from graph_core import Node, Edge
+    g5.nodes["impl_grow_z"] = Node(id="impl_grow_z", text="grow z helper", node_type="implementation",
+                                   metadata={"entry": "grow_z"})
+    g5.edges.append(Edge(src="impl_grow_z", dst="concept_lists", relation="part_of"))
+    g5._rebuild_index()
+    _ = cr.rank("grow z helper")                    # picks up the new atom, tokenizes ONLY it
+    incremental = (calls_after_build == n_impl and cr.tok_calls == n_impl + 1)
+    parity = top_cached == top_plain
+    print(f"  [5] cache: tokenized {n_impl}->build, +1 on growth (calls={cr.tok_calls}), "
+          f"parity_with_plain={parity} -> {'PASS' if incremental and parity else 'FAIL'}")
+    ok &= incremental and parity
 
     print(f"\n  ALGO_GRR_RETRIEVAL SELFTEST -> {'PASS' if ok else 'FAIL'}")
     return ok
