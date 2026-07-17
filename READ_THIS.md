@@ -348,6 +348,23 @@ CHANNEL ISOLATION — MEASURED (2026-07-17, --isolate, clean 2x2, 3 OLD-variants
   Verified locally: C-level runaway + infinite loop both hard-killed, normal code passes. Selftests keep
   the fast in-process SIGALRM path (trusted stub code). => the corpus run can no longer hang on any task.
 
+## SCALE-UP RUN HARNESS (algo_grr_scaleup.py, 2026-07-18 — built + no-GPU selftested; molab-ready)
+  The scale-up run = ONE long membrane pass over a big DECOMPOSABLE + DIVERSE corpus, LM FROZEN, graph
+  grows + stays CLEAN. Assembles compose-generator tasks (compounding) INTERLEAVED with MBPP+ (diversity).
+  Config = the winners: topology retrieval + subprocess hard-verify (V5_HARD_VERIFY auto on --lm) + fixed
+  fuzz-gate + helper-granular derive-bank + DEAD-ATOM PRUNE + periodic graph-health monitor.
+  PRUNE: drop DERIVED atoms never reused after `prune_grace` tasks -> kills the dead-atom bloat MBPP+'s
+  atomic tasks cause (the 41-banked/8-reused problem). Selftest: prune shrinks the graph (28->26, 5 dead
+  removed) while the REUSED compose prims survive (derived_reuse 21) and the graph stays healthy (0 orphans/
+  dangling/dups). TRADE-OFF (documented): too-short grace can prune a prim before its first reuse -> the LM
+  re-derives it (self-heals, minor cost); default grace=50 + a corpus where prims recur avoids it.
+  Per-chunk report tracks solved/reuse/derived_reuse/banked/pruned/atoms/dead/lm-per-task -> watch reuse &
+  derived_reuse RISE, lm-per-task FALL, atoms grow but dead bounded. Saves the grown graph (--save).
+  molab: `python -m v5.runtime.algo_grr_scaleup --run --lm Qwen/Qwen2.5-3B-Instruct --n-compose 120 --mbpp 200
+  --save graphs/grr_scaleup.json`  (topology default; --prune-grace / --report-every tunable).
+  10 GRR-Tool modules all no-GPU selftest PASS (seed/membrane/policy/poison/mbpp/retrieval/compose/health/
+  ablate/scaleup).
+
 ## MBPP+ RE-RUN — M2 minimal-prompt regression CLEARED + gate-fix impact (2026-07-18, real 3B, hang-fixed)
   cosine, MINIMAL prompt (goal 3) + fuzz-gate fix (c642d7f) + subprocess hard-verify (41f2133), 120 tasks:
     SOLVED 92/120 (76%) | reuse 29 (derived 8) | banked 41 | graph 25->66     [prev heavy-prompt: 70%/24(4)/13/38]
