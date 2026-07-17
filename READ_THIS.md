@@ -335,6 +335,30 @@ CHANNEL ISOLATION — MEASURED (2026-07-17, --isolate, clean 2x2, 3 OLD-variants
   Repro: `python -m v5.runtime.algo_grr_mbpp --run --lm Qwen/Qwen2.5-3B-Instruct --limit 120 [--policy]`
   (needed a verify TIMEOUT fix first — LM code infinite-loops; commit 10f3c40 run_with_timeout on every exec).
 
+## USER 3 GOALS — autonomous session (2026-07-17, all no-GPU built + selftested; molab validation pending)
+Driven by the MBPP+ lesson (seed-trained policy went OOD -> reuse 24->4). All three serve the same end:
+make reuse come from the GRAPH's structure + verify, not from a fragile trained net or prompt tricks.
+  GOAL 1 — TOPOLOGY USEFUL: `algo_grr_retrieval.TopologyRetriever` boosts the DEPEND-neighbours of the
+    partial program in retrieval -> surfaces the composable complement cosine buries, using the graph's
+    OWN edges (no net, generalises). Selftest: is_anagram after char_freq cosine-rank 6 -> topology-rank 1;
+    ABLATION: without depend edges is_perfect's closure can't realize (depend topology is load-bearing).
+    Drops into MembraneSolver.policy_fn; `algo_grr_mbpp --topo`.
+  GOAL 2 — SCALABILITY: `CachedTokenRetriever` tokenizes each atom ONCE, only new atoms on growth (idf by
+    counting); the membrane no longer rebuilds a retriever per task (was O(atoms x tasks)). One retriever
+    reused across the corpus. Selftest [5]: 21 tokenized at build, +1 on growth, parity with plain.
+  GOAL 3 — LESS PROMPT-ENGINEERING: bankable_pure_defs already extracts a helper whether TOP-LEVEL or
+    NESTED, so the compose prompt dropped the "TOP-LEVEL not nested" rules + one-shot example -> now 3
+    minimal lines. Factoring robustness is the SYSTEM's job (AST), not the prompt's. poison_test [7]:
+    top-level + nested helper both banked, monolith banks nothing.
+  MOLAB VALIDATION (when back — do these):
+    (a) topology on MBPP+:  `python -m v5.runtime.algo_grr_mbpp --run --lm Qwen/Qwen2.5-3B-Instruct --limit 120 --topo`
+        -> does depend-topology lift cross-task reuse above cosine's 24 (and derived_reuse above 4)?
+    (b) minimal-prompt regression: default `--run --lm --limit 120` now uses the MINIMAL prompt -> confirm
+        solve% + banked stay ~ the cosine run (70% / 13) i.e. the 3B still factors without the cajoling.
+    Commits: 91484bd(goal1) 7bba9dd(goal2) 8497c84(goal3). Modules: algo_grr_retrieval.py (new).
+    Everything no-GPU selftested locally (7 GRR-Tool modules: seed/membrane/policy/poison_test/mbpp/
+    retrieval, all PASS).
+
 ## GRR-Tool BUILD STATUS (2026-07-17) — poison thesis CONFIRMED with real 3B
 All four modules, selftested no-GPU, plus the real-3B two-arm molab run completed:
 - `algo_grr_seed.py` -> `graphs/grr_seed_clean.json` (clean 25-node seed with depend edges).
