@@ -314,6 +314,27 @@ CHANNEL ISOLATION — MEASURED (2026-07-17, --isolate, clean 2x2, 3 OLD-variants
   greedy decode (do_sample=False) + multiple seeds + more tasks. Repro:
   `V5_LM_QUANT=8bit python -m v5.runtime.algo_grr_poison_test --run --lm Qwen/Qwen2.5-3B-Instruct --isolate`.
 
+## MBPP+ GENERALIZATION RESULT (2026-07-17, real Qwen2.5-3B, 120 tasks from the 25-atom clean seed)
+  The real generalization proof — does the frozen membrane solve diverse real tasks + REUSE across them?
+  COSINE retrieval (no --policy):                    per-chunk reuse rose 7 -> 12 -> 17 -> 24
+    SOLVED 85/120 (70%) | cross-task reuse 24 (of DERIVED atoms: 4, rising 0->1->2->4) | banked 13 | graph 25->38
+  POLICY (seed-trained ComplementPolicy, --policy):
+    SOLVED 91/120 (75%) | cross-task reuse 4 (derived 0) | banked 16 | graph 25->41
+  HEADLINE: cross-task reuse was 0 in EVERY prior design; with cosine it is 24 and RISING on real MBPP+ —
+    the clean seed primitives (is_prime/gcd/...) are load-bearing in real solutions (20/24 reuses are seed).
+    COMPOUNDING (derived_reuse) = 4, monotonic 0->4: the graph-grows-then-reuses loop fires on real data,
+    nascent but real. Solve 70% = the frozen 3B's capability PRESERVED (no poison; matches GRR-14 ~70%).
+  THE POLICY LESSON (honest negative): the ComplementPolicy trained on 20 SEED compositions is OUT-OF-DISTRIBUTION
+    on MBPP+ -> its policy_sigmoid is noise there, and cos_w=0.5 over-weights it (sigmoid 0-1 vs 0.5*cos 0-0.5)
+    -> it PERTURBS the ranking and BURIES the seed atoms cosine surfaces -> reuse 24 -> 4, compounding -> 0.
+    Solve went UP (75%) only because less/noisier retrieval -> cleaner spec -> the 3B writes from scratch (it
+    is better at that than composing over wrong atoms; banked rose 13->16 confirms more derive). VERDICT: for
+    MBPP+ use COSINE now; the policy needs training on REAL MBPP+ compositions (harvest the cosine run's
+    verified reuses -> train -> redeploy = STaR-for-retrieval). Retrieval/reuse is the GRAPH's contribution
+    (compounding, fewer tokens over time), NOT a raw solve-rate lever; solve is 3B-bound.
+  Repro: `python -m v5.runtime.algo_grr_mbpp --run --lm Qwen/Qwen2.5-3B-Instruct --limit 120 [--policy]`
+  (needed a verify TIMEOUT fix first — LM code infinite-loops; commit 10f3c40 run_with_timeout on every exec).
+
 ## GRR-Tool BUILD STATUS (2026-07-17) — poison thesis CONFIRMED with real 3B
 All four modules, selftested no-GPU, plus the real-3B two-arm molab run completed:
 - `algo_grr_seed.py` -> `graphs/grr_seed_clean.json` (clean 25-node seed with depend edges).
