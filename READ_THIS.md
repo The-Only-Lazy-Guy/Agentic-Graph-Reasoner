@@ -348,6 +348,18 @@ CHANNEL ISOLATION — MEASURED (2026-07-17, --isolate, clean 2x2, 3 OLD-variants
   Verified locally: C-level runaway + infinite loop both hard-killed, normal code passes. Selftests keep
   the fast in-process SIGALRM path (trusted stub code). => the corpus run can no longer hang on any task.
 
+## MBPP+ RE-RUN — M2 minimal-prompt regression CLEARED + gate-fix impact (2026-07-18, real 3B, hang-fixed)
+  cosine, MINIMAL prompt (goal 3) + fuzz-gate fix (c642d7f) + subprocess hard-verify (41f2133), 120 tasks:
+    SOLVED 92/120 (76%) | reuse 29 (derived 8) | banked 41 | graph 25->66     [prev heavy-prompt: 70%/24(4)/13/38]
+  M2 PASS: minimal prompt did NOT cost solve — +6pp (76 vs 70). Goal 3 confirmed on real data.
+  GATE-FIX IMPACT: banked 13 -> 41 (3x) — the fuzz-gate false-reject bug was suppressing composed-helper
+  banking; fixed -> 3x more helpers bank; derived_reuse 4 -> 8 (doubled), reuse 24 -> 29. NO HANGS (the
+  subprocess hard-verify held; every FAIL = lm_calls=7 = budget exhausted = genuine 3B gap on ~24% of MBPP+,
+  not a stall). HONEST CAVEAT (scale-up): 41 banked but only 8 reused -> ~33 task-specific helpers never
+  reused (MBPP+ atomic, 2% ceiling) = graph BLOAT / dead-atom accumulation. Not harmful (frozen LM + curated
+  retrieval filter dead atoms) but bloat -> the scale-up run should WIRE algo_grr_health + a dead-atom prune.
+  On a DECOMPOSABLE corpus this doesn't happen (algo_grr_compose: 6 banked -> 36 reused).
+
 ## MBPP+ LOCAL ANALYSIS (no-GPU, 2026-07-17 — contextualises the numbers above)
   [1] data quality: 378/378 references satisfy their own asserts (100%).
   [2] **COMPOUNDING CEILING = 2%**: only 8/378 MBPP+ references have ANY extractable helper
