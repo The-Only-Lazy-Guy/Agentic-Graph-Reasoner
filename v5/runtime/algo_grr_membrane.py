@@ -83,6 +83,32 @@ def realize_closure_code(graph: MemoryGraph, atom_ids: list[str]) -> str:
 # VERIFY — the hard gate. exec code, run I/O tests, return (fraction_pass, detail)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+class _Timeout(Exception):
+    pass
+
+
+def run_with_timeout(fn, seconds: float = 5.0, default=None):
+    """Run fn() but abort a runaway (LM code can infinite-loop) after `seconds`. Uses SIGALRM on Unix
+    (molab); a no-op passthrough on platforms without it (Windows selftest — our own code is safe).
+    Signals fire only in the main thread; the membrane loop runs there."""
+    import signal
+    if not hasattr(signal, "SIGALRM"):
+        return fn()
+
+    def _handler(signum, frame):
+        raise _Timeout()
+
+    old = signal.signal(signal.SIGALRM, _handler)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        return fn()
+    except _Timeout:
+        return default
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+
+
 def _called(code: str, name: str) -> bool:
     """True iff `name` is CALLED in code (a `name(` occurrence that is not its own `def name(`)."""
     calls = len(re.findall(r"(?<![\w.])" + re.escape(name) + r"\s*\(", code))
@@ -135,13 +161,17 @@ def fuzz_gate_helper(helper_src: str, name: str, type_pool: list, n: int = 14,
     except Exception as e:  # noqa: BLE001
         return False, f"compile error: {e!r}"
     rng = random.Random(seed)
+    _HANG = object()
     outs, crashes, sample = [], 0, None
     for _ in range(n):
         types = [rng.choice(type_pool) for _ in range(max(1, arity))]
         args = tuple(_rand_val(t, rng) for t in types)
         try:
-            out = fn(*args)
+            out = run_with_timeout(lambda a=args: fn(*a), seconds=2.0, default=_HANG)
         except Exception:  # noqa: BLE001
+            crashes += 1
+            continue
+        if out is _HANG:                     # infinite loop on this input -> fragile
             crashes += 1
             continue
         outs.append(repr(out))
@@ -238,32 +268,36 @@ def reuse_set(code: str, entry: str, atom_entries: set[str]) -> list[str]:
     return reached
 
 
-def verify_code(code: str, entry: str, tests: list[tuple]) -> tuple[float, str]:
-    """Returns (fraction of tests passing, detail). Any exception -> that test fails."""
+def verify_code(code: str, entry: str, tests: list[tuple], timeout: float = 6.0) -> tuple[float, str]:
+    """Returns (fraction of tests passing, detail). Any exception -> that test fails. The whole run is
+    bounded by `timeout` — LM-generated code can infinite-loop; a runaway scores 0.0 instead of hanging."""
     if not tests:
         return 0.0, "no tests"
-    ns: dict = {}
+
+    def _run():
+        ns: dict = {}
+        exec(compile(code, f"<compile:{entry}>", "exec"), ns)   # may raise -> caught below
+        fn = ns.get(entry)
+        if not callable(fn):
+            return 0.0, f"entry '{entry}' not defined"
+        n_ok, first_err = 0, ""
+        for args, expected in tests:
+            try:
+                got = fn(*args)
+            except Exception as e:  # noqa: BLE001
+                if not first_err:
+                    first_err = f"{entry}{args!r} raised {e!r}"
+                continue
+            if got == expected:
+                n_ok += 1
+            elif not first_err:
+                first_err = f"{entry}{args!r} -> {got!r} != {expected!r}"
+        return n_ok / len(tests), (first_err or "all pass")
+
     try:
-        exec(compile(code, f"<compile:{entry}>", "exec"), ns)
+        return run_with_timeout(_run, seconds=timeout, default=(0.0, "timeout (runaway code)"))
     except Exception as e:  # noqa: BLE001
         return 0.0, f"compile error: {e!r}"
-    fn = ns.get(entry)
-    if not callable(fn):
-        return 0.0, f"entry '{entry}' not defined"
-    n_ok = 0
-    first_err = ""
-    for args, expected in tests:
-        try:
-            got = fn(*args)
-        except Exception as e:  # noqa: BLE001
-            if not first_err:
-                first_err = f"{entry}{args!r} raised {e!r}"
-            continue
-        if got == expected:
-            n_ok += 1
-        elif not first_err:
-            first_err = f"{entry}{args!r} -> {got!r} != {expected!r}"
-    return n_ok / len(tests), (first_err or "all pass")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

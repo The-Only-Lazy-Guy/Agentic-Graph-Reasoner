@@ -36,23 +36,31 @@ COMMON = ("import math\nimport re\nimport itertools\nimport functools\n"
 # Verify via the task's own asserts (the hard gate; the LM never writes these)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def verify_asserts(code: str, asserts: list[str], setup: str = "") -> tuple[float, str]:
-    ns: dict = {}
-    try:
-        exec(compile(COMMON + (setup or "") + "\n" + code, "<mbpp>", "exec"), ns)
-    except Exception as e:  # noqa: BLE001
-        return 0.0, f"compile: {e!r}"
+def verify_asserts(code: str, asserts: list[str], setup: str = "",
+                   timeout: float = 6.0) -> tuple[float, str]:
+    """Grade LM code against the task's own asserts. Bounded by `timeout` — LM-generated code can
+    infinite-loop; a runaway scores 0.0 instead of hanging the whole corpus run."""
+    from v5.runtime.algo_grr_membrane import run_with_timeout
     if not asserts:
         return 0.0, "no asserts"
-    n_ok, first = 0, ""
-    for a in asserts:
-        try:
-            exec(a, ns)
-            n_ok += 1
-        except Exception as e:  # noqa: BLE001
-            if not first:
-                first = f"{a[:70]} -> {e!r}"
-    return n_ok / len(asserts), (first or "all pass")
+
+    def _run():
+        ns: dict = {}
+        exec(compile(COMMON + (setup or "") + "\n" + code, "<mbpp>", "exec"), ns)
+        n_ok, first = 0, ""
+        for a in asserts:
+            try:
+                exec(a, ns)
+                n_ok += 1
+            except Exception as e:  # noqa: BLE001
+                if not first:
+                    first = f"{a[:70]} -> {e!r}"
+        return n_ok / len(asserts), (first or "all pass")
+
+    try:
+        return run_with_timeout(_run, seconds=timeout, default=(0.0, "timeout (runaway code)"))
+    except Exception as e:  # noqa: BLE001
+        return 0.0, f"compile: {e!r}"
 
 
 def _type_pool_from_asserts(asserts: list[str], entry: str) -> list:
@@ -101,12 +109,16 @@ def load_mbpp(path: str = CORPUS, limit: int | None = None) -> list[dict]:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def run_mbpp(graph, tasks: list[dict], compile_fn, policy_fn=None, chunk: int = 30,
-             verbose: bool = True) -> dict:
+             max_hops: int = 4, max_retries: int = 1, verbose: bool = True) -> dict:
+    # trimmed hop/retry budget: most MBPP+ tasks don't match a seed atom, so an unbounded retrieval
+    # loop just burns LM calls before deriving. Fewer hops -> faster corpus pass; the derive path
+    # (LM writes from scratch) is where diverse tasks are solved anyway.
     seed_ids = {nid for nid in graph.nodes if graph.nodes[nid].node_type == "implementation"}
     solved = reuse = banked = derived_reuse = 0
     per = []
     for i, t in enumerate(tasks):
-        solver = MembraneSolver(graph, compile_fn, policy_fn=policy_fn)
+        solver = MembraneSolver(graph, compile_fn, policy_fn=policy_fn,
+                                max_hops=max_hops, max_retries=max_retries)
         r = solver.solve(t)
         if r["solved"]:
             solved += 1
