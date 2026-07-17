@@ -151,6 +151,9 @@ _DEPEND_CHAINS = {
 def _add_stubs(graph: MemoryGraph, stubs: list[tuple[str, str]],
                part_of: str = "noise", base_depends: dict[str, list[str]] | None = None):
     deps = base_depends or {}
+    concept_id = f"concept_{part_of}"
+    if concept_id not in graph.nodes:                 # create the domain concept node
+        graph.nodes[concept_id] = Node(id=concept_id, node_type="concept", text=part_of)
     for entry, code in stubs:
         nid = f"impl_{entry}"
         graph.nodes[nid] = Node(
@@ -158,7 +161,9 @@ def _add_stubs(graph: MemoryGraph, stubs: list[tuple[str, str]],
             text=f"{entry} helper",
             metadata={"entry": entry, "code": code, "origin": "stub"},
         )
-        graph.edges.append(Edge(src=part_of, dst=nid, relation="part_of"))
+        # match the seed schema: part_of goes ATOM -> concept (was reversed -> health mis-flagged
+        # these as orphans, and the edge pointed at a non-existent concept node).
+        graph.edges.append(Edge(src=nid, dst=concept_id, relation="part_of"))
         for dep in deps.get(entry, []):
             dep_id = f"impl_{dep}"
             if dep_id in graph.nodes:
