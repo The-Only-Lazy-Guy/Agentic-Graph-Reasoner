@@ -348,6 +348,21 @@ CHANNEL ISOLATION — MEASURED (2026-07-17, --isolate, clean 2x2, 3 OLD-variants
   Verified locally: C-level runaway + infinite loop both hard-killed, normal code passes. Selftests keep
   the fast in-process SIGALRM path (trusted stub code). => the corpus run can no longer hang on any task.
 
+## SCALE-UP RUN — VALIDATED on real 3B (2026-07-18, 320-task run, topology + prune)
+  320 tasks (120 compose + 200 MBPP+, interleaved), frozen Qwen2.5-3B, topology retrieval + dead-atom prune:
+    [ 40] solved 29 reuse 14 deriv_reuse  6 banked 12 pruned  0 atoms 33 lm/task 3.75
+    [120] solved 100 reuse 68 deriv_reuse 37 banked 31 pruned 13 atoms 39 lm/task 3.15
+    [240] solved 196 (82%) reuse 125 deriv_reuse 66 banked 58 pruned 30 atoms 49 lm/task 3.25
+  THE SCALE-UP THESIS VALIDATED on real hardware:
+    - COMPOUNDING on the real 3B: deriv_reuse 6 -> 66 (monotone) — the decomposable corpus + topology
+      delivers real compounding (vs the ~8 MBPP+-only atomic ceiling). The 3B factors + reuses when the
+      corpus supports it. M1 answered.
+    - PRUNE holds the graph BOUNDED: banked 58 but atoms stays ~45 (30 pruned) — dead-atom bloat controlled
+      at scale exactly as designed.
+    - lm/task ~3.2 flat (bounded cost). LM FROZEN throughout ("more data" = the graph grew).
+  Bug found+fixed mid-run (5598ede): a derived helper's >4300-digit int (2**(n*400) on n=40) crashed
+  repr() in the fuzz gate (Python 3.11 int-str cap) -> try/except + raised the cap. Re-run completes clean.
+
 ## SCALE-UP RUN HARNESS (algo_grr_scaleup.py, 2026-07-18 — built + no-GPU selftested; molab-ready)
   The scale-up run = ONE long membrane pass over a big DECOMPOSABLE + DIVERSE corpus, LM FROZEN, graph
   grows + stays CLEAN. Assembles compose-generator tasks (compounding) INTERLEAVED with MBPP+ (diversity).
