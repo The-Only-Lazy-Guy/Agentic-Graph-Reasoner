@@ -361,6 +361,19 @@ CHANNEL ISOLATION — MEASURED (2026-07-17, --isolate, clean 2x2, 3 OLD-variants
   [6] scalability (goal 2): at 625 nodes CachedTokenRetriever = 1.9 ms/rank vs 4.2 ms/rank rebuilding
       each call (~2.2x; gap widens with N). Script: scratchpad/local_analysis.py.
 
+## DECOMPOSABLE CORPUS — strong compounding, the counterpart to MBPP+'s 2% ceiling (algo_grr_compose.py)
+  Built the corpus the ceiling analysis pointed to: outer(inner(n)) tasks over a SMALL pool of recurring
+  primitives (sum_of_squares / nth_fibonacci / factorial / triangular / digit_product), so once a primitive
+  is derived+banked it is REUSED by every later task that needs it. No-GPU selftest (60 tasks, STUB=ref):
+    factorability ceiling 100% (vs MBPP+ 2%); COMPOUNDING = 6 atoms banked, reused 36 times
+    (derived_reuse 10->23->36 while banked FLATLINES at 6 = derive-once/reuse-forever; 6x leverage per
+    derived atom vs MBPP+'s ~0.2x).
+  PROVES the frozen-membrane design compounds STRONGLY when the corpus is DECOMPOSABLE — MBPP+'s flat
+  derived_reuse was the CORPUS (atomic tasks), never the design. HONEST CAVEAT: the stub uses the reference
+  (which always factors + calls the prims) -> this proves the CEILING is 100% (corpus decomposable), not
+  that the real 3B realises it (it may inline). molab realisation test: `python -m v5.runtime.algo_grr_compose
+  --run --lm Qwen/Qwen2.5-3B-Instruct --n 80 --topo` -> how much of the 100% ceiling does the real 3B hit?
+
 ## USER 3 GOALS — autonomous session (2026-07-17, all no-GPU built + selftested; molab validation pending)
 Driven by the MBPP+ lesson (seed-trained policy went OOD -> reuse 24->4). All three serve the same end:
 make reuse come from the GRAPH's structure + verify, not from a fragile trained net or prompt tricks.
