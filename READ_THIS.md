@@ -447,8 +447,10 @@ KEY FINDINGS:
   (2) POLICY EFFECT (0.17-0.25 above random): both topo and cosine beat random by the same margin
       (topo-random = prec +0.17, recall +0.25 on bare). Retrieval skill matters — but cosine and topo
       are indistinguishable on the small curriculum (topo-cosine = -0.02 prec).
-  (3) NOISE IMMUNITY (perfect): noise - bare = prec +0.00, recall +0.00, hops +0.00 on BOTH policies.
-      The membrane filters irrelevant atoms completely — cosine similarity thresholds exclude them.
+  (3) NOISE IMMUNITY (perfect, now PROPERLY POWERED): with 20 irrelevant distractors (was a buggy 4 —
+      fixed 2026-07-18), noise - bare = prec +0.00, recall +0.00 on cosine AND topo. The distractors DO
+      bite — RANDOM policy drops prec 0.35 -> 0.27 under them — but the membrane's cosine-similarity
+      threshold filters all 20 completely. Irrelevant knowledge cannot hurt a real retrieval policy.
   (4) TOPOLOGY HURTS ON SMALL CURRICULUM: topo grown-bare = prec +0.02, recall +0.05, but first_hit
       drops -0.20 and hops rise +1.0. The grown helpers' depend edges (prime_factors->is_prime,
       count_divisors->divisors) are NOISE for the curriculum — topology boosts those neighbors too high

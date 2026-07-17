@@ -166,9 +166,10 @@ def _add_stubs(graph: MemoryGraph, stubs: list[tuple[str, str]],
 
 
 def make_noise_graph() -> MemoryGraph:
+    # add the SAME COUNT of IRRELEVANT stubs as the grown graph adds RELEVANT helpers, so the
+    # noise-immunity test is a fair counterpart to the knowledge test (was buggy: n_impl-21=0 -> only 4).
     g = load_seed()
-    noise_count = max(1, len([n for n in g.nodes if g.nodes[n].node_type == "implementation"]) - 21)
-    _add_stubs(g, _NOISE_STUBS[:max(4, noise_count)], part_of="noise_domain")
+    _add_stubs(g, _NOISE_STUBS[:len(_GROWN_HELPERS)], part_of="noise_domain")
     return g
 
 
