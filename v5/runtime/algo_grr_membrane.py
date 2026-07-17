@@ -391,22 +391,16 @@ def render_compile_prompt(spec: dict) -> str:
     the graph never reaches the LM (the membrane). Atoms are framed as already-defined helpers the
     model composes; it writes ONLY the entry glue. Verified atom code is prepended by the caller, so
     the LM cannot corrupt the atoms."""
+    # MINIMAL prompt (goal 3 — reduce prompt-engineering reliance). The system extracts reusable
+    # helpers by AST (bankable_pure_defs) whether the LM writes them top-level or NESTED, so the prompt
+    # no longer cajoles a specific format (the old "TOP-LEVEL not nested" rules + one-shot are gone).
+    # One line asks to modularize (else a monolith has nothing to bank); factoring robustness is the
+    # SYSTEM's job, not the prompt's.
     lines = [
-        "You are a code compiler. Solve the task by COMPOSING small functions. Rules:",
-        "- CALL a provided helper wherever it applies; never reimplement one.",
-        "- For any sub-computation NOT covered by a provided helper, define it as a SEPARATE, "
-        "TOP-LEVEL, GENERAL function with a descriptive name (e.g. `sum_of_squares`, "
-        "`nth_fibonacci`) — do NOT inline it, and do NOT nest it inside the entry function.",
-        f"- Finally define `{spec['entry']}` to CALL those functions.",
-        "- Output ONLY function definitions. No test code, no print(), no calls at module level.",
-        "",
-        "Required shape (helpers at top level, NOT nested inside the entry):",
-        "```python",
-        "def sum_of_squares(k):        # general top-level helper",
-        "    return sum(i * i for i in range(1, k + 1))",
-        "def solve_it(n):              # entry calls the helper",
-        "    return sum_of_squares(n)",
-        "```",
+        "You are a code compiler. Write Python to solve the task.",
+        "- Call a provided helper wherever it applies; do not reimplement one.",
+        "- If a sub-computation is reusable, put it in its own clearly-named function.",
+        "- Output only function definitions (no test code, prints, or module-level calls).",
         "",
         f"Task: {spec['task_text']}",
         f"Entry function name: {spec['entry']}",
@@ -434,13 +428,8 @@ def render_compile_prompt(spec: dict) -> str:
         lines += ["", "Your previous attempt FAILED. Code:", "```python", str(fail.get("code", "")),
                   "```", f"Error: {fail.get('error', '')}", "Fix it."]
     if spec.get("derive"):
-        lines += [
-            "",
-            "None of the helpers covers the core operation. Factor it out: first define a SMALL, "
-            "GENERAL, reusable helper function named for WHAT IT COMPUTES (not for this task, e.g. "
-            "`sum_of_squares`/`nth_fibonacci`, never `solve`/the task name), then define "
-            f"`{spec['entry']}` to CALL that helper. The helper must be reusable by other tasks — "
-            "no task-specific constants baked in."]
+        lines += ["", "No provided helper covers the core step — write it as its own reusable, "
+                  "generally-named function and call it from the entry."]
     lines += ["", "Return ALL the functions (top-level helpers first, then the entry) in one "
               "```python code block."]
     return "\n".join(lines)

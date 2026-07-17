@@ -421,6 +421,27 @@ def _selftest() -> bool:
           f"({b_real}) -> {'PASS' if rej and acc else 'FAIL'}")
     ok &= rej and acc
 
+    # [7] AST-driven factoring is FORMAT-ROBUST (goal 3 — minimal prompt): the system banks the helper
+    #     whether the LM writes it TOP-LEVEL or NESTED, and banks NOTHING from a monolith. So the prompt
+    #     no longer needs to cajole a specific factoring format.
+    fmt_cases = [
+        ("t_a", "def triple(x):\n    return x * 3\ndef t_a(n):\n    return triple(n)\n", "triple"),
+        ("t_b", "def t_b(n):\n    def quad(x):\n        return x * 4\n    return quad(n)\n", "quad"),
+        ("t_d", "def t_d(n):\n    return n * 6\n", None),          # monolith -> nothing to bank
+    ]
+    fmt_ok = True
+    for entry, code, expect in fmt_cases:
+        g7 = load_seed()
+        got = {g7.nodes[b].metadata.get("entry", b) for b in
+               bank_helper_granular(g7, code, entry, type_pool=[int])}
+        if expect is None:
+            fmt_ok &= (len(got) == 0)
+        else:
+            fmt_ok &= (expect in got)
+    print(f"  [7] AST factoring robust (top-level + nested banked, monolith banks nothing) -> "
+          f"{'PASS' if fmt_ok else 'FAIL'}")
+    ok &= fmt_ok
+
     print(f"\n  ALGO_GRR_POISON_TEST SELFTEST -> {'PASS' if ok else 'FAIL'}")
     return ok
 
