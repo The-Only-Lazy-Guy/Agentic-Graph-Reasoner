@@ -335,6 +335,26 @@ CHANNEL ISOLATION — MEASURED (2026-07-17, --isolate, clean 2x2, 3 OLD-variants
   Repro: `python -m v5.runtime.algo_grr_mbpp --run --lm Qwen/Qwen2.5-3B-Instruct --limit 120 [--policy]`
   (needed a verify TIMEOUT fix first — LM code infinite-loops; commit 10f3c40 run_with_timeout on every exec).
 
+## MBPP+ LOCAL ANALYSIS (no-GPU, 2026-07-17 — contextualises the numbers above)
+  [1] data quality: 378/378 references satisfy their own asserts (100%).
+  [2] **COMPOUNDING CEILING = 2%**: only 8/378 MBPP+ references have ANY extractable helper
+      (bankable_pure_defs) — 370 are MONOLITHIC single functions. MBPP+ tasks are ATOMIC (one function
+      each), so derived-reuse is CORPUS-CEILING-LIMITED (~8 tasks) REGARDLESS of retrieval. That is why
+      derived_reuse was 4 — it's the corpus, NOT the design. The cosine reuse=24 (of SEED primitives) is
+      the unbounded signal. => STRONG compounding needs DECOMPOSABLE tasks (APPS / the designed curriculum
+      / multi-step problems where sub-computations recur), not MBPP+. Key corpus lesson.
+  [3] type inference: 265/378 asserts give a non-[int] pool (list 116 / int 113 / str 58 / int+list 38 /
+      tuple 29 / dict 5) — the fuzz-gate is typed from real signatures.
+  [4] fuzz-gate PRECISION BUG found + fixed (commit c642d7f): the gate exec'd a helper ALONE -> composed
+      helpers (sum_divisors->divisors) NameError'd -> false "fragile" reject -> silently SUPPRESSED banking
+      of reuse-bearing helpers. Fixed with dependency-closure exec + crash-rule relaxed to always-crash
+      only (type-sensitive multi-arg helpers must pass). Seed-atom precision 11/21 -> 20/21; degenerate
+      still rejected 2/2.
+  [5] reuse ceiling: 261/378 tasks have a seed atom @cos>=0.15 (69%), 56 @cos>=0.25 (14%) — cosine's
+      measured reuse 24/120 (~20%) sits sensibly inside this envelope.
+  [6] scalability (goal 2): at 625 nodes CachedTokenRetriever = 1.9 ms/rank vs 4.2 ms/rank rebuilding
+      each call (~2.2x; gap widens with N). Script: scratchpad/local_analysis.py.
+
 ## USER 3 GOALS — autonomous session (2026-07-17, all no-GPU built + selftested; molab validation pending)
 Driven by the MBPP+ lesson (seed-trained policy went OOD -> reuse 24->4). All three serve the same end:
 make reuse come from the GRAPH's structure + verify, not from a fragile trained net or prompt tricks.
