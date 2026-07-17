@@ -600,6 +600,11 @@ class MembraneSolver:
         # (a composition where neither atom alone yields partial credit still climbs); realized
         # coverage is the STOP signal, and un-called atoms are pruned at the end. Adding a
         # definition never lowers coverage, so speculative add is monotone-safe.
+        # NOTE (S2, negative result): a coverage-stall "early-derive" was tried + REVERTED — on a genuine
+        # 2-atom composition coverage stays 0 until BOTH atoms are selected, so "stalled" is
+        # indistinguishable from "climbing", and bailing early breaks solvable compositions. The real
+        # per-task-cost lever is BETTER RETRIEVAL (topology solves in fewer hops than cosine — measured),
+        # not a coverage heuristic. max_hops is the honest budget.
         for hop in range(self.max_hops):
             ranked = self.policy_fn(task, selected, self.graph, self.retriever)
             cand = next((c for c, s in ranked if s > min_score and c not in selected), None)

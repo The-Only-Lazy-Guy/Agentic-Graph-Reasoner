@@ -374,6 +374,28 @@ CHANNEL ISOLATION — MEASURED (2026-07-17, --isolate, clean 2x2, 3 OLD-variants
   that the real 3B realises it (it may inline). molab realisation test: `python -m v5.runtime.algo_grr_compose
   --run --lm Qwen/Qwen2.5-3B-Instruct --n 80 --topo` -> how much of the 100% ceiling does the real 3B hit?
 
+## SCALABILITY VERIFICATION (S1-S3, no-GPU, 2026-07-17 — the gate before the scale-up long run)
+  S1 LOOP SCALES (scratchpad/scale_probe.py, full membrane over a synthetic graph, 50 stub tasks/size):
+     atoms 21->2000: SOLVED 50/50 at EVERY size (distractors don't confuse it); cost is O(atoms) —
+     rank 0.06->5.66 ms, per-task 0.63->7.75 ms (stub, no LM). At scale-up scale (hundreds-low-thousands
+     of atoms) the membrane overhead is NEGLIGIBLE vs LM generation (seconds/task) => the loop is
+     LM-BOUND, not membrane-bound. O(N) cosine retrieval is the eventual ceiling (needs an approximate-NN
+     index beyond ~10k atoms) — documented, not a scale-up blocker.
+  S2 EARLY-DERIVE = NEGATIVE RESULT (reverted): a coverage-stall "stop grinding hops, derive early" heuristic
+     BREAKS genuine 2-atom compositions — coverage stays 0 until BOTH atoms are selected, so "stalled" is
+     indistinguishable from "climbing", and bailing loses the complement. The real per-task-cost lever is
+     BETTER RETRIEVAL (topology solves in fewer hops than cosine — that's why cosine ran "weirdly long"),
+     not a coverage heuristic. max_hops is the honest budget. Documented in the solve() loop.
+  S3 GRAPH-HEALTH MONITOR (algo_grr_health.py) for the scale-up run: reports exact-code dups, BEHAVIOURAL
+     dups (fuzz-equal on a shared FIXED input set — the GRR-1 fuzz-equivalence class, the real pollution),
+     orphans, dangling edges, dead derived atoms. Two probe lessons baked in: shared fixed inputs (else
+     each atom consumes the rng -> incomparable), wide multi-digit range (digit_sum==reverse_digits on
+     1-digit), and DISCRIMINATING-only signatures (is_perfect/is_palindrome_number are ~always-False on
+     random -> uninformative, must not be flagged as dups). Selftest: clean seed 0 dups/orphans/dangling;
+     an injected is_prime behavioural clone is CAUGHT. Run: `--graph <path>` to audit any grown graph.
+  VERDICT: the loop is verified scalable for the scale-up (LM-bound; health monitor ready). 8 GRR-Tool
+  modules all no-GPU selftest PASS.
+
 ## USER 3 GOALS — autonomous session (2026-07-17, all no-GPU built + selftested; molab validation pending)
 Driven by the MBPP+ lesson (seed-trained policy went OOD -> reuse 24->4). All three serve the same end:
 make reuse come from the GRAPH's structure + verify, not from a fragile trained net or prompt tricks.
