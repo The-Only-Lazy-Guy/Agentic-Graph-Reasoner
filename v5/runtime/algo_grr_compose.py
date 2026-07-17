@@ -169,6 +169,8 @@ def main() -> None:
             from v5.runtime.algo_grr_retrieval import make_topology_policy
             policy_fn = make_topology_policy(graph)
         if a.lm:
+            import os
+            os.environ["V5_HARD_VERIFY"] = "1"            # subprocess verify -> LM code can't hang the run
             from v5.runtime.algo_grr_membrane import make_frozen_gen, make_lm_compiler
             compile_fn = make_lm_compiler(make_frozen_gen(a.lm, temperature=0.6, max_new_tokens=320))
         else:

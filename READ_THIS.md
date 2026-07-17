@@ -340,6 +340,13 @@ CHANNEL ISOLATION — MEASURED (2026-07-17, --isolate, clean 2x2, 3 OLD-variants
     (compounding, fewer tokens over time), NOT a raw solve-rate lever; solve is 3B-bound.
   Repro: `python -m v5.runtime.algo_grr_mbpp --run --lm Qwen/Qwen2.5-3B-Instruct --limit 120 [--policy]`
   (needed a verify TIMEOUT fix first — LM code infinite-loops; commit 10f3c40 run_with_timeout on every exec).
+  HANG FIX #2 (2026-07-18): the SIGALRM timeout is INSUFFICIENT — it only fires between Python bytecodes,
+  so a C-LEVEL runaway in LM code (factorial(10**9), 'x'*10**9, 2**10**8, catastrophic regex) never yields
+  and HANGS despite the timeout (MBPP+ diversity triggers these; the seed curriculum didn't). Fix: with
+  V5_HARD_VERIFY=1 (AUTO-set on every --lm run) each assert-verify runs in a FRESH python SUBPROCESS with a
+  real kill-on-timeout (subprocess.run timeout -> SIGKILL; isolated interpreter, no CUDA inherited).
+  Verified locally: C-level runaway + infinite loop both hard-killed, normal code passes. Selftests keep
+  the fast in-process SIGALRM path (trusted stub code). => the corpus run can no longer hang on any task.
 
 ## MBPP+ LOCAL ANALYSIS (no-GPU, 2026-07-17 — contextualises the numbers above)
   [1] data quality: 378/378 references satisfy their own asserts (100%).

@@ -17,6 +17,8 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -36,17 +38,64 @@ COMMON = ("import math\nimport re\nimport itertools\nimport functools\n"
 # Verify via the task's own asserts (the hard gate; the LM never writes these)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# Worker executed in a FRESH subprocess (see hard_verify_asserts). It reads {full, asserts} on stdin,
+# runs the asserts, prints "FRAC <frac> <detail>". A C-level runaway (factorial(10**9), 'x'*10**9,
+# catastrophic regex) is killed by the parent's subprocess timeout — which SIGALRM cannot do (signals
+# only fire between Python bytecodes, never inside a C call).
+_HARD_WORKER = r"""
+import sys, json
+d = json.load(sys.stdin)
+ns = {}
+try:
+    exec(compile(d["full"], "<v>", "exec"), ns)
+except Exception as e:
+    print("FRAC 0.0 compile:" + repr(e)[:80]); sys.exit()
+n, first = 0, ""
+A = d["asserts"]
+for a in A:
+    try:
+        exec(a, ns); n += 1
+    except Exception as e:
+        if not first: first = repr(e)[:80]
+print("FRAC", n / max(1, len(A)), first or "ok")
+"""
+
+
+def hard_verify_asserts(full_code: str, asserts: list[str], timeout: float) -> tuple[float, str]:
+    """Run the asserts in a FRESH python subprocess with a real kill-on-timeout. Isolated interpreter
+    (no CUDA inherited), so a C-level runaway is hard-killed instead of hanging the corpus run."""
+    try:
+        r = subprocess.run([sys.executable, "-c", _HARD_WORKER],
+                           input=json.dumps({"full": full_code, "asserts": asserts}),
+                           capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return 0.0, "timeout (hard-killed subprocess)"
+    line = next((ln for ln in reversed(r.stdout.splitlines()) if ln.startswith("FRAC ")), None)
+    if not line:
+        return 0.0, f"no result (crash: {r.stderr.strip()[:80]})"
+    parts = line.split(" ", 2)
+    try:
+        return float(parts[1]), (parts[2] if len(parts) > 2 else "")
+    except ValueError:
+        return 0.0, "parse error"
+
+
 def verify_asserts(code: str, asserts: list[str], setup: str = "",
                    timeout: float = 6.0) -> tuple[float, str]:
-    """Grade LM code against the task's own asserts. Bounded by `timeout` — LM-generated code can
-    infinite-loop; a runaway scores 0.0 instead of hanging the whole corpus run."""
-    from v5.runtime.algo_grr_membrane import run_with_timeout
+    """Grade LM code against the task's own asserts. LM code can infinite-loop OR do a C-level runaway.
+    With V5_HARD_VERIFY=1 (auto-set on --lm runs) each verify runs in a hard-killable SUBPROCESS; else
+    the fast in-process SIGALRM path (fine for trusted stub/selftest code)."""
     if not asserts:
         return 0.0, "no asserts"
+    full = COMMON + (setup or "") + "\n" + code
+    if os.environ.get("V5_HARD_VERIFY") == "1":
+        return hard_verify_asserts(full, asserts, timeout)
+
+    from v5.runtime.algo_grr_membrane import run_with_timeout
 
     def _run():
         ns: dict = {}
-        exec(compile(COMMON + (setup or "") + "\n" + code, "<mbpp>", "exec"), ns)
+        exec(compile(full, "<mbpp>", "exec"), ns)
         n_ok, first = 0, ""
         for a in asserts:
             try:
@@ -215,8 +264,10 @@ def main() -> None:
             _m, policy_fn = train_and_make_policy(load_seed())
             print("[policy] ComplementPolicy on seed graph -> membrane retrieval")
         if a.lm:
+            os.environ["V5_HARD_VERIFY"] = "1"            # subprocess verify -> real LM code can't hang the run
             from v5.runtime.algo_grr_membrane import make_frozen_gen, make_lm_compiler
             compile_fn = make_lm_compiler(make_frozen_gen(a.lm, temperature=0.6, max_new_tokens=320))
+            print("[hard-verify] each verify runs in a hard-killable subprocess")
         else:
             compile_fn = make_stub_compiler({t["entry"]: t["reference"] for t in tasks})
             print("(stub = reference code; use --lm for the real generalization test)")
