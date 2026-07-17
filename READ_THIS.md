@@ -316,10 +316,16 @@ CHANNEL ISOLATION — MEASURED (2026-07-17, --isolate, clean 2x2, 3 OLD-variants
 
 ## MBPP+ GENERALIZATION RESULT (2026-07-17, real Qwen2.5-3B, 120 tasks from the 25-atom clean seed)
   The real generalization proof — does the frozen membrane solve diverse real tasks + REUSE across them?
-  COSINE retrieval (no --policy):                    per-chunk reuse rose 7 -> 12 -> 17 -> 24
-    SOLVED 85/120 (70%) | cross-task reuse 24 (of DERIVED atoms: 4, rising 0->1->2->4) | banked 13 | graph 25->38
-  POLICY (seed-trained ComplementPolicy, --policy):
-    SOLVED 91/120 (75%) | cross-task reuse 4 (derived 0) | banked 16 | graph 25->41
+  3-WAY RETRIEVAL A/B (120 tasks, same frozen 3B):
+    cosine   : SOLVED 85/120 (70%) | reuse 24 (derived 4) | banked 13 | graph 25->38  (reuse 7->12->17->24)
+    policy   : SOLVED 91/120 (75%) | reuse  4 (derived 0) | banked 16 | graph 25->41  (seed-trained net = OOD)
+    TOPOLOGY : SOLVED 94/120 (78%) | reuse 36 (derived 3) | banked 25 | graph 25->50  (reuse 10->21->26->36)  <-- BEST
+  GOAL-1 VALIDATED ON REAL DATA: depend-edge topology retrieval WINS every axis -> reuse 24->36 (+50%,
+    seed-atom reuse alone 20->33), solve 70->78%, banked 13->25. The graph's OWN EDGES are the best
+    retrieval signal — beats flat cosine AND the trained net, needs NO training (generalises where the
+    seed-net went OOD). derived_reuse stays ~3 (= the 2% MBPP+ atomic ceiling; topology can't lift what
+    the corpus doesn't contain). Caveats: single noisy run (but +12 reuse / +8pp solve > the +-1-2 floor);
+    this run PREDATES the gate fix c642d7f (banking is a lower bound). Repro: `... --limit 120 --topo`.
   HEADLINE: cross-task reuse was 0 in EVERY prior design; with cosine it is 24 and RISING on real MBPP+ —
     the clean seed primitives (is_prime/gcd/...) are load-bearing in real solutions (20/24 reuses are seed).
     COMPOUNDING (derived_reuse) = 4, monotonic 0->4: the graph-grows-then-reuses loop fires on real data,
