@@ -52,8 +52,14 @@ WAVE 2  ▼ #4 compound-vs-RAG  ▼ #6 invention                  ▼ MHPP verif
 2. **Model:** TRMPlanDecoder: input = mpnet(task) + atom-set embeddings; output = the atom-program as a token sequence over {atom-pointers, wiring-ops: call/compose/arg}. Teacher-force; deep supervision (algo_trm train pattern).
 3. **Eval:** held-out tasks (unseen wiring compositions). Metric = **program exact-match** AND **realized-code verify-rate**.
 **DoD / selftest:** on held-out, realized-code verify ≥70% (planner infers structure the LM alone gets ~3% at depth 5 — see `algo_grr_wiring`).
-**Expected (speculative):** shallow (depth≤2) ~90%, depth 3–4 ~60–75%, depth 5 ~40–60%. This is the number that replaces the "oracle" in #1b.
-**Risk:** underfit → scale data (10k+), or shrink the wiring grammar first.
+**RESULT (built, `algo_grr_planner.py`):** a FLAT seq2seq planner DEGRADES with depth exactly like the LM
+(verify 1.00→0.07 by depth 5; overall 0.46) — the compositional-generalisation limit. The FIX (already
+validated as GRR-7): **net-GUIDED VERIFIED SEARCH** — beam-decode candidates with the seq2seq as a GUIDE,
+VERIFY each, return the first that passes. Lifts it: 0.72→**0.98** @d2, 0.40→**0.75** @d3, overall
+0.46→**0.67**. Deep extrapolation (d≥4) stays **budget-bound** (beam=10 + OOD-deep net can't contain the
+program) → raise beam / train on deeper (the GRR-8 verifies-to-solve tradeoff). **So the planner = search +
+net-guide + verify, NOT a flat decoder.** `plan_by_search()` is the interface MembraneV2 (#1b) consumes.
+**Risk:** deep depth needs budget; train the net on the target depth range + scale beam with depth.
 
 ---
 
