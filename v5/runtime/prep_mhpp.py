@@ -71,7 +71,15 @@ def _load_rows(a) -> list[dict]:
             return [dict(r) for r in ds]
         except Exception as e:  # noqa: BLE001
             print(f"       -> {e!r}")
-    raise SystemExit("Could not load MHPP. Pass --hf <path>, --url <jsonl>, or --local <file>.")
+            # split name wrong (e.g. BigCodeBench uses versioned splits v0.1.x) -> auto-pick the latest
+            try:
+                dd = load_dataset(name)                    # DatasetDict of all splits
+                split = sorted(dd.keys())[-1]              # latest (e.g. v0.1.4)
+                print(f"       -> auto-using split '{split}'")
+                return [dict(r) for r in dd[split]]
+            except Exception as e2:  # noqa: BLE001
+                print(f"       -> {e2!r}")
+    raise SystemExit("Could not load the dataset. Pass --hf <path> --split <name>, --url <jsonl>, or --local <file>.")
 
 
 def _validate(path: str) -> bool:
