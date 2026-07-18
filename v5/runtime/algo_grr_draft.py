@@ -126,121 +126,90 @@ def build_reverse_map(lm_to_draft: dict[int, int]) -> dict[int, int]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TRMDecoder — small autoregressive GRU that generates code tokens
+# TRMPlanDecoder — end-to-end TRM planner + autoregressive decoder
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-class TRMDecoder(nn.Module):
-    """Tiny autoregressive decoder that converts TRM reasoning plan → code tokens.
+class TRMPlanDecoder(nn.Module):
+    """End-to-end: TRM refines a plan over T steps, decoder generates code tokens.
+    Gradients from decoder CE loss flow through TRM — trains both jointly."""
 
-    The TRMReasoner produces z_T (the reasoning plan) + selected atom embeddings.
-    This decoder takes that plan and generates code tokens autoregressively.
-
-    Architecture:
-        token_embed (vocab_size × d_emb) → GRU(d_emb + d_context, d_hidden) →
-        cross-attend to atom_embs → language head (d_hidden × vocab_size)
-    """
-
-    def __init__(self, vocab_size: int, d_context: int = 256, d_emb: int = 64,
-                 d_hidden: int = 128, d_atom: int = 256, num_layers: int = 2,
-                 dropout: float = 0.1):
+    def __init__(self, vocab_size: int, d_in: int = 256, d: int = 256, T: int = 5,
+                 d_emb: int = 64, d_hidden: int = 128, d_atom: int = 256,
+                 num_layers: int = 2, dropout: float = 0.1):
         super().__init__()
         self.vocab_size = vocab_size
         self.d_hidden = d_hidden
+        self.T = T
 
-        self.token_embed = nn.Embedding(vocab_size, d_emb, padding_idx=2)  # PAD=2
-        self.plan_proj = nn.Linear(d_context, d_hidden)  # project z_T → GRU init
+        self.task_proj = nn.Linear(d_in, d)
+        self.atom_proj = nn.Linear(d_atom, d)
+        self.z0 = nn.Parameter(torch.zeros(d))
+        self.f = nn.Sequential(nn.Linear(3 * d, d), nn.GELU(), nn.Linear(d, d))
+        self.q = nn.Sequential(nn.Linear(2 * d, d), nn.GELU(), nn.Linear(d, d))
+        self.scale = d ** 0.5
+        self.plan_proj = nn.Linear(d, d_hidden)
 
-        # GRU: input = [token_emb, context] where context = plan + atom_summary
+        self.token_embed = nn.Embedding(vocab_size, d_emb, padding_idx=2)
         self.gru = nn.GRU(d_emb + d_hidden, d_hidden, num_layers=num_layers,
                           dropout=dropout if num_layers > 1 else 0, batch_first=True)
-
-        # Cross-attend to atom embeddings after each step
         self.atom_q = nn.Linear(d_hidden, d_hidden)
         self.atom_k = nn.Linear(d_atom, d_hidden)
         self.atom_v = nn.Linear(d_atom, d_hidden)
-
-        # Language head
         self.lang_head = nn.Sequential(
-            nn.Linear(d_hidden * 2, d_hidden),  # concat GRU out + attended atoms
-            nn.GELU(),
-            nn.Linear(d_hidden, vocab_size),
-        )
+            nn.Linear(d_hidden * 2, d_hidden), nn.GELU(), nn.Linear(d_hidden, vocab_size))
 
-    def forward(self, z_T: torch.Tensor, atom_embs: torch.Tensor | None = None,
+    def _plan(self, task_vec: torch.Tensor, atom_vecs: torch.Tensor) -> torch.Tensor:
+        x = self.task_proj(task_vec)
+        A = self.atom_proj(atom_vecs)
+        z = self.z0
+        y = torch.zeros(A.shape[0], device=A.device)
+        for _ in range(self.T):
+            ysoft = torch.softmax(y, dim=0)
+            ysum = ysoft @ A
+            z = self.f(torch.cat([x, ysum, z]))
+            query = self.q(torch.cat([x, z]))
+            y = (A @ query) / self.scale
+        return z
+
+    def forward(self, task_vec: torch.Tensor, atom_vecs: torch.Tensor,
                 target_ids: torch.Tensor | None = None,
-                max_tokens: int = 100, temperature: float = 1.0) -> torch.Tensor | list[int]:
-        """Forward pass: teacher-force or generate.
+                max_tokens: int = 100, temperature: float = 1.0):
+        z_T = self._plan(task_vec, atom_vecs)
+        plan = self.plan_proj(z_T)
+        h0 = plan.unsqueeze(0).expand(self.gru.num_layers, -1).contiguous()
 
-        Args:
-            z_T: [d_context] final TRM hidden state
-            atom_embs: [n_atoms, d_atom] or None
-            target_ids: [seq_len] for teacher-forcing
-            max_tokens: max generation length
-            temperature: sampling temperature for generation
+        ak = self.atom_k(atom_vecs) if atom_vecs.shape[0] > 0 else None
+        av = self.atom_v(atom_vecs) if atom_vecs.shape[0] > 0 else None
 
-        Returns:
-            If target_ids given: logits [seq_len-1, vocab_size] for training
-            Else: list of generated token IDs
-        """
-        # Plan as initial state
-        plan = self.plan_proj(z_T)  # [d_hidden]
-        h0 = plan.unsqueeze(0).expand(self.gru.num_layers, -1).contiguous()  # [num_layers, d_hidden]
-
-        # Atom context
-        if atom_embs is not None and atom_embs.shape[0] > 0:
-            atom_k = self.atom_k(atom_embs)  # [n, d_hidden]
-            atom_v = self.atom_v(atom_embs)  # [n, d_hidden]
-        else:
-            atom_k = atom_v = None
-
-        def attend(h: torch.Tensor) -> torch.Tensor:
-            if atom_k is None:
-                return torch.zeros_like(h)
-            q = self.atom_q(h).unsqueeze(0)  # [1, d_hidden]
-            scores = (q @ atom_k.T) / (self.d_hidden ** 0.5)  # [1, n]
-            attn = F.softmax(scores, dim=-1)  # [1, n]
-            return (attn @ atom_v).squeeze(0)  # [d_hidden]
+        def _att(h):
+            if ak is None: return torch.zeros_like(h)
+            s = (self.atom_q(h).unsqueeze(0) @ ak.T) / (self.d_hidden ** 0.5)
+            return (F.softmax(s, dim=-1) @ av).squeeze(0)
 
         if target_ids is not None:
-            # Teacher-forcing: return logits per position
-            embs = self.token_embed(target_ids[:-1])  # [seq_len-1, d_emb]
-            context = plan.unsqueeze(0).expand(embs.shape[0], -1)  # [seq_len-1, d_hidden]
-            gru_in = torch.cat([embs, context], dim=-1)  # [seq_len-1, d_emb + d_hidden]
-            gru_out, _ = self.gru(gru_in.unsqueeze(0), h0.unsqueeze(1))  # [1, seq_len-1, d_hidden]
-            gru_out = gru_out.squeeze(0)  # [seq_len-1, d_hidden]
-            attended = torch.stack([attend(gru_out[i]) for i in range(gru_out.shape[0])])
-            combined = torch.cat([gru_out, attended], dim=-1)  # [seq_len-1, 2*d_hidden]
-            return self.lang_head(combined)  # [seq_len-1, vocab_size]
+            embs = self.token_embed(target_ids[:-1])
+            ctx = plan.unsqueeze(0).expand(embs.shape[0], -1)
+            go, _ = self.gru(torch.cat([embs, ctx], dim=-1).unsqueeze(0), h0.unsqueeze(1))
+            go = go.squeeze(0)
+            att = torch.stack([_att(go[i]) for i in range(go.shape[0])])
+            return self.lang_head(torch.cat([go, att], dim=-1))
 
-        # Generation mode
         generated = []
-        h = h0.unsqueeze(1)  # [num_layers, 1, d_hidden]
-        tok = torch.tensor([[0]], device=z_T.device)  # BOS
-
+        h = h0.unsqueeze(1)
+        tok = torch.tensor([[0]], device=task_vec.device)
         for _ in range(max_tokens):
-            emb = self.token_embed(tok)  # [1, 1, d_emb]
-            context = plan.unsqueeze(0).unsqueeze(0)  # [1, 1, d_hidden]
-            gru_in = torch.cat([emb, context], dim=-1)  # [1, 1, d_emb + d_hidden]
-            out, h = self.gru(gru_in, h)  # out: [1, 1, d_hidden]
-            h_state = out.squeeze(1)  # [1, d_hidden]
-            att = attend(h_state[0])  # [d_hidden]
-            combined = torch.cat([h_state[0], att], dim=-1)  # [2*d_hidden]
-            logits = self.lang_head(combined.unsqueeze(0))  # [1, vocab_size]
-
-            # Sample or argmax (guard temperature==0 -> no divide-by-zero -> greedy)
-            if temperature and temperature > 0:
-                probs = F.softmax(logits / temperature, dim=-1)
-                next_tok = torch.multinomial(probs.squeeze(0), 1)
-            else:
-                next_tok = logits.argmax(dim=-1)
-
-            tid = next_tok.item()
-            if tid == 1:  # EOS
-                break
+            emb = self.token_embed(tok)
+            go, h = self.gru(torch.cat([emb, plan.unsqueeze(0).unsqueeze(0)], dim=-1), h)
+            hs = go.squeeze(1)
+            att = _att(hs[0])
+            lo = self.lang_head(torch.cat([hs[0], att], dim=-1).unsqueeze(0))
+            ntok = torch.multinomial(F.softmax(lo / max(temperature, 1e-8), dim=-1).squeeze(0), 1) \
+                if temperature > 0 else lo.argmax(dim=-1)
+            tid = ntok.item()
+            if tid == 1: break
             generated.append(tid)
-            tok = next_tok.unsqueeze(0)  # [1, 1]
-
+            tok = ntok.unsqueeze(0)
         return generated
 
 
@@ -259,9 +228,13 @@ def _bow_embed(text: str, dim: int = 256) -> np.ndarray:
     return v / n if n else v
 
 
-def make_training_data(trm, tokenizer, lm_to_draft, specials, device,
+def make_training_data(tokenizer, lm_to_draft, specials, device,
                        corpus_paths: list[str] | None = None):
-    """Build (z_T, atom_embs, target_ids) triples from curriculum + MBPP+ traces."""
+    """Build (task_vec, atom_embs, target_ids) from curriculum + MBPP+.
+
+    No TRM pre-computation — the end-to-end TRMPlanDecoder handles planning
+    inside its forward pass.
+    """
     from v5.runtime.algo_grr_poison_test import curriculum, load_seed
     from v5.runtime.algo_grr_membrane import TokenRetriever
 
@@ -270,7 +243,7 @@ def make_training_data(trm, tokenizer, lm_to_draft, specials, device,
     data = []
     seen_codes: set[str] = set()
 
-    def _process_code(code: str, task_text: str) -> None:
+    def _process(code: str, task_text: str) -> None:
         if code in seen_codes:
             return
         seen_codes.add(code)
@@ -280,25 +253,14 @@ def make_training_data(trm, tokenizer, lm_to_draft, specials, device,
         atom_embs_list = [_bow_embed(graph.nodes[nid].text) for nid in atom_ids]
         atom_embs = torch.tensor(np.stack(atom_embs_list) if atom_embs_list else [[0.0]*256],
                                  dtype=torch.float, device=device)
-
-        task_vec = _bow_embed(task_text)
-        x_vec = torch.tensor(task_vec, dtype=torch.float, device=device)
-
-        trm.eval()
-        with torch.no_grad():
-            outs = trm(x_vec, atom_embs, return_all=True)
-            z_T = outs[1][-1]
-
+        task_vec = torch.tensor(_bow_embed(task_text), dtype=torch.float, device=device)
         target = encode_for_draft(code, tokenizer, lm_to_draft, specials).to(device)
         if target.shape[0] >= 3:
-            data.append((z_T.detach().cpu(), atom_embs.cpu(), target.cpu()))
+            data.append((task_vec.cpu(), atom_embs.cpu(), target.cpu()))
 
-    # (A) Curriculum tasks
     for rnd in curriculum():
         for t in rnd:
-            _process_code(t["recipe"], t["text"])
-
-    # (B) MBPP+ tasks
+            _process(t["recipe"], t["text"])
     if corpus_paths:
         for cp in corpus_paths:
             path = Path(cp)
@@ -308,85 +270,63 @@ def make_training_data(trm, tokenizer, lm_to_draft, specials, device,
                 if not line.strip():
                     continue
                 r = json.loads(line)
-                code = r.get("code", "")
-                text = r.get("text", "")
+                code, text = r.get("code", ""), r.get("text", "")
                 if code and text:
-                    _process_code(code, text)
+                    _process(code, text)
 
     print(f"  [draft data] {len(data)} training examples, {len(seen_codes)} unique", flush=True)
     return data
 
 
-def _collate(batch: list) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Collate a list of (z_T, atom_embs, target) into batched tensors.
-
-    Atom embeddings are stacked; targets are padded to max seq len in batch.
-    """
-    z_Ts = torch.stack([item[0] for item in batch])
+def _collate(batch: list) -> tuple[torch.Tensor, list, torch.Tensor]:
+    task_vecs = torch.stack([item[0] for item in batch])
     targets = [item[2] for item in batch]
     max_len = max(t.shape[0] for t in targets)
-    padded = torch.full((len(targets), max_len), 2, dtype=torch.long)  # PAD=2
+    padded = torch.full((len(targets), max_len), 2, dtype=torch.long)
     for i, t in enumerate(targets):
         padded[i, :t.shape[0]] = t
-
-    # Handle variable-size atom_embs — since they differ per example,
-    # we handle them per-sample in the forward pass.
-    return z_Ts, [item[1] for item in batch], padded
+    return task_vecs, [item[1] for item in batch], padded
 
 
-def train_decoder(decoder: TRMDecoder, data: list, epochs: int = 50,
-                  lr: float = 1e-3, batch_size: int = 8, device: str = "cpu") -> TRMDecoder:
-    """Train the TRMDecoder on verified (plan → code) pairs.
+def train_decoder(model: TRMPlanDecoder, data: list, epochs: int = 50,
+                  lr: float = 1e-3, batch_size: int = 8, device: str = "cpu") -> TRMPlanDecoder:
+    from torch.utils.data import DataLoader
 
-    Uses DataLoader with batching. Variable-length atom_embs are handled
-    per-sample inside the decoder wrapper.
-    """
-    from torch.utils.data import DataLoader, TensorDataset
+    opt = torch.optim.AdamW(model.parameters(), lr=lr)
+    ce = nn.CrossEntropyLoss(ignore_index=2)
+    loader = DataLoader(data, batch_size=batch_size, shuffle=True, collate_fn=_collate)
 
-    opt = torch.optim.AdamW(decoder.parameters(), lr=lr)
-    ce = nn.CrossEntropyLoss(ignore_index=2)  # PAD
-
-    # Simple batching via DataLoader
-    loader = DataLoader(data, batch_size=batch_size, shuffle=True,
-                        collate_fn=_collate)
-
-    decoder.train()
+    model.train()
     for ep in range(epochs):
         total_loss = 0.0
         n_batches = 0
-        for z_Ts, atom_embs_list, targets in loader:
-            z_Ts = z_Ts.to(device)
+        for task_vecs, atom_embs_list, targets in loader:
+            task_vecs = task_vecs.to(device)
             targets = targets.to(device)
-
             batch_loss = 0.0
-            for i in range(z_Ts.shape[0]):
-                z_T = z_Ts[i]
-                atom_embs = atom_embs_list[i].to(device)
-                target = targets[i]
-
-                # Mask out padding tokens
-                valid = target != 2
+            for i in range(task_vecs.shape[0]):
+                tv = task_vecs[i]
+                ae = atom_embs_list[i].to(device)
+                tg = targets[i]
+                valid = tg != 2
                 if valid.sum() < 2:
                     continue
+                logits = model(tv, ae, target_ids=tg[:valid.sum()])
+                batch_loss = batch_loss + ce(logits, tg[1:valid.sum()])
 
-                logits = decoder(z_T, atom_embs=atom_embs, target_ids=target[:valid.sum()])
-                loss = ce(logits, target[1:valid.sum()])
-                batch_loss = batch_loss + loss
-
-            batch_loss = batch_loss / z_Ts.shape[0]
+            batch_loss = batch_loss / task_vecs.shape[0]
             batch_loss.backward()
-            torch.nn.utils.clip_grad_norm_(decoder.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             opt.zero_grad()
             total_loss += batch_loss.item()
             n_batches += 1
 
         if (ep + 1) % 5 == 0 or ep == 0:
-            print(f"  [draft train ep {ep+1}] mean loss {total_loss/max(1,n_batches):.4f}",
-                  flush=True)
+            print(f"  [train ep {ep+1}] mean loss {total_loss/max(1,n_batches):.4f}", flush=True)
 
-    decoder.eval()
-    return decoder
+    model.eval()
+    return model
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -486,27 +426,14 @@ class SpecDecVerify:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def make_draft_compile_fn(trm, decoder, specdec: SpecDecVerify,
+def make_draft_compile_fn(model: TRMPlanDecoder, specdec: SpecDecVerify,
                           lm_to_draft: dict[int, int], draft_to_lm: dict[int, int],
                           tokenizer, device: str = "cpu",
                           max_retries: int = 2) -> Callable[[dict], str]:
-    """Create a compile_fn that uses TRM draft + spec-dec verify.
-
-    For each solve attempt:
-      1. TRM reasons → selects atoms
-      2. Decoder generates code tokens
-      3. LM verifies (single forward pass) → accept/reject
-      4. If rejected, TRM re-reasons with rejection context
-      5. If accepted, return the generated code
-
-    Signature matches MembraneSolver's compile_fn: (spec) -> str
-    """
     def compile_fn(spec: dict) -> str:
         task_text = spec.get("task_text", "")
         entry = spec.get("entry", "")
 
-        # Select atoms via retriever (same as training) for consistent z_T
-        # This overrides spec.atoms from MembraneSolver
         from v5.runtime.algo_grr_poison_test import load_seed
         from v5.runtime.algo_grr_membrane import TokenRetriever
         graph = load_seed()
@@ -517,48 +444,34 @@ def make_draft_compile_fn(trm, decoder, specdec: SpecDecVerify,
         atom_codes = [graph.nodes[nid].metadata.get("code", "") for nid in atom_ids]
 
         task_vec = torch.tensor(_bow_embed(task_text), dtype=torch.float, device=device)
-        if atom_texts:
-            atom_embs = torch.stack([torch.tensor(_bow_embed(t), dtype=torch.float, device=device)
-                                     for t in atom_texts])
-        else:
-            atom_embs = torch.zeros(1, 256, device=device)
+        atom_embs = (torch.stack([torch.tensor(_bow_embed(t), dtype=torch.float, device=device)
+                                  for t in atom_texts]) if atom_texts
+                     else torch.zeros(1, 256, device=device))
 
-        # Build verify context with atom code so LM can judge plausibility
         atom_code_block = "\n".join(atom_codes)
-        if atom_code_block:
-            context = f"Available functions:\n{atom_code_block}\n\nTask: {task_text}\nWrite {entry}.\n"
-        else:
-            context = f"Task: {task_text}\nWrite {entry}.\n"
+        context = (f"Available functions:\n{atom_code_block}\n\nTask: {task_text}\nWrite {entry}.\n"
+                   if atom_code_block else f"Task: {task_text}\nWrite {entry}.\n")
 
         for attempt in range(max_retries + 1):
-            trm.eval()
+            model.eval()
             with torch.no_grad():
-                outs = trm(task_vec, atom_embs, return_all=True)
-                z_T = outs[1][-1]
-
-            decoder.eval()
-            with torch.no_grad():
-                draft_ids = decoder(z_T, atom_embs=atom_embs, temperature=0.0)
-
+                draft_ids = model(task_vec, atom_embs, temperature=0.0)
             if not draft_ids:
                 continue
 
-            decoded_preview = decode_from_draft(draft_ids[:20], specdec.tokenizer, draft_to_lm)
-            print(f"    [draft {attempt}] {len(draft_ids)} tokens, "
-                  f"preview: {decoded_preview[:80]}", flush=True)
+            preview = decode_from_draft(draft_ids[:20], specdec.tokenizer, draft_to_lm)
+            print(f"    [draft {attempt}] {len(draft_ids)} tokens, preview: {preview[:80]}",
+                  flush=True)
 
-            accepted, logprobs, verified = specdec.verify(
-                draft_ids, draft_to_lm, context_text=context)
-
+            _, logprobs, verified = specdec.verify(draft_ids, draft_to_lm, context_text=context)
             if verified or attempt >= max_retries:
                 code = decode_from_draft(draft_ids, specdec.tokenizer, draft_to_lm)
-                mean_lp = (sum(logprobs) / len(logprobs)) if logprobs else -99
-                print(f"    [verify] mean_lp={mean_lp:.2f} "
+                mlp = (sum(logprobs) / len(logprobs)) if logprobs else -99
+                print(f"    [verify] mean_lp={mlp:.2f} "
                       f"{'ACCEPTED' if verified else 'FALLBACK'}", flush=True)
                 return code if code else f"def {entry}(): pass"
 
-        code = decode_from_draft(draft_ids, specdec.tokenizer, draft_to_lm)
-        return code if code else f"def {entry}(): pass"
+        return f"def {entry}(): pass"
 
     return compile_fn
 
@@ -973,17 +886,17 @@ def _selftest() -> bool:
 
     # [1] DRAFT PATH: the tiny TRM decoder trains on a verified code token-stream and REPRODUCES it
     #     (greedy, temperature=0 — exercises the divide-by-zero fix). This is what the TRM 'drafts'.
-    V = 14                                                     # 0=BOS 1=EOS 2=PAD + 11 code tokens
-    dec = TRMDecoder(vocab_size=V, d_context=32, d_emb=16, d_hidden=32, d_atom=32, num_layers=1)
-    z_T = torch.randn(32)
-    atom_embs = torch.randn(2, 32)
-    target = torch.tensor([0, 3, 4, 5, 6, 7, 5, 8, 9, 1])     # BOS ... EOS  (a 'verified atom' stream)
-    opt = torch.optim.Adam(dec.parameters(), lr=5e-3)
+    V = 14
+    mod = TRMPlanDecoder(vocab_size=V, d_in=32, d=32, T=3, d_emb=16, d_hidden=32, d_atom=32, num_layers=1)
+    tv = torch.randn(32)
+    av = torch.randn(2, 32)
+    target = torch.tensor([0, 3, 4, 5, 6, 7, 5, 8, 9, 1])
+    opt = torch.optim.Adam(mod.parameters(), lr=5e-3)
     for _ in range(500):
-        logits = dec(z_T, atom_embs=atom_embs, target_ids=target)   # [L-1, V]
+        logits = mod(tv, av, target_ids=target)
         loss = F.cross_entropy(logits, target[1:])
         opt.zero_grad(); loss.backward(); opt.step()
-    gen = dec(z_T, atom_embs=atom_embs, temperature=0.0, max_tokens=20)  # list[int], greedy
+    gen = mod(tv, av, temperature=0.0, max_tokens=20)
     want = target[1:-1].tolist()
     repro = gen == want
     print(f"  [1] decoder drafts the verified stream (greedy): {gen} == {want} -> "
@@ -1103,9 +1016,6 @@ def main() -> None:
         print(f"  saved vocab ({draft_vocab_size} tokens) to {a.vocab}", flush=True)
 
     if a.train_trm:
-        from v5.runtime.algo_trm import _build
-        _, _, TRMReasoner, *_ = _build()
-
         if not Path(a.vocab).exists():
             print(f"  vocab not found at {a.vocab}, run --train-vocab first", flush=True)
             return
@@ -1120,39 +1030,29 @@ def main() -> None:
         trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
         tokenizer = AutoTokenizer.from_pretrained(a.lm, trust_remote_code=trust)
 
-        # TRM
-        trm = TRMReasoner(d_in=256, d=256, T=5, d_feedback=64)
-        trm.to(device)
-        trm.eval()
+        model = TRMPlanDecoder(vocab_size=draft_vocab_size, d_in=256, d=256, T=5,
+                               d_emb=64, d_hidden=128, d_atom=256, num_layers=2)
+        model.to(device)
 
-        # Decoder
-        decoder = TRMDecoder(vocab_size=draft_vocab_size, d_context=256, d_emb=64,
-                             d_hidden=128, d_atom=256, num_layers=2)
-        decoder.to(device)
-
-        # Training data — include MBPP+ corpus if available
         corpus_paths = list(a.corpus) if a.corpus else []
         extra = ["artifacts/mbpp_plus_prepped.jsonl"]
         for p in extra:
             if Path(p).exists() and p not in corpus_paths:
                 corpus_paths.append(p)
-        data = make_training_data(trm, tokenizer, lm_to_draft, specials, device,
+        data = make_training_data(tokenizer, lm_to_draft, specials, device,
                                   corpus_paths=corpus_paths if corpus_paths else None)
         if not data:
             print("  no training data", flush=True)
             return
 
-        decoder = train_decoder(decoder, data, epochs=a.epochs,
-                                batch_size=a.batch_size, lr=a.lr, device=device)
+        model = train_decoder(model, data, epochs=a.epochs,
+                              batch_size=a.batch_size, lr=a.lr, device=device)
 
         Path(a.decoder).parent.mkdir(parents=True, exist_ok=True)
-        torch.save(decoder.state_dict(), a.decoder)
+        torch.save(model.state_dict(), a.decoder)
         print(f"  saved decoder to {a.decoder}", flush=True)
 
     if a.run:
-        from v5.runtime.algo_trm import _build
-        _, _, TRMReasoner, *_ = _build()
-
         if not Path(a.vocab).exists() or not Path(a.decoder).exists():
             print(f"  need both {a.vocab} and {a.decoder}; run --train-vocab + --train-trm first",
                   flush=True)
@@ -1162,31 +1062,21 @@ def main() -> None:
         lm_to_draft = vocab_data["lm_to_draft"]
         draft_to_lm = vocab_data["draft_to_lm"]
         draft_vocab_size = vocab_data["draft_vocab_size"]
-        specials = vocab_data["specials"]
 
-        trm = TRMReasoner(d_in=256, d=256, T=5, d_feedback=64)
-        trm.to(device)
-        trm.eval()
-
-        decoder = TRMDecoder(vocab_size=draft_vocab_size, d_context=256, d_emb=64,
-                             d_hidden=128, d_atom=256, num_layers=2)
-        decoder.load_state_dict(torch.load(a.decoder, map_location=device))
-        decoder.to(device)
-        decoder.eval()
+        model = TRMPlanDecoder(vocab_size=draft_vocab_size, d_in=256, d=256, T=5,
+                               d_emb=64, d_hidden=128, d_atom=256, num_layers=2)
+        model.load_state_dict(torch.load(a.decoder, map_location=device))
+        model.to(device)
+        model.eval()
 
         specdec = SpecDecVerify(a.lm, threshold=-2.0)
-        compile_fn = make_draft_compile_fn(trm, decoder, specdec, lm_to_draft,
-                                           draft_to_lm, specdec.tokenizer, device=device)
+        compile_fn = make_draft_compile_fn(model, specdec, lm_to_draft, draft_to_lm,
+                                           specdec.tokenizer, device=device)
 
-        # Run curriculum
         print("\n--- TRM draft + spec-dec verify on curriculum ---\n", flush=True)
-        from v5.runtime.algo_grr_poison_test import curriculum, load_seed, run_new_arm
-        from v5.runtime.algo_grr_membrane import make_lm_compiler
-
-        # Use draft as compile fn
+        from v5.runtime.algo_grr_poison_test import curriculum, run_new_arm, _fmt
         rounds = curriculum()
         m = run_new_arm(rounds, compile_fn)
-        from v5.runtime.algo_grr_poison_test import _fmt
         _fmt("TRM-draft + spec-dec:", m)
 
 
