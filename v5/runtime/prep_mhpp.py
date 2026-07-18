@@ -25,13 +25,16 @@ _ROOT = str(Path(__file__).resolve().parents[2])
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-# best-effort HF dataset names for MHPP (the exact path may differ — pass --hf to override)
-_HF_CANDIDATES = ["SparksofAGI/MHPP", "MHPP/MHPP", "obiwan96/mhpp"]
+# HARD benchmark sources. NOTE: MHPP (SparksofAGI/MHPP) withholds tests+solutions (submit-to-server) ->
+# it does NOT work with our LOCAL verify gate. Use BigCodeBench (public unittest tests) instead — our
+# loader routes its unittest-style tests to verify_unittest. Pass --hf to override.
+_HF_CANDIDATES = ["bigcode/bigcodebench", "SparksofAGI/MHPP"]
 
 
 def _norm_row(r: dict) -> dict | None:
-    """Map an arbitrary MHPP/HumanEval-ish row to our schema. Returns None if unusable."""
-    prompt = r.get("prompt") or r.get("problem") or r.get("text") or r.get("question") or ""
+    """Map a hard-benchmark row (BigCodeBench / HumanEval+ / MHPP) to our schema. Returns None if unusable."""
+    prompt = (r.get("complete_prompt") or r.get("instruct_prompt") or r.get("prompt") or r.get("problem")
+              or r.get("text") or r.get("question") or "")
     entry = r.get("entry_point") or r.get("entry") or r.get("name") or ""
     test = r.get("test") or r.get("test_code") or r.get("test_list") or ""
     sol = r.get("canonical_solution") or r.get("solution") or r.get("code") or r.get("answer") or ""

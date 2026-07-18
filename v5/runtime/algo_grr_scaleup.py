@@ -57,7 +57,9 @@ def assemble_corpus(n_compose: int = 120, mbpp_limit: int = 200, seed: int = 0) 
 
 def run_scaleup(graph, tasks: list[dict], compile_fn, policy_fn=None, retriever=None,
                 prune_grace: int = 50, report_every: int = 40, save_path: str = "",
-                max_hops: int = 4, max_retries: int = 1, verbose: bool = True) -> dict:
+                max_hops: int = 4, max_retries: int = 1, verbose: bool = True, bank: bool = True) -> dict:
+    # bank=True  -> OURS: verified self-growth (bank atoms + prune + abstract) -> compounds.
+    # bank=False -> RAG baseline: STATIC store, retrieval only, NO banking -> flat (the contrast for #4).
     if retriever is None:
         from v5.runtime.algo_grr_retrieval import CachedTokenRetriever
         retriever = CachedTokenRetriever(graph)
@@ -79,12 +81,13 @@ def run_scaleup(graph, tasks: list[dict], compile_fn, policy_fn=None, retriever=
                 reuse += 1
                 if s not in seed_ids:
                     derived_reuse += 1
-            for nid in bank_helper_granular(graph, r["code"], t["entry"], type_pool=t["type_pool"]):
-                bank_task[nid] = i
-                banked += 1
+            if bank:                                      # OURS self-grows; RAG baseline keeps a static store
+                for nid in bank_helper_granular(graph, r["code"], t["entry"], type_pool=t["type_pool"]):
+                    bank_task[nid] = i
+                    banked += 1
 
         # PRUNE dead derived atoms: banked >= grace tasks ago, never reused.
-        if (i + 1) % prune_grace == 0:
+        if bank and (i + 1) % prune_grace == 0:
             dead = [nid for nid, bt in list(bank_task.items())
                     if i - bt >= prune_grace and reuse_count.get(nid, 0) == 0
                     and nid in graph.nodes and graph.nodes[nid].metadata.get("origin") == "derived"]
@@ -178,6 +181,8 @@ def main() -> None:
     ap.add_argument("--prune-grace", type=int, default=50)
     ap.add_argument("--report-every", type=int, default=40)
     ap.add_argument("--save", default="")
+    ap.add_argument("--rag-baseline", action="store_true",
+                    help="#4 hero plot: run OURS (self-growing) vs a STATIC-RAG baseline on the same stream")
     a = ap.parse_args()
 
     if a.selftest:
@@ -185,10 +190,7 @@ def main() -> None:
 
     if a.run:
         stream, stubs = assemble_corpus(a.n_compose, a.mbpp, seed=0)
-        graph = load_seed()
         from v5.runtime.algo_grr_retrieval import CachedTokenRetriever, make_topology_policy
-        retriever = CachedTokenRetriever(graph)
-        policy_fn = make_topology_policy(graph) if a.topo else None
         if a.lm:
             os.environ["V5_HARD_VERIFY"] = "1"            # subprocess verify -> no hangs
             from v5.runtime.algo_grr_membrane import make_frozen_gen, make_lm_compiler
@@ -197,9 +199,36 @@ def main() -> None:
         else:
             compile_fn = make_stub_compiler(stubs)
             print("(stub = reference; use --lm for the real scale-up run)")
+
+        if a.rag_baseline:                                # ── #4: OURS vs static-RAG, same stream ──
+            def _arm(bank, topo):
+                g = load_seed()
+                return run_scaleup(g, stream, compile_fn,
+                                   policy_fn=make_topology_policy(g) if topo else None,
+                                   retriever=CachedTokenRetriever(g), prune_grace=a.prune_grace,
+                                   report_every=a.report_every, verbose=False, bank=bank)[0]
+            print(f"#4 COMPOUNDING vs RAG: {len(stream)} tasks, lm={a.lm or 'stub'}\n")
+            ours = _arm(bank=True, topo=True)             # verified self-growth + topology
+            rag = _arm(bank=False, topo=False)            # static store + cosine, no banking
+            print(f"  window |  OURS solved  lm/task |  RAG solved  lm/task")
+            for po, pr in zip(ours["per"], rag["per"]):
+                print(f"  {po['upto']:>6} |    {po['solved']:>4}     {po['lm_per_task']:>5} |   {pr['solved']:>4}    "
+                      f" {pr['lm_per_task']:>5}")
+            print(f"\n  FINAL  OURS: solved {ours['solved']}/{ours['n']} | banked {ours['banked']} | "
+                  f"DERIVED_REUSE {ours['derived_reuse']} | lm/task {ours['per'][-1]['lm_per_task']}")
+            print(f"         RAG : solved {rag['solved']}/{rag['n']} | banked {rag['banked']} | "
+                  f"DERIVED_REUSE {rag['derived_reuse']} (static store) | lm/task {rag['per'][-1]['lm_per_task']}")
+            print(f"  => COMPOUNDING signal = derived_reuse: OURS {ours['derived_reuse']} vs RAG {rag['derived_reuse']} "
+                  f"(RAG cannot reuse — it never banks). With the real 3B, OURS lm/task also falls as banked")
+            print(f"     atoms cut compose cost; the stub is cost-flat so lm/task shows the plumbing only.")
+            return
+
+        graph = load_seed()
+        policy_fn = make_topology_policy(graph) if a.topo else None
         print(f"SCALE-UP: {len(stream)} tasks ({a.n_compose} compose + MBPP+), lm={a.lm or 'stub'}, "
               f"retrieval={'topo' if a.topo else 'cosine'}, prune_grace={a.prune_grace}\n")
-        res, _g = run_scaleup(graph, stream, compile_fn, policy_fn=policy_fn, retriever=retriever,
+        res, _g = run_scaleup(graph, stream, compile_fn, policy_fn=policy_fn,
+                              retriever=CachedTokenRetriever(graph),
                               prune_grace=a.prune_grace, report_every=a.report_every, save_path=a.save)
         print(f"\nSCALE-UP DONE: solved {res['solved']}/{res['n']} | reuse {res['reuse']} "
               f"(derived {res['derived_reuse']}) | banked {res['banked']} | pruned {res['pruned']} | "

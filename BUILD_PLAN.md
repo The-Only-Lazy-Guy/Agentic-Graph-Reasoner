@@ -122,13 +122,20 @@ for semantic candidates. #3 RESOLVED.
 
 ---
 
-## MHPP verify (after #1a; MOLAB)
-Already built: `prep_mhpp.py` + `load_mhpp` + `verify_check` (sample 3/3 validated).
+## Hard-benchmark verify (MOLAB) — MHPP is a DEAD END; use BigCodeBench
+**MHPP is real (arXiv 2405.11430) BUT withholds tests+solutions** (submit-to-server) → it does NOT work
+with our local verify gate. **Swapped to BigCodeBench** (public unittest tests). Built + validated:
+- `verify_unittest` (algo_grr_mbpp): runs a `class TestCases(unittest.TestCase)`, pass iff all tests pass
+  (correct→1.0, wrong→0.0 verified).
+- `load_mhpp` auto-routes: asserts→verify_asserts, `def check`→verify_check, unittest→verify_unittest.
+- `prep_mhpp` maps BigCodeBench fields (complete_prompt/instruct_prompt/test/canonical_solution) + self-
+  validates canonicals. Sample `artifacts/bcb_sample.jsonl` → 2/2 canonical PASS.
 ```
-python -m v5.runtime.prep_mhpp --hf <mhpp-hf-path> --out artifacts/mhpp.jsonl   # self-validates canonicals
-python -m v5.runtime.algo_grr_mbpp --run --lm Qwen/Qwen2.5-3B-Instruct --topo --mhpp --limit 120
+python -m v5.runtime.prep_mhpp --hf bigcode/bigcodebench --out artifacts/bcb.jsonl   # download + self-validate
+python -m v5.runtime.algo_grr_mbpp --run --lm Qwen/Qwen2.5-3B-Instruct --topo --mhpp artifacts/bcb.jsonl --limit 120
 ```
-Once MembraneV2 (#1a) lands, point it at `--mhpp` too. **Expect base-3B low, memory helps on decomposable, ceiling-bound elsewhere** — the honest hard-eval.
+**Caveat:** BCB tasks use real libs (pandas/numpy/…) — the molab env must have them. Expect base-3B low,
+memory helps on decomposable, ceiling-bound elsewhere — the honest hard-eval.
 
 ---
 

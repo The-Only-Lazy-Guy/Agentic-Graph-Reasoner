@@ -164,6 +164,18 @@ def verify_check(code: str, test_code: str, entry: str, setup: str = "",
     return verify_asserts(combined, [f"check({entry})"], setup=setup, timeout=timeout)
 
 
+def verify_unittest(code: str, test_code: str, entry: str = "", setup: str = "",
+                    timeout: float = 20.0, test_class: str = "TestCases") -> tuple[float, str]:
+    """BigCodeBench-style grading: the task ships a `class TestCases(unittest.TestCase)`. We define the
+    solution + the test class, run it, and pass iff every test passes. Runs in the hard-verify subprocess
+    (BCB tasks use real libs + can be slow -> longer default timeout)."""
+    body = code + "\n\n" + (test_code or "")
+    run = (f"\nimport unittest as _ut\n"
+           f"_res = _ut.TextTestRunner(verbosity=0).run(_ut.TestLoader().loadTestsFromTestCase({test_class}))\n"
+           f"assert _res.wasSuccessful(), f'{{len(_res.failures)}} fail / {{len(_res.errors)}} err'\n")
+    return verify_asserts(body + run, ["True"], setup=setup, timeout=timeout)
+
+
 def load_mhpp(path: str = "artifacts/mhpp.jsonl", limit: int | None = None) -> list[dict]:
     """MHPP (Mostly Hard Python Problems) — the harder benchmark (MBPP is ~2% factorable / too easy).
     Reads a JSONL and normalises to our task dict. Supports BOTH schemas per row:
@@ -190,11 +202,14 @@ def load_mhpp(path: str = "artifacts/mhpp.jsonl", limit: int | None = None) -> l
             def mk(asserts=asserts, setup=setup):
                 return lambda code: verify_asserts(code, asserts, setup)
             examples, tp = asserts, _type_pool_from_asserts(asserts, entry)
-        else:                                                 # HumanEval/MHPP check-function row
+        else:                                                 # test-function row (check OR unittest)
             test_code = r.get("test") or r.get("test_code") or ""
-
-            def mk(tc=test_code, e=entry, setup=setup):
-                return lambda code: verify_check(code, tc, e, setup)
+            if "unittest" in test_code or "class TestCases" in test_code:   # BigCodeBench-style
+                def mk(tc=test_code, e=entry, setup=setup):
+                    return lambda code: verify_unittest(code, tc, e, setup)
+            else:                                             # HumanEval/MHPP `def check(candidate)` style
+                def mk(tc=test_code, e=entry, setup=setup):
+                    return lambda code: verify_check(code, tc, e, setup)
             examples, tp = [], [int]
         tasks.append(dict(text=text, entry=entry, examples=examples, verify_fn=mk(),
                           type_pool=tp, tests=[], reference=ref, pipeline_shaped=False))
