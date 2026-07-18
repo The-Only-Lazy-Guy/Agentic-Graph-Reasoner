@@ -466,7 +466,7 @@ class SpecDecVerify:
 
         # Per-token log-probs
         log_probs = F.log_softmax(logits[:-1], dim=-1)
-        token_logprobs = log_probs[range(logits.shape[-1] - 1), input_ids[0, 1:]]
+        token_logprobs = log_probs[range(logits.shape[0] - 1), input_ids[0, 1:]]
 
         # Extract draft-position logprobs (after context)
         if ctx_len < token_logprobs.shape[0]:
@@ -505,11 +505,18 @@ def make_draft_compile_fn(trm, decoder, specdec: SpecDecVerify,
     def compile_fn(spec: dict) -> str:
         task_text = spec.get("task_text", "")
         entry = spec.get("entry", "")
-        atoms = spec.get("atoms", [])
-        derive_mode = spec.get("derive", False)
 
-        # Build atom embeddings (bag-of-words, no-GPU)
-        atom_texts = [a.get("code", a.get("purpose", "")) for a in atoms]
+        # Select atoms via retriever (same as training) for consistent z_T
+        # This overrides spec.atoms from MembraneSolver
+        from v5.runtime.algo_grr_poison_test import load_seed
+        from v5.runtime.algo_grr_membrane import TokenRetriever
+        graph = load_seed()
+        retriever = TokenRetriever(graph)
+        rank = retriever.rank(task_text, exclude=set())
+        atom_ids = [nid for nid, _ in rank[:6]]
+        atom_texts = [graph.nodes[nid].text for nid in atom_ids]
+        atom_codes = [graph.nodes[nid].metadata.get("code", "") for nid in atom_ids]
+
         task_vec = torch.tensor(_bow_embed(task_text), dtype=torch.float, device=device)
         if atom_texts:
             atom_embs = torch.stack([torch.tensor(_bow_embed(t), dtype=torch.float, device=device)
@@ -518,7 +525,7 @@ def make_draft_compile_fn(trm, decoder, specdec: SpecDecVerify,
             atom_embs = torch.zeros(1, 256, device=device)
 
         # Build verify context with atom code so LM can judge plausibility
-        atom_code_block = "\n".join(a.get("code", "") for a in atoms)
+        atom_code_block = "\n".join(atom_codes)
         if atom_code_block:
             context = f"Available functions:\n{atom_code_block}\n\nTask: {task_text}\nWrite {entry}.\n"
         else:
@@ -532,7 +539,7 @@ def make_draft_compile_fn(trm, decoder, specdec: SpecDecVerify,
 
             decoder.eval()
             with torch.no_grad():
-                draft_ids = decoder(z_T, atom_embs=atom_embs, temperature=0.8)
+                draft_ids = decoder(z_T, atom_embs=atom_embs, temperature=0.0)
 
             if not draft_ids:
                 continue
