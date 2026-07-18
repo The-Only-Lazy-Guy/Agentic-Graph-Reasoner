@@ -434,54 +434,52 @@ class SpecDecVerify:
         self.max_length = 2048
 
     def verify(self, draft_ids: list[int], draft_to_lm: dict[int, int],
-               context_prompt: str = "") -> tuple[list[int], list[float], int]:
-        """Run LM forward pass on draft tokens. Return accepted tokens, per-token probs, first reject idx.
+               context_text: str = "") -> tuple[list[int], list[float], bool]:
+        """Run LM forward pass on draft tokens with FULL context (including atom code).
+
+        Uses MEAN log-prob over the draft portion (avoids per-token alignment issues
+        from BPE re-tokenization). Returns accepted tokens, per-token logprobs, and
+        whether the draft passes the threshold.
 
         Returns:
-            accepted_tokens: list of draft token IDs accepted
-            token_logprobs: per-token log-prob under the LM
-            reject_pos: position of first rejection (or -1 if all accepted)
+            accepted_tokens: list of draft token IDs (all or empty)
+            token_logprobs: per-token log-prob under the LM for the draft portion
+            accepted: True if mean log-prob >= -2.5
         """
-        # Decode draft tokens to text
+        # Build full prompt with full context + atom code + draft
         draft_text = decode_from_draft(draft_ids, self.tokenizer, draft_to_lm)
-
-        # Full prompt = context + draft
-        full_text = context_prompt + draft_text if context_prompt else draft_text
+        full_text = context_text + draft_text if context_text else draft_text
 
         # Tokenize
         enc = self.tokenizer(full_text, return_tensors="pt", truncation=True,
                              max_length=self.max_length).to(self.device)
-        input_ids = enc["input_ids"]  # [1, seq_len]
+        input_ids = enc["input_ids"]
+
+        # Also encode context alone to find where draft begins
+        ctx_ids = self.tokenizer(context_text, return_tensors="pt", truncation=True,
+                                  max_length=self.max_length).to(self.device)["input_ids"]
+        ctx_len = ctx_ids.shape[-1] - 1  # minus BOS
 
         with torch.no_grad():
             outputs = self.lm(input_ids)
-            logits = outputs.logits[0]  # [seq_len, vocab_size]
+            logits = outputs.logits[0]
 
-        # Per-token log-probs (skip first token — no prior)
-        log_probs = F.log_softmax(logits[:-1], dim=-1)  # [seq_len-1, vocab_size]
-        token_logprobs = log_probs[range(logits.shape[0] - 1), input_ids[0, 1:]]
+        # Per-token log-probs
+        log_probs = F.log_softmax(logits[:-1], dim=-1)
+        token_logprobs = log_probs[range(logits.shape[-1] - 1), input_ids[0, 1:]]
 
-        # Find where context ends and draft begins
-        ctx_len = len(self.tokenizer.encode(context_prompt, add_special_tokens=False)) if context_prompt else 0
+        # Extract draft-position logprobs (after context)
+        if ctx_len < token_logprobs.shape[0]:
+            draft_lps = token_logprobs[ctx_len:].tolist()
+        else:
+            draft_lps = []
 
-        accepted = []
-        reject_pos = -1
-        for i, lp in enumerate(token_logprobs):
-            if i < ctx_len:
-                continue  # skip context tokens
-            if lp.item() >= self.threshold:
-                # Map back to draft token
-                lm_tid = input_ids[0, i + 1].item()
-                if lm_tid in draft_to_lm:
-                    accepted.append(draft_to_lm[lm_tid])
-                else:
-                    # Token not in draft vocab — still accept (it's a separator/whitespace)
-                    pass
-            else:
-                reject_pos = i
-                break
-
-        return accepted, token_logprobs.tolist(), reject_pos
+        # Accept if mean draft log-prob >= threshold
+        mean_lp = (sum(draft_lps) / len(draft_lps)) if draft_lps else -99.0
+        accepted = mean_lp >= self.threshold
+        if accepted:
+            return list(draft_ids), draft_lps, True
+        return [], draft_lps, False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -519,14 +517,19 @@ def make_draft_compile_fn(trm, decoder, specdec: SpecDecVerify,
         else:
             atom_embs = torch.zeros(1, 256, device=device)
 
+        # Build verify context with atom code so LM can judge plausibility
+        atom_code_block = "\n".join(a.get("code", "") for a in atoms)
+        if atom_code_block:
+            context = f"Available functions:\n{atom_code_block}\n\nTask: {task_text}\nWrite {entry}.\n"
+        else:
+            context = f"Task: {task_text}\nWrite {entry}.\n"
+
         for attempt in range(max_retries + 1):
-            # TRM reason
             trm.eval()
             with torch.no_grad():
                 outs = trm(task_vec, atom_embs, return_all=True)
-                z_T = outs[1][-1]  # final state
+                z_T = outs[1][-1]
 
-            # Decoder generate
             decoder.eval()
             with torch.no_grad():
                 draft_ids = decoder(z_T, atom_embs=atom_embs, temperature=0.8)
@@ -534,20 +537,20 @@ def make_draft_compile_fn(trm, decoder, specdec: SpecDecVerify,
             if not draft_ids:
                 continue
 
-            # LM verify (single forward pass)
-            accepted, logprobs, reject_pos = specdec.verify(
-                draft_ids, draft_to_lm,
-                context_prompt=f"Task: {task_text}\nWrite {entry}.\n")
-            if reject_pos == -1 or attempt >= max_retries:
-                # All accepted or out of retries → decode and return
-                code = decode_from_draft(accepted or draft_ids,
-                                         specdec.tokenizer, draft_to_lm)
+            decoded_preview = decode_from_draft(draft_ids[:20], specdec.tokenizer, draft_to_lm)
+            print(f"    [draft {attempt}] {len(draft_ids)} tokens, "
+                  f"preview: {decoded_preview[:80]}", flush=True)
+
+            accepted, logprobs, verified = specdec.verify(
+                draft_ids, draft_to_lm, context_text=context)
+
+            if verified or attempt >= max_retries:
+                code = decode_from_draft(draft_ids, specdec.tokenizer, draft_to_lm)
+                mean_lp = (sum(logprobs) / len(logprobs)) if logprobs else -99
+                print(f"    [verify] mean_lp={mean_lp:.2f} "
+                      f"{'ACCEPTED' if verified else 'FALLBACK'}", flush=True)
                 return code if code else f"def {entry}(): pass"
 
-            # More retries available — continue with shorter accepted prefix as context
-            # (The spec-dec mechanism already handles this)
-
-        # Fallback
         code = decode_from_draft(draft_ids, specdec.tokenizer, draft_to_lm)
         return code if code else f"def {entry}(): pass"
 
