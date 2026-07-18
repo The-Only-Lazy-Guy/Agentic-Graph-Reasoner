@@ -185,7 +185,7 @@ class TRMDecoder(nn.Module):
         """
         # Plan as initial state
         plan = self.plan_proj(z_T)  # [d_hidden]
-        h0 = plan.unsqueeze(0).expand(self.gru.num_layers, -1)  # [num_layers, d_hidden]
+        h0 = plan.unsqueeze(0).expand(self.gru.num_layers, -1).contiguous()  # [num_layers, d_hidden]
 
         # Atom context
         if atom_embs is not None and atom_embs.shape[0] > 0:
