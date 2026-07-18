@@ -32,6 +32,14 @@ _ARITY = {**{_UNARY[k][1]: 1 for k in _UNARY}, **{_BINARY[k][1]: 2 for k in _BIN
 _PTOK = ["<pad>", "<bos>", "<eos>", "n"] + _OPS
 _P2I = {t: i for i, t in enumerate(_PTOK)}
 
+# Composition-domain atom names (all unary)
+_COMB_ATOMS = ["sum_of_squares", "nth_fibonacci", "factorial", "triangular", "digit_product",
+               "is_prime", "reverse_digits", "digit_sum", "num_divisors"]
+_COMB_ARITY = {a: 1 for a in _COMB_ATOMS}
+_COMB_ARITY["n"] = 0
+_COMB_PTOK = ["<pad>", "<bos>", "<eos>", "n"] + _COMB_ATOMS
+_COMB_P2I = {t: i for i, t in enumerate(_COMB_PTOK)}
+
 
 def _prog_tokens(t) -> list[str]:
     """Prefix serialisation of the expression tree -> program tokens (over atom names)."""
@@ -42,19 +50,22 @@ def _prog_tokens(t) -> list[str]:
     return [_BINARY[t[0]][1]] + _prog_tokens(t[1]) + _prog_tokens(t[2])
 
 
-def _tokens_to_wiring(toks: list[str]):
-    """Inverse: prefix program tokens -> AtomProgram wiring tree (+ atom list). Robust to truncation."""
+def _tokens_to_wiring(toks: list[str], arity=None):
+    """Inverse: prefix program tokens -> AtomProgram wiring tree (+ atom list). Robust to truncation.
+    arity: dict mapping token->arity. Defaults to wiring-domain _ARITY."""
     from v5.runtime.algo_grr_pipeline import AtomProgram
+    if arity is None:
+        arity = _ARITY
     it = iter(toks)
 
     def parse():
         try:
             tok = next(it)
         except StopIteration:
-            return "n"                              # pad a truncated program with the leaf
+            return "n"
         if tok == "n":
             return "n"
-        ar = _ARITY.get(tok, 0)
+        ar = arity.get(tok, 0)
         return ("call", tok, [parse() for _ in range(ar)])
 
     wiring = parse()
@@ -66,7 +77,6 @@ def _tokens_to_wiring(toks: list[str]):
                 atoms_of(a, acc)
     acc: list = []
     atoms_of(wiring, acc)
-    # dedup keep order
     seen, atoms = set(), []
     for a in acc:
         if a not in seen:
@@ -131,7 +141,68 @@ def _make_data(depths, n, seed, wvocab=None):
     return words, progs, wvocab
 
 
-def train_planner(model, words, progs, wvocab, steps=3000, lr=2e-3, seed=0):
+def _make_compose_data(n, seed=0):
+    """Generate (text, program-tokens, word-vocab) from the compose corpus."""
+    from v5.runtime.algo_grr_compose import INNER, OUTER, gen_corpus
+    tasks = gen_corpus(n, seed=seed)
+    words, progs = [], []
+    for t in tasks:
+        inner, outer = t["_prims"]
+        words.append(t["text"])
+        progs.append(["<bos>", outer, inner, "n", "<eos>"])
+    wvocab = _word_vocab(words)
+    return words, progs, wvocab
+
+
+def _save_model(path, model, domain, wvocab):
+    """Save model + metadata."""
+    import torch
+    obj = dict(domain=domain, state_dict=model.state_dict(), wvocab=wvocab)
+    if domain == "compose":
+        obj["ptok"] = _COMB_PTOK; obj["p2i"] = _COMB_P2I; obj["arity"] = _COMB_ARITY
+        obj["n_words"] = len(wvocab); obj["n_prog"] = len(_COMB_PTOK)
+    else:
+        obj["ptok"] = _PTOK; obj["p2i"] = _P2I; obj["arity"] = _ARITY
+        obj["n_words"] = len(wvocab); obj["n_prog"] = len(_PTOK)
+    torch.save(obj, path)
+    print(f"  saved to {path}")
+
+
+def _load_model(path):
+    """Load model + metadata. Returns (model, enc_words, wvocab, ptok, p2i, arity)."""
+    import torch
+    torch, nn, Seq2Seq = _build()
+    obj = torch.load(path, weights_only=True)
+    model = Seq2Seq(obj["n_words"], obj["n_prog"])
+    model.load_state_dict(obj["state_dict"])
+    model.eval()
+
+    def enc_words(w):
+        ids = [obj["wvocab"].get(t.lower(), 1) for t in w.replace("(", " ").replace(")", " ").split()]
+        return ids or [1]
+    return model, enc_words, obj["wvocab"], obj["ptok"], obj["p2i"], obj["arity"]
+
+
+def _train_and_save(domain, save_path, steps=3000):
+    """Train a planner model and save it."""
+    torch, nn, Seq2Seq = _build()
+    torch.manual_seed(0)
+    if domain == "compose":
+        words_list, progs_list, wvocab = _make_compose_data(120, seed=1)
+        model = Seq2Seq(len(wvocab), len(_COMB_PTOK))
+        model, _ = train_planner(model, words_list, progs_list, wvocab, p2i=_COMB_P2I, steps=steps)
+        _save_model(save_path, model, domain, wvocab)
+    else:
+        words_list, progs_list, wvocab = _make_data([1, 2, 3], 1500, seed=1)
+        model = Seq2Seq(len(wvocab), len(_PTOK))
+        model, _ = train_planner(model, words_list, progs_list, wvocab, steps=steps)
+        _save_model(save_path, model, domain, wvocab)
+    return model
+
+
+def train_planner(model, words, progs, wvocab, p2i=None, steps=3000, lr=2e-3, seed=0):
+    if p2i is None:
+        p2i = _P2I
     import torch
     rng = random.Random(seed)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
@@ -143,7 +214,7 @@ def train_planner(model, words, progs, wvocab, steps=3000, lr=2e-3, seed=0):
     for it in range(steps):
         i = rng.randrange(len(words))
         w = torch.tensor([enc_words(words[i])])
-        p = torch.tensor([[_P2I[t] for t in progs[i]]])
+        p = torch.tensor([[p2i[t] for t in progs[i]]])
         H, h = model.encode(w)
         wmask = torch.ones(1, w.shape[1], dtype=torch.bool)
         loss = 0.0
@@ -157,19 +228,23 @@ def train_planner(model, words, progs, wvocab, steps=3000, lr=2e-3, seed=0):
     return model, enc_words
 
 
-def plan_program(model, enc_words, wvocab, task_words, max_len=40):
+def plan_program(model, enc_words, wvocab, task_words, ptok=None, p2i=None, max_len=40):
     import torch
+    if ptok is None:
+        ptok = _PTOK
+    if p2i is None:
+        p2i = _P2I
     model.eval()
     with torch.no_grad():
         w = torch.tensor([enc_words(task_words)])
         H, h = model.encode(w)
         wmask = torch.ones(1, w.shape[1], dtype=torch.bool)
-        tok = torch.tensor([_P2I["<bos>"]])
+        tok = torch.tensor([p2i["<bos>"]])
         out = []
         for _ in range(max_len):
             logit, h = model.step(tok, h, H, wmask)
             nxt = int(logit.argmax(-1))
-            t = _PTOK[nxt]
+            t = ptok[nxt]
             if t == "<eos>":
                 break
             if t not in ("<bos>", "<pad>"):
@@ -178,23 +253,35 @@ def plan_program(model, enc_words, wvocab, task_words, max_len=40):
     return out
 
 
-def plan_by_search(model, enc_words, task_words, verify_fn, beam=10, max_len=40):
+def plan_by_search(model, enc_words, task_words, verify_fn, ptok=None, p2i=None, arity=None,
+                   beam=10, max_len=40, realize_fn=None):
     """Net-GUIDED VERIFIED search (the GRR-7 recipe): beam-decode top-`beam` candidate programs with the
     seq2seq as a GUIDE, then VERIFY each -> return the first that passes. Search does the reasoning; the
     net cuts the budget; verify gates. Generalises to depth where flat decode degrades. Returns
-    (AtomProgram|None, n_verifies, solved)."""
+    (AtomProgram|None, n_verifies, solved).
+
+    realize_fn: optional callable(AtomProgram) -> full code string. If None, uses _realize_prog
+    which emits entry-only code (suitable for wiring-domain verify that prepends helpers)."""
+    if ptok is None:
+        ptok = _PTOK
+    if p2i is None:
+        p2i = _P2I
+    if arity is None:
+        arity = _ARITY
+    if realize_fn is None:
+        realize_fn = _realize_prog
     import torch
     model.eval()
     with torch.no_grad():
         w = torch.tensor([enc_words(task_words)])
         H, h0 = model.encode(w)
         wmask = torch.ones(1, w.shape[1], dtype=torch.bool)
-        beams = [([_P2I["<bos>"]], 0.0, h0)]
+        beams = [([p2i["<bos>"]], 0.0, h0)]
         done = []
         for _ in range(max_len):
             nxt = []
             for toks, lp, h in beams:
-                if toks[-1] == _P2I["<eos>"]:
+                if toks[-1] == p2i["<eos>"]:
                     done.append((toks, lp)); continue
                 logit, h2 = model.step(torch.tensor([toks[-1]]), h, H, wmask)
                 logp = torch.log_softmax(logit, -1)[0]
@@ -208,9 +295,10 @@ def plan_by_search(model, enc_words, task_words, verify_fn, beam=10, max_len=40)
     cands = sorted(done, key=lambda x: x[1], reverse=True)[:beam]
     verifies = 0
     for toks, _ in cands:
-        prog = _tokens_to_wiring([_PTOK[i] for i in toks if _PTOK[i] not in ("<bos>", "<eos>", "<pad>")])
+        prog = _tokens_to_wiring([ptok[i] for i in toks if ptok[i] not in ("<bos>", "<eos>", "<pad>")],
+                                 arity=arity)
         verifies += 1
-        if verify_fn(_realize_prog(prog)):
+        if verify_fn(realize_fn(prog)):
             return prog, verifies, True
     return None, verifies, False
 
@@ -263,9 +351,22 @@ def _realize_prog(prog) -> str:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--save", type=str, default="", help="save trained model to PATH")
+    ap.add_argument("--load", type=str, default="", help="load saved model from PATH")
+    ap.add_argument("--domain", type=str, default="wiring", choices=["wiring", "compose"],
+                    help="domain for training (default: wiring)")
+    ap.add_argument("--train-steps", type=int, default=3000, help="training steps")
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
+    if a.save:
+        _train_and_save(a.domain, a.save, steps=a.train_steps)
+        return
+    if a.load:
+        model, enc_words, wvocab, ptok, p2i, arity = _load_model(a.load)
+        domain = "compose" if len(ptok) == len(_COMB_PTOK) else "wiring"
+        print(f"loaded {a.load}: domain={domain}, n_words={len(wvocab)}, n_prog={len(ptok)}")
+        return
     ap.print_help()
 
 
