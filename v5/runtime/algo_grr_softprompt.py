@@ -259,25 +259,30 @@ def main() -> None:
     ap.print_help()
 
 
-# ── HARD compositions over OBSCURE primitives — where the 3B fails alone, so graph memory has room ──
+# ── HARD compositions: the INNER is a CUSTOM, OPAQUE routine the 3B CANNOT know (unguessable) ──
+# Baseline MUST fail (no definition anywhere -> the 3B guesses wrong), so memory has real headroom.
+# The gadgets recur across train+test (different OUTER wrapper) -> the prefix gets a fair transfer shot
+# at carrying each small routine. OUTER stays standard (the 3B knows it) -> the ONLY missing piece is
+# the gadget = the graph-memory. Text arm delivers the gadget's CODE; latent arm delivers a hint vector.
 def _hard_compose_corpus():
     import numpy as np  # noqa: F401
     from v5.runtime.algo_grr_mbpp import verify_asserts
 
-    def collatz_steps(n):
-        s = 0
-        while n > 1:
-            n = n // 2 if n % 2 == 0 else 3 * n + 1
-            s += 1
-        return s
+    # CUSTOM gadgets — deterministic, fast, varied output, NOT derivable from the name/description.
+    def g0(n):
+        return ((n * 37 + 11) ^ (n * n)) % 100
 
-    def digital_root(n):
-        while n >= 10:
-            n = sum(int(c) for c in str(n))
-        return n
+    def g1(n):
+        return sum((i * i * i) % 7 for i in range(n + 1)) % 50
 
-    def aliquot_sum(n):
-        return sum(i for i in range(1, n) if n % i == 0)
+    def g2(n):
+        return (n * n * n - 3 * n + 17) % 88
+
+    def g3(n):
+        p = 1
+        for c in str(n):
+            p *= int(c) + 1
+        return p % 60
 
     def count_set_bits(n):
         return bin(n).count("1")
@@ -285,31 +290,33 @@ def _hard_compose_corpus():
     def is_prime(n):
         return n >= 2 and all(n % i for i in range(2, int(n ** 0.5) + 1))
 
-    def num_divisors(n):
-        return sum(1 for i in range(1, n + 1) if n % i == 0)
+    def digital_root(n):
+        while n >= 10:
+            n = sum(int(c) for c in str(n))
+        return n
 
     def is_perfect_square(n):
         r = int(n ** 0.5)
         return any((r + d) ** 2 == n for d in (-1, 0, 1))
 
     _P = {
-        "collatz_steps": "def collatz_steps(n):\n    s=0\n    while n>1:\n        n=n//2 if n%2==0 else 3*n+1\n        s+=1\n    return s\n",
-        "digital_root": "def digital_root(n):\n    while n>=10:\n        n=sum(int(c) for c in str(n))\n    return n\n",
-        "aliquot_sum": "def aliquot_sum(n):\n    return sum(i for i in range(1,n) if n%i==0)\n",
+        "g0": "def g0(n):\n    return ((n*37+11)^(n*n))%100\n",
+        "g1": "def g1(n):\n    return sum((i*i*i)%7 for i in range(n+1))%50\n",
+        "g2": "def g2(n):\n    return (n*n*n-3*n+17)%88\n",
+        "g3": "def g3(n):\n    p=1\n    for c in str(n):\n        p*=int(c)+1\n    return p%60\n",
         "count_set_bits": "def count_set_bits(n):\n    return bin(n).count('1')\n",
-        "num_divisors": "def num_divisors(n):\n    return sum(1 for i in range(1,n+1) if n%i==0)\n",
         "is_prime": "def is_prime(n):\n    return n>=2 and all(n%i for i in range(2,int(n**0.5)+1))\n",
+        "digital_root": "def digital_root(n):\n    while n>=10:\n        n=sum(int(c) for c in str(n))\n    return n\n",
         "is_perfect_square": "def is_perfect_square(n):\n    r=int(n**0.5)\n    return any((r+d)**2==n for d in (-1,0,1))\n",
     }
-    # INNER: compute x from n (obscure enough the frozen 3B mis-implements)   name -> (fn, noun-phrase)
+    # INNER: opaque custom routine — the description NAMES it but hides the formula (memory-only).
     INNER = {
-        "collatz_steps": (collatz_steps, "the number of steps in the Collatz sequence of n until it reaches 1"),
-        "digital_root": (digital_root, "the digital root of n (repeatedly sum the decimal digits until one digit remains)"),
-        "aliquot_sum": (aliquot_sum, "the sum of the proper divisors of n (divisors below n)"),
-        "count_set_bits": (count_set_bits, "the number of 1-bits in the binary representation of n"),
-        "num_divisors": (num_divisors, "the count of positive divisors of n"),
+        "g0": (g0, "the output of internal routine g0 (a fixed proprietary integer transform) applied to n"),
+        "g1": (g1, "the output of internal routine g1 (a fixed proprietary integer transform) applied to n"),
+        "g2": (g2, "the output of internal routine g2 (a fixed proprietary integer transform) applied to n"),
+        "g3": (g3, "the output of internal routine g3 (a fixed proprietary integer transform) applied to n"),
     }
-    # OUTER: apply to x                     name -> (fn, phrase(x))
+    # OUTER: standard, the 3B knows it — so the gadget is the ONLY missing piece.
     OUTER = {
         "is_prime": (is_prime, "whether {v} is prime"),
         "count_set_bits": (count_set_bits, "the number of 1-bits of {v}"),
@@ -320,17 +327,16 @@ def _hard_compose_corpus():
     k = 0
     for iname, (ifn, idesc) in INNER.items():
         for oname, (ofn, ophr) in OUTER.items():
-            if iname == oname:
-                continue
             entry = f"h_{k:02d}"; k += 1
             ref = f"{_P[iname]}\n{_P[oname]}\ndef {entry}(n):\n    return {oname}({iname}(n))\n"
             asserts = []
-            for n in (6, 12, 19, 27, 40):
+            for n in (5, 9, 14, 23, 31, 40, 52, 63):
                 try:
                     asserts.append(f"assert {entry}({n}) == {ofn(ifn(n))!r}")
                 except Exception:  # noqa: BLE001
                     pass
-            text = f"Given a positive integer n, let x be {idesc}. Return {ophr.format(v='x')}."
+            text = (f"Given a positive integer n, let x be {idesc}. Return {ophr.format(v='x')}. "
+                    f"(g0/g1/g2/g3 are fixed internal routines — use the one named.)")
             atom_specs = [
                 {"name": iname, "purpose": idesc, "code": _P[iname]},
                 {"name": oname, "purpose": ophr.format(v="a value x"), "code": _P[oname]},
