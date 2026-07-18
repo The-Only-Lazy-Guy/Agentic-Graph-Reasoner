@@ -207,7 +207,7 @@ class TRMDecoder(nn.Module):
             embs = self.token_embed(target_ids[:-1])  # [seq_len-1, d_emb]
             context = plan.unsqueeze(0).expand(embs.shape[0], -1)  # [seq_len-1, d_hidden]
             gru_in = torch.cat([embs, context], dim=-1)  # [seq_len-1, d_emb + d_hidden]
-            gru_out, _ = self.gru(gru_in.unsqueeze(0), h0.unsqueeze(0))  # [1, seq_len-1, d_hidden]
+            gru_out, _ = self.gru(gru_in.unsqueeze(0), h0.unsqueeze(1))  # [1, seq_len-1, d_hidden]
             gru_out = gru_out.squeeze(0)  # [seq_len-1, d_hidden]
             attended = torch.stack([attend(gru_out[i]) for i in range(gru_out.shape[0])])
             combined = torch.cat([gru_out, attended], dim=-1)  # [seq_len-1, 2*d_hidden]
@@ -215,7 +215,7 @@ class TRMDecoder(nn.Module):
 
         # Generation mode
         generated = []
-        h = h0.unsqueeze(0)  # [1, num_layers, d_hidden] for batch=1
+        h = h0.unsqueeze(1)  # [num_layers, 1, d_hidden]
         tok = torch.tensor([[0]], device=z_T.device)  # BOS
 
         for _ in range(max_tokens):
@@ -260,38 +260,61 @@ def _bow_embed(text: str, dim: int = 256) -> np.ndarray:
     return v / n if n else v
 
 
-def make_training_data(trm, tokenizer, lm_to_draft, specials, device):
-    """Build (z_T, atom_embs, target_ids) triples from verified curriculum traces."""
+def make_training_data(trm, tokenizer, lm_to_draft, specials, device,
+                       corpus_paths: list[str] | None = None):
+    """Build (z_T, atom_embs, target_ids) triples from curriculum + MBPP+ traces."""
     from v5.runtime.algo_grr_poison_test import curriculum, load_seed
     from v5.runtime.algo_grr_membrane import TokenRetriever
 
     graph = load_seed()
     retriever = TokenRetriever(graph)
     data = []
+    seen_codes: set[str] = set()
 
+    def _process_code(code: str, task_text: str) -> None:
+        if code in seen_codes:
+            return
+        seen_codes.add(code)
+
+        rank = retriever.rank(task_text, exclude=set())
+        atom_ids = [nid for nid, _ in rank[:6]]
+        atom_embs_list = [_bow_embed(graph.nodes[nid].text) for nid in atom_ids]
+        atom_embs = torch.tensor(np.stack(atom_embs_list) if atom_embs_list else [[0.0]*256],
+                                 dtype=torch.float, device=device)
+
+        task_vec = _bow_embed(task_text)
+        x_vec = torch.tensor(task_vec, dtype=torch.float, device=device)
+
+        trm.eval()
+        with torch.no_grad():
+            outs = trm(x_vec, atom_embs, return_all=True)
+            z_T = outs[1][-1]
+
+        target = encode_for_draft(code, tokenizer, lm_to_draft, specials).to(device)
+        if target.shape[0] >= 3:
+            data.append((z_T.detach().cpu(), atom_embs.cpu(), target.cpu()))
+
+    # (A) Curriculum tasks
     for rnd in curriculum():
         for t in rnd:
-            rank = retriever.rank(t["text"], exclude=set())
-            atom_ids = [nid for nid, _ in rank[:6]]
-            atom_embs_list = [_bow_embed(graph.nodes[nid].text) for nid in atom_ids]
-            atom_embs = torch.tensor(np.stack(atom_embs_list) if atom_embs_list else [[0.0]*256],
-                                     dtype=torch.float, device=device)
+            _process_code(t["recipe"], t["text"])
 
-            task_vec = _bow_embed(t["text"])
-            x_vec = torch.tensor(task_vec, dtype=torch.float, device=device)
+    # (B) MBPP+ tasks
+    if corpus_paths:
+        for cp in corpus_paths:
+            path = Path(cp)
+            if not path.exists():
+                continue
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                r = json.loads(line)
+                code = r.get("code", "")
+                text = r.get("text", "")
+                if code and text:
+                    _process_code(code, text)
 
-            trm.eval()
-            with torch.no_grad():
-                outs = trm(x_vec, atom_embs, return_all=True)
-                z_T = outs[1][-1]
-
-            code = t["recipe"]
-            target = encode_for_draft(code, tokenizer, lm_to_draft, specials).to(device)
-
-            if target.shape[0] >= 3:
-                data.append((z_T.detach().cpu(), atom_embs.cpu(), target.cpu()))
-
-    print(f"  [draft data] {len(data)} training examples", flush=True)
+    print(f"  [draft data] {len(data)} training examples, {len(seen_codes)} unique", flush=True)
     return data
 
 
@@ -600,8 +623,14 @@ def main() -> None:
                              d_hidden=128, d_atom=256, num_layers=2)
         decoder.to(device)
 
-        # Training data
-        data = make_training_data(trm, tokenizer, lm_to_draft, specials, device)
+        # Training data — include MBPP+ corpus if available
+        corpus_paths = list(a.corpus) if a.corpus else []
+        extra = ["artifacts/mbpp_plus_prepped.jsonl"]
+        for p in extra:
+            if Path(p).exists() and p not in corpus_paths:
+                corpus_paths.append(p)
+        data = make_training_data(trm, tokenizer, lm_to_draft, specials, device,
+                                  corpus_paths=corpus_paths if corpus_paths else None)
         if not data:
             print("  no training data", flush=True)
             return
