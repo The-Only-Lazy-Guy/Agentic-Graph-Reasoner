@@ -70,16 +70,18 @@ net-guide + verify, NOT a flat decoder.** `plan_by_search()` is the interface Me
 2. Router atom features = concat[ mpnet-content , struct_features(adj) , one-hop topology-aggregated content ]. Train router on verified `(task→used-atoms)`.
 3. Re-run `--scale` at 24/60/120/250/500 on the FIXED corpus.
 **DoD / selftest:** router@3 **holds ≥0.85 at 500 atoms** on the de-confounded test (vs flat 0.22).
-**RESULT (built, `algo_grr_graphgps.py`):** de-confounded the scale test (separated clusters, not the
-densifying circle — cosine no longer collapses artefactually). GraphGPS features = content + LapPE/RWSE +
-**one-hop message-passing** (the message-passing term carries the neighbour's content = the specific-edge
-signal positional encodings alone miss). Recall@2: GraphGPS **0.71 vs content-only 0.17 @N=60** (structure
-clearly recovers the cross-cluster dep edge), but BOTH erode toward ~0.5 by N=500 — because **Recall@2-of-N
-is a needle problem for ANY features at scale.** The pipeline doesn't need top-2: the planner searches+verifies
-over a candidate SET, so **top-K (K~10) is the operative metric** (eval was running but the machine killed it —
-rerun `--selftest`). **The clean scale fix = cluster-first HIERARCHICAL routing** — the de-confounded corpus
-has explicit clusters (`comm`); route coarse to the query+dep clusters, then fine within (~N/C atoms) so the
-fine ranker never faces all N. That 2-level GraphGPS is the remaining build for #3.
+**RESULT + RESOLUTION (built, `algo_grr_graphgps.py`):** de-confounded the scale test (separated clusters,
+not the densifying circle). GraphGPS features = content + LapPE/RWSE + one-hop message-passing give a real
+lift over content-only (0.71 vs 0.17 @N=60), BUT both flat AND hierarchical learned routing plateau ~0.5 at
+scale — ranking a SPECIFIC cross-cluster atom is a needle for ANY features, and coarse-routing-to-the-dep-
+cluster is as hard as fine-routing-to-the-dep-atom (2 hier attempts, both hier≡flat).
+**THE ANSWER (the honest reframe):** a KNOWN structural edge is **FOLLOWED, not learned** — graph traversal
+(`TopologyRetriever` depend-boost, already built): candidate = {q} ∪ neighbours(q) -> the dep partner IS q's
+neighbour -> **Recall 1.00, O(degree), scale-free** (measured: content 0.30 / flat-GPS 0.50 / **TOPO 1.00**).
+So: **structural deps -> follow the edge (topology, trivial + scales); LEARNED GraphGPS routing is only for
+SEMANTIC relevance** (content, no explicit edge). The "routing at scale" weakness dissolves for structure.
+Wire into MembraneV2's AtomRouter: topology-boost for depend-neighbours (structural) + GPS/content ranker
+for semantic candidates. #3 RESOLVED.
 
 ---
 
