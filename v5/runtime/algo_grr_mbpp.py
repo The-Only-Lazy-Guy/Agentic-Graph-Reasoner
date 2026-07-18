@@ -155,6 +155,55 @@ def load_mbpp(path: str = CORPUS, limit: int | None = None) -> list[dict]:
     return tasks
 
 
+def verify_check(code: str, test_code: str, entry: str, setup: str = "",
+                 timeout: float = 8.0) -> tuple[float, str]:
+    """HumanEval/MHPP-style grading: the task ships a `def check(candidate): assert ...` function.
+    We define the solution + check, then call check(entry). Reuses the SIGALRM / subprocess hard-verify
+    machinery of verify_asserts (the whole thing is one assert: `check(entry)`)."""
+    combined = code + "\n\n" + (test_code or "")
+    return verify_asserts(combined, [f"check({entry})"], setup=setup, timeout=timeout)
+
+
+def load_mhpp(path: str = "artifacts/mhpp.jsonl", limit: int | None = None) -> list[dict]:
+    """MHPP (Mostly Hard Python Problems) — the harder benchmark (MBPP is ~2% factorable / too easy).
+    Reads a JSONL and normalises to our task dict. Supports BOTH schemas per row:
+      - MBPP-style:      {text, name, asserts:[...], code?, setup?}          -> verify_asserts
+      - HumanEval-style: {prompt, entry_point, test:"def check(candidate):...", canonical_solution?}  -> verify_check
+    Prep MHPP to this JSONL on molab (`datasets.load_dataset(...)` -> dump rows); function-completion +
+    tests plug straight into the same verify gate (V5_HARD_VERIFY subprocess on --lm runs)."""
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"MHPP jsonl not found at {path}. Prep it on molab: load the MHPP dataset "
+                                f"and dump rows as {{prompt, entry_point, test, canonical_solution}} JSONL.")
+    tasks = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        r = json.loads(line)
+        entry = r.get("entry_point") or r.get("name") or r.get("entry") or ""
+        text = r.get("prompt") or r.get("problem") or r.get("text") or ""
+        setup = r.get("setup", "") or r.get("test_setup", "")
+        ref = r.get("canonical_solution") or r.get("code") or r.get("solution") or ""
+        if r.get("asserts"):                                  # MBPP-style row
+            asserts = r["asserts"]
+
+            def mk(asserts=asserts, setup=setup):
+                return lambda code: verify_asserts(code, asserts, setup)
+            examples, tp = asserts, _type_pool_from_asserts(asserts, entry)
+        else:                                                 # HumanEval/MHPP check-function row
+            test_code = r.get("test") or r.get("test_code") or ""
+
+            def mk(tc=test_code, e=entry, setup=setup):
+                return lambda code: verify_check(code, tc, e, setup)
+            examples, tp = [], [int]
+        tasks.append(dict(text=text, entry=entry, examples=examples, verify_fn=mk(),
+                          type_pool=tp, tests=[], reference=ref, pipeline_shaped=False))
+        if limit and len(tasks) >= limit:
+            break
+    print(f"[MHPP] loaded {len(tasks)} tasks from {path}")
+    return tasks
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Corpus driver — membrane over the stream; measures cross-task reuse as the graph grows
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -246,13 +295,15 @@ def main() -> None:
     ap.add_argument("--topo", action="store_true",
                     help="use topology-aware retrieval (depend-neighbour boost — structural, no net)")
     ap.add_argument("--corpus", default=CORPUS)
+    ap.add_argument("--mhpp", nargs="?", const="artifacts/mhpp.jsonl", default=None,
+                    help="use the harder MHPP benchmark (JSONL path; default artifacts/mhpp.jsonl)")
     a = ap.parse_args()
 
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
 
     if a.run:
-        tasks = load_mbpp(a.corpus, limit=a.limit)
+        tasks = load_mhpp(a.mhpp, limit=a.limit) if a.mhpp else load_mbpp(a.corpus, limit=a.limit)
         graph = load_seed()
         from v5.runtime.algo_grr_retrieval import CachedTokenRetriever
         retriever = CachedTokenRetriever(graph)          # one cached retriever for the whole corpus
