@@ -880,31 +880,39 @@ def _gen3b(model, tok, prompt, max_new=8):
 
 
 def _lm_drift(a) -> bool:
-    """Measure the 3B's variable-tracking accuracy vs #distractor assignments (its real lost-in-the-middle
-    drift), and put a matched WM-TRM beside it. Both see the SAME assignments; the WM retrieves by key."""
+    """DISTANCE axis: a FEW bindings are stated, then a long stretch of numeric-prose filler, then the query
+    far away. A weak on-device LM (use 0.5B) DRIFTS as the filler grows (lost-in-the-middle); the WM-TRM
+    ingests the few bindings as key->value writes + FILL tokens for the filler and retrieves by key (its
+    proven clean regime — few bindings, long gap). eval_dists = filler length."""
     import random
-    import torch
     torch, nn, WorkingMemoryModel, GRUBaseline = _build_wm_models()
     torch.manual_seed(a.seed)
+    F = torch.nn.functional
 
-    # variable names + values that render cleanly to text AND map to the WM's (key,value) tokens
-    max_d = max(a.eval_dists)
-    K = max_d + 4                                 # enough distinct keys for query + distractors
-    V = 10                                        # values 0..9 (single digits, easy to parse)
+    n_real = max(2, a.pairs)                        # FEW real bindings -> the WM's clean regime
+    V = 10
+    K = max(n_real + 2, 10)
     vocab, VAL0 = _assoc_vocab(K, V)
-    names = [f"v{i}" for i in range(K)]
+    names = [f"q{i}" for i in range(K)]
+    max_fill = max(a.eval_dists)
 
-    # train an inline WM on VARIABLE #pairs (capacity task): 2..max_d+1 pairs, tiny gap
-    print(f"[lm-drift] training inline WM (K={K} keys, V={V})…", flush=True)
+    # train the WM on the DISTANCE regime it must handle: n_real pairs, gaps 3..max_fill
+    print(f"[lm-drift] training WM (n_real={n_real} bindings, gaps 3..{max_fill}, d={a.d})…", flush=True)
     wm = WorkingMemoryModel(vocab, V, d=a.d)
     opt = torch.optim.Adam(wm.parameters(), lr=2e-3)
     rng = random.Random(a.seed)
     for it in range(a.steps):
-        npairs = rng.randint(2, max_d + 1)
-        x, y = make_assoc_batch(a.batch, npairs, rng.randint(0, 3), K, V, seed=a.seed + it)
-        loss = torch.nn.functional.cross_entropy(wm(x), y)
+        g = rng.randint(3, max_fill)
+        x, y = make_assoc_batch(a.batch, n_real, g, K, V, seed=a.seed + it)
+        loss = F.cross_entropy(wm(x), y)
         opt.zero_grad(); loss.backward(); opt.step()
-    print(f"  WM trained (loss {loss.item():.3f}). Loading {a.lm}…\n", flush=True)
+    xq, yq = make_assoc_batch(256, n_real, max_fill, K, V, seed=7)
+    with torch.no_grad():
+        wm_hold = (wm(xq).argmax(-1) == yq).float().mean().item()
+    print(f"  WM trained (loss {loss.item():.3f}); holds {wm_hold:.2f} at gap {max_fill}. Loading {a.lm}…\n",
+          flush=True)
+    if wm_hold < 0.85:
+        print("  (WARNING: WM undertrained for this config — raise --steps or --d, or lower gaps)")
 
     from transformers import AutoTokenizer
     from v5.lm_loader import load_frozen_lm
@@ -913,42 +921,42 @@ def _lm_drift(a) -> bool:
         tok.pad_token = tok.eos_token
     model = load_frozen_lm(a.lm).eval()
 
-    print(f"  #distract | 3B (text) | WM-TRM   (accuracy recalling 1 queried variable; {a.trials} trials)")
-    rng = random.Random(1234)
-    ok_rows = []
-    for nd in a.eval_dists:
-        b3 = bw = 0
-        for _ in range(a.trials):
-            qk = rng.randrange(K)
-            distract = rng.sample([k for k in range(K) if k != qk], nd)
-            keys = [qk] + distract
-            vals = {k: rng.randrange(V) for k in keys}
-            order = keys[:]; rng.shuffle(order)
-            # ---- 3B: assignments as TEXT, query one ----
-            lines = "\n".join(f"{names[k]} = {vals[k]}" for k in order)
-            prompt = (f"Here are variable assignments:\n{lines}\n\n"
-                      f"What is the value of {names[qk]}? Reply with only the integer.")
-            if _parse_int(_gen3b(model, tok, prompt)) == vals[qk]:
-                b3 += 1
-            # ---- WM-TRM: same assignments as key->value writes, GET the query ----
-            s = []
-            for k in order:
-                s += [_SET, _KEY0 + k, VAL0 + vals[k]]
-            s += [_GET, _KEY0 + qk]
-            with torch.no_grad():
-                pred = int(wm(torch.tensor([s])).argmax(-1))
-            if pred == vals[qk]:
-                bw += 1
-        a3, aw = b3 / a.trials, bw / a.trials
-        ok_rows.append((a3, aw))
-        print(f"  {nd:>8}  |   {a3:.2f}    |  {aw:.2f}", flush=True)
+    def _filler(i, r):                             # numeric prose = interference, NOT an assignment
+        return (f"Note {i}: shipment {r.randint(100, 999)} moved {r.randint(2, 99)} crates "
+                f"to depot {r.randint(1, 40)} on day {r.randint(1, 28)}.")
 
-    a3_lo, aw_lo = ok_rows[0]
-    a3_hi, aw_hi = ok_rows[-1]
-    ok = a3_hi < a3_lo - 0.15 and aw_hi > 0.85
-    print(f"\n  3B: {a3_lo:.2f} (few) -> {a3_hi:.2f} (many distractors) = LOST-IN-THE-MIDDLE drift (real)")
-    print(f"  WM-TRM: holds {aw_hi:.2f} at {a.eval_dists[-1]} distractors = exact key retrieval, no drift")
-    print(f"  -> {'PASS' if ok else 'INCONCLUSIVE'}: the WM-TRM fixes a MEASURED 3B failure (not a strawman).")
+    print(f"  filler | {a.lm.split('/')[-1]} (text) | WM-TRM   (recall 1 of {n_real} values; {a.trials} trials)")
+    rng = random.Random(1234)
+    rows = []
+    for nf in a.eval_dists:
+        b_lm = b_wm = 0
+        for _ in range(a.trials):
+            keys = rng.sample(range(K), n_real)
+            vals = {k: rng.randrange(V) for k in keys}
+            qk = rng.choice(keys)
+            assign = "\n".join(f"{names[k]} = {vals[k]}" for k in keys)      # bindings up top
+            fill = "\n".join(_filler(i, rng) for i in range(nf))             # long numeric-prose gap
+            prompt = (f"Remember these values:\n{assign}\n\n{fill}\n\n"
+                      f"Question: what is the value of {names[qk]}? Answer with only the integer.")
+            if _parse_int(_gen3b(model, tok, prompt)) == vals[qk]:
+                b_lm += 1
+            s = []                                  # WM: same bindings, gap = nf FILL tokens
+            for k in keys:
+                s += [_SET, _KEY0 + k, VAL0 + vals[k]]
+            s += [_FILL] * nf + [_GET, _KEY0 + qk]
+            with torch.no_grad():
+                if int(wm(torch.tensor([s])).argmax(-1)) == vals[qk]:
+                    b_wm += 1
+        alm, awm = b_lm / a.trials, b_wm / a.trials
+        rows.append((alm, awm))
+        print(f"  {nf:>6} |   {alm:.2f}       |  {awm:.2f}", flush=True)
+
+    lm_lo, lm_hi = rows[0][0], rows[-1][0]
+    wm_hi = rows[-1][1]
+    ok = lm_hi < lm_lo - 0.15 and wm_hi > 0.85
+    print(f"\n  {a.lm.split('/')[-1]}: {lm_lo:.2f} (short) -> {lm_hi:.2f} (long context) = LOST-IN-THE-MIDDLE drift")
+    print(f"  WM-TRM: holds {wm_hi:.2f} at {a.eval_dists[-1]} filler = exact key retrieval, no decay")
+    print(f"  -> {'PASS' if ok else 'INCONCLUSIVE'}: the WM-TRM fixes a MEASURED LM failure (not a strawman).")
     return ok
 
 
