@@ -573,11 +573,8 @@ def main() -> None:
         print(f"  saved vocab ({draft_vocab_size} tokens) to {a.vocab}", flush=True)
 
     if a.train_trm:
-        import importlib
-        spec = importlib.util.spec_from_file_location("trm", Path(__file__).parent / "algo_trm.py")
-        trm_mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(trm_mod)
-        TRMReasoner = trm_mod.TRMReasoner
+        from v5.runtime.algo_trm import _build
+        _, _, TRMReasoner, *_ = _build()
 
         if not Path(a.vocab).exists():
             print(f"  vocab not found at {a.vocab}, run --train-vocab first", flush=True)
@@ -617,11 +614,8 @@ def main() -> None:
         print(f"  saved decoder to {a.decoder}", flush=True)
 
     if a.run:
-        import importlib
-        spec = importlib.util.spec_from_file_location("trm", Path(__file__).parent / "algo_trm.py")
-        trm_mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(trm_mod)
-        TRMReasoner = trm_mod.TRMReasoner
+        from v5.runtime.algo_trm import _build
+        _, _, TRMReasoner, *_ = _build()
 
         if not Path(a.vocab).exists() or not Path(a.decoder).exists():
             print(f"  need both {a.vocab} and {a.decoder}; run --train-vocab + --train-trm first",
