@@ -165,13 +165,149 @@ def _selftest() -> bool:
     return ok
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# REAL-3B CAPABILITY A/B (molab) — does the soft prompt lift solve-rate, or saturate?
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def make_lm_bundle(model_name: str):
+    """Load the FROZEN LM once. Returns (model, tok, embed_layer, d_model, device)."""
+    import os
+    import torch
+    from transformers import AutoTokenizer
+    from v5.lm_loader import load_frozen_lm
+    trust = os.environ.get("V5_LM_TRUST_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
+    tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=trust)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+    model = load_frozen_lm(model_name)                    # weights frozen (requires_grad False)
+    embed_layer = model.get_input_embeddings()
+    d_model = embed_layer.embedding_dim
+    return model, tok, embed_layer, d_model, next(model.parameters()).device
+
+
+def _prompt_ids(tok, text, device):
+    msg = tok.apply_chat_template([{"role": "user", "content": text}], tokenize=False,
+                                  add_generation_prompt=True)
+    return tok(msg, return_tensors="pt", add_special_tokens=False).input_ids.to(device)
+
+
+def softprompt_generate(bundle, sptrm, task_text, atom_vecs, embed_fn, prompt_text,
+                        fail_vec=None, max_new_tokens=256, temperature=0.6):
+    """Generate code from the FROZEN LM conditioned on the TRM's soft prompt (prepended in embed space)."""
+    import torch
+    model, tok, embed_layer, d_model, dev = bundle
+    x = torch.as_tensor(embed_fn(task_text), dtype=torch.float32, device=dev)
+    A = torch.as_tensor(atom_vecs, dtype=torch.float32, device=dev)
+    fv = None if fail_vec is None else torch.as_tensor(fail_vec, dtype=torch.float32, device=dev)
+    with torch.no_grad():
+        sp, _z = sptrm(x, A, fv)                          # [K, d_model]
+        ids = _prompt_ids(tok, prompt_text, dev)
+        emb = embed_layer(ids)                            # [1, L, d_model]
+        full = torch.cat([sp.to(emb.dtype).unsqueeze(0), emb], dim=1)
+        out = model.generate(inputs_embeds=full, do_sample=True, temperature=temperature,
+                             top_p=0.95, max_new_tokens=max_new_tokens, pad_token_id=tok.pad_token_id)
+    return tok.decode(out[0], skip_special_tokens=True)
+
+
+def train_softprompt(bundle, sptrm, traces, embed_fn, render_prompt, steps=600, lr=3e-3, seed=0):
+    """STaR/prefix-tuning: teach the TRM+projection to make the FROZEN LM produce the verified code.
+    Gradients flow THROUGH the frozen LM into the prefix ONLY (LM weights never update)."""
+    import random
+    import torch
+    import torch.nn as nn
+    model, tok, embed_layer, d_model, dev = bundle
+    sptrm.to(dev)
+    opt = torch.optim.Adam(sptrm.parameters(), lr=lr)
+    rng = random.Random(seed)
+    K = sptrm.K
+    for step in range(steps):
+        tr = traces[rng.randrange(len(traces))]           # (task_text, atom_vecs, prompt_text, code)
+        x = torch.as_tensor(embed_fn(tr["task"]), dtype=torch.float32, device=dev)
+        A = torch.as_tensor(tr["atoms"], dtype=torch.float32, device=dev)
+        sp, _z = sptrm(x, A)                               # [K, d_model]
+        p_ids = _prompt_ids(tok, tr["prompt"], dev)
+        c_ids = tok(tr["code"] + tok.eos_token, return_tensors="pt",
+                    add_special_tokens=False).input_ids.to(dev)
+        ids = torch.cat([p_ids, c_ids], dim=1)[:, -1024:]
+        emb = embed_layer(ids)                            # [1, L, d_model]
+        full = torch.cat([sp.to(emb.dtype).unsqueeze(0), emb], dim=1)   # [1, K+L, d_model]
+        logits = model(inputs_embeds=full).logits         # [1, K+L, vocab]
+        n_c = min(c_ids.shape[1], ids.shape[1] - 1)
+        pred = logits[:, K + ids.shape[1] - n_c - 1: K + ids.shape[1] - 1, :]
+        loss = nn.functional.cross_entropy(pred.reshape(-1, logits.shape[-1]).float(),
+                                           ids[:, -n_c:].reshape(-1))
+        opt.zero_grad(); loss.backward(); opt.step()
+        if step % 100 == 0:
+            print(f"  [sp-train {step}] loss {loss.item():.3f}", flush=True)
+    return sptrm
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--ab", action="store_true", help="real-3B capability A/B (molab)")
+    ap.add_argument("--lm", default="Qwen/Qwen2.5-3B-Instruct")
+    ap.add_argument("--limit", type=int, default=80)
+    ap.add_argument("--train-steps", type=int, default=500)
+    ap.add_argument("--K", type=int, default=8)
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
+    if a.ab:
+        _run_ab(a)
+        return
     ap.print_help()
+
+
+def _run_ab(a):
+    """Capability A/B: plain frozen 3B vs 3B+trained-soft-prompt-TRM on held-out tasks.
+    Train on the FIRST half's verified solutions, test solve-rate on the SECOND half."""
+    import os
+    import torch
+    os.environ["V5_HARD_VERIFY"] = "1"
+    torch, nn, SoftPromptTRM, _StubLM = _build()
+    from v5.runtime.algo_grr_mbpp import load_mbpp
+    from v5.runtime.algo_grr_membrane import render_compile_prompt
+    from v5.runtime.algo_grr_policy import HashEmbed
+
+    embed = HashEmbed(dim=768)                             # deterministic task/atom embedding (mpnet-swappable)
+    tasks = load_mbpp(limit=a.limit)
+    half = len(tasks) // 2
+    train_tasks, test_tasks = tasks[:half], tasks[half:]
+    bundle = make_lm_bundle(a.lm)
+    d_model = bundle[3]
+    sptrm = SoftPromptTRM(d_in=768, d_model=d_model, d=256, K=a.K, T=3)
+
+    # training traces: task + a couple retrieved-atom vecs + prompt + the REFERENCE code (verified)
+    traces = []
+    for t in train_tasks:
+        spec = {"task_text": t["text"], "entry": t["entry"], "atoms": [], "examples": t["examples"]}
+        traces.append({"task": t["text"], "atoms": [embed(t["text"])],
+                       "prompt": render_compile_prompt(spec), "code": t["reference"]})
+    print(f"[A/B] train {len(traces)} traces, test {len(test_tasks)} held-out, K={a.K}\n")
+    train_softprompt(bundle, sptrm, traces, embed, render_compile_prompt, steps=a.train_steps)
+
+    def _solve(task, use_prefix):
+        spec = {"task_text": task["text"], "entry": task["entry"], "atoms": [], "examples": task["examples"]}
+        prompt = render_compile_prompt(spec)
+        if use_prefix:
+            code = softprompt_generate(bundle, sptrm, task["text"], [embed(task["text"])], embed, prompt)
+        else:
+            ids = _prompt_ids(bundle[1], prompt, bundle[4])
+            with torch.no_grad():
+                out = bundle[0].generate(**{"input_ids": ids}, do_sample=True, temperature=0.6,
+                                         top_p=0.95, max_new_tokens=256, pad_token_id=bundle[1].pad_token_id)
+            code = bundle[1].decode(out[0, ids.shape[1]:], skip_special_tokens=True)
+        from v5.runtime.algo_grr_membrane import _extract_code, strip_module_exec
+        return task["verify_fn"](strip_module_exec(_extract_code(code)))[0] >= 1.0
+
+    plain = sum(_solve(t, False) for t in test_tasks)
+    prefx = sum(_solve(t, True) for t in test_tasks)
+    n = len(test_tasks)
+    print(f"\n[A/B RESULT] held-out {n} tasks:")
+    print(f"  plain frozen 3B      : {plain}/{n} ({100*plain//n}%)")
+    print(f"  3B + soft-prompt TRM : {prefx}/{n} ({100*prefx//n}%)")
+    print(f"  DELTA = {prefx - plain:+d}  ->  {'CAPABILITY ADDED' if prefx > plain else 'SATURATED (no lift)'}")
 
 
 if __name__ == "__main__":
