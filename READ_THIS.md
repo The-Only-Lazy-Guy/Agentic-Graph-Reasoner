@@ -36,9 +36,10 @@ GRR-7 STaR (search+verify+consolidate), REAL MPNET --compo-gen-star --hard, leav
 (superseded) RL+GRPO dense reward: discovered structure once but HIGH VARIANCE / unstable -> replaced by STaR
 ```
 
-## MEMBRANE + NEURAL ROUTING — the two decisive experiments (session 2026-07-18)
+## MEMBRANE + NEURAL — the FOUR memory/reasoning channels (session 2026-07-18)
 Settles WHERE a neural model belongs relative to the frozen-compiler + text-membrane. Answers the
-competition rejections ("too simple / already in market / slow / context grows").
+competition rejections ("too simple / already in market / slow / context grows"). Four measured channels:
+latent (REPLACE-fails) · text (deliver) · router (ROUTE-wins) · draft+WM (SPEED + reasoning ASSIST).
 
 **1. Can a neural LATENT REPLACE text (deliver the atom's code)?  NO — routing collapse.**
 `algo_grr_softprompt --ab` (real Qwen2.5-3B, 37 hard compositions; inner = OPAQUE gadget g0..g7 the 3B
@@ -68,11 +69,33 @@ Recall@2 / @3 held-out:  cosine RAG 0.50 / 0.50   (STUCK — fetching MORE can't
 ```
 Bigger router (39k, deeper) OVERFIT -> 0.81 (capacity-hurts again, consistent with exp.1).
 
-**DESIGN LOCK: NEURAL ROUTING (discrete pointer) + verified TEXT delivery + self-growing graph.** This is
-NOT graph-RAG (= cosine + static human store). Rejections answered: precision -> fewer atoms -> FASTER
-(slow); route-by-learned-structure, not context-flood (scale); learned structural routing over a VERIFIED
-SELF-GROWN graph, trained on VERIFIED solves != cosine-RAG (novelty). `make_router_policy()` already fits
-the MembraneSolver `policy_fn` seam; end-to-end solve-rate with the 3B is the next run.
+**3. Can the TRM assist at DECODE time (speculative decoding)?  YES — speed + a real reasoning assist.**
+`algo_grr_draft` (TRM drafts tokens in the LM's OWN vocab -> native channel, no foreign-latent collapse;
+LM verifies). Two honest wins (NOT "the LM gets smarter" — vanilla spec-decode preserves the LM dist):
+- SPEED: TRM drafts N tokens, LM ratifies in ONE forward pass vs N autoregressive -> `--selftest` 8 toks/fwd.
+- REASONING ASSIST (the real one): the LM's true failure on LARGE tasks is STATE-DRIFT (loses an
+  intermediate result over a long generation). A TRM WORKING MEMORY (verified, non-decaying) overrides the
+  drifted LM at flagged positions. `--reason-demo`: a value used `d` tokens after it was set:
+```
+d:          2     10    20    50    75
+LM alone   0.82  0.31  0.05  0.04  0.06   = STATE-DRIFT (the real failure)
+LM+WM-TRM  1.00  1.00  1.00  1.00  1.00   = verified memory doesn't decay
+```
+  And it's a TRAINED model, not hardcoded — `--train-wm` (associative recall, LEARNED write/read):
+```
+train gap 3-20, eval to 100:  gap  5    15    30    60    100
+GRU baseline (no ext memory)      0.42  0.45  0.52  0.42  0.50   (= the LM's fixed-state limit; can't)
+WM-TRM (learned, 47k params)      0.95  0.95  0.97  0.96  0.98   (FLAT; generalises 5x past train range)
+```
+  LM plans (strength); TRM remembers + executes exactly (LM weakness). Honest scope: deployed TRM must
+  LEARN to detect/execute/inject the sub-result; the MECHANISM (verified non-decaying memory overriding a
+  drifted LM via spec-decode) is proven. Molab: `--train-vocab` -> `--train-trm` -> `--run` (real 3B accept+solve).
+
+**DESIGN LOCK: NEURAL ROUTES + DRAFTS (discrete tokens/pointers) + verified TEXT/graph DELIVERS + LM
+RATIFIES.** This is NOT graph-RAG (= cosine + static human store). Rejections answered: router precision +
+spec-decode -> FASTER (slow); route-by-learned-structure + WM not context-flood (scale); latent-fails +
+router-wins + WM-assist over a VERIFIED SELF-GROWN graph != cosine-RAG (novelty/"too simple"). Seams wired:
+`make_router_policy()` -> MembraneSolver.policy_fn; `algo_grr_draft` TRM-draft compile_fn. 3B end-to-end = next run.
 
 ## Honest frontier
 - Imitation alone → RECALL (memorizes family→program; 0% compo-gen on synthetic AND mpnet). GRPO was the
@@ -113,13 +136,20 @@ python -m v5.runtime.algo_grr_membrane --run --stub              # 6/6 on curric
 python -m v5.runtime.algo_grr_poison_test --selftest             # two-arm structural test (no GPU)
 python -m v5.runtime.algo_grr_policy --selftest                  # ComplementPolicy TRM policy
 python -m v5.runtime.algo_grr_router --selftest                  # NEURAL routing: cosine 0.50 -> router 0.98 @3 (no GPU)
+python -m v5.runtime.algo_grr_draft --selftest                   # spec-decode: draft+gate+speed+WM (no GPU)
+python -m v5.runtime.algo_grr_draft --reason-demo                # WM-TRM fixes LM state-drift 0.06 -> 1.00 (no GPU)
+python -m v5.runtime.algo_grr_draft --train-wm                   # LEARNED assoc-recall: GRU 0.48 vs WM 0.97 @gap100 (no GPU)
 # Membrane latent-vs-text A/B + neural router (GPU for --ab):
 python -m v5.runtime.algo_grr_softprompt --ab --lm Qwen/Qwen2.5-3B-Instruct  # A none / B text ~100% / C latent 73%->15% scaled
+# TRM-drafts / LM-verifies spec-decode (GPU, real 3B accept+solve):
+python -m v5.runtime.algo_grr_draft --train-vocab --lm Qwen/Qwen2.5-3B-Instruct --vocab artifacts/draft_vocab.pkl
+python -m v5.runtime.algo_grr_draft --train-trm --lm Qwen/Qwen2.5-3B-Instruct --vocab artifacts/draft_vocab.pkl --decoder artifacts/trm_decoder.pt --epochs 100
+python -m v5.runtime.algo_grr_draft --run --lm Qwen/Qwen2.5-3B-Instruct --vocab artifacts/draft_vocab.pkl --decoder artifacts/trm_decoder.pt
 # Poison thesis (GPU, Qwen2.5-3B-Instruct):
 python -m v5.runtime.algo_grr_poison_test --run --lm Qwen/Qwen2.5-3B-Instruct  # NEW arm only
 python -m v5.runtime.algo_grr_poison_test --inspect --lm Qwen/Qwen2.5-3B-Instruct  # R3/R4 derive inspect
 V5_LM_QUANT=8bit python -m v5.runtime.algo_grr_poison_test --run --lm Qwen/Qwen2.5-3B-Instruct --old-arm  # both arms
-# every module: python -m v5.runtime.<algo_quality|algo_capability|algo_abstract|algo_sleep|algo_graph_edits|algo_graph_mg|algo_compose_tasks|algo_composed|algo_trm_compose|algo_dsl|algo_dsl_trm|algo_grr_loop|algo_meta|algo_anticheat|algo_grr_seed|algo_grr_membrane|algo_grr_poison_test|algo_grr_policy|algo_grr_router|algo_grr_softprompt> --selftest   # 18/18 PASS
+# every module: python -m v5.runtime.<algo_quality|algo_capability|algo_abstract|algo_sleep|algo_graph_edits|algo_graph_mg|algo_compose_tasks|algo_composed|algo_trm_compose|algo_dsl|algo_dsl_trm|algo_grr_loop|algo_meta|algo_anticheat|algo_grr_seed|algo_grr_membrane|algo_grr_poison_test|algo_grr_policy|algo_grr_router|algo_grr_softprompt|algo_grr_draft> --selftest   # 19/19 PASS
 ```
 
 ## Files (all v5/runtime/)
@@ -127,7 +157,8 @@ algo_quality · algo_capability · algo_abstract · algo_sleep · algo_composed 
 algo_dsl · algo_dsl_trm (STaR + _guided_search + solve_with_search; legacy train_rl kept for comparison) ·
 algo_grr_loop (GRR-8: wake_sleep_loop/rebuild_net/_sleep_store) · algo_meta · algo_anticheat ·
 algo_grr_membrane (frozen-compiler + text-membrane) · algo_grr_softprompt (latent A/B — REPLACE-fails) ·
-algo_grr_router (NEURAL routing — ROUTE-wins; make_router_policy -> MembraneSolver.policy_fn seam).
+algo_grr_router (NEURAL routing — ROUTE-wins; make_router_policy -> MembraneSolver.policy_fn seam) ·
+algo_grr_draft (TRM-drafts/LM-verifies spec-decode + WorkingMemoryModel: SPEED + reasoning ASSIST).
 Reuses: algo_graph_mg (MGRetriever.resolve_deps), algo_compose_tasks (_REF/_NEEDS/ALL_ATOMS/gen),
 algo_graph_edits+graph_grower (health-gated writes), subgraph/gnn_encoder/goal_encoder (read stack).
 Trained: artifacts/grr6_trm.pt, artifacts/grr6_dsl.pt.
