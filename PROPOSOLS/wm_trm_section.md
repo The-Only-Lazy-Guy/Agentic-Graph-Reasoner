@@ -58,13 +58,16 @@ where it was set is recovered exactly:
 
 `python -m v5.runtime.algo_grr_draft --reason-demo`
 
-**(c) Real-3B target — NOT YET DEMONSTRATED (honest status).** We built a harness to show the WM fixing a
-real 3B failure (`--lm-drift`). First run: a Qwen2.5-3B scored **1.00** on simple variable-tracking even
-with 20 distractors — i.e. it does **not** drift on an easy short task, so there is no failure to fix at
-this difficulty. A genuine demonstration needs a task where the 3B measurably fails (long-context
-aggregation, or many interleaved state *updates* over a long span) **and** a properly-trained WM at that
-config. This is the immediate next experiment; we do not claim a real-3B win until it is measured. The
-learned-memory result in (a) is synthetic (the GRU baseline stands in for the LM's fixed-state limitation).
+**(c) Real-LM target — NOT DEMONSTRATED; and we learned why (honest negative).** We built a harness
+(`--lm-drift`) to show the WM fixing a real LM failure, and ran it twice. **Qwen2.5-3B: 1.00** recalling a
+variable among 20 assignments. **Qwen2.5-0.5B: ~0.97 flat** recalling a value even after 200 sentences of
+distractor filler. Conclusion: **clean key→value retrieval is not an LM failure mode** — small models do it
+well even over long context. The LM state-failures that *do* matter (many interleaved **updates** to one
+variable; **aggregation/counting**; retrieval from **prose**) require the memory to *overwrite or compute*,
+which the current pure-associative-recall WM does not. So the WM-as-built does not yet have a validated
+real-LM target. The learned-memory result in (a) is **synthetic** (the GRU baseline stands in for the LM's
+fixed-state limitation). Making the WM assist a real LM requires an update/compute-capable memory + a task
+where the LM measurably fails — an honest open problem, not a solved one.
 
 ## 4. Why this is not "just retrieval / already on the market"
 
