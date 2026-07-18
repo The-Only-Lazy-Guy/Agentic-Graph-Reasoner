@@ -284,6 +284,21 @@ def _hard_compose_corpus():
             p *= int(c) + 1
         return p % 60
 
+    def g4(n):
+        return (n * n * n * n + 7 * n + 3) % 71
+
+    def g5(n):
+        return sum(int(c) ** 2 for c in str(n)) % 45
+
+    def g6(n):
+        return ((n << 2) ^ (n * 13) ^ 5) % 64
+
+    def g7(n):
+        a, b = 1, 1
+        for _ in range(n):
+            a, b = b, (a + b) % 50
+        return a
+
     def count_set_bits(n):
         return bin(n).count("1")
 
@@ -299,29 +314,35 @@ def _hard_compose_corpus():
         r = int(n ** 0.5)
         return any((r + d) ** 2 == n for d in (-1, 0, 1))
 
+    def last_digit(n):
+        return n % 10
+
     _P = {
         "g0": "def g0(n):\n    return ((n*37+11)^(n*n))%100\n",
         "g1": "def g1(n):\n    return sum((i*i*i)%7 for i in range(n+1))%50\n",
         "g2": "def g2(n):\n    return (n*n*n-3*n+17)%88\n",
         "g3": "def g3(n):\n    p=1\n    for c in str(n):\n        p*=int(c)+1\n    return p%60\n",
+        "g4": "def g4(n):\n    return (n*n*n*n+7*n+3)%71\n",
+        "g5": "def g5(n):\n    return sum(int(c)**2 for c in str(n))%45\n",
+        "g6": "def g6(n):\n    return ((n<<2)^(n*13)^5)%64\n",
+        "g7": "def g7(n):\n    a,b=1,1\n    for _ in range(n):\n        a,b=b,(a+b)%50\n    return a\n",
         "count_set_bits": "def count_set_bits(n):\n    return bin(n).count('1')\n",
         "is_prime": "def is_prime(n):\n    return n>=2 and all(n%i for i in range(2,int(n**0.5)+1))\n",
         "digital_root": "def digital_root(n):\n    while n>=10:\n        n=sum(int(c) for c in str(n))\n    return n\n",
         "is_perfect_square": "def is_perfect_square(n):\n    r=int(n**0.5)\n    return any((r+d)**2==n for d in (-1,0,1))\n",
+        "last_digit": "def last_digit(n):\n    return n%10\n",
     }
     # INNER: opaque custom routine — the description NAMES it but hides the formula (memory-only).
-    INNER = {
-        "g0": (g0, "the output of internal routine g0 (a fixed proprietary integer transform) applied to n"),
-        "g1": (g1, "the output of internal routine g1 (a fixed proprietary integer transform) applied to n"),
-        "g2": (g2, "the output of internal routine g2 (a fixed proprietary integer transform) applied to n"),
-        "g3": (g3, "the output of internal routine g3 (a fixed proprietary integer transform) applied to n"),
-    }
+    _gd = "the output of internal routine {g} (a fixed proprietary integer transform) applied to n"
+    INNER = {g: (fn, _gd.format(g=g)) for g, fn in
+             [("g0", g0), ("g1", g1), ("g2", g2), ("g3", g3), ("g4", g4), ("g5", g5), ("g6", g6), ("g7", g7)]}
     # OUTER: standard, the 3B knows it — so the gadget is the ONLY missing piece.
     OUTER = {
         "is_prime": (is_prime, "whether {v} is prime"),
         "count_set_bits": (count_set_bits, "the number of 1-bits of {v}"),
         "digital_root": (digital_root, "the digital root of {v}"),
         "is_perfect_square": (is_perfect_square, "whether {v} is a perfect square"),
+        "last_digit": (last_digit, "the last decimal digit of {v}"),
     }
     tasks = []
     k = 0
@@ -336,11 +357,17 @@ def _hard_compose_corpus():
                 except Exception:  # noqa: BLE001
                     pass
             text = (f"Given a positive integer n, let x be {idesc}. Return {ophr.format(v='x')}. "
-                    f"(g0/g1/g2/g3 are fixed internal routines — use the one named.)")
+                    f"(g0..g7 are fixed internal routines — use the one named.)")
             atom_specs = [
                 {"name": iname, "purpose": idesc, "code": _P[iname]},
                 {"name": oname, "purpose": ophr.format(v="a value x"), "code": _P[oname]},
             ]
+
+            # DROP degenerate tasks: if every asserted output is identical, a constant guess passes
+            # without any memory (verify needs ALL asserts) -> the gadget wouldn't be load-bearing.
+            if len({a.split("==", 1)[1].strip() for a in asserts}) < 2:
+                k -= 1
+                continue
 
             def mk(a=asserts):
                 return lambda code: verify_asserts(code, a)
