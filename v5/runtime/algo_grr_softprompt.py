@@ -249,7 +249,10 @@ def main() -> None:
     ap.add_argument("--lm", default="Qwen/Qwen2.5-3B-Instruct")
     ap.add_argument("--limit", type=int, default=80)
     ap.add_argument("--train-steps", type=int, default=500)
-    ap.add_argument("--K", type=int, default=8)
+    ap.add_argument("--K", type=int, default=8, help="soft-prompt length (virtual tokens)")
+    ap.add_argument("--d", type=int, default=256, help="TRM latent width (the real z bottleneck)")
+    ap.add_argument("--T", type=int, default=3, help="TRM recursion depth")
+    ap.add_argument("--dump", type=int, default=0, help="print N latent-arm failures (mechanism)")
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
@@ -401,7 +404,8 @@ def _run_ab(a):
     train_tasks, test_tasks = tasks[:half], tasks[half:]
     bundle = make_lm_bundle(a.lm)
     d_model = bundle[3]
-    sptrm = SoftPromptTRM(d_in=384, d_model=d_model, d=256, K=a.K, T=3)
+    sptrm = SoftPromptTRM(d_in=384, d_model=d_model, d=a.d, K=a.K, T=a.T)
+    _np = sum(p.numel() for p in sptrm.parameters())
 
     def _atom_vecs(t):
         return np.stack([embed(s) for s in t["atom_texts"]]).astype(np.float32)
@@ -412,8 +416,10 @@ def _run_ab(a):
         traces.append({"task": t["text"], "atoms": _atom_vecs(t),
                        "prompt": render_compile_prompt(spec), "code": t["reference"]})
     print(f"[FAIR A/B] {len(tasks)} hard compositions; train {len(traces)}, test {len(test_tasks)}; "
-          f"MiniLM embed, ground-truth atom memory, K={a.K}\n")
+          f"MiniLM embed, ground-truth atom memory; TRM K={a.K} d={a.d} T={a.T} ({_np/1e3:.1f}k params)\n")
     train_softprompt(bundle, sptrm, traces, embed, render_compile_prompt, steps=a.train_steps)
+
+    _fails = []                                           # (gadget, entry, real_code, generated_code) latent misses
 
     def _gen_plain(prompt):
         ids = _prompt_ids(bundle[1], prompt, bundle[4])
@@ -437,7 +443,10 @@ def _run_ab(a):
             code = _strip_redefs(code, names)             # (else a wrong guessed g0 shadows the real gadget)
             closure = "\n\n".join(a["code"].rstrip("\n") for a in task["atom_specs"])
             code = closure + "\n\n" + code
-        return task["verify_fn"](code)[0] >= 1.0
+        ok = task["verify_fn"](code)[0] >= 1.0
+        if arm == "latent" and not ok:                    # capture HOW the latent reconstruction missed
+            _fails.append((task["atom_specs"][0]["name"], task["entry"], task["atom_specs"][0]["code"], code))
+        return ok
 
     none = sum(_solve(t, "none") for t in test_tasks)
     txt = sum(_solve(t, "text") for t in test_tasks)
@@ -451,6 +460,13 @@ def _run_ab(a):
     print(f"  text lift    (B-A) = {txt - none:+d}")
     print(f"  latent vs text (C-B) = {lat - txt:+d}   ->  "
           f"{'latent matches/beats text' if lat >= txt else 'TEXT delivers code the latent cannot (capacity limit) -> structural/membrane TRM is the answer'}")
+    if a.dump and _fails:
+        print(f"\n[LATENT FAILURES] {len(_fails)} misses — how the neural reconstruction broke "
+              f"(real gadget vs what the soft-prompt made the frozen LM emit):")
+        for gname, ent, real, gen in _fails[:a.dump]:
+            print(f"\n  ── {ent} (needs {gname}) ──")
+            print("  REAL gadget:\n    " + real.strip().replace("\n", "\n    "))
+            print("  LM emitted (soft-prompt only):\n    " + gen.strip()[:500].replace("\n", "\n    "))
 
 
 if __name__ == "__main__":
