@@ -259,55 +259,162 @@ def main() -> None:
     ap.print_help()
 
 
+# ── HARD compositions over OBSCURE primitives — where the 3B fails alone, so graph memory has room ──
+def _hard_compose_corpus():
+    import numpy as np  # noqa: F401
+    from v5.runtime.algo_grr_mbpp import verify_asserts
+
+    def collatz_steps(n):
+        s = 0
+        while n > 1:
+            n = n // 2 if n % 2 == 0 else 3 * n + 1
+            s += 1
+        return s
+
+    def digital_root(n):
+        while n >= 10:
+            n = sum(int(c) for c in str(n))
+        return n
+
+    def aliquot_sum(n):
+        return sum(i for i in range(1, n) if n % i == 0)
+
+    def count_set_bits(n):
+        return bin(n).count("1")
+
+    def is_prime(n):
+        return n >= 2 and all(n % i for i in range(2, int(n ** 0.5) + 1))
+
+    def num_divisors(n):
+        return sum(1 for i in range(1, n + 1) if n % i == 0)
+
+    def is_perfect_square(n):
+        r = int(n ** 0.5)
+        return any((r + d) ** 2 == n for d in (-1, 0, 1))
+
+    _P = {
+        "collatz_steps": "def collatz_steps(n):\n    s=0\n    while n>1:\n        n=n//2 if n%2==0 else 3*n+1\n        s+=1\n    return s\n",
+        "digital_root": "def digital_root(n):\n    while n>=10:\n        n=sum(int(c) for c in str(n))\n    return n\n",
+        "aliquot_sum": "def aliquot_sum(n):\n    return sum(i for i in range(1,n) if n%i==0)\n",
+        "count_set_bits": "def count_set_bits(n):\n    return bin(n).count('1')\n",
+        "num_divisors": "def num_divisors(n):\n    return sum(1 for i in range(1,n+1) if n%i==0)\n",
+        "is_prime": "def is_prime(n):\n    return n>=2 and all(n%i for i in range(2,int(n**0.5)+1))\n",
+        "is_perfect_square": "def is_perfect_square(n):\n    r=int(n**0.5)\n    return any((r+d)**2==n for d in (-1,0,1))\n",
+    }
+    # INNER: compute x from n (obscure enough the frozen 3B mis-implements)   name -> (fn, noun-phrase)
+    INNER = {
+        "collatz_steps": (collatz_steps, "the number of steps in the Collatz sequence of n until it reaches 1"),
+        "digital_root": (digital_root, "the digital root of n (repeatedly sum the decimal digits until one digit remains)"),
+        "aliquot_sum": (aliquot_sum, "the sum of the proper divisors of n (divisors below n)"),
+        "count_set_bits": (count_set_bits, "the number of 1-bits in the binary representation of n"),
+        "num_divisors": (num_divisors, "the count of positive divisors of n"),
+    }
+    # OUTER: apply to x                     name -> (fn, phrase(x))
+    OUTER = {
+        "is_prime": (is_prime, "whether {v} is prime"),
+        "count_set_bits": (count_set_bits, "the number of 1-bits of {v}"),
+        "digital_root": (digital_root, "the digital root of {v}"),
+        "is_perfect_square": (is_perfect_square, "whether {v} is a perfect square"),
+    }
+    tasks = []
+    k = 0
+    for iname, (ifn, idesc) in INNER.items():
+        for oname, (ofn, ophr) in OUTER.items():
+            if iname == oname:
+                continue
+            entry = f"h_{k:02d}"; k += 1
+            ref = f"{_P[iname]}\n{_P[oname]}\ndef {entry}(n):\n    return {oname}({iname}(n))\n"
+            asserts = []
+            for n in (6, 12, 19, 27, 40):
+                try:
+                    asserts.append(f"assert {entry}({n}) == {ofn(ifn(n))!r}")
+                except Exception:  # noqa: BLE001
+                    pass
+            text = f"Given a positive integer n, let x be {idesc}. Return {ophr.format(v='x')}."
+            atom_specs = [
+                {"name": iname, "purpose": idesc, "code": _P[iname]},
+                {"name": oname, "purpose": ophr.format(v="a value x"), "code": _P[oname]},
+            ]
+
+            def mk(a=asserts):
+                return lambda code: verify_asserts(code, a)
+            tasks.append(dict(text=text, entry=entry, examples=asserts, verify_fn=mk(),
+                              reference=ref, atom_texts=[idesc, ophr.format(v="a value x")],
+                              atom_specs=atom_specs))
+    return tasks
+
+
 def _run_ab(a):
-    """Capability A/B: plain frozen 3B vs 3B+trained-soft-prompt-TRM on held-out tasks.
-    Train on the FIRST half's verified solutions, test solve-rate on the SECOND half."""
+    """FAIR capability A/B (retest): MiniLM embeddings + GRAPH-MEMORY objective on HARD compositions over
+    obscure primitives (where the frozen 3B fails alone). The TRM gets the GROUND-TRUTH needed-atom memory
+    (best case for the latent). Train the soft prompt to inject that memory -> verified composition; test
+    held-out: plain 3B (task text only) vs 3B + memory-soft-prompt."""
     import os
-    import torch
+    import numpy as np
+    import torch as _t
     os.environ["V5_HARD_VERIFY"] = "1"
     torch, nn, SoftPromptTRM, _StubLM = _build()
-    from v5.runtime.algo_grr_mbpp import load_mbpp
-    from v5.runtime.algo_grr_membrane import render_compile_prompt
-    from v5.runtime.algo_grr_policy import HashEmbed
+    from v5.runtime.algo_grr_membrane import render_compile_prompt, _extract_code, strip_module_exec
+    from embedder import encode_one                        # real MiniLM (384-d) — the semantic embedder
 
-    embed = HashEmbed(dim=768)                             # deterministic task/atom embedding (mpnet-swappable)
-    tasks = load_mbpp(limit=a.limit)
+    def embed(text):
+        return encode_one(text)
+
+    tasks = _hard_compose_corpus()
+    import random
+    random.Random(0).shuffle(tasks)
     half = len(tasks) // 2
     train_tasks, test_tasks = tasks[:half], tasks[half:]
     bundle = make_lm_bundle(a.lm)
     d_model = bundle[3]
-    sptrm = SoftPromptTRM(d_in=768, d_model=d_model, d=256, K=a.K, T=3)
+    sptrm = SoftPromptTRM(d_in=384, d_model=d_model, d=256, K=a.K, T=3)
 
-    # training traces: task + a couple retrieved-atom vecs + prompt + the REFERENCE code (verified)
+    def _atom_vecs(t):
+        return np.stack([embed(s) for s in t["atom_texts"]]).astype(np.float32)
+
     traces = []
     for t in train_tasks:
         spec = {"task_text": t["text"], "entry": t["entry"], "atoms": [], "examples": t["examples"]}
-        traces.append({"task": t["text"], "atoms": [embed(t["text"])],
+        traces.append({"task": t["text"], "atoms": _atom_vecs(t),
                        "prompt": render_compile_prompt(spec), "code": t["reference"]})
-    print(f"[A/B] train {len(traces)} traces, test {len(test_tasks)} held-out, K={a.K}\n")
+    print(f"[FAIR A/B] {len(tasks)} hard compositions; train {len(traces)}, test {len(test_tasks)}; "
+          f"MiniLM embed, ground-truth atom memory, K={a.K}\n")
     train_softprompt(bundle, sptrm, traces, embed, render_compile_prompt, steps=a.train_steps)
 
-    def _solve(task, use_prefix):
-        spec = {"task_text": task["text"], "entry": task["entry"], "atoms": [], "examples": task["examples"]}
-        prompt = render_compile_prompt(spec)
-        if use_prefix:
-            code = softprompt_generate(bundle, sptrm, task["text"], [embed(task["text"])], embed, prompt)
-        else:
-            ids = _prompt_ids(bundle[1], prompt, bundle[4])
-            with torch.no_grad():
-                out = bundle[0].generate(**{"input_ids": ids}, do_sample=True, temperature=0.6,
-                                         top_p=0.95, max_new_tokens=256, pad_token_id=bundle[1].pad_token_id)
-            code = bundle[1].decode(out[0, ids.shape[1]:], skip_special_tokens=True)
-        from v5.runtime.algo_grr_membrane import _extract_code, strip_module_exec
-        return task["verify_fn"](strip_module_exec(_extract_code(code)))[0] >= 1.0
+    def _gen_plain(prompt):
+        ids = _prompt_ids(bundle[1], prompt, bundle[4])
+        with _t.no_grad():
+            out = bundle[0].generate(input_ids=ids, do_sample=True, temperature=0.6, top_p=0.95,
+                                     max_new_tokens=256, pad_token_id=bundle[1].pad_token_id)
+        return bundle[1].decode(out[0, ids.shape[1]:], skip_special_tokens=True)
 
-    plain = sum(_solve(t, False) for t in test_tasks)
-    prefx = sum(_solve(t, True) for t in test_tasks)
+    def _solve(task, arm):
+        # arm: 'none' = task only; 'text' = atoms as TEXT (membrane spec, code prepended); 'latent' = memory soft-prompt
+        atoms = task["atom_specs"] if arm == "text" else []
+        spec = {"task_text": task["text"], "entry": task["entry"], "atoms": atoms, "examples": task["examples"]}
+        prompt = render_compile_prompt(spec)
+        if arm == "latent":
+            code = softprompt_generate(bundle, sptrm, task["text"], _atom_vecs(task), embed, prompt)
+        else:
+            code = _gen_plain(prompt)
+        code = strip_module_exec(_extract_code(code))
+        if arm == "text":                                 # prepend the verified atom closure (as the membrane does)
+            closure = "\n\n".join(a["code"].rstrip("\n") for a in task["atom_specs"])
+            code = closure + "\n\n" + code
+        return task["verify_fn"](code)[0] >= 1.0
+
+    none = sum(_solve(t, "none") for t in test_tasks)
+    txt = sum(_solve(t, "text") for t in test_tasks)
+    lat = sum(_solve(t, "latent") for t in test_tasks)
     n = len(test_tasks)
-    print(f"\n[A/B RESULT] held-out {n} tasks:")
-    print(f"  plain frozen 3B      : {plain}/{n} ({100*plain//n}%)")
-    print(f"  3B + soft-prompt TRM : {prefx}/{n} ({100*prefx//n}%)")
-    print(f"  DELTA = {prefx - plain:+d}  ->  {'CAPABILITY ADDED' if prefx > plain else 'SATURATED (no lift)'}")
+    print(f"\n[FAIR A/B RESULT] held-out {n} hard compositions (obscure-primitive pipelines):")
+    print(f"  A. plain 3B, no memory      : {none}/{n} ({100*none//n}%)")
+    print(f"  B. 3B + atoms as TEXT        : {txt}/{n} ({100*txt//n}%)   (membrane: verified code in prompt)")
+    print(f"  C. 3B + memory soft-prompt   : {lat}/{n} ({100*lat//n}%)   (latent: same atoms via K virtual tokens)")
+    print(f"  latent lift  (C-A) = {lat - none:+d}   ->  {'latent injects memory' if lat > none else 'latent adds nothing over no-memory'}")
+    print(f"  text lift    (B-A) = {txt - none:+d}")
+    print(f"  latent vs text (C-B) = {lat - txt:+d}   ->  "
+          f"{'latent matches/beats text' if lat >= txt else 'TEXT delivers code the latent cannot (capacity limit) -> structural/membrane TRM is the answer'}")
 
 
 if __name__ == "__main__":
