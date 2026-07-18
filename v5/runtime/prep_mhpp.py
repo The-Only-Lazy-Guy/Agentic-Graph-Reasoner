@@ -82,12 +82,13 @@ def _load_rows(a) -> list[dict]:
     raise SystemExit("Could not load the dataset. Pass --hf <path> --split <name>, --url <jsonl>, or --local <file>.")
 
 
-def _validate(path: str) -> bool:
-    """Run each canonical solution through the loader's verify_fn — they must (nearly) all pass."""
+def _validate(path: str, limit: int = 0) -> bool:
+    """Run each canonical solution through the loader's verify_fn — they must (nearly) all pass. Use
+    `limit` to sample (BCB is 1140 heavy-lib subprocess verifies -> full validate takes 15+ min)."""
     from v5.runtime.algo_grr_mbpp import load_mhpp
     import os
     os.environ.setdefault("V5_HARD_VERIFY", "1")     # subprocess hard-verify (untrusted-code safe)
-    tasks = load_mhpp(path)
+    tasks = load_mhpp(path, limit=limit or None)
     ok = miss = 0
     fails = []
     for t in tasks:
@@ -121,7 +122,7 @@ def main() -> None:
     a = ap.parse_args()
 
     if a.validate:
-        sys.exit(0 if _validate(a.validate) else 1)
+        sys.exit(0 if _validate(a.validate, limit=a.limit) else 1)
 
     rows = _load_rows(a)
     norm = [x for x in (_norm_row(r) for r in rows) if x]
@@ -132,7 +133,7 @@ def main() -> None:
         for x in norm:
             f.write(json.dumps(x) + "\n")
     print(f"[prep] wrote {len(norm)} tasks -> {a.out} (from {len(rows)} raw rows)")
-    _validate(a.out)
+    _validate(a.out, limit=a.limit or 50)            # sample-validate by default (full 1140 = 15+ min)
 
 
 if __name__ == "__main__":
