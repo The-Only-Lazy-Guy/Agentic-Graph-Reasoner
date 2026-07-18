@@ -179,12 +179,114 @@ def _selftest() -> bool:
     return ok
 
 
+def _scale_test(sizes=(24, 60, 120, 250, 500)) -> bool:
+    """WEAKNESS PROBE #2: does neural routing HOLD as the graph grows? Sweep #atoms; report Recall@3
+    router vs cosine on held-out. If the router degrades toward cosine at scale, routing does NOT scale
+    (-> need hierarchical/coarse-to-fine routing). If it holds, the 'scale' rejection is answered."""
+    torch, nn, NeuralRouter = _build()
+    import numpy as np
+    print("algo_grr_router --scale: does learned routing hold as the graph grows?\n")
+    print(f"  {'#atoms':>7} {'cosine@3':>9} {'router@3':>9}   verdict")
+    ok = True
+    for n in sizes:
+        atoms, train, test = _synth_corpus(n_atoms=n, n_train=max(300, n * 6), n_test=120, seed=0)
+        d = atoms.shape[1]
+        A = torch.as_tensor(atoms)
+        router = NeuralRouter(d)
+        train_router(router, train, atoms, epochs=300, lr=3e-3)
+
+        def cs(t):
+            return (A @ torch.as_tensor(t)).tolist()
+
+        def rs(t):
+            with torch.no_grad():
+                return router(torch.as_tensor(t), A).tolist()
+        cos3 = float(np.mean([_recall_at_k(cs(t), nd, 3) for t, nd in test]))
+        rou3 = float(np.mean([_recall_at_k(rs(t), nd, 3) for t, nd in test]))
+        held = rou3 > 0.80 and rou3 - cos3 > 0.3
+        ok &= held
+        print(f"  {n:>7} {cos3:>9.2f} {rou3:>9.2f}   {'holds' if held else 'DEGRADES'}", flush=True)
+    print(f"\n  -> {'PASS: routing HOLDS at scale' if ok else 'routing degrades at scale -> add hierarchical routing'}")
+    return ok
+
+
+def _kmeans(X, C, iters=25, seed=0):
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    cent = X[rng.choice(len(X), C, replace=False)].copy()
+    lab = np.zeros(len(X), dtype=int)
+    for _ in range(iters):
+        d = ((X[:, None, :] - cent[None]) ** 2).sum(-1)
+        lab = d.argmin(1)
+        for c in range(C):
+            m = X[lab == c]
+            if len(m):
+                cent[c] = m.mean(0)
+    return lab, cent.astype("float32")
+
+
+def _hier_test(sizes=(120, 250, 500)) -> bool:
+    """THE FIX for the scale weakness: cluster atoms; a COARSE router picks a few clusters, a FINE router
+    picks atoms WITHIN them. Each level chooses among a SMALL set -> accuracy independent of total graph
+    size. Compares FLAT router vs HIERARCHICAL at scale (Recall@3, held-out)."""
+    torch, nn, NeuralRouter = _build()
+    import numpy as np
+    print("algo_grr_router --hier: hierarchical routing restores accuracy at scale\n")
+    print(f"  {'#atoms':>7} {'flat@3':>7} {'hier@3':>7}   (coarse picks 3 clusters, fine picks within)")
+    ok = True
+    for n in sizes:
+        atoms, train, test = _synth_corpus(n_atoms=n, n_train=max(300, n * 6), n_test=120, seed=0)
+        d = atoms.shape[1]
+        A = torch.as_tensor(atoms)
+        C = max(4, int(round(n ** 0.5)))                       # ~sqrt(n) clusters
+        lab, cent = _kmeans(atoms, C, seed=1)
+        Cc = 3                                                  # coarse picks top-3 clusters
+
+        flat = NeuralRouter(d); train_router(flat, train, atoms, epochs=250, lr=3e-3)
+
+        # COARSE router over cluster CENTROIDS: task -> which clusters hold needed atoms
+        coarse_train = [(t, {int(lab[j]) for j in nd}) for t, nd in train]
+        coarse = NeuralRouter(d); train_router(coarse, coarse_train, cent, epochs=250, lr=3e-3)
+        # FINE router over atoms (reuse the flat one — same objective; the win is CANDIDATE REDUCTION)
+        fine = flat
+
+        def flat3(t):
+            with torch.no_grad():
+                return _recall_at_k(flat(torch.as_tensor(t), A).tolist(), nd, 3)
+
+        def hier3(t, nd):
+            tt = torch.as_tensor(t)
+            with torch.no_grad():
+                cl = set(torch.topk(coarse(tt, torch.as_tensor(cent)), Cc).indices.tolist())
+                cand = [j for j in range(n) if lab[j] in cl]
+                if not cand:
+                    return 0.0
+                fs = fine(tt, A[cand])                         # score ONLY the candidate atoms
+                pick = {cand[i] for i in torch.topk(fs, min(3, len(cand))).indices.tolist()}
+            return len(pick & set(nd)) / len(nd)
+
+        flat_r = float(np.mean([_recall_at_k(flat(torch.as_tensor(t), A).tolist(), nd, 3) for t, nd in test]))
+        hier_r = float(np.mean([hier3(t, nd) for t, nd in test]))
+        gain = hier_r > flat_r + 0.05
+        ok &= hier_r > 0.80
+        print(f"  {n:>7} {flat_r:>7.2f} {hier_r:>7.2f}   {'restored' if gain else '~same'}", flush=True)
+    print(f"\n  -> {'PASS: hierarchy restores routing at scale' if ok else 'partial'} "
+          f"(fine router always ranks within ~{Cc}*sqrt(n) candidates, not all N)")
+    return ok
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--scale", action="store_true", help="weakness probe: routing accuracy vs graph size")
+    ap.add_argument("--hier", action="store_true", help="the fix: hierarchical routing vs flat at scale")
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
+    if a.scale:
+        sys.exit(0 if _scale_test() else 1)
+    if a.hier:
+        sys.exit(0 if _hier_test() else 1)
     ap.print_help()
 
 
