@@ -196,6 +196,10 @@ def load_mhpp(path: str = "artifacts/mhpp.jsonl", limit: int | None = None) -> l
         text = r.get("prompt") or r.get("problem") or r.get("text") or ""
         setup = r.get("setup", "") or r.get("test_setup", "")
         ref = r.get("canonical_solution") or r.get("code") or r.get("solution") or ""
+        # BigCodeBench/HumanEval completion format: canonical_solution is the function BODY only, and the
+        # prompt holds the signature + imports. Prepend the prompt so the reference is a runnable module.
+        if entry and text and f"def {entry}" not in ref:
+            ref = text.rstrip() + "\n" + ref
         if r.get("asserts"):                                  # MBPP-style row
             asserts = r["asserts"]
 
