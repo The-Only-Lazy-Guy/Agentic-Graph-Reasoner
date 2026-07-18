@@ -91,7 +91,26 @@ WM-TRM (learned, 47k params)      0.95  0.95  0.97  0.96  0.98   (FLAT; generali
   LEARN to detect/execute/inject the sub-result; the MECHANISM (verified non-decaying memory overriding a
   drifted LM via spec-decode) is proven. Molab: `--train-vocab` -> `--train-trm` -> `--run` (real 3B accept+solve).
 
-**DESIGN LOCK: NEURAL ROUTES + DRAFTS (discrete tokens/pointers) + verified TEXT/graph DELIVERS + LM
+**4. THE REAL "ASSIST" WIN — composition ceiling (`algo_grr_wiring --run`, real Qwen2.5-3B).** The frozen
+LM's genuine failure is WIRING, not recall (that's why the WM/recall tests found no target and this did).
+Parse a nested arithmetic expression (words) → correctly-wired atom calls; depth grows → free-form 3B
+COLLAPSES; planned (ground-truth tree → deterministic realize) holds:
+```
+depth        1     2     3     4     5
+free-form 3B 0.73  0.67  0.30  0.13  0.03   = WIRING CEILING (real, steep)
+planned      1.00  1.00  1.00  1.00  1.00   = structure removes it
+```
+=> the reasoner emits STRUCTURE (atom-program): ROUTER = which atoms (0.50→0.98), PLANNER = how wired
+(0.03→1.00); LM delivers/ratifies. Honest caveat: planned arm is GIVEN the tree; the TRM that INFERS it
+from NL = the compose-forced TRM (GRR-6, str_dp2 Δ+0.50 on algorithmic tasks). This is the strongest
+"small reasoner assists frozen LM" result — real 3B, exact verifier, deterministic planned arm.
+
+**OPEN PROBLEM (honest) — routing at scale (`--scale`/`--hier`).** Flat router degrades as atoms grow
+(0.98@24 → 0.74@120 → 0.37@250 → cosine). BUT the synthetic test is CONFOUNDED (atoms on a fixed circle →
+more atoms = denser packing = harder DISCRIMINATION not pure scale), and the quick hierarchical fix did NOT
+restore it (flat 0.37 = hier 0.37 @250). Do NOT claim hierarchy fixes scale; needs a non-confounded test.
+
+**DESIGN LOCK: NEURAL ROUTES + PLANS (discrete pointers/structure) + verified TEXT/graph DELIVERS + LM
 RATIFIES.** This is NOT graph-RAG (= cosine + static human store). Rejections answered: router precision +
 spec-decode -> FASTER (slow); route-by-learned-structure + WM not context-flood (scale); latent-fails +
 router-wins + WM-assist over a VERIFIED SELF-GROWN graph != cosine-RAG (novelty/"too simple"). Seams wired:
