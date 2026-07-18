@@ -360,7 +360,8 @@ def _run_ab(a):
     import torch as _t
     os.environ["V5_HARD_VERIFY"] = "1"
     torch, nn, SoftPromptTRM, _StubLM = _build()
-    from v5.runtime.algo_grr_membrane import render_compile_prompt, _extract_code, strip_module_exec
+    from v5.runtime.algo_grr_membrane import (render_compile_prompt, _extract_code, strip_module_exec,
+                                              _strip_redefs)
     from embedder import encode_one                        # real MiniLM (384-d) — the semantic embedder
 
     def embed(text):
@@ -404,7 +405,9 @@ def _run_ab(a):
         else:
             code = _gen_plain(prompt)
         code = strip_module_exec(_extract_code(code))
-        if arm == "text":                                 # prepend the verified atom closure (as the membrane does)
+        if arm == "text":                                 # mirror make_lm_compiler: strip the LM's redefs of
+            names = {a["name"] for a in task["atom_specs"]}   # provided atoms, THEN prepend the verified closure
+            code = _strip_redefs(code, names)             # (else a wrong guessed g0 shadows the real gadget)
             closure = "\n\n".join(a["code"].rstrip("\n") for a in task["atom_specs"])
             code = closure + "\n\n" + code
         return task["verify_fn"](code)[0] >= 1.0
