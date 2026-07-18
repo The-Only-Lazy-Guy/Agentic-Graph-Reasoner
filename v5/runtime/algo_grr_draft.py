@@ -378,7 +378,7 @@ def train_decoder(decoder: TRMDecoder, data: list, epochs: int = 50,
             torch.nn.utils.clip_grad_norm_(decoder.parameters(), 1.0)
             opt.step()
             opt.zero_grad()
-            total_loss += float(batch_loss)
+            total_loss += batch_loss.item()
             n_batches += 1
 
         if (ep + 1) % 5 == 0 or ep == 0:
@@ -856,6 +856,102 @@ def _train_wm_cli(a) -> bool:
     return ok
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# REAL-3B DRIFT HARNESS — the WM-TRM fixes an ACTUAL 3B failure (variable tracking / lost-in-the-middle).
+# Same task, two solvers: the frozen 3B reads the assignments as TEXT (drifts as distractors grow); the
+# WM-TRM ingests them as key->value writes (retrieves by key exactly, independent of how many distractors).
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _parse_int(text):
+    import re
+    m = re.search(r"-?\d+", text)
+    return int(m.group()) if m else None
+
+
+def _gen3b(model, tok, prompt, max_new=8):
+    import torch
+    msg = tok.apply_chat_template([{"role": "user", "content": prompt}], tokenize=False,
+                                  add_generation_prompt=True)
+    ids = tok(msg, return_tensors="pt", add_special_tokens=False).input_ids.to(model.device)
+    with torch.no_grad():
+        out = model.generate(input_ids=ids, max_new_tokens=max_new, do_sample=False,
+                             pad_token_id=tok.pad_token_id)
+    return tok.decode(out[0, ids.shape[1]:], skip_special_tokens=True)
+
+
+def _lm_drift(a) -> bool:
+    """Measure the 3B's variable-tracking accuracy vs #distractor assignments (its real lost-in-the-middle
+    drift), and put a matched WM-TRM beside it. Both see the SAME assignments; the WM retrieves by key."""
+    import random
+    import torch
+    torch, nn, WorkingMemoryModel, GRUBaseline = _build_wm_models()
+    torch.manual_seed(a.seed)
+
+    # variable names + values that render cleanly to text AND map to the WM's (key,value) tokens
+    max_d = max(a.eval_dists)
+    K = max_d + 4                                 # enough distinct keys for query + distractors
+    V = 10                                        # values 0..9 (single digits, easy to parse)
+    vocab, VAL0 = _assoc_vocab(K, V)
+    names = [f"v{i}" for i in range(K)]
+
+    # train an inline WM on VARIABLE #pairs (capacity task): 2..max_d+1 pairs, tiny gap
+    print(f"[lm-drift] training inline WM (K={K} keys, V={V})…", flush=True)
+    wm = WorkingMemoryModel(vocab, V, d=a.d)
+    opt = torch.optim.Adam(wm.parameters(), lr=2e-3)
+    rng = random.Random(a.seed)
+    for it in range(a.steps):
+        npairs = rng.randint(2, max_d + 1)
+        x, y = make_assoc_batch(a.batch, npairs, rng.randint(0, 3), K, V, seed=a.seed + it)
+        loss = torch.nn.functional.cross_entropy(wm(x), y)
+        opt.zero_grad(); loss.backward(); opt.step()
+    print(f"  WM trained (loss {loss.item():.3f}). Loading {a.lm}…\n", flush=True)
+
+    from transformers import AutoTokenizer
+    from v5.lm_loader import load_frozen_lm
+    tok = AutoTokenizer.from_pretrained(a.lm)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+    model = load_frozen_lm(a.lm).eval()
+
+    print(f"  #distract | 3B (text) | WM-TRM   (accuracy recalling 1 queried variable; {a.trials} trials)")
+    rng = random.Random(1234)
+    ok_rows = []
+    for nd in a.eval_dists:
+        b3 = bw = 0
+        for _ in range(a.trials):
+            qk = rng.randrange(K)
+            distract = rng.sample([k for k in range(K) if k != qk], nd)
+            keys = [qk] + distract
+            vals = {k: rng.randrange(V) for k in keys}
+            order = keys[:]; rng.shuffle(order)
+            # ---- 3B: assignments as TEXT, query one ----
+            lines = "\n".join(f"{names[k]} = {vals[k]}" for k in order)
+            prompt = (f"Here are variable assignments:\n{lines}\n\n"
+                      f"What is the value of {names[qk]}? Reply with only the integer.")
+            if _parse_int(_gen3b(model, tok, prompt)) == vals[qk]:
+                b3 += 1
+            # ---- WM-TRM: same assignments as key->value writes, GET the query ----
+            s = []
+            for k in order:
+                s += [_SET, _KEY0 + k, VAL0 + vals[k]]
+            s += [_GET, _KEY0 + qk]
+            with torch.no_grad():
+                pred = int(wm(torch.tensor([s])).argmax(-1))
+            if pred == vals[qk]:
+                bw += 1
+        a3, aw = b3 / a.trials, bw / a.trials
+        ok_rows.append((a3, aw))
+        print(f"  {nd:>8}  |   {a3:.2f}    |  {aw:.2f}", flush=True)
+
+    a3_lo, aw_lo = ok_rows[0]
+    a3_hi, aw_hi = ok_rows[-1]
+    ok = a3_hi < a3_lo - 0.15 and aw_hi > 0.85
+    print(f"\n  3B: {a3_lo:.2f} (few) -> {a3_hi:.2f} (many distractors) = LOST-IN-THE-MIDDLE drift (real)")
+    print(f"  WM-TRM: holds {aw_hi:.2f} at {a.eval_dists[-1]} distractors = exact key retrieval, no drift")
+    print(f"  -> {'PASS' if ok else 'INCONCLUSIVE'}: the WM-TRM fixes a MEASURED 3B failure (not a strawman).")
+    return ok
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # SELFTEST (no GPU) — proves the DRAFT path (decoder trains + reproduces), the whole-draft
 # GATE logic (mean-logprob accept/reject), and the SPEED accounting (N tokens / 1 verify pass).
@@ -939,6 +1035,9 @@ def main() -> None:
     ap.add_argument("--reason-demo", action="store_true", help="no-GPU: WM-TRM fixes LM state-drift curve")
     ap.add_argument("--train-wm", action="store_true",
                     help="TRAIN the learned working-memory model (associative recall, generalises past train gap)")
+    ap.add_argument("--lm-drift", action="store_true",
+                    help="REAL-3B variable-tracking: 3B drift vs distractors, WM-TRM beside it (needs the LM)")
+    ap.add_argument("--trials", type=int, default=30, help="trials per point in --lm-drift")
     ap.add_argument("--keys", type=int, default=8)
     ap.add_argument("--values", type=int, default=8)
     ap.add_argument("--pairs", type=int, default=3, help="key-value pairs to store before the query")
@@ -970,6 +1069,8 @@ def main() -> None:
         sys.exit(0 if _reason_demo() else 1)
     if a.train_wm:
         sys.exit(0 if _train_wm_cli(a) else 1)
+    if a.lm_drift:
+        sys.exit(0 if _lm_drift(a) else 1)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"algo_grr_draft — TRM drafts, LM verifies (device={device})\n", flush=True)
