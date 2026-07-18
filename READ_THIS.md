@@ -1,4 +1,4 @@
-# READ_THIS — GRR: Graph Recursive Reasoner (2026-07-17)
+# READ_THIS — GRR: Graph Recursive Reasoner (2026-07-18)
 
 > At-a-glance dump of the latest session (raw numbers, decisions, repro commands).
 > Updated each working session. Branch: fix/swe-slot-plan-gate-real-file.
@@ -35,6 +35,44 @@ GRR-7 STaR (search+verify+consolidate), REAL MPNET --compo-gen-star --hard, leav
                    (first real run: 89%, max_lis wandered 0-100%; fixed by MDL-minimal keep-gate, see below)
 (superseded) RL+GRPO dense reward: discovered structure once but HIGH VARIANCE / unstable -> replaced by STaR
 ```
+
+## MEMBRANE + NEURAL ROUTING — the two decisive experiments (session 2026-07-18)
+Settles WHERE a neural model belongs relative to the frozen-compiler + text-membrane. Answers the
+competition rejections ("too simple / already in market / slow / context grows").
+
+**1. Can a neural LATENT REPLACE text (deliver the atom's code)?  NO — routing collapse.**
+`algo_grr_softprompt --ab` (real Qwen2.5-3B, 37 hard compositions; inner = OPAQUE gadget g0..g7 the 3B
+cannot guess -> baseline MUST fail; held-out = novel gadget×outer pairings, not memorization):
+```
+A. plain 3B (no memory)      : 0-5%     baseline can't derive the opaque routine  -> memory load-bearing
+B. atoms as TEXT (membrane)  : ~100%    verified code in prompt, ZERO training (needs _strip_redefs, else
+                                         a wrong guessed g0 SHADOWS the real gadget: was 37% -> 100%)
+C. soft-prompt LATENT        : 73%  ->  15% WHEN SCALED UP (K8 d256 54k -> K32 d512 36M params)
+```
+Scaling the latent made it WORSE. `--dump`: on a miss the frozen LM emits a well-formed body of the
+WRONG gadget (needs g4 -> emits g6's `((n<<2)^(n*13)^5)%64`). = ROUTING COLLAPSE (fuzzy associative recall
+collides), not reconstruction noise. Capacity is NOT the lever. Text = content-addressed EXACT copy;
+latent = lossy, collides, must-retrain-per-atom (kills self-growth). => TEXT is the memory interface;
+the neural model must NOT transport code. (z-wall, now empirical + mechanistic.)
+
+**2. Can a neural model IMPROVE retrieval (ROUTE which atoms)?  YES — beats cosine RAG.**
+`algo_grr_router --selftest` (no-GPU). NeuralRouter (14k params) scores atoms, emits a DISCRETE pointer
+(top-k SELECTION); membrane delivers the picked atoms' exact code as TEXT (pointer != code -> the collapse
+of exp.1 cannot recur). Controlled corpus: the needed helper is TEXT-DISSIMILAR (a called dep), held-out
+uses unseen angles = generalization:
+```
+Recall@2 / @3 held-out:  cosine RAG 0.50 / 0.50   (STUCK — fetching MORE can't fix a similarity-blind miss)
+                         |cosine|   0.44 / 0.47
+                         NEURAL router (ours) 0.85 / 0.98   (+35pts@2; learned the structural dep from
+                                                             verified solves; cosine is blind to it)
+```
+Bigger router (39k, deeper) OVERFIT -> 0.81 (capacity-hurts again, consistent with exp.1).
+
+**DESIGN LOCK: NEURAL ROUTING (discrete pointer) + verified TEXT delivery + self-growing graph.** This is
+NOT graph-RAG (= cosine + static human store). Rejections answered: precision -> fewer atoms -> FASTER
+(slow); route-by-learned-structure, not context-flood (scale); learned structural routing over a VERIFIED
+SELF-GROWN graph, trained on VERIFIED solves != cosine-RAG (novelty). `make_router_policy()` already fits
+the MembraneSolver `policy_fn` seam; end-to-end solve-rate with the 3B is the next run.
 
 ## Honest frontier
 - Imitation alone → RECALL (memorizes family→program; 0% compo-gen on synthetic AND mpnet). GRPO was the
@@ -74,17 +112,22 @@ python -m v5.runtime.algo_grr_membrane --selftest                # frozen+ membr
 python -m v5.runtime.algo_grr_membrane --run --stub              # 6/6 on curriculum (no GPU)
 python -m v5.runtime.algo_grr_poison_test --selftest             # two-arm structural test (no GPU)
 python -m v5.runtime.algo_grr_policy --selftest                  # ComplementPolicy TRM policy
+python -m v5.runtime.algo_grr_router --selftest                  # NEURAL routing: cosine 0.50 -> router 0.98 @3 (no GPU)
+# Membrane latent-vs-text A/B + neural router (GPU for --ab):
+python -m v5.runtime.algo_grr_softprompt --ab --lm Qwen/Qwen2.5-3B-Instruct  # A none / B text ~100% / C latent 73%->15% scaled
 # Poison thesis (GPU, Qwen2.5-3B-Instruct):
 python -m v5.runtime.algo_grr_poison_test --run --lm Qwen/Qwen2.5-3B-Instruct  # NEW arm only
 python -m v5.runtime.algo_grr_poison_test --inspect --lm Qwen/Qwen2.5-3B-Instruct  # R3/R4 derive inspect
 V5_LM_QUANT=8bit python -m v5.runtime.algo_grr_poison_test --run --lm Qwen/Qwen2.5-3B-Instruct --old-arm  # both arms
-# every module: python -m v5.runtime.<algo_quality|algo_capability|algo_abstract|algo_sleep|algo_graph_edits|algo_graph_mg|algo_compose_tasks|algo_composed|algo_trm_compose|algo_dsl|algo_dsl_trm|algo_grr_loop|algo_meta|algo_anticheat|algo_grr_seed|algo_grr_membrane|algo_grr_poison_test|algo_grr_policy> --selftest   # 16/16 PASS
+# every module: python -m v5.runtime.<algo_quality|algo_capability|algo_abstract|algo_sleep|algo_graph_edits|algo_graph_mg|algo_compose_tasks|algo_composed|algo_trm_compose|algo_dsl|algo_dsl_trm|algo_grr_loop|algo_meta|algo_anticheat|algo_grr_seed|algo_grr_membrane|algo_grr_poison_test|algo_grr_policy|algo_grr_router|algo_grr_softprompt> --selftest   # 18/18 PASS
 ```
 
 ## Files (all v5/runtime/)
 algo_quality · algo_capability · algo_abstract · algo_sleep · algo_composed · algo_trm_compose ·
 algo_dsl · algo_dsl_trm (STaR + _guided_search + solve_with_search; legacy train_rl kept for comparison) ·
-algo_grr_loop (GRR-8: wake_sleep_loop/rebuild_net/_sleep_store) · algo_meta · algo_anticheat.
+algo_grr_loop (GRR-8: wake_sleep_loop/rebuild_net/_sleep_store) · algo_meta · algo_anticheat ·
+algo_grr_membrane (frozen-compiler + text-membrane) · algo_grr_softprompt (latent A/B — REPLACE-fails) ·
+algo_grr_router (NEURAL routing — ROUTE-wins; make_router_policy -> MembraneSolver.policy_fn seam).
 Reuses: algo_graph_mg (MGRetriever.resolve_deps), algo_compose_tasks (_REF/_NEEDS/ALL_ATOMS/gen),
 algo_graph_edits+graph_grower (health-gated writes), subgraph/gnn_encoder/goal_encoder (read stack).
 Trained: artifacts/grr6_trm.pt, artifacts/grr6_dsl.pt.
