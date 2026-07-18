@@ -58,10 +58,13 @@ where it was set is recovered exactly:
 
 `python -m v5.runtime.algo_grr_draft --reason-demo`
 
-**(c) On a real 3B, it targets a real failure.** The same variable-tracking task, on Qwen2.5-3B: the model
-reads the assignments as text and drifts as distractors grow; the WM-TRM ingests them as key→value writes
-and retrieves by key.
-`python -m v5.runtime.algo_grr_draft --lm-drift --lm Qwen/Qwen2.5-3B-Instruct --eval-dists 2 5 10 20 --d 128`
+**(c) Real-3B target — NOT YET DEMONSTRATED (honest status).** We built a harness to show the WM fixing a
+real 3B failure (`--lm-drift`). First run: a Qwen2.5-3B scored **1.00** on simple variable-tracking even
+with 20 distractors — i.e. it does **not** drift on an easy short task, so there is no failure to fix at
+this difficulty. A genuine demonstration needs a task where the 3B measurably fails (long-context
+aggregation, or many interleaved state *updates* over a long span) **and** a properly-trained WM at that
+config. This is the immediate next experiment; we do not claim a real-3B win until it is measured. The
+learned-memory result in (a) is synthetic (the GRU baseline stands in for the LM's fixed-state limitation).
 
 ## 4. Why this is not "just retrieval / already on the market"
 
