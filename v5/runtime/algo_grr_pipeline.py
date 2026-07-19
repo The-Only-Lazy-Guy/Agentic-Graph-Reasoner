@@ -542,12 +542,15 @@ class MembraneV2:
     """
 
     def __init__(self, store, router, planner, ratify_fn=None, author_fn=None, bank=True,
-                 batch_author_fn=None, fuzz_gate=True, fuzz_n=12, fallback_planner=None):
+                 batch_author_fn=None, fuzz_gate=True, fuzz_n=12, fallback_planner=None,
+                 semantic_channel=None):
         self.store, self.router, self.planner = store, router, planner
         self.ratify_fn = ratify_fn
         self.author_fn = author_fn
         self.batch_author_fn = batch_author_fn     # STEP-SPEC: author ALL missing atoms in ONE LM call
         self.bank = bank
+        self.semantic_channel = semantic_channel   # v6 dual-channel: if set, realize via the symbolic
+                                                   # skeleton + emit a faithful explanation (else plain realize)
         self.fuzz_gate = fuzz_gate                 # GRR-1: only GENERAL authored helpers may enter the store
         self.fuzz_n = fuzz_n
         self.fallback_planner = fallback_planner   # if the LEARNED planner's program fails verify, retry with this
@@ -623,23 +626,29 @@ class MembraneV2:
                     self.store[a] = src; authored.append(a)
                 elif src and _authored_ok(src, a):
                     self.fuzz_rejected += 1
-        code = realize(prog, self.store, task["entry"])
+        explanation = ""
+        if self.semantic_channel is not None:      # v6 dual-channel: symbolic skeleton + faithful narration
+            from v5.runtime.algo_grr_dcpd import dual_channel_realize
+            dc = dual_channel_realize(prog, self.store, task, semantic=self.semantic_channel)
+            code, explanation = dc["code"], dc["explanation"]
+        else:
+            code = realize(prog, self.store, task["entry"])
         if self.ratify_fn:                         # real LM writes/ratifies the glue line
             code = self.ratify_fn(code, task, prog)
         ok = task["verify_fn"](code)[0] >= 1.0
-        return ok, code, prog, authored
+        return ok, code, prog, authored, explanation
 
     def solve(self, task: dict) -> dict:
         ranked = self.router.rank(task["text"])
         # PRIMARY planner (the learned reasoner) attempts first; if its program can't be verified, retry
         # with the controllable oracle/heuristic FALLBACK (kept for deployment, not removed).
-        ok, code, prog, authored_now = self._attempt(task, self.planner, ranked)
+        ok, code, prog, authored_now, explanation = self._attempt(task, self.planner, ranked)
         used_fallback = False
         if not ok and self.fallback_planner is not None:
-            ok2, code2, prog2, authored2 = self._attempt(task, self.fallback_planner, ranked)
+            ok2, code2, prog2, authored2, expl2 = self._attempt(task, self.fallback_planner, ranked)
             authored_now = authored_now + authored2
             if ok2:
-                ok, code, prog, used_fallback = ok2, code2, prog2, True
+                ok, code, prog, explanation, used_fallback = ok2, code2, prog2, expl2, True
         if ok:
             self.plan_fallback_ok += int(used_fallback)
             self.plan_primary_ok += int(not used_fallback)
@@ -659,11 +668,16 @@ class MembraneV2:
         keep = self.bank and ok
         if keep:
             self.banked += len(set(authored_now))
+            meta = getattr(self.store, "meta", None)     # mark banked atoms authored (rich-node provenance)
+            if meta is not None:
+                for a in set(authored_now):
+                    if a in meta:
+                        meta[a].provenance = "authored"
         else:
             for a in set(authored_now):
                 self.store.pop(a, None)
         return dict(solved=ok, code=code, program=prog, route_ok=route_ok,
-                    authored=authored_now, author_calls=self.author_calls)
+                    authored=authored_now, author_calls=self.author_calls, explanation=explanation)
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
