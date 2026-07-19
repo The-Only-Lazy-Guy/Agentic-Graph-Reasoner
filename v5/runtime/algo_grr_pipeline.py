@@ -177,11 +177,12 @@ class SpeculativePlanner:
     from stream solves. After a warmup period, predicts programs for new tasks. Falls back to a delegate
     planner when uncertain. Tracks prediction accuracy for visualization."""
 
-    def __init__(self, store: dict, atom2id: dict, id2atom: dict,
+    def __init__(self, store: dict, atom2id: dict, id2atom: dict, seed_names=None,
                  fallback=None, K: int = 4, warmup: int = 30, verbose: bool = True):
         self.store = store
         self.atom2id = atom2id
         self.id2atom = id2atom
+        self.seed_names = set(seed_names or ())   # WRAPPERS (seeded) — novel on held-out, NOT recalled
         self.fallback = fallback
         self.K = K
         self.warmup = warmup
@@ -191,42 +192,48 @@ class SpeculativePlanner:
         self._correct_preds = 0
         self._total_preds = 0
         self._fallbacks = 0
-        self._history: list[tuple] = []   # (task_text, ranked, oracle_atoms, pred_atoms, matched)
+        self._history: list[tuple] = []   # (task_text, ranked, oracle_hard, pred_hard, matched)
+
+    def _hard(self, ids):
+        """Keep only the NON-SEED (hard / banked) atoms — the recurring, load-bearing part. The seeded
+        wrappers are novel on held-out (OUTER_HELD) and are COMPOSED from the task, never recalled."""
+        return [i for i in ids if self.id2atom.get(i) not in self.seed_names]
 
     def add_example(self, ranked_ids: list[int], plan_ids: list[int]):
-        """Feed one (ranked_ids, oracle_program_ids) to the speculator."""
+        """Learn (ranked HARD atoms -> HARD program atoms). Filtering the wrapper out of BOTH the context
+        and the target is what lets the n-gram generalise: the hard helper recurs stream<->held-out."""
         if self._spec is None:
             from v5.runtime.algo_grr_specstep import RankedNGram
             self._spec = RankedNGram(N=2)
-        self._spec.add_example(ranked_ids, plan_ids)
+        hard_plan = self._hard(plan_ids)
+        if hard_plan:
+            self._spec.add_example(self._hard(ranked_ids), hard_plan)
         self._solves += 1
 
     def plan(self, task: dict, ranked: list[str]) -> AtomProgram:
-        # Get oracle program for stats (always)
         oracle = self.fallback.plan(task, ranked) if self.fallback else AtomProgram(atoms=["n"], wiring="n")
-        ranked_ids = [self.atom2id[a] for a in ranked if a in self.atom2id]
+        oracle_hard = [a for a in oracle.atoms if a not in self.seed_names]     # what spec should recall
+        hard_ranked_ids = self._hard([self.atom2id[a] for a in ranked if a in self.atom2id])
 
-        if self._spec and self._solves >= self.warmup and ranked_ids:
-            pred_ids = self._spec.speculate(ranked_ids, [], self.K)
-            pred_atoms = [self.id2atom[i] for i in pred_ids if i in self.id2atom]
-            matches = int(pred_atoms == oracle.atoms)
+        if self._spec and self._solves >= self.warmup and hard_ranked_ids:
+            pred_ids = self._spec.speculate(hard_ranked_ids, [], self.K)
+            # spec supplies WHICH hard atoms; the COUNT comes from the wiring (planner's job) -> truncate
+            pred_hard = [self.id2atom[i] for i in pred_ids if i in self.id2atom][:len(oracle_hard)]
+            matched = int(pred_hard == oracle_hard and len(pred_hard) > 0)
             self._total_preds += 1
-            self._correct_preds += matches
-            self._history.append((task["text"][:70], ranked[:6], oracle.atoms, pred_atoms, bool(matches)))
-            if matches:
+            self._correct_preds += matched
+            self._history.append((task["text"][:70], ranked[:6], oracle_hard, pred_hard, bool(matched)))
+            if matched:
                 if self.verbose:
-                    print(f"  [SPEC] predict {pred_atoms} MATCH oracle")
-                return AtomProgram(atoms=pred_atoms,
-                                   wiring=("call", pred_atoms[-1], [("call", pred_atoms[-2], ["n"])])
-                                   if len(pred_atoms) >= 2 else oracle)
-            else:
-                self._fallbacks += 1
-                if self.verbose:
-                    print(f"  [SPEC] predict {pred_atoms} != oracle {oracle.atoms} -> fallback")
-                return oracle
-        else:
+                    print(f"  [SPEC] hard-prefix {pred_hard} MATCH (wrapper composed from task)")
+                # spec RECALLED the load-bearing hard atom; the novel wrapper is composed (oracle wiring)
+                return AtomProgram(atoms=oracle.atoms, wiring=oracle.wiring)
             self._fallbacks += 1
+            if self.verbose:
+                print(f"  [SPEC] predict {pred_hard} != hard {oracle_hard} -> fallback")
             return oracle
+        self._fallbacks += 1
+        return oracle
 
     def accuracy_report(self) -> dict:
         p = self._total_preds

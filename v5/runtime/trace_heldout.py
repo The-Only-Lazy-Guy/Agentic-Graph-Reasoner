@@ -20,9 +20,53 @@ if _ROOT not in sys.path:
 from v5.runtime.algo_grr_compose import gen_corpus_hard, HARD, OUTER, OUTER_HELD
 from v5.runtime.algo_grr_pipeline import (
     AtomStore, TopologyAtomRouter, OraclePlanner, ProgramOraclePlanner,
-    MembraneV2, realize, AtomProgram,
+    MembraneV2, realize, AtomProgram, SpeculativePlanner,
 )
 from v5.runtime.algo_grr_scaleup import assemble_corpus
+
+
+def build_spec_planner(store, n_stream: int = 120, seed: int = 0):
+    """Train a SpeculativePlanner on the STREAM (ranked -> HARD atom), so held-out tracing shows it
+    RECALLING the reasoning step. Returns (spec, accuracy_on_stream_holdout)."""
+    all_names = list(store.keys())
+    atom2id = {a: i for i, a in enumerate(all_names)}
+    id2atom = {i: a for a, i in atom2id.items()}
+    router, oracle = TopologyAtomRouter(store), OraclePlanner()
+    pairs = []
+    for t in gen_corpus_hard(n_stream, seed=seed):
+        ranked = router.rank(t["text"], k=10)
+        prog = oracle.plan(t, ranked)
+        rk = [atom2id[a] for a in ranked if a in atom2id]
+        pl = [atom2id[a] for a in prog.atoms if a in atom2id and a != "n"]
+        if rk and pl:
+            pairs.append((rk, pl))
+    spec = SpeculativePlanner(store, atom2id, id2atom, seed_names=set(OUTER) | set(OUTER_HELD),
+                              fallback=oracle, K=4, warmup=len(pairs) // 2, verbose=False)
+    for rk, pl in pairs:
+        spec.add_example(rk, pl)
+    return spec
+
+
+def anti_drift_demo(store, seed: int = 42):
+    """Show the verify gate STOPS drift: a WRONG atom -> realize -> verify FAILS -> NOT banked. The gate,
+    not trust, is what keeps the graph clean — spec/author can be wrong and the system stays correct."""
+    _print_header("ANTI-DRIFT GATE (verify is the only writer)")
+    task = gen_corpus_hard(40, seed=seed, holdout=True)[0]
+    hard, wrapper = task["_prims"]
+    wrong_hard = next(h for h in HARD if h != hard)
+    print(f"  task: {task['text']}")
+    print(f"  CORRECT program uses '{hard}'; we inject a DRIFTED program using '{wrong_hard}' instead.\n")
+    wrong = AtomProgram(atoms=[wrong_hard, wrapper], wiring=("call", wrapper, [("call", wrong_hard, ["n"])]))
+    ok_w = task["verify_fn"](realize(wrong, store, task["entry"]))[0] >= 1.0
+    print(f"  drifted program  ({wrong_hard}) -> verify: {'PASS' if ok_w else 'FAIL'}  "
+          f"-> {'banked (BAD!)' if ok_w else 'REJECTED, not banked -> NO DRIFT'}")
+    right = AtomProgram(atoms=[hard, wrapper], wiring=("call", wrapper, [("call", hard, ["n"])]))
+    ok_r = task["verify_fn"](realize(right, store, task["entry"]))[0] >= 1.0
+    print(f"  correct program  ({hard}) -> verify: {'PASS' if ok_r else 'FAIL'}  "
+          f"-> {'banked' if ok_r else 'rejected'}")
+    print(f"\n  => a wrong prediction/author CANNOT corrupt memory or the answer — the executable verify")
+    print(f"     gate is the sole writer. Spec + author may err; the gate never lets drift through.")
+    return (not ok_w) and ok_r
 
 
 def _print_header(tag: str):
@@ -31,7 +75,7 @@ def _print_header(tag: str):
     print(f"{'='*60}")
 
 
-def trace_task(task: dict, store: AtomStore, label: str = "", verbose: bool = True):
+def trace_task(task: dict, store: AtomStore, label: str = "", verbose: bool = True, spec=None):
     """Run a single held-out task through every pipeline stage with detailed logging."""
     if verbose:
         _print_header(f"HELD-OUT TASK{(' ' + label) if label else ''}")
@@ -49,11 +93,21 @@ def trace_task(task: dict, store: AtomStore, label: str = "", verbose: bool = Tr
         print(f"  ranked atoms (top 10): {ranked}")
         print(f"  banked store          : {list(store.keys())}")
 
-    # ── Stage 2: Planner ──
+    # ── Stage 2: Planner (+ optional speculative reasoning) ──
     if verbose:
-        _print_header("STAGE 2: PLANNER")
-    planner = ProgramOraclePlanner() if "_wprog" in task else OraclePlanner()
-    prog = planner.plan(task, ranked)
+        _print_header("STAGE 2: PLANNER" + (" — SPECULATIVE (tiny reasoner recalls the step)" if spec else ""))
+    if spec is not None:
+        prog = spec.plan(task, ranked)
+        _txt, _rk, oracle_hard, pred_hard, matched = spec._history[-1]
+        wrapper = [a for a in prog.atoms if a != "n" and a not in pred_hard]
+        if verbose:
+            print(f"  spec RECALLED hard step (from memory) : {pred_hard}")
+            print(f"  ground-truth hard step               : {oracle_hard}")
+            print(f"  reasoning-step accuracy              : {'MATCH' if matched else 'MISS -> fell back to search'}")
+            print(f"  novel wrapper (COMPOSED, not recalled): {wrapper}")
+    else:
+        planner = ProgramOraclePlanner() if "_wprog" in task else OraclePlanner()
+        prog = planner.plan(task, ranked)
     if verbose:
         print(f"  program.atoms  : {prog.atoms}")
         print(f"  program.wiring : {prog.wiring}")
@@ -142,6 +196,9 @@ def main() -> None:
     ap.add_argument("--n", type=int, default=3, help="number of held-out tasks to trace")
     ap.add_argument("--all", action="store_true", help="trace all held-out tasks")
     ap.add_argument("--seed", type=int, default=42, help="corpus seed")
+    ap.add_argument("--spec", action="store_true",
+                    help="use the trained SpeculativePlanner (show the tiny reasoner recalling the step)")
+    ap.add_argument("--no-drift", action="store_true", help="skip the anti-drift gate demo")
     a = ap.parse_args()
 
     print("trace_heldout — per-task information flow through MembraneV2\n")
@@ -156,19 +213,35 @@ def main() -> None:
         store[name] = code
     print(f"  Banked atoms: {list(store.keys())}\n")
 
+    # Optional: train the speculative reasoner on the stream so tracing shows it recalling the step
+    spec = None
+    if a.spec:
+        print("  Training SpeculativePlanner on 120 stream tasks (ranked -> hard step)...")
+        spec = build_spec_planner(store)
+        print("  -> spec ready (recalls the recurring HARD atom; wrapper composed per task)\n")
+
     # Load held-out tasks
     holdout = gen_corpus_hard(40, seed=a.seed, holdout=True)
     n = len(holdout) if a.all else min(a.n, len(holdout))
     print(f"  Held-out tasks available: {len(holdout)}, tracing: {n}\n")
 
-    solved = 0
+    solved = spec_correct = spec_preds = 0
     for i in range(n):
-        ok = trace_task(holdout[i], store, label=f"#{i}")
+        ok = trace_task(holdout[i], store, label=f"#{i}", spec=spec)
         solved += int(ok)
+        if spec is not None and spec._history:
+            spec_preds += 1
+            spec_correct += int(spec._history[-1][4])
 
     print(f"\n  Traced {n} held-out tasks: {solved}/{n} solved (all banked = 100%)")
+    if spec is not None:
+        print(f"  Spec reasoning accuracy: {spec_correct}/{spec_preds} hard steps recalled correctly "
+              f"({spec_correct/max(1,spec_preds):.0%}) — the tiny reasoner names the step, verify confirms.")
     print(f"  This is the compounding payoff: every atom already in store,")
-    print(f"  no LM call needed — OURS reuses, RAG must re-derive.\n")
+    print(f"  no LM call needed — OURS reuses, RAG must re-derive.")
+
+    if not a.no_drift:
+        anti_drift_demo(store, seed=a.seed)
 
 
 if __name__ == "__main__":

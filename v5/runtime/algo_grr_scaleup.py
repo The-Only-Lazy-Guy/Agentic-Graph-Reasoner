@@ -268,6 +268,7 @@ def main() -> None:
         # ── Phase 2: Build SpeculativePlanner from collected pairs ──
         warmup = max(1, len(train_pairs) // 2)
         spec_planner = SpeculativePlanner(store, atom2id, id2atom,
+                                          seed_names=set(OUTER) | set(OUTER_HELD),
                                           fallback=oracle, K=4,
                                           warmup=warmup, verbose=bool(a.debug))
         for rk, pl in train_pairs:
