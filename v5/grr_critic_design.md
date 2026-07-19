@@ -146,3 +146,37 @@ prune fires, latent seam honestly NotImplemented.
 grammar-constrained hole-fill (Outlines / GBNF) on the `--lm` run; implement `LatentSemanticChannel` on a
 white-box runner only to feed `fair_ab`. Keep the code-atom compounding number as the proposal headline;
 dual-channel is the "explains its approach + stores meaning not code" story.
+
+**REAL 3B PROOF (2026-07-20):** `algo_grr_dcpd --run --lm` (Qwen2.5-3B), n=40 — DUAL-CHANNEL 39/40 verifies,
+**0 syntax errors**, faithfulness **1.00**; FREE-INLINE 18/40, **5** hallucinated syntax, no explanation.
+
+---
+
+# Deployment-scaling: teacher-verifier, gate-RL, TRM freezing (design 2026-07-20)
+
+**Teacher-as-verifier, retire the critic.** The cross-domain critic failed (code→math AUC 0.46 = chance;
+MiniLM too weak on code). Replace its training-time role with the teacher (molab 32B): execution verifier
+stays PRIMARY where it exists; the teacher judges only where none exists; a teacher verdict trains the
+student only if the real verifier passes it OR N-of-M teacher consensus gates a *provisional* tier. Teacher
+= denser proposer (can be wrong) → never writes a permanent node alone. The signed mistake-tier + the
+subprocess executor survive (reused by dcpd's negative-edge prune); only the error-noticer role retires.
+
+**Gate/delegation RL without mode collapse.** RL-tuning how much the TRM delegates to the LM collapses to
+**A (Silent Coder)** γ→0 everywhere (perfect code, no explanation) or **B (Yapper)** γ→1 everywhere (plain
+hallucinating LLM). Fix = COMPOSITE reward: `R_exec` (terminal, big syntax penalty) + `R_bridge` (reward
+narration ONLY if exec passes, **faithfulness-weighted not token-volume**) + `P_mode` (penalize graph-on-Sem
+/ LM-on-Struct) + entropy `H` with decaying β; CURRICULUM syntax-sandbox → forced-explanation. The AST
+skeleton supplies the `Struct/Sem` label per span **for free** (closure=Struct, holes=Sem). This trains the
+DISCRETE delegation policy we ship (continuous γ is Design A, parked behind `fair_ab` — same reward trains
+it if it wins). Keep a STaR fallback (search gate-schedules → verify → amortize) since sampling-RL was
+unstable for program synthesis on this stack. VALIDATED no-GPU (`algo_grr_gate_rl --selftest`): R_exec-only
+→ Collapse A (Sem→LM 0.00); composite curriculum → **synergy** (Struct→graph 0.00 / Sem→LM 1.00 / exec 1.00);
+drop-syntax-penalty + no-P_mode + expensive-graph → Collapse B (Struct→LM 1.00, exec 0.76). Both traps
+reproduced; composite reward avoids them.
+
+**TRM freezing at deployment.** The LM stays FROZEN forever (weight-poison, measured). The TRM *can* unfreeze
+but ONLY via verifier-gated STaR (learn from verified-solved traces), NEVER naive online RL/self-train (the
+GRR-7 wanderer). Recommended: TRM FROZEN on-device by default, adaptation lives in the GRAPH (rebuild-net:
+graph is the memory, net re-amortizes); the teacher re-trains the TRM offline (STaR + gate-RL) and pushes
+updates. Optional research knob: a slow verifier-gated online-STaR trickle + a forgetting guard
+(frozen-holdout replay / EWC). Unfreeze only behind the gate that already makes banking safe.
