@@ -208,7 +208,7 @@ def main() -> None:
         os.environ["V5_HARD_VERIFY"] = "1"
         from v5.runtime.algo_grr_membrane import make_frozen_gen
         from v5.runtime.algo_grr_pipeline import run_v2_compare, make_lm_author, make_lm_inline, \
-            make_lm_batch_author, SpeculativePlanner
+            make_lm_batch_author
         gen = make_frozen_gen(a.lm, temperature=0.6, max_new_tokens=320)
         stream = gen_corpus_hard(a.n_compose, seed=0)
         holdout = gen_corpus_hard(40, seed=0, holdout=True)
@@ -217,16 +217,8 @@ def main() -> None:
               f"stream {len(stream)} + held-out {len(holdout)} | lm={a.lm}\n", flush=True)
         author_fn = make_lm_author(gen)
         batch_author_fn = make_lm_batch_author(gen) if a.spec_step else None
-        spec_planner = None
-        if a.spec_step:
-            from v5.runtime.algo_grr_compose import INNER, OUTER, HARD
-            all_atoms = list(INNER.keys()) + list(OUTER.keys()) + list(HARD.keys())
-            spec_planner = SpeculativePlanner(
-                store={}, atom2id={a: i for i, a in enumerate(all_atoms)},
-                id2atom={i: a for a, i in enumerate(all_atoms)},
-                fallback=None)
         run_v2_compare(stream, holdout, author_fn, make_lm_inline(gen),
-                       batch_author_fn=batch_author_fn, spec_planner=spec_planner,
+                       batch_author_fn=batch_author_fn,
                        report_every=a.report_every)
         return
 
