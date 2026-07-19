@@ -15,7 +15,10 @@ real 3B. Deadline moved to 2026-07-25.
 ### HEADLINE RAW NUMBERS
 ```
 REAL 3B (Qwen2.5-3B-Instruct), --v2 MembraneV2(route→plan→author→realize→verify→bank) vs inline-RAG:
-  per-atom, oracle planner : OURS held-out 37/40 vs RAG 16/40 | stream 78 vs 58 | deriv_reuse 110 | ~4.6x fewer LM calls
+  PURE NEURAL (candidate + gps, ZERO oracle) : OURS held-out 31/40 vs RAG 15/40 | stream 40/60 vs 33/60 | LM calls 63 vs 100 (1.6x fewer)
+                              banked 4, deriv_reuse 67 | planner PRIMARY(NeuralDecode) 42/71 + FALLBACK(Candidate) 29/71 — BOTH load-bearing
+                              <-- THE SHIPPABLE-CONFIG NUMBER: no hand-coded structure anywhere, still 2.07x gap on the real 3B
+  per-atom, oracle planner : OURS held-out 37/40 vs RAG 16/40 | stream 78 vs 58 | deriv_reuse 110 | ~4.6x fewer LM calls (oracle FALLBACK)
   fuzz-gated, spec-step     : OURS held-out 31/40 vs RAG 21/40 | stream 90 vs 60 | deriv_reuse 117 | spec-pred 80%
   --planner neural (no net) : COMPOUNDING CURVE per-window OURS 18→28→32 RISING, RAG 19→18→19 FLAT (deriv_reuse 77)
                               held-out 3/40 (net can't emit NOVEL held-out wrappers, no fallback) — EXPECTED
