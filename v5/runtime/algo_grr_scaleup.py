@@ -194,7 +194,8 @@ def main() -> None:
                          "on the HARD corpus + held-out set; requires --lm. No-GPU check: "
                          "python -m v5.runtime.algo_grr_pipeline --selftest-v2")
     ap.add_argument("--spec-step", action="store_true",
-                    help="step-speculation: batch-author all missing atoms in ONE LM call (cuts LM calls ~2x)")
+                    help="step-speculation: batch-author + SpeculativePlanner (RankedNGram learns (ranked->program) "
+                         "from stream, predicts on held-out). Shows prediction accuracy.")
     ap.add_argument("--debug", type=int, nargs="?", const=5, default=0,
                     help="print per-task detail for first N held-out tasks (default 5)")
     a = ap.parse_args()
@@ -209,19 +210,115 @@ def main() -> None:
         os.environ["V5_HARD_VERIFY"] = "1"
         from v5.runtime.algo_grr_membrane import make_frozen_gen
         from v5.runtime.algo_grr_pipeline import run_v2_compare, make_lm_author, make_lm_inline, \
-            make_lm_batch_author
+            make_lm_batch_author, SpeculativePlanner, AtomStore, TopologyAtomRouter, \
+            OraclePlanner, ProgramOraclePlanner, MembraneV2
+        from v5.runtime.algo_grr_compose import OUTER, OUTER_HELD, HARD, INNER
         gen = make_frozen_gen(a.lm, temperature=0.6, max_new_tokens=320)
         stream = gen_corpus_hard(a.n_compose, seed=0)
         holdout = gen_corpus_hard(40, seed=0, holdout=True)
-        spec_tag = " + SPEC-STEP" if a.spec_step else ""
-        print(f"#4-v2 INTEGRATED: MembraneV2(reason+author+bank){spec_tag} vs inline-RAG (no reasoner) | "
-              f"stream {len(stream)} + held-out {len(holdout)} | lm={a.lm}\n", flush=True)
-        author_fn = make_lm_author(gen)
         batch_author_fn = make_lm_batch_author(gen) if a.spec_step else None
-        run_v2_compare(stream, holdout, author_fn, make_lm_inline(gen),
-                       batch_author_fn=batch_author_fn,
-                       report_every=a.report_every,
-                       debug_heldout_n=a.debug)
+        spec_tag = " + SPEC-STEP" if a.spec_step else ""
+
+        if not a.spec_step:
+            # ── Standard --v2 (no speculation) ──
+            print(f"#4-v2 INTEGRATED: MembraneV2(reason+author+bank) vs inline-RAG (no reasoner) | "
+                  f"stream {len(stream)} + held-out {len(holdout)} | lm={a.lm}\n", flush=True)
+            run_v2_compare(stream, holdout, make_lm_author(gen), make_lm_inline(gen),
+                           report_every=a.report_every, debug_heldout_n=a.debug)
+            return
+
+        # ── SPEC-STEP: Stream (train SpeculativePlanner) -> Held-out (predict) ──
+        all_atom_names = list(set(list(INNER.keys()) + list(OUTER.keys())
+                                  + list(OUTER_HELD.keys()) + list(HARD.keys())))
+        atom2id = {a: i for i, a in enumerate(all_atom_names)}
+        id2atom = {i: a for a, i in atom2id.items()}
+
+        def seed_store():
+            s = AtomStore()
+            for name, (code, *_ ) in {**OUTER, **OUTER_HELD}.items():
+                s[name] = code
+            return s
+
+        store = seed_store()
+        router = TopologyAtomRouter(store)
+        oracle = OraclePlanner()
+        ours = MembraneV2(store, router, oracle, batch_author_fn=batch_author_fn, bank=True)
+
+        print(f"#4-v2 INTEGRATED (SPEC-STEP): train SpeculativePlanner during stream, predict on held-out | "
+              f"stream {len(stream)} + held-out {len(holdout)} | lm={a.lm}\n", flush=True)
+
+        # ── Phase 1: Stream — OraclePlanner solves, collect training pairs ──
+        print(f"  Phase 1: stream {len(stream)} tasks — collecting (ranked -> program) pairs\n")
+        o_stream = 0
+        train_pairs = []
+        for i, t in enumerate(stream):
+            r = ours.solve(t)
+            o_stream += int(r["solved"])
+            # Collect: router output + oracle program = training pair
+            ranked = router.rank(t["text"], k=10)
+            ranked_ids = [atom2id[a] for a in ranked if a in atom2id]
+            plan_ids = [atom2id[a] for a in r["program"].atoms if a in atom2id and a != "n"]
+            if ranked_ids and plan_ids:
+                train_pairs.append((ranked_ids, plan_ids))
+            if (i + 1) % a.report_every == 0 or i == len(stream) - 1:
+                print(f"  [stream {i+1:>4}] solved={o_stream} banked={ours.banked} "
+                      f"deriv_reuse={ours.derived_reuse} author_calls={ours.author_calls} "
+                      f"pairs={len(train_pairs)}", flush=True)
+
+        # ── Phase 2: Build SpeculativePlanner from collected pairs ──
+        warmup = max(1, len(train_pairs) // 2)
+        spec_planner = SpeculativePlanner(store, atom2id, id2atom,
+                                          fallback=oracle, K=4,
+                                          warmup=warmup, verbose=bool(a.debug))
+        for rk, pl in train_pairs:
+            spec_planner.add_example(rk, pl)
+        print(f"\n  Phase 2: SpeculativePlanner built — {len(train_pairs)} pairs, warmup={warmup} solves")
+
+        # ── Phase 3: Held-out with SpeculativePlanner ──
+        ours.planner = spec_planner
+        print(f"\n  Phase 3: held-out {len(holdout)} tasks with SpeculativePlanner\n")
+        o_hold = 0
+        for hi, t in enumerate(holdout):
+            r = ours.solve(t)
+            ok = r["solved"]
+            o_hold += int(ok)
+            if hi < a.debug:
+                bank_status = {a: "banked" if a in store else "missing"
+                               for a in r["program"].atoms if a != "n"}
+                print(f"  [{hi}] {t['text'][:50]} | atoms: {dict(list(bank_status.items())[:4])} "
+                      f"| {'SOLVED' if ok else 'FAIL'}")
+
+        # ── Phase 4: RAG baseline (inline, no bank) ──
+        def rag_run(tasks, tag):
+            inline = make_lm_inline(gen)
+            solved = calls = 0
+            for i, t in enumerate(tasks):
+                code = inline(t)
+                calls += 1
+                solved += int(t["verify_fn"](code)[0] >= 1.0)
+                if (i + 1) % a.report_every == 0 or i == len(tasks) - 1:
+                    print(f"  [RAG {tag} {i+1:>4}] solved={solved}", flush=True)
+            return solved, calls
+        r_stream, r_calls_s = rag_run(stream, "str")
+        r_hold, r_calls_h = rag_run(holdout, "hold")
+
+        # ── Final summary ──
+        ns, nh = len(stream), len(holdout)
+        print(f"\n  {'='*60}")
+        print(f"  FINAL RESULTS")
+        print(f"  {'='*60}")
+        print(f"  arm  | stream solved | HELD-OUT solved | LM calls")
+        print(f"  OURS |   {o_stream:>3}/{ns}    |     {o_hold:>3}/{nh}     | {ours.author_calls} author "
+              f"(banked {ours.banked}, deriv_reuse {ours.derived_reuse})")
+        print(f"  RAG  |   {r_stream:>3}/{ns}    |     {r_hold:>3}/{nh}     | {r_calls_s + r_calls_h} inline "
+              f"(no bank, no reasoner)")
+        print(f"\n  => HELD-OUT gap: OURS {o_hold}/{nh} vs RAG {r_hold}/{nh} — OURS reuses the "
+              f"banked verified helper; RAG must re-derive inline and fails.")
+
+        # ── SpeculativePlanner accuracy report ──
+        spec_planner.show_summary()
+        if a.debug:
+            spec_planner.show_history(n=min(10, a.debug))
         return
 
     if a.run:

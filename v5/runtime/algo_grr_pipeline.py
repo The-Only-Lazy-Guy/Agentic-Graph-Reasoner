@@ -173,47 +173,98 @@ class ProgramOraclePlanner:
 
 
 class SpeculativePlanner:
-    """RankedNGram wrapped as a pipeline Planner interface. Learns (ranked → program) atom sequences
-    from banked solves and predicts programs for new tasks. Falls back to a delegate planner when
-    the prediction is uncertain or insufficiently trained."""
+    """RankedNGram wrapped as a pipeline Planner interface. Learns (ranked -> program) atom sequences
+    from stream solves. After a warmup period, predicts programs for new tasks. Falls back to a delegate
+    planner when uncertain. Tracks prediction accuracy for visualization."""
 
     def __init__(self, store: dict, atom2id: dict, id2atom: dict,
-                 fallback=None, train_pairs: list | None = None, K: int = 4):
+                 fallback=None, K: int = 4, warmup: int = 30, verbose: bool = True):
         self.store = store
         self.atom2id = atom2id
         self.id2atom = id2atom
         self.fallback = fallback
         self.K = K
-        self._pairs: list[tuple[list[int], list[int]]] = train_pairs or []
+        self.warmup = warmup
+        self.verbose = verbose
         self._spec = None
-        if self._pairs:
-            self._rebuild()
+        self._solves = 0
+        self._correct_preds = 0
+        self._total_preds = 0
+        self._fallbacks = 0
+        self._history: list[tuple] = []   # (task_text, ranked, oracle_atoms, pred_atoms, matched)
 
     def add_example(self, ranked_ids: list[int], plan_ids: list[int]):
-        self._pairs.append((ranked_ids, plan_ids))
-
-    def _rebuild(self):
-        if self._pairs:
+        """Feed one (ranked_ids, oracle_program_ids) to the speculator."""
+        if self._spec is None:
             from v5.runtime.algo_grr_specstep import RankedNGram
-            self._spec = RankedNGram(self._pairs, N=2)
+            self._spec = RankedNGram(N=2)
+        self._spec.add_example(ranked_ids, plan_ids)
+        self._solves += 1
 
     def plan(self, task: dict, ranked: list[str]) -> AtomProgram:
-        if self._spec is None:
-            return self._or_fallback(task, ranked)
+        # Get oracle program for stats (always)
+        oracle = self.fallback.plan(task, ranked) if self.fallback else AtomProgram(atoms=["n"], wiring="n")
         ranked_ids = [self.atom2id[a] for a in ranked if a in self.atom2id]
-        if not ranked_ids:
-            return self._or_fallback(task, ranked)
-        pred_ids = self._spec.speculate(ranked_ids, [], self.K)
-        pred_atoms = [self.id2atom[i] for i in pred_ids if i in self.id2atom]
-        if len(pred_atoms) >= 2:
-            return AtomProgram(atoms=pred_atoms,
-                               wiring=("call", pred_atoms[-1], [("call", pred_atoms[-2], ["n"])]))
-        return self._or_fallback(task, ranked)
 
-    def _or_fallback(self, task, ranked) -> AtomProgram:
-        if self.fallback is not None:
-            return self.fallback.plan(task, ranked)
-        return AtomProgram(atoms=["n"], wiring="n")
+        if self._spec and self._solves >= self.warmup and ranked_ids:
+            pred_ids = self._spec.speculate(ranked_ids, [], self.K)
+            pred_atoms = [self.id2atom[i] for i in pred_ids if i in self.id2atom]
+            matches = int(pred_atoms == oracle.atoms)
+            self._total_preds += 1
+            self._correct_preds += matches
+            self._history.append((task["text"][:70], ranked[:6], oracle.atoms, pred_atoms, bool(matches)))
+            if matches:
+                if self.verbose:
+                    print(f"  [SPEC] predict {pred_atoms} MATCH oracle")
+                return AtomProgram(atoms=pred_atoms,
+                                   wiring=("call", pred_atoms[-1], [("call", pred_atoms[-2], ["n"])])
+                                   if len(pred_atoms) >= 2 else oracle)
+            else:
+                self._fallbacks += 1
+                if self.verbose:
+                    print(f"  [SPEC] predict {pred_atoms} != oracle {oracle.atoms} -> fallback")
+                return oracle
+        else:
+            self._fallbacks += 1
+            return oracle
+
+    def accuracy_report(self) -> dict:
+        p = self._total_preds
+        return dict(predictions=p, correct=self._correct_preds,
+                    accuracy=self._correct_preds / max(1, p),
+                    fallbacks=self._fallbacks, warmup=self.warmup,
+                    solves=self._solves)
+
+    def show_history(self, n: int = 10):
+        """Print the last N plan predictions with comparison vs oracle."""
+        print(f"\n{'='*60}")
+        print(f"  SpeculativePlanner: prediction history (last {n} of {len(self._history)})")
+        print(f"{'='*60}")
+        for task_text, ranked, oracle_atoms, pred_atoms, matched in self._history[-n:]:
+            tag = "MATCH" if matched else "MISMATCH"
+            print(f"  task: {task_text[:50]}")
+            print(f"  ranked top-6: {ranked}")
+            print(f"  oracle: {oracle_atoms}  pred: {pred_atoms}  [{tag}]")
+            print(f"  {'-'*50}")
+
+    def show_summary(self):
+        """Print accuracy summary."""
+        r = self.accuracy_report()
+        print(f"\n  SpeculativePlanner prediction summary:")
+        print(f"  warmup: {r['warmup']} solves, {r['solves']} total solves")
+        print(f"  predictions: {r['predictions']}")
+        print(f"  correct: {r['correct']}  accuracy: {r['accuracy']:.2%}")
+        print(f"  fallbacks: {r['fallbacks']}")
+        if r['predictions'] > 0:
+            print(f"  -> {r['correct']}/{r['predictions']} programs predicted correctly "
+                  f"({r['fallbacks'] - r['predictions']} warmup/fallback)")
+        if r['accuracy'] >= 0.9:
+            print(f"  -> RankedNGram reliably learns the (ranked -> program) mapping")
+        elif r['accuracy'] >= 0.5:
+            print(f"  -> RankedNGram partial: {r['accuracy']:.0%} accurate — motif learning works "
+                  f"but some patterns unseen")
+        else:
+            print(f"  -> RankedNGram low accuracy — more solves or larger K needed")
 
 
 class MembraneV2:

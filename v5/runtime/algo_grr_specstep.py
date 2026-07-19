@@ -116,36 +116,43 @@ class RankedNGram:
     Learns: given the top-N ranked atoms and the atoms accepted so far, which atom comes next?
     The router's ranking provides the task context the history-only model lacks."""
 
-    def __init__(self, train_pairs: list[tuple[list[int], list[int]]], N: int = 2):
+    def __init__(self, train_pairs: list[tuple[list[int], list[int]]] | None = None, N: int = 2):
         """train_pairs: (ranked_atom_ids, plan_atom_ids) from training tasks.
         ranked_atom_ids = router.rank(task_text) as integer IDs."""
         self.N = N
         self.table: dict[tuple, list[int]] = defaultdict(list)
-        for ranked, plan in train_pairs:
-            for i in range(len(plan)):
-                for n in range(1, min(N, i + 1) + 1):
-                    start = max(0, i - n)
-                    hist_ctx = tuple(plan[start:i])
-                    used = set(plan[:i])
-                    top_remaining = tuple(a for a in ranked if a not in used)[:3]
-                    key = (top_remaining, hist_ctx)
-                    self.table[key].append(plan[i])
+        if train_pairs:
+            for pair in train_pairs:
+                self.add_example(*pair)
 
-    def _predict(self, rank_ctx: tuple, hist_ctx: tuple) -> int:
+    def add_example(self, ranked: list[int], plan: list[int]):
+        """Add one (ranked_ids, plan_ids) pair to the n-gram table (online)."""
+        for i in range(len(plan)):
+            for n in range(1, min(self.N, i + 1) + 1):
+                start = max(0, i - n)
+                hist_ctx = tuple(plan[start:i])
+                used = set(plan[:i])
+                top_remaining = tuple(a for a in ranked if a not in used)[:3]
+                key = (top_remaining, hist_ctx)
+                self.table[key].append(plan[i])
+
+    def _predict(self, rank_ctx: tuple, hist_ctx: tuple) -> int | None:
         key = (rank_ctx, hist_ctx)
         c = self.table.get(key, [])
         if not c and len(hist_ctx) > 0:
             return self._predict(rank_ctx, hist_ctx[1:])
         if not c and len(rank_ctx) > 0:
             return self._predict(rank_ctx[1:], hist_ctx)
-        return Counter(c).most_common(1)[0][0] if c else 0
+        return Counter(c).most_common(1)[0][0] if c else None
 
-    def speculate(self, ranked: list[int], hist: list[int], K: int) -> list[int]:
-        out = []
+    def speculate(self, ranked: list[int], hist: list[int], K: int) -> list[int | None]:
+        out: list[int | None] = []
         rank_ctx = tuple(ranked[:3])
         hist_ctx = tuple(hist)
         for _ in range(K):
             nxt = self._predict(rank_ctx, hist_ctx)
+            if nxt is None:
+                return out                               # early stop — no more confident predictions
             out.append(nxt)
             hist_ctx = (hist_ctx + (nxt,))[-self.N:]
             used = set(hist) | set(out)
