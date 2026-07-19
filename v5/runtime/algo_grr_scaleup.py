@@ -199,6 +199,9 @@ def main() -> None:
     ap.add_argument("--batch-author", action="store_true",
                     help="author ALL missing atoms in ONE LM call (fewer calls, but the 3B writes multiple "
                          "hard helpers worse -> weaker banks -> lower solve; measured regression, off by default)")
+    ap.add_argument("--router", choices=["topo", "gps"], default="topo",
+                    help="atom router for --v2: topo (token + follow-edge) | gps (GraphGPS: MiniLM content "
+                         "+ follow-edge — semantic wrapper disambiguation, lifts CandidatePlanner held-out)")
     ap.add_argument("--planner", choices=["oracle", "neural", "candidate", "auto"], default="oracle",
                     help="structure planner for --v2: oracle (reads _prims) | neural (decode only) | "
                          "candidate (neural -> CandidatePlanner fallback: net picks hard atom, router picks "
@@ -242,10 +245,19 @@ def main() -> None:
                     make_fallback = lambda store: CandidatePlanner(store, ppath, seed)     # noqa: E731
                 elif a.planner == "auto":
                     make_fallback = lambda store: OraclePlanner()                          # noqa: E731 — safety net
+            make_router = None
+            if a.router == "gps":                # GraphGPS content router (semantic wrapper disambiguation)
+                from v5.runtime.algo_grr_pipeline import GraphGPSRouter
+                descs = {}
+                for _d in (INNER, OUTER, OUTER_HELD, HARD):
+                    for _k, _v in _d.items():
+                        descs[_k] = _v[2].replace("{v}", "the value")
+                make_router = lambda store: GraphGPSRouter(store, descs)                   # noqa: E731
             print(f"#4-v2 INTEGRATED: MembraneV2(reason+author+bank) vs inline-RAG (no reasoner) | "
-                  f"planner={a.planner} | stream {len(stream)} + held-out {len(holdout)} | lm={a.lm}\n", flush=True)
+                  f"planner={a.planner} router={a.router} | stream {len(stream)} + held-out {len(holdout)} "
+                  f"| lm={a.lm}\n", flush=True)
             run_v2_compare(stream, holdout, make_lm_author(gen), make_lm_inline(gen),
-                           make_planner=make_planner, make_fallback=make_fallback,
+                           make_planner=make_planner, make_fallback=make_fallback, make_router=make_router,
                            report_every=a.report_every, debug_heldout_n=a.debug)
             return
 

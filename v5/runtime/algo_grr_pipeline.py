@@ -195,6 +195,53 @@ class TopologyAtomRouter:
         return ranked[:k] if k else ranked
 
 
+class GraphGPSRouter:
+    """GraphGPS routing (#3): rank atoms by SEMANTIC content (MiniLM cosine of the task vs each atom's
+    description) + FOLLOW-THE-EDGE (depend-neighbours). Disambiguates where token-overlap can't — e.g.
+    'the number of digits' -> count_digits vs 'the number of divisors' -> num_divisors — so the
+    CandidatePlanner's router-selected wrapper is right more often (lifts held-out). Content = the atom's
+    description (falls back to the name)."""
+
+    def __init__(self, store, descs=None):
+        from embedder import encode_one
+        import numpy as np
+        self.store, self.descs, self._enc, self._np = store, descs or {}, encode_one, np
+        self._emb: dict = {}
+        self._edges: dict = {}
+        self._index()
+
+    def _text(self, name):
+        return self.descs.get(name) or name.replace("_", " ")
+
+    def _index(self):
+        import re
+        names = set(self.store)
+        for n in self.store:
+            if n not in self._emb:
+                self._emb[n] = self._np.asarray(self._enc(self._text(n)), dtype="float32")
+            if n not in self._edges:
+                body = self.store[n]
+                self._edges[n] = {m for m in names if m != n and re.search(rf"\b{re.escape(m)}\s*\(", body)}
+
+    def rank(self, task_text: str, k: int | None = None):
+        self._index()
+        np = self._np
+        q = np.asarray(self._enc(task_text), dtype="float32")
+        qn = np.linalg.norm(q) + 1e-9
+
+        def cos(n):
+            v = self._emb[n]
+            return float(q @ v / (qn * (np.linalg.norm(v) + 1e-9)))
+        scored = sorted(self.store, key=cos, reverse=True)
+        top = scored[:6]
+        nbrs = set()
+        for n in top:
+            nbrs |= self._edges.get(n, set())
+        return (top + [n for n in scored[6:] if n in nbrs]
+                + [n for n in scored[6:] if n not in nbrs])[:k] if k else \
+               (top + [n for n in scored[6:] if n in nbrs] + [n for n in scored[6:] if n not in nbrs])
+
+
 class OraclePlanner:
     """WAVE-0 stub: reads the KNOWN wiring (task['_prims'] = (inner, outer)) -> the ground-truth program.
     #2 replaces this with the trained TRMPlanDecoder that INFERS the program from the NL task."""
@@ -696,8 +743,8 @@ def make_lm_batch_author(gen):
 
 
 def run_v2_compare(stream, holdout, author_fn, inline_fn, *, batch_author_fn=None,
-                   spec_planner=None, make_planner=None, make_fallback=None, verbose=True, report_every=40,
-                   debug_heldout_n: int = 0) -> dict:
+                   spec_planner=None, make_planner=None, make_fallback=None, make_router=None,
+                   verbose=True, report_every=40, debug_heldout_n: int = 0) -> dict:
     """OURS = MembraneV2 (route→plan→author-missing→realize→verify→BANK) vs RAG = inline (3B writes the
     whole entry, no reasoner, no memory). Held-out = same hard helpers under UNSEEN easy wrappers: the
     pure reuse test — OURS retrieves the helper it banked; RAG must re-derive the hard logic inline.
@@ -715,7 +762,8 @@ def run_v2_compare(stream, holdout, author_fn, inline_fn, *, batch_author_fn=Non
     store = seed_store()
     planner = spec_planner or (make_planner(store) if make_planner else OraclePlanner())
     fb = make_fallback(store) if (make_fallback and not spec_planner) else None
-    ours = MembraneV2(store, TopologyAtomRouter(store), planner, fallback_planner=fb,
+    router = make_router(store) if make_router else TopologyAtomRouter(store)
+    ours = MembraneV2(store, router, planner, fallback_planner=fb,
                       author_fn=None if batch_author_fn else author_fn,
                       batch_author_fn=batch_author_fn, bank=True)
     o_stream = 0
