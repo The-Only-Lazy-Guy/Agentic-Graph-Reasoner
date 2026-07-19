@@ -33,21 +33,24 @@ if _ROOT not in sys.path:
 
 from v5.runtime.algo_grr_poison_test import load_seed, bank_helper_granular  # noqa: E402
 from v5.runtime.algo_grr_membrane import MembraneSolver, make_stub_compiler  # noqa: E402
-from v5.runtime.algo_grr_compose import gen_corpus  # noqa: E402
+from v5.runtime.algo_grr_compose import gen_corpus, gen_corpus_hard  # noqa: E402
 from v5.runtime.algo_grr_health import graph_health  # noqa: E402
 
 
-def assemble_corpus(n_compose: int = 120, mbpp_limit: int = 200, seed: int = 0) -> list[dict]:
+def assemble_corpus(n_compose: int = 120, mbpp_limit: int = 200, seed: int = 0,
+                    hard: bool = False) -> list[dict]:
     """Interleave the decomposable compose corpus (compounding) with MBPP+ (diversity + dead-atom
-    pressure). Interleaved so derived prims recur throughout, not front-loaded."""
+    pressure). Interleaved so derived prims recur throughout, not front-loaded. hard=True uses the
+    HARD-helper corpus (non-trivial algos the 3B fails to inline -> banking is load-bearing vs RAG)."""
     import random
-    compose = gen_corpus(n_compose, seed=seed)
+    compose = (gen_corpus_hard if hard else gen_corpus)(n_compose, seed=seed)
     mbpp = []
-    try:
-        from v5.runtime.algo_grr_mbpp import load_mbpp
-        mbpp = load_mbpp(limit=mbpp_limit)
-    except Exception as e:  # noqa: BLE001
-        print(f"(MBPP+ unavailable: {e!r} — compose-only)")
+    if mbpp_limit > 0:
+        try:
+            from v5.runtime.algo_grr_mbpp import load_mbpp
+            mbpp = load_mbpp(limit=mbpp_limit)
+        except Exception as e:  # noqa: BLE001
+            print(f"(MBPP+ unavailable: {e!r} — compose-only)")
     rng = random.Random(seed)
     stubs = {t["entry"]: t.get("reference", "") for t in compose + mbpp}
     stream = compose + mbpp
@@ -183,13 +186,52 @@ def main() -> None:
     ap.add_argument("--save", default="")
     ap.add_argument("--rag-baseline", action="store_true",
                     help="#4 hero plot: run OURS (self-growing) vs a STATIC-RAG baseline on the same stream")
+    ap.add_argument("--hard", action="store_true",
+                    help="use the HARD-helper corpus (non-trivial algos the 3B fails to inline) so banking "
+                         "is load-bearing vs RAG; pair with --mbpp 0 for a clean compounding signal")
+    ap.add_argument("--v2", action="store_true",
+                    help="integrated MembraneV2 (reason+author+bank) vs inline-RAG (no reasoner, no memory) "
+                         "on the HARD corpus + held-out set; requires --lm. No-GPU check: "
+                         "python -m v5.runtime.algo_grr_pipeline --selftest-v2")
+    ap.add_argument("--spec-step", action="store_true",
+                    help="step-speculation: batch-author all missing atoms in ONE LM call (cuts LM calls ~2x) "
+                         "+ optional RankedNGram speculative planner from banked solves")
     a = ap.parse_args()
 
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
 
+    if a.run and a.v2:                                # ── integrated MembraneV2 vs inline-RAG (the real #4) ──
+        if not a.lm:
+            raise SystemExit("--v2 needs --lm (real 3B). No-GPU check: "
+                             "python -m v5.runtime.algo_grr_pipeline --selftest-v2")
+        os.environ["V5_HARD_VERIFY"] = "1"
+        from v5.runtime.algo_grr_membrane import make_frozen_gen
+        from v5.runtime.algo_grr_pipeline import run_v2_compare, make_lm_author, make_lm_inline, \
+            make_lm_batch_author, SpeculativePlanner
+        gen = make_frozen_gen(a.lm, temperature=0.6, max_new_tokens=320)
+        stream = gen_corpus_hard(a.n_compose, seed=0)
+        holdout = gen_corpus_hard(40, seed=0, holdout=True)
+        spec_tag = " + SPEC-STEP" if a.spec_step else ""
+        print(f"#4-v2 INTEGRATED: MembraneV2(reason+author+bank){spec_tag} vs inline-RAG (no reasoner) | "
+              f"stream {len(stream)} + held-out {len(holdout)} | lm={a.lm}\n", flush=True)
+        author_fn = make_lm_author(gen)
+        batch_author_fn = make_lm_batch_author(gen) if a.spec_step else None
+        spec_planner = None
+        if a.spec_step:
+            from v5.runtime.algo_grr_compose import INNER, OUTER, HARD
+            all_atoms = list(INNER.keys()) + list(OUTER.keys()) + list(HARD.keys())
+            spec_planner = SpeculativePlanner(
+                store={}, atom2id={a: i for i, a in enumerate(all_atoms)},
+                id2atom={i: a for a, i in enumerate(all_atoms)},
+                fallback=None)
+        run_v2_compare(stream, holdout, author_fn, make_lm_inline(gen),
+                       batch_author_fn=batch_author_fn, spec_planner=spec_planner,
+                       report_every=a.report_every)
+        return
+
     if a.run:
-        stream, stubs = assemble_corpus(a.n_compose, a.mbpp, seed=0)
+        stream, stubs = assemble_corpus(a.n_compose, a.mbpp, seed=0, hard=a.hard)
         from v5.runtime.algo_grr_retrieval import CachedTokenRetriever, make_topology_policy
         if a.lm:
             os.environ["V5_HARD_VERIFY"] = "1"            # subprocess verify -> no hangs
@@ -201,15 +243,16 @@ def main() -> None:
             print("(stub = reference; use --lm for the real scale-up run)")
 
         if a.rag_baseline:                                # ── #4: OURS vs static-RAG, same stream ──
-            def _arm(bank, topo):
+            def _arm(bank, topo, label):
+                print(f"\n  ── running {label} arm: {len(stream)} tasks (progress every {a.report_every}) ──", flush=True)
                 g = load_seed()
                 return run_scaleup(g, stream, compile_fn,
                                    policy_fn=make_topology_policy(g) if topo else None,
                                    retriever=CachedTokenRetriever(g), prune_grace=a.prune_grace,
-                                   report_every=a.report_every, verbose=False, bank=bank)[0]
+                                   report_every=a.report_every, verbose=True, bank=bank)[0]
             print(f"#4 COMPOUNDING vs RAG: {len(stream)} tasks, lm={a.lm or 'stub'}\n")
-            ours = _arm(bank=True, topo=True)             # verified self-growth + topology
-            rag = _arm(bank=False, topo=False)            # static store + cosine, no banking
+            ours = _arm(bank=True, topo=True, label="OURS (self-growing + topology)")   # verified self-growth
+            rag = _arm(bank=False, topo=False, label="RAG baseline (static store, no banking)")
             print(f"  window |  OURS solved  lm/task |  RAG solved  lm/task")
             for po, pr in zip(ours["per"], rag["per"]):
                 print(f"  {po['upto']:>6} |    {po['solved']:>4}     {po['lm_per_task']:>5} |   {pr['solved']:>4}    "

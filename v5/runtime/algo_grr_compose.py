@@ -113,6 +113,148 @@ def gen_corpus(n_tasks: int = 60, seed: int = 0) -> list[dict]:
     return tasks
 
 
+# ── HARD reusable helpers: non-trivial algorithms a frozen 3B often FAILS to write inline (partitions,
+#    derangements, josephus, ...). Each recurs across many tasks, so a banked+verified copy is
+#    LOAD-BEARING: OURS banks once then reuses; RAG must re-derive inline every time and errs. This is
+#    the corpus that separates compounding from static-RAG (gen_corpus's easy prims cannot). ───────────
+def _partitions(n):
+    dp = [1] + [0] * n
+    for k in range(1, n + 1):
+        for i in range(k, n + 1):
+            dp[i] += dp[i - k]
+    return dp[n]
+
+
+def _derangements(n):
+    if n == 0:
+        return 1
+    a, b = 1, 0
+    for i in range(2, n + 1):
+        a, b = b, (i - 1) * (a + b)
+    return b
+
+
+def _josephus(n):
+    r = 0
+    for i in range(1, n + 1):
+        r = (r + 2) % i
+    return r + 1
+
+
+def _catalan(n):
+    from math import comb
+    return comb(2 * n, n) // (n + 1)
+
+
+def _mult_persistence(n):
+    s, n = 0, abs(n)
+    while n >= 10:
+        p = 1
+        for c in str(n):
+            p *= int(c)
+        n = p
+        s += 1
+    return s
+
+
+HARD = {
+    "num_partitions": ("def num_partitions(n):\n    dp = [1] + [0] * n\n    for k in range(1, n + 1):\n"
+                       "        for i in range(k, n + 1):\n            dp[i] += dp[i - k]\n    return dp[n]\n",
+                       _partitions, "the number of integer partitions of n"),
+    "derangements": ("def derangements(n):\n    if n == 0:\n        return 1\n    a, b = 1, 0\n"
+                     "    for i in range(2, n + 1):\n        a, b = b, (i - 1) * (a + b)\n    return b\n",
+                     _derangements, "the number of derangements of n items"),
+    "josephus": ("def josephus(n):\n    r = 0\n    for i in range(1, n + 1):\n        r = (r + 2) % i\n"
+                 "    return r + 1\n", _josephus, "the Josephus survivor position for n people (step 2)"),
+    "catalan": ("def catalan(n):\n    from math import comb\n    return comb(2 * n, n) // (n + 1)\n",
+                _catalan, "the n-th Catalan number"),
+    "mult_persistence": ("def mult_persistence(n):\n    s, n = 0, abs(n)\n    while n >= 10:\n        p = 1\n"
+                         "        for c in str(n):\n            p *= int(c)\n        n = p\n        s += 1\n"
+                         "    return s\n", _mult_persistence, "the multiplicative persistence of n"),
+}
+
+
+# OUTER wrappers used ONLY in the held-out split: trivially easy (the LM writes them fine), so on a
+# held-out task the ONLY hard part is the HARD helper. OURS reuses the BANKED helper -> solves; RAG has
+# no memory and must re-derive the hard helper inline -> fails. Isolates "reasoner+memory vs inline".
+OUTER_HELD = {
+    "is_even": ("def is_even(n):\n    return n % 2 == 0\n", lambda x: x % 2 == 0, "whether {v} is even"),
+    "last_digit": ("def last_digit(n):\n    return abs(n) % 10\n", lambda x: abs(x) % 10, "the last digit of {v}"),
+    "count_digits": ("def count_digits(n):\n    return len(str(abs(n)))\n", lambda x: len(str(abs(x))),
+                     "the number of digits in {v}"),
+}
+
+
+def gen_corpus_hard(n_tasks: int = 120, seed: int = 0, holdout: bool = False) -> list[dict]:
+    """Compose outer(HARD(n)) tasks. HARD helpers are non-trivial (a frozen 3B often fails to write them
+    inline), and each recurs across many tasks -> once DERIVED+banked it is reused, and the reuse is
+    LOAD-BEARING (RAG, which re-derives inline, gets HARD wrong). holdout=True uses UNSEEN easy wrappers
+    (OUTER_HELD) over the SAME hard helpers -> a pure test of banked-atom reuse: OURS retrieves the
+    verified helper it banked earlier; RAG (no memory, no reasoner) must re-write the hard logic inline."""
+    outers = OUTER_HELD if holdout else OUTER
+    rng = random.Random(seed + (10_000 if holdout else 0))
+    combos = [(h, o) for h in HARD for o in outers]
+    rng.shuffle(combos)
+    tasks = []
+    for k in range(n_tasks):
+        hard, outer = combos[k % len(combos)]
+        h_code, h_fn, h_desc = HARD[hard]
+        o_code, o_fn, o_desc = outers[outer]
+        entry = f"{'ho' if holdout else 'h'}_{k:03d}"
+        text = f"{o_desc.format(v=h_desc)}"
+        ref = f"{h_code}\n{o_code}\ndef {entry}(n):\n    return {outer}({hard}(n))\n"
+        asserts = []
+        for n in (5, 6, 7, 8):
+            try:
+                exp = o_fn(h_fn(n))
+            except Exception:  # noqa: BLE001
+                continue
+            asserts.append(f"assert {entry}({n}) == {exp!r}")
+
+        def _mk(a=asserts):
+            return lambda code: verify_asserts(code, a)
+
+        tasks.append(dict(text=text, entry=entry, examples=asserts, verify_fn=_mk(),
+                          type_pool=[int], tests=[], reference=ref, _prims=(hard, outer)))
+    return tasks
+
+
+def gen_corpus_multihard(n_tasks: int = 90, seed: int = 0) -> list[dict]:
+    """Each task chains TWO hard helpers: W( h1( josephus(n) ) ) — needs josephus AND h1 authored. Multiple
+    missing atoms per task is what makes STEP-SPECULATION pay: the tiny planner proposes the whole K-atom
+    program at once, the LM authors+verifies the CHUNK in ONE call instead of one call per atom. josephus
+    is a bounded shrinker (≤n) so nested values stay small/computable. Also strengthens the RAG-fails case
+    (RAG must inline BOTH hard helpers). `_wprog` = (atoms dep-first, wiring tree) for the realizer."""
+    rng = random.Random(seed + 555)
+    h1_pool = [h for h in HARD if h != "josephus"]
+    tasks = []
+    for k in range(n_tasks):
+        h1 = h1_pool[k % len(h1_pool)]
+        wname = list(OUTER)[k % len(OUTER)]
+        h1_code, h1_fn, h1_desc = HARD[h1]
+        j_code, j_fn, _ = HARD["josephus"]
+        w_code, w_fn, w_desc = OUTER[wname]
+        entry = f"m_{k:03d}"
+        text = w_desc.format(v=f"{h1_desc} of the Josephus survivor for n people")
+        ref = f"{j_code}\n{h1_code}\n{w_code}\ndef {entry}(n):\n    return {wname}({h1}(josephus(n)))\n"
+        asserts = []
+        for n in (5, 6, 7, 8):
+            try:
+                exp = w_fn(h1_fn(j_fn(n)))
+            except Exception:  # noqa: BLE001
+                continue
+            asserts.append(f"assert {entry}({n}) == {exp!r}")
+
+        def _mk(a=asserts):
+            return lambda code: verify_asserts(code, a)
+
+        wiring = ("call", wname, [("call", h1, [("call", "josephus", ["n"])])])
+        tasks.append(dict(text=text, entry=entry, examples=asserts, verify_fn=_mk(),
+                          type_pool=[int], tests=[], reference=ref, _prims=(h1, wname),
+                          _wprog=(["josephus", h1, wname], wiring)))
+    return tasks
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # SELFTEST — the corpus is decomposable (ceiling ~100%) and compounds (derived_reuse >> MBPP+)
 # ═══════════════════════════════════════════════════════════════════════════════

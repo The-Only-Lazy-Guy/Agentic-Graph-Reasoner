@@ -8056,3 +8056,29 @@ Holdout vs warmstart_hardneg:
 - `eval_unified_roundtrip.py`: uses `out.get("verifier_logits", out["edge_rel_logits"])`
 
 **Code changes persist but are inert by default (--verifier-weight 0).**
+## 2026-07-15 - GRR-14b topology/read-this pass
+
+Read `READ_THIS.md` plus the active `v5/runtime` GRR-14b scripts (`algo_lm_train.py`, `algo_lm_author.py`, `algo_graph_mg.py`, `algo_graph_edits.py`) after the cloud run showed declining behavior and bad graph topology.
+
+Observed graph snapshots:
+
+```text
+graphs/grr_grown (1).json: 369 nodes, 421 edges, part_of=371, depend=50, top hubs concept_algorithms=371 and impl_sum=39
+graphs/grr_grown (3).json: 384 nodes, 379 edges, part_of=379, depend=0
+graphs/grr_grown.json:     377 nodes, 371 edges, part_of=371, depend=0
+```
+
+Diagnosis:
+
+```text
+Old hub failure: builtin-colliding atom names like sum were counted as graph calls, so normal sum(...) code created false depend/reuse edges.
+Current cloud output: taxonomy-only graph. The run used default --ad-style off, so no graph atoms were advertised and no composition/reuse depend edges were expected.
+```
+
+Patched:
+
+```text
+v5/runtime/algo_graph_mg.py      safe reusable atom names; retriever skips builtin-colliding impls; call detection rejects builtins/method calls
+v5/runtime/algo_lm_author.py    _called_atoms uses safe-name gate; _bank_solution stops appending legacy guessed impl_{name} edges
+v5/runtime/algo_lm_train.py     IncrementalMGRetriever uses safe-name gate; round/final logs include depend edge counts and taxonomy-only warning
+```
