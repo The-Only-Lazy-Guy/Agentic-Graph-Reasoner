@@ -199,9 +199,10 @@ def main() -> None:
     ap.add_argument("--batch-author", action="store_true",
                     help="author ALL missing atoms in ONE LM call (fewer calls, but the 3B writes multiple "
                          "hard helpers worse -> weaker banks -> lower solve; measured regression, off by default)")
-    ap.add_argument("--planner", choices=["oracle", "neural", "auto"], default="oracle",
-                    help="structure planner for --v2: oracle (reads _prims) | neural (trained SearchPlanner) "
-                         "| auto (neural + oracle FALLBACK, kept as controllable safety net)")
+    ap.add_argument("--planner", choices=["oracle", "neural", "candidate", "auto"], default="oracle",
+                    help="structure planner for --v2: oracle (reads _prims) | neural (decode only) | "
+                         "candidate (neural -> CandidatePlanner fallback: net picks hard atom, router picks "
+                         "novel wrapper — PURE NEURAL, no oracle) | auto (neural -> oracle safety net)")
     ap.add_argument("--debug", type=int, nargs="?", const=5, default=0,
                     help="print per-task detail for first N held-out tasks (default 5)")
     a = ap.parse_args()
@@ -230,13 +231,16 @@ def main() -> None:
             make_planner = make_fallback = None
             if a.planner != "oracle":
                 from v5.runtime.algo_grr_planner import _train_and_save
-                from v5.runtime.algo_grr_pipeline import NeuralDecodePlanner, OraclePlanner
+                from v5.runtime.algo_grr_pipeline import NeuralDecodePlanner, CandidatePlanner, OraclePlanner
+                seed = set(OUTER) | set(OUTER_HELD)
                 ppath = "artifacts/planner_hard.pt"
                 if not os.path.exists(ppath):
                     print("  training HARD-domain planner (structure inference, no-GPU ~2min)...", flush=True)
                     _train_and_save("hard", ppath, steps=3000)
                 make_planner = lambda store: NeuralDecodePlanner(store, ppath)             # noqa: E731
-                if a.planner == "auto":
+                if a.planner == "candidate":     # PURE NEURAL: net decodes hard, router selects novel wrapper
+                    make_fallback = lambda store: CandidatePlanner(store, ppath, seed)     # noqa: E731
+                elif a.planner == "auto":
                     make_fallback = lambda store: OraclePlanner()                          # noqa: E731 — safety net
             print(f"#4-v2 INTEGRATED: MembraneV2(reason+author+bank) vs inline-RAG (no reasoner) | "
                   f"planner={a.planner} | stream {len(stream)} + held-out {len(holdout)} | lm={a.lm}\n", flush=True)

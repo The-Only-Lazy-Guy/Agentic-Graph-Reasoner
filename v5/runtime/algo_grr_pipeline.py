@@ -120,6 +120,27 @@ class NeuralDecodePlanner:
         return _tokens_to_wiring(toks, arity=self._arity)
 
 
+class CandidatePlanner:
+    """Candidate-conditioned planner (makes the ROUTER load-bearing + solves held-out on the NEURAL path):
+    the seq2seq decodes the recurring HARD (non-seed) atom + the wiring shape — it generalises there — but
+    the NOVEL WRAPPER (a seed atom, unseen on held-out) is SELECTED from the router's ranked candidates
+    (surfaced by content/token match), not decoded from a fixed vocab. So held-out's unseen wrappers are
+    reachable without an oracle, and a better router (GraphGPS) -> better candidates -> better plans."""
+
+    def __init__(self, store, model_path, seed_names):
+        self.neural = NeuralDecodePlanner(store, model_path)
+        self.seed = set(seed_names)
+
+    def plan(self, task: dict, ranked=None) -> AtomProgram:
+        prog = self.neural.plan(task, ranked)
+        hard = [a for a in prog.atoms if a != "n" and a not in self.seed]   # net decodes the recurring atom
+        wrapper = next((a for a in (ranked or []) if a in self.seed), None)  # router SELECTS the wrapper
+        if len(hard) == 1 and wrapper:                                       # standard outer(inner(n))
+            return AtomProgram(atoms=[hard[0], wrapper],
+                               wiring=("call", wrapper, [("call", hard[0], ["n"])]))
+        return prog                                                          # multi-atom / unusual -> net decode
+
+
 class AtomRouter:
     """WAVE-0 stub: rank atoms by token overlap with the task text. #3 replaces with GraphGPS features
     (mpnet content + topology MPNN + LapPE/RWSE). Interface is `.rank(task_text) -> [name...]`."""
@@ -752,10 +773,11 @@ def run_v2_compare(stream, holdout, author_fn, inline_fn, *, batch_author_fn=Non
         print(f"\n  => HELD-OUT: OURS {o_hold}/{nh} vs RAG {r_hold}/{nh} — OURS BEHIND. The planner could "
               f"not infer the NOVEL held-out structure and no fallback was set (run --planner auto). The "
               f"banked helper is useless if the planner can't wire it.")
-    if ours.fallback_planner is not None:              # the LEARNED planner's share vs the oracle safety net
+    if ours.fallback_planner is not None:              # primary planner's share vs the fallback's
         tot = ours.plan_primary_ok + ours.plan_fallback_ok
-        print(f"  => planner: LEARNED reasoner solved {ours.plan_primary_ok}/{tot} (in-distribution "
-              f"structure inference), oracle-fallback {ours.plan_fallback_ok}/{tot} (novel structure).")
+        fbname = type(ours.fallback_planner).__name__
+        print(f"  => planner: PRIMARY solved {ours.plan_primary_ok}/{tot} (in-distribution structure "
+              f"inference), FALLBACK ({fbname}) solved {ours.plan_fallback_ok}/{tot} (novel structure).")
     return dict(ours_stream=o_stream, ours_hold=o_hold, rag_stream=r_stream, rag_hold=r_hold,
                 author_calls=ours.author_calls, banked=ours.banked, derived_reuse=ours.derived_reuse,
                 plan_primary_ok=ours.plan_primary_ok, plan_fallback_ok=ours.plan_fallback_ok)
