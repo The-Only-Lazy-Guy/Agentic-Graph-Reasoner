@@ -1,0 +1,232 @@
+\documentclass[fontsize=16pt,a4paper]{scrartcl}
+\usepackage[margin=1.8cm]{geometry}
+\usepackage{fontspec}
+\setmainfont{Sarabun-Regular.ttf}[Path=./,BoldFont=Sarabun-Bold.ttf]
+\XeTeXlinebreaklocale "th"
+\XeTeXlinebreakskip=0pt plus 1pt
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,calc,fit,backgrounds}
+\usepackage{booktabs,array,xcolor,enumitem,titlesec,caption,float}
+\captionsetup{font=small,labelfont=bf}
+\definecolor{nb}{HTML}{1F4E79}\definecolor{ng}{HTML}{2E7D32}\definecolor{nr}{HTML}{B00020}
+\definecolor{no}{HTML}{B8860B}\definecolor{g1}{HTML}{F2F2F2}\definecolor{g2}{HTML}{E8F0FE}
+\definecolor{g3}{HTML}{E9F6EA}
+\titleformat{\section}{\large\bfseries\color{nb}}{\thesection.}{0.5em}{}
+\titleformat{\subsection}{\normalsize\bfseries\color{nb}}{\thesubsection}{0.5em}{}
+\newcommand{\can}{\textcolor{ng}{\textbf{ทำได้}}}
+\newcommand{\cant}{\textcolor{nr}{\textbf{ทำไม่ได้}}}
+\setlist{leftmargin=1.5em,itemsep=1pt,topsep=2pt}
+\renewcommand{\arraystretch}{1.2}
+\newcommand{\src}[1]{\footnotesize\textcolor{nb}{[#1]}}
+
+\begin{document}
+
+% ---------- FRONT PAGE (I-New Gen header kept; title updated) ----------
+\begin{center}
+{\small\color{nb}ข้อเสนอผลงานสิ่งประดิษฐ์และนวัตกรรม \textperiodcentered\ I--New Gen Award 2027 \textperiodcentered\ กลุ่มที่ 4 พลังงาน วัสดุ เคมีชีวภาพ และอุตสาหกรรม}\\[6pt]
+{\LARGE\bfseries\color{nb} ผู้ช่วยให้เหตุผลบนอุปกรณ์ปลายทาง ด้วยกราฟความรู้ที่ตรวจสอบได้}\\[3pt]
+{\Large\bfseries\color{nb} อธิบายวิธีคิดได้ ไม่สร้างไวยากรณ์ผิด และเก่งขึ้นโดยไม่ต้องฝึกโมเดล}\\[5pt]
+{\small An On-Device Reasoning Assistant with a Verified Knowledge Graph:\\ it explains its reasoning, never hallucinates syntax, and improves without retraining the model}\\[4pt]
+{\small\itshape ความเชื่อมโยงกับกลุ่ม 4: ระบบอัตโนมัติ/อุตสาหกรรมอัจฉริยะ \textperiodcentered\ ประสิทธิภาพและการใช้พลังงาน \textperiodcentered\ การประยุกต์บนอุปกรณ์ปลายทาง}
+\end{center}
+\hrule\vspace{6pt}
+
+% ======================================================================
+\section{ปัญหาจริงที่เกิดขึ้นแล้วในวันนี้ (The Hook)}
+ผู้ช่วย AI เขียนโปรแกรมกำลังถูกใช้งานอย่างกว้างขวาง แต่หลักฐานเชิงประจักษ์ปี 2025 ชี้ว่ามันสร้าง \textbf{ปัญหาจริงสามด้านพร้อมกัน}:
+
+\begin{itemize}
+\item \textbf{เชื่อถือไม่ได้ --- โค้ดที่ AI เขียน ``ผิด/ไม่ปลอดภัย'' ในอัตราสูง.} รายงาน GenAI Code Security ของ Veracode ปี 2025 ทดสอบโมเดลภาษากว่า 100 ตัว พบว่า \textbf{45\%} ของโค้ดที่ AI สร้างมีช่องโหว่ความปลอดภัย และมีช่องโหว่ \textbf{มากกว่าโค้ดที่มนุษย์เขียน 2.74 เท่า}\,\footnotemark[1] ยิ่งไปกว่านั้น งานวิจัยของ Stanford พบว่านักพัฒนาที่ใช้ AI ช่วย ``เขียนโค้ดที่ปลอดภัยน้อยลง แต่กลับ \emph{มั่นใจมากขึ้น}'' ในความถูกต้องของมัน\,\footnotemark[2] --- โมเดล \emph{แต่งไวยากรณ์/ตรรกะที่ผิดออกมาอย่างมั่นใจ} (hallucination)
+\item \textbf{ความลับรั่วไหล --- โค้ดต้องถูกส่งออกนอกองค์กร.} ปี 2023 วิศวกร Samsung นำซอร์สโค้ดลับไปวางใน ChatGPT เพื่อหาทางแก้บั๊ก เกิดการรั่วไหล \textbf{3 ครั้งใน 20 วัน} จนบริษัทต้อง \textbf{สั่งห้ามใช้ AI ทั้งองค์กร}\,\footnotemark[3] เพราะข้อมูลถูกเก็บบนเซิร์ฟเวอร์ของผู้ให้บริการโดยลบไม่ได้
+\item \textbf{กินพลังงานมหาศาล --- การพึ่งคลาวด์ไม่ยั่งยืน.} IEA รายงานว่าการใช้ไฟฟ้าของศูนย์ข้อมูล AI \textbf{พุ่งขึ้น 50\% ในปี 2025} และการใช้ไฟฟ้าของศูนย์ข้อมูลรวมจะ \textbf{เพิ่มเป็นสองเท่า} จาก 485 เป็น 950 TWh ภายในปี 2030\,\footnotemark[4]
+\end{itemize}
+
+\footnotetext[1]{Veracode, ``2025 GenAI Code Security Report'' --- veracode.com/blog/ai-generated-code-security-risks/}
+\footnotetext[2]{Stanford (Perry et al.), ``Do Users Write More Insecure Code with AI Assistants?''}
+\footnotetext[3]{Forbes/CNBC, พ.ค.\ 2023, ``Samsung Bans ChatGPT After Sensitive Code Leak.''}
+\footnotetext[4]{IEA, ``Data centre electricity use surged in 2025,'' iea.org.}
+
+\noindent สรุป: เครื่องมือที่มีอยู่บังคับให้ผู้ใช้เลือกระหว่าง \emph{ความสามารถ (คลาวด์)} กับ \emph{ความเป็นส่วนตัว/ต้นทุน} และไม่ว่าเลือกทางใด ก็ยัง \emph{ตรวจสอบไม่ได้ว่า AI คิดอย่างไร} และ \emph{เชื่อไวยากรณ์ที่มันเขียนไม่ได้}
+
+% ======================================================================
+\section{สิ่งที่ต้องแก้ (What we need to fix)}
+รากของปัญหาคือสถาปัตยกรรมปัจจุบันยัด ``ความสามารถทั้งหมด'' ไว้ใน \textbf{น้ำหนักทึบของโมเดล} ทำให้เกิดข้อเสียที่แก้ไม่ได้ในตัวมันเอง 3 ข้อ:
+
+\begin{table}[H]\centering\small
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{5.0cm}>{\raggedright\arraybackslash}p{10.3cm}@{}}
+\toprule
+\textbf{อาการที่ต้องแก้} & \textbf{ต้นเหตุเชิงสถาปัตยกรรม}\\
+\midrule
+แต่งไวยากรณ์/โค้ดผิดอย่างมั่นใจ & โมเดลถูกบังคับให้ ``เดา'' โครงสร้างที่เข้มงวด (ไวยากรณ์) จากปริภูมิแฝงที่สูญเสียข้อมูล\\
+อธิบายวิธีคิดไม่ได้ (กล่องดำ) & เหตุผลอยู่ในเวกเตอร์แฝง อ่านไม่ได้ ตรวจย้อนหลังไม่ได้\\
+เก่งขึ้น = ต้องฝึกซ้ำ/ขึ้นคลาวด์ & ความรู้ผูกกับน้ำหนัก การอัปเดตต้อง fine-tune (พลังงานสูง + ``ลืม'' ของเดิม) หรือส่งข้อมูลออก\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent เป้าหมายของโครงการนี้จึงกลับด้าน: \emph{แยกความสามารถออกจากน้ำหนักโมเดล} แล้วย้ายไปไว้ใน \textbf{กราฟความรู้ที่ตรวจสอบได้ ซึ่งเป็นข้อความที่คนอ่านได้}
+
+% ======================================================================
+\section{สิ่งที่ต้องการจริง ๆ (What we really need)}
+เครื่องมือที่ใช้ได้จริงในโรงเรียน SME และองค์กรที่หวงข้อมูล ต้องมีคุณสมบัติสี่ข้อพร้อมกัน:
+\begin{enumerate}
+\item \textbf{อยู่บนเครื่อง (on-device):} โมเดลเล็ก ($\sim$3B, 4-bit) \textbf{ตรึงค่า (frozen)} รันบน GPU โน้ตบุ๊ก $\le$6\,GB ออฟไลน์ ต้นทุนต่อครั้ง = 0
+\item \textbf{ถูกต้องโดยการตรวจสอบ (verified):} ทุกความรู้ที่บันทึกต้อง \emph{ผ่านการทดสอบ} ก่อน กราฟจึงถูกต้อง ``โดยโครงสร้าง''
+\item \textbf{อธิบายได้อย่างซื่อสัตย์ (faithful explanation):} ระบบต้องบอกได้ว่ามันใช้ขั้นตอนใด เพราะอะไร และคำอธิบายต้อง \emph{ตรงกับสิ่งที่รันจริง} ไม่ใช่แต่งทีหลัง
+\item \textbf{เก่งขึ้นโดยไม่ต้องฝึก:} ``เรียนรู้'' = เพิ่มโหนด/เส้นเชื่อมในกราฟ ไม่ใช่ gradient descent
+\end{enumerate}
+
+\noindent\textbf{กฎที่เราวัดได้ (พิสูจน์อิสระ 3 ครั้ง):} โมเดลที่ตรึงค่าเป็นฟังก์ชัน \emph{ข้อความเข้า--ข้อความออก} ช่องทางเดียวที่ป้อนเข้าได้แบบไม่สูญเสียคือ \textbf{ข้อความ (ไม่ใช่เวกเตอร์แฝง)} ดังนั้นระบบภายนอกช่วยได้เพียง (ก) \emph{เลือกข้อความที่ตรวจแล้ว} ป้อนให้ และ (ข) ปล่อยให้โมเดลทำสิ่งที่ถนัด ตารางล่างคือ ``แผนที่ของสิ่งที่ทำได้/ไม่ได้'' ภายใต้ข้อจำกัดนี้:
+
+\begin{table}[H]\centering\small
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{5.9cm}>{\raggedright\arraybackslash}p{4.5cm}>{\raggedright\arraybackslash}p{4.5cm}@{}}
+\toprule
+\textbf{ช่องทางที่ทดลองป้อนให้โมเดล} & \textbf{สิ่งที่โมเดลเล็กผลิต} & \textbf{ผล (3B จริง)}\\
+\midrule
+เวกเตอร์แฝง (latent) & เวกเตอร์ให้ LM อ่าน & \cant\ (routing collapse 73$\to$15)\\
+ร่างโค้ดแทน (draft) & โทเคนโค้ด & \cant\ (0/3 เป็นขยะ)\\
+\textbf{โครงสร้าง: เลือกอะตอมใด (route)} & ตัวชี้ (pointer) & \can\ (cosine 0.50$\to$\textbf{0.98})\\
+\textbf{โครงสร้าง: ต่ออะตอมอย่างไร (plan)} & โปรแกรมอะตอม & \can\ (\textbf{0.03$\to$1.00})\\
+\bottomrule
+\end{tabular}
+\caption{ทุกช่องทางที่ ``ไม่ใช่โครงสร้าง'' ล้มเหลว ทั้งสองช่องทาง ``โครงสร้าง'' สำเร็จ --- นี่คือเหตุผลของสถาปัตยกรรม}
+\end{table}
+
+% ======================================================================
+\section{ผลงานของเรา: สถาปัตยกรรมสองช่องสัญญาณ (Show our work)}
+เรานำกฎข้างต้นมาสร้างระบบที่ \textbf{แยกความหมาย (การอธิบาย) ออกจากไวยากรณ์ (การเขียนโค้ดที่เป๊ะ)} เป็นสองช่องสัญญาณ: \textbf{ช่องสัญลักษณ์} ดึงโครงสร้างโค้ดที่ตรวจแล้วจากกราฟ (แม่นยำ ไม่มีทางแต่งผิด) ส่วน \textbf{ช่องความหมาย} ให้ LM เล่าอธิบายจากการเดินกราฟจริง (ตรงกับที่รัน)
+
+\begin{figure}[H]\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[font=\scriptsize,node distance=5mm,
+  box/.style={draw=nb,thick,rounded corners,align=center,minimum height=9mm,minimum width=20mm,fill=white},
+  gph/.style={draw=ng,very thick,rounded corners,align=center,minimum height=13mm,minimum width=30mm,fill=g3},
+  lm/.style={draw=no,very thick,rounded corners,align=center,minimum height=11mm,minimum width=24mm,fill=g1},
+  ar/.style={-{Stealth[length=2.4mm]},thick,nb},
+  fb/.style={-{Stealth[length=2.4mm]},thick,nr,dashed}]
+\node[box](task){\textbf{งาน (NL)}\\``digit sum of\\the Josephus\ldots''};
+\node[box,right=of task](rt){\textbf{ROUTER}\\GraphGPS\\\emph{อะตอมใด}};
+\node[box,right=of rt](pl){\textbf{PLANNER/TRM}\\โปรแกรมอะตอม\\\emph{ต่ออย่างไร}};
+\node[gph,right=of pl](gr){\textbf{กราฟความรู้}\\โหนด=\{โค้ด+คำอธิบาย\\+วิธีทำ+ที่มา\}\\(เยื่อเลือกผ่าน)};
+\node[box,below=10mm of gr,minimum width=42mm](rz){\textbf{สร้างผลลัพธ์ 2 ช่อง}\\ \textcolor{nb}{สัญลักษณ์}: โครงสร้างเป๊ะจากกราฟ + ช่องว่างให้เติม\\ \textcolor{ng}{ความหมาย}: คำอธิบายจากการเดินกราฟ};
+\node[lm,left=10mm of rz](lm){\textbf{LM ตรึงค่า}\\4-bit \textperiodcentered\ 6GB\\เติมกาว+เล่า};
+\node[box,left=10mm of lm,minimum width=22mm](vf){\textbf{VERIFY}\\ประตูเดียว\\ที่เขียนได้};
+\node[box,left=10mm of vf,fill=g2](out){\textbf{ผลลัพธ์}\\โค้ด + คำอธิบาย};
+\draw[ar](task)--(rt);\draw[ar](rt)--(pl);\draw[ar](pl)--(gr);
+\draw[ar](gr)--(rz);\draw[ar](rz)--(lm);\draw[ar](lm)--(vf);\draw[ar](vf)--(out);
+\draw[fb](vf.south)|-($(rz.south)+(0,-6mm)$)-|node[pos=0.25,below,black]{\scriptsize BANK: ผ่านแล้วบันทึกอะตอมใหม่ $\Rightarrow$ กราฟโต ต้นทุนลด}(gr.south);
+\end{tikzpicture}}
+\caption{ท่อการทำงาน (pipeline): ROUTER เลือกอะตอม $\to$ PLANNER/TRM วางโครงสร้าง $\to$ กราฟส่งโค้ดที่ตรวจแล้วเป็น ``ข้อความ'' $\to$ สร้างผลลัพธ์สองช่อง (สัญลักษณ์=เป๊ะ, ความหมาย=อธิบาย) $\to$ \textbf{VERIFY เป็นประตูเดียวที่เขียนกราฟได้} $\to$ ผ่านแล้ว BANK ทำให้กราฟโตและต้นทุน LM ต่อครั้งลดลง (compounding) โมเดลไม่เคยถูกฝึก}
+\label{fig:pipe}
+\end{figure}
+
+% ---------- SAMPLE RUN parallel to pipeline ----------
+\subsection{ตัวอย่างการทำงานจริง 1 ครั้ง (วางคู่ขนานกับท่อ)}
+ตารางล่างคือ ``การรันจริงหนึ่งครั้ง'' ของงาน \emph{``ผลรวมหลักของตำแหน่งผู้รอดชีวิต Josephus''} ไล่ทีละสถานี ให้เห็นว่าแต่ละกล่องในรูปที่~\ref{fig:pipe} ผลิตอะไรออกมาจริง:
+
+\begin{table}[H]\centering\small
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{3.2cm}>{\raggedright\arraybackslash}p{12.0cm}@{}}
+\toprule
+\textbf{สถานีในท่อ} & \textbf{ผลลัพธ์จริงของตัวอย่างนี้}\\
+\midrule
+1. งาน (NL) & ``the digit sum of the Josephus survivor position for n''\\
+2. ROUTER & จัดอันดับอะตอมด้วยความหมาย $\to$ เลือก \texttt{josephus}, \texttt{digit\_sum}\\
+3. PLANNER/TRM & โปรแกรมอะตอม: \texttt{digit\_sum(josephus(n))} (ต่อสองอะตอม)\\
+4. กราฟ (สัญลักษณ์) & ดึง \emph{ซอร์สที่ตรวจแล้ว} ของ \texttt{josephus} และ \texttt{digit\_sum} มาเป็นโครงสร้างที่ ``ล็อก'' (LM แก้ไม่ได้)\\
+5. LM (ช่องความหมาย) & เติมกาว \texttt{return digit\_sum(josephus(n))} + \emph{เล่า}: ``ใช้ josephus หาตำแหน่งผู้รอด แล้ว digit\_sum รวมหลัก''\\
+6. VERIFY & รันกับชุดทดสอบจริง $\to$ \textcolor{ng}{\textbf{ผ่าน}} (closure เป๊ะ 100\%)\\
+7. BANK & บันทึกกลับ กราฟโตขึ้น งานถัดไปที่ใช้ josephus ไม่ต้องเรียก LM อีก\\
+\bottomrule
+\end{tabular}
+\caption{การรันจริงหนึ่งครั้ง: ผลลัพธ์เป็นของโมเดลเอง (อธิบายได้) แต่โครงสร้างที่ยากมาจากกราฟ (ไม่มีทางแต่งไวยากรณ์ผิด) --- ``ความหมายเป็นของ LM ไวยากรณ์เป็นของกราฟ''}
+\end{table}
+
+% ---------- RESULTS ----------
+\subsection{ผลการทดลอง (วัดจริงบน 3B, ฮาร์ดแวร์เดียว)}
+\begin{table}[H]\centering\small
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{8.8cm}cc@{}}
+\toprule
+\textbf{สิ่งที่วัด (Qwen2.5-3B จริง)} & \textbf{ไม่ใช้วิธีเรา} & \textbf{ใช้วิธีเรา}\\
+\midrule
+สองช่องสัญญาณ: งานที่ ``ผ่านการทดสอบ'' ($n{=}40$) & 18/40 (เขียนอิสระ) & \textbf{39/40}\\
+\quad ไวยากรณ์ผิดที่หลุดออกไป & 5/40 & \textbf{0/40}\\
+\quad ความตรงของคำอธิบายกับโค้ดจริง (faithfulness) & --- & \textbf{1.00}\\
+ความจำ+ผู้ให้เหตุผล vs RAG: งานที่ไม่เคยเห็น ($n{=}40$) & 15/40 (RAG) & \textbf{31/40}\\
+\quad จำนวนครั้งที่เรียก LM (ยิ่งน้อยยิ่งดี) & 100 & \textbf{63}\\
+เพดานการ ``ประกอบ'' (ความลึก 5) & 0.03 & \textbf{1.00}\\
+การค้นอะตอมด้วยโครงสร้าง (เทียบ cosine) & 0.50 & \textbf{0.98}\\
+\bottomrule
+\end{tabular}
+\caption{ทุกตัวเลขวัดจากการรันจริงบนโมเดล 3B ตรึงค่า ``ผ่านการทดสอบ'' = ชุดทดสอบรันผ่านจริง ไม่ใช่แค่คอมไพล์ได้}
+\label{tab:res}
+\end{table}
+
+\noindent อ่านผล: (1) ช่องสัญลักษณ์ทำให้ \textbf{ไวยากรณ์ผิดเป็นศูนย์} เพราะโครงสร้างยากมาจากกราฟ ไม่ใช่การเดาของโมเดล --- ตอบโจทย์ ``เชื่อถือไม่ได้'' ในหัวข้อ 1 โดยตรง (2) กราฟที่เติบโตได้ \textbf{ชนะ RAG 31 ต่อ 15} พร้อม \emph{เรียก LM น้อยกว่า} เพราะนำอะตอมที่ตรวจแล้วกลับมาใช้ (compounding: derived-reuse วัดได้ 6$\to$70 บนสตรีมจริง) (3) เมื่อให้ ``โครงสร้าง'' เพดานการประกอบที่โมเดลเปล่าทำได้ 3\% กลายเป็น 100\%
+
+% ======================================================================
+\section{ผู้ให้เหตุผลจิ๋ว (TRM) และปริภูมิความหมายของการค้น}
+หัวใจการ ``เลือกอะตอมและวางโครงสร้าง'' คือโมเดลจิ๋วสองส่วน: \textbf{ตัวจัดเส้นทาง (GraphGPS)} ที่ฝังงานและอะตอมลงในปริภูมิความหมายเดียวกันแล้ววัดความใกล้ + เดินตามเส้นเชื่อม และ \textbf{ผู้ให้เหตุผล TRM} (พารามิเตอร์หลักหมื่น) ที่เขียนสถานะย่อยที่ตรวจแล้วลง ``ความจำที่ไม่จางหาย'' รูปซ้ายคือภาพปริภูมิฝัง: อะตอมจับกลุ่มตามความหมาย และงานใหม่ถูกส่งไปกลุ่มที่ถูกต้อง (แก้ปัญหา ``digits'' vs ``divisors'' ที่การจับคู่คำทำไม่ได้)
+
+\begin{figure}[H]\centering
+\begin{minipage}[t]{0.52\textwidth}\centering
+\begin{tikzpicture}[font=\scriptsize,scale=0.9,
+  atm/.style={circle,minimum size=3.2mm,inner sep=0,draw=nb,fill=nb!12},
+  atg/.style={circle,minimum size=3.2mm,inner sep=0,draw=nr,fill=nr!12},
+  atc/.style={circle,minimum size=3.2mm,inner sep=0,draw=no,fill=no!18},
+  q/.style={star,star points=5,minimum size=5mm,inner sep=0,draw=ng,fill=ng,text=white}]
+\draw[->,gray] (-0.2,0)--(5.7,0) node[right,black]{มิติ 1};
+\draw[->,gray] (0,-0.2)--(0,4.7) node[above,black]{มิติ 2};
+% cluster A: digit ops (top-left)
+\node[atm](a1) at (0.9,3.2){}; \node[atm](a2) at (1.35,3.55){}; \node[atm](a3) at (0.7,3.0){};
+\node[nb] at (0.95,4.2){กลุ่ม ``หลักเลข''};
+% cluster B: number theory (right)
+\node[atg] at (4.7,3.1){}; \node[atg] at (5.0,2.7){}; \node[atg] at (4.4,2.7){};
+\node[nr] at (4.7,3.6){กลุ่ม ``ทฤษฎีจำนวน''};
+% cluster C: combinatorics (bottom)
+\node[atc] at (2.35,0.95){}; \node[atc] at (2.8,0.68){};
+\node[no] at (2.5,1.55){กลุ่ม ``การจัดหมู่''};
+% query routed to A
+\node[q](qq) at (2.0,2.3){};
+\draw[->,ng,very thick] (qq)--(a2); \draw[->,ng,very thick] (qq)--(a1);
+\node[ng] at (3.7,2.25){งาน ``digit sum''};
+\end{tikzpicture}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.45\textwidth}\centering\vspace{-3.4cm}
+\small
+\textbf{ความจำที่ไม่จางหายของ TRM} (วัดจริง): ฝึกบนช่องว่างสั้น ($\le$20) ทดสอบบนช่องว่างยาวที่ไม่เคยเห็น\\[3pt]
+\begin{tabular}{@{}ccc@{}}
+\toprule
+ช่องว่าง & GRU & \textbf{TRM}\\
+\midrule
+20 (สุดที่ฝึก) & 0.45 & \textbf{0.95}\\
+100 (5$\times$) & 0.50 & \textbf{0.98}\\
+\bottomrule
+\end{tabular}\\[3pt]
+{\scriptsize TRM ``เรียนกลไก'' ไม่ใช่ท่องความยาว: แม่นคงที่ $\sim$0.97 เมื่อยืดไกล 5 เท่าของช่วงฝึก}
+\end{minipage}
+\caption{ซ้าย: ปริภูมิฝังของการค้น --- อะตอมจับกลุ่มตามความหมาย งานถูกส่งไปกลุ่มที่ถูก ขวา: TRM เรียนรู้การจำที่ไม่จางและ \emph{วางนัยทั่วไปเกินช่วงฝึก}}
+\label{fig:emb}
+\end{figure}
+
+% ======================================================================
+\section{การขยายสู่การใช้งานจริง (Deployment scaling)}
+\begin{itemize}
+\item \textbf{ครูตรวจแทนการฝึก:} ตอนพัฒนา ใช้ ``โมเดลครู'' ขนาดใหญ่ (นอกเครื่อง) ช่วยตัดสินเฉพาะที่ไม่มีเครื่องตรวจอัตโนมัติ แต่ \emph{เครื่องตรวจจริง (รันโค้ด) ยังเป็นหลัก} --- ครูเสนอ ความจริงมาจากการตรวจ
+\item \textbf{ปรับจูน TRM+GPS ด้วย RL โดยไม่ให้ ``ยุบตัว'':} การฝึกประตูเลือกช่อง (gate) แบบธรรมดายุบเป็น ``เขียนโค้ดอย่างเดียว ไม่อธิบาย'' หรือ ``อธิบายอย่างเดียว หลอนโค้ด'' เราออกแบบ \emph{ฟังก์ชันรางวัลผสม} (ผลรันจริง + รางวัลอธิบายที่วัด ``ความตรง'' + โทษใช้ผิดช่อง + เอนโทรปี) และหลักสูตรฝึกเป็นขั้น \textbf{พิสูจน์แล้วแบบไม่ใช้ GPU} ว่าเข้าสู่จุดสมดุลสองช่องได้ (โครงสร้าง$\to$กราฟ 0\%, อธิบาย$\to$LM 100\%, ผ่าน 100\%) และเห็นทั้งสองแบบ ``ยุบตัว'' เมื่อถอดองค์ประกอบออก
+\item \textbf{TRM ปรับตัวได้ แต่ต้องผ่านประตูตรวจเสมอ:} LM ตรึงตลอดไป ส่วน TRM อัปเดตได้ \emph{เฉพาะจากร่องรอยที่ผ่านการตรวจแล้ว} (ไม่ใช่เรียนรู้ออนไลน์ดิบ ๆ ที่ทำให้ ``เลื่อนลอย'') ค่าเริ่มต้นบนเครื่องคือ TRM ตรึง ให้ ``กราฟ'' เป็นตัวปรับตัว ครูฝึก TRM ใหม่นอกเครื่องแล้วส่งอัปเดต
+\end{itemize}
+
+% ======================================================================
+\section{ข้อจำกัด (ระบุตรงไปตรงมา)}
+\begin{itemize}
+\item \textbf{เพดานคือ ``การประดิษฐ์'' อะตอมใหม่:} กราฟนำอะตอมที่รู้แล้วมาใช้/ต่อ ถ้างานต้องการพื้นฐานใหม่ที่ 3B เขียนเองไม่ได้ ก็ยังเป็นเพดาน --- การให้ LM ประดิษฐ์อะตอมใหม่คือแนวหน้าถัดไป
+\item \textbf{ขอบเขตอยู่ที่โดเมนที่ตรวจได้:} การเติบโตที่ปลอดภัยต้องมีเครื่องตรวจ (โค้ด/คณิต/จำลอง) โดเมนปลายเปิดยังต้องพึ่งการค้นคืน --- เราระบุขอบเขตนี้ ไม่กล่าวเกินจริง
+\item \textbf{ตัวอย่างยังเล็ก:} ตัวเลขวัดบนชุดหลักสิบ เป็นสัญญาณเชิงบวกและกลไกที่พิสูจน์ได้ ไม่ใช่การอ้างว่าดีที่สุด กำลังขยายไปชุดทดสอบยากขึ้น (MHPP, BigCodeBench)
+\end{itemize}
+
+% ======================================================================
+\section{สรุป}
+โครงการนี้เปลี่ยน ``การทำให้ AI เก่งขึ้น'' จากการฝึกน้ำหนักที่กินพลังงานและตรวจไม่ได้ ให้เป็น \textbf{การแก้กราฟที่ถูก โปร่งใส และตรวจสอบได้} บนโมเดลเล็กตรึงค่าที่รันออฟไลน์บนเครื่องราคาประหยัด สถาปัตยกรรมสองช่องสัญญาณทำให้ผลลัพธ์ \emph{เป็นของโมเดลเอง อธิบายได้ และไวยากรณ์ผิดเป็นศูนย์} (39/40 เทียบ 18/40 บน 3B จริง) กราฟที่เติบโตได้ชนะ RAG พร้อมเรียกโมเดลน้อยลง และโครงสร้างของกราฟลบเพดานการประกอบจาก 3\% เป็น 100\% --- ตอบทั้งสามปัญหาจริงในหัวข้อ 1 (เชื่อถือได้ เป็นส่วนตัว ประหยัดพลังงาน) ด้วยหลักฐานที่วัดได้จริง
+
+\vfill\noindent{\scriptsize ภาพและตัวเลขทั้งหมดมาจากการรันจริงบนฮาร์ดแวร์ที่ระบุ ด้วยการตรวจด้วยชุดทดสอบจริง ไม่มีการคาดการณ์เกินผลที่วัดได้ \textperiodcentered\ แบบอักษร TH Sarabun (Sarabun, OFL) ขนาด 16}
+\end{document}
