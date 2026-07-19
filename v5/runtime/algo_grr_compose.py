@@ -215,7 +215,8 @@ def gen_corpus_hard(n_tasks: int = 120, seed: int = 0, holdout: bool = False) ->
             return lambda code: verify_asserts(code, a)
 
         tasks.append(dict(text=text, entry=entry, examples=asserts, verify_fn=_mk(),
-                          type_pool=[int], tests=[], reference=ref, _prims=(hard, outer)))
+                          type_pool=[int], tests=[], reference=ref, _prims=(hard, outer),
+                          atom_oracles={hard: h_fn}))   # fuzz-generality gate: bank the helper iff general
     return tasks
 
 
@@ -251,7 +252,8 @@ def gen_corpus_multihard(n_tasks: int = 90, seed: int = 0) -> list[dict]:
         wiring = ("call", wname, [("call", h1, [("call", "josephus", ["n"])])])
         tasks.append(dict(text=text, entry=entry, examples=asserts, verify_fn=_mk(),
                           type_pool=[int], tests=[], reference=ref, _prims=(h1, wname),
-                          _wprog=(["josephus", h1, wname], wiring)))
+                          _wprog=(["josephus", h1, wname], wiring),
+                          atom_oracles={h1: h1_fn, "josephus": j_fn}))   # fuzz-generality gate
     return tasks
 
 

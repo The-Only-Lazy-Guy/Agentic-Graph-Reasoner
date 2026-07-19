@@ -287,18 +287,47 @@ class MembraneV2:
     """
 
     def __init__(self, store, router, planner, ratify_fn=None, author_fn=None, bank=True,
-                 batch_author_fn=None):
+                 batch_author_fn=None, fuzz_gate=True, fuzz_n=12):
         self.store, self.router, self.planner = store, router, planner
         self.ratify_fn = ratify_fn
         self.author_fn = author_fn
         self.batch_author_fn = batch_author_fn     # STEP-SPEC: author ALL missing atoms in ONE LM call
         self.bank = bank
+        self.fuzz_gate = fuzz_gate                 # GRR-1: only GENERAL authored helpers may enter the store
+        self.fuzz_n = fuzz_n
         self.seed = set(store)                     # seed atoms never count as "derived"
         self.reuse = {}                            # atom -> times used across tasks
         self.derived_reuse = 0                     # uses of BANKED (non-seed) atoms = the compounding signal
         self.banked = 0                            # distinct atoms authored+banked
         self.author_calls = 0                      # atoms authored (per-atom count)
         self.lm_calls = 0                          # ACTUAL LM invocations (batch spec cuts this)
+        self.fuzz_rejected = 0                     # authored helpers REJECTED by the generality gate
+
+    def _fuzz_general(self, name: str, src: str, task: dict) -> bool:
+        """GRR-1 fuzz-generality: an authored helper enters the store ONLY if it matches its oracle on
+        RANDOM inputs (not just the 4 visible asserts a masking wrapper can hide). No oracle for `name`
+        (real deployment) -> pass through (composite verify still gates). This kills the 'wrong helper
+        passes weak verify and BANKS -> held-out fails' variance."""
+        if not self.fuzz_gate:
+            return True
+        orc = (task.get("atom_oracles") or {}).get(name)
+        if orc is None:
+            return True                            # no independent oracle -> defer to the composite gate
+        import random
+        rng = random.Random((hash(name) & 0xffffffff))
+        try:
+            ns: dict = {}
+            exec(compile(src, "<atom>", "exec"), ns)  # noqa: S102 — gated author, sandboxed by caller
+            fn = ns.get(name)
+            if not callable(fn):
+                return False
+            for _ in range(self.fuzz_n):
+                x = rng.randint(2, 30)
+                if fn(x) != orc(x):
+                    return False
+            return True
+        except Exception:  # noqa: BLE001
+            return False
 
     def solve(self, task: dict) -> dict:
         ranked = self.router.rank(task["text"])
@@ -314,17 +343,21 @@ class MembraneV2:
             self.author_calls += len(missing)
             for a in missing:
                 src = srcs.get(a, "")
-                if src and _authored_ok(src, a):
+                if src and _authored_ok(src, a) and self._fuzz_general(a, src, task):
                     self.store[a] = src
                     authored_now.append(a)
+                elif src and _authored_ok(src, a):
+                    self.fuzz_rejected += 1        # wrong-but-compiles helper -> gate rejects, never banks
         elif missing and self.author_fn is not None:
             for a in missing:
                 src = self.author_fn(a, task)
                 self.lm_calls += 1
                 self.author_calls += 1
-                if src and _authored_ok(src, a):
+                if src and _authored_ok(src, a) and self._fuzz_general(a, src, task):
                     self.store[a] = src
                     authored_now.append(a)
+                elif src and _authored_ok(src, a):
+                    self.fuzz_rejected += 1
         code = realize(prog, self.store, task["entry"])
         if self.ratify_fn:                         # real LM writes/ratifies the glue line
             code = self.ratify_fn(code, task, prog)
@@ -801,6 +834,68 @@ def _selftest_router() -> bool:
     return ok
 
 
+def _selftest_fuzz() -> bool:
+    """GRR-1 fuzz-generality gate: a helper that is correct on the 4 visible asserts (n=5-8) but WRONG
+    elsewhere passes the composite verify yet must NOT bank. Show (1) the gate rejects it directly, and
+    (2) under a noisy author (50% non-general), WITH the gate ZERO non-general helpers reach the store;
+    WITHOUT it they pollute the bank (the held-out-variance root cause)."""
+    import random
+    from v5.runtime.algo_grr_compose import gen_corpus_hard, HARD, OUTER, OUTER_HELD
+    print("algo_grr_pipeline --selftest-fuzz: fuzz-generality gate (only GENERAL helpers bank)\n")
+    oj = HARD["josephus"][1]
+    lut = {n: oj(n) for n in range(2, 9)}                     # correct on visible asserts, 0 elsewhere
+    bad = f"def josephus(n):\n    return {lut}.get(n, 0)\n"
+    good = HARD["josephus"][0]
+    probe = MembraneV2(AtomStore(), AtomRouter(AtomStore()), OraclePlanner())
+    t_orc = {"atom_oracles": {"josephus": oj}}
+    rej_bad = not probe._fuzz_general("josephus", bad, t_orc)
+    acc_good = probe._fuzz_general("josephus", good, t_orc)
+    print(f"  (1) direct gate: non-general helper REJECTED={rej_bad} | correct helper ACCEPTED={acc_good}")
+
+    correct_src = {**{k: v[0] for k, v in HARD.items()},
+                   **{k: v[0] for k, v in OUTER.items()},
+                   **{k: v[0] for k, v in OUTER_HELD.items()}}
+
+    def noisy(seed):
+        rng = random.Random(seed)
+        def author(name, task):
+            if name in HARD and rng.random() < 0.5:          # 50% of the time: a non-general (5-8-only) helper
+                o = HARD[name][1]
+                lu = {n: o(n) for n in range(2, 9)}
+                return f"def {name}(n):\n    return {lu}.get(n, 0)\n"
+            return correct_src.get(name, "")
+        return author
+
+    def run(gate):
+        store = AtomStore()
+        for nm, (c, *_ ) in {**OUTER, **OUTER_HELD}.items():
+            store[nm] = c
+        m = MembraneV2(store, TopologyAtomRouter(store), OraclePlanner(),
+                       author_fn=noisy(1), bank=True, fuzz_gate=gate)
+        for t in gen_corpus_hard(120, seed=0):
+            m.solve(t)
+        bad_banks = 0                                        # banked helpers WRONG on unseen n (15..20)
+        for name in HARD:
+            if name in store:
+                ns: dict = {}
+                exec(compile(store[name], "<x>", "exec"), ns)  # noqa: S102
+                fn, o = ns[name], HARD[name][1]
+                if any(fn(x) != o(x) for x in range(15, 21)):
+                    bad_banks += 1
+        return m.banked, m.fuzz_rejected, bad_banks
+
+    b0, r0, bad0 = run(False)
+    b1, r1, bad1 = run(True)
+    print(f"  (2) noisy author (same seed):")
+    print(f"      NO GATE : banked {b0} | fuzz_rejected {r0} | NON-GENERAL banked helpers {bad0}")
+    print(f"      GATE    : banked {b1} | fuzz_rejected {r1} | NON-GENERAL banked helpers {bad1}")
+    print(f"      => the gate keeps memory PURE — only helpers correct on random inputs bank; wrong ones")
+    print(f"         are rejected and re-authored, so held-out stops depending on authoring luck.")
+    ok = rej_bad and acc_good and bad0 > 0 and bad1 == 0 and r1 > 0
+    print(f"\n  ALGO_GRR_PIPELINE FUZZ SELFTEST -> {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--selftest", action="store_true")
@@ -817,6 +912,8 @@ def main() -> None:
                     help="step-speculation: batch-author K atoms in ONE LM call vs per-atom (no GPU)")
     ap.add_argument("--selftest-router", action="store_true",
                     help="topology follow-edge routing (structural memory-awareness) vs content-only (no GPU)")
+    ap.add_argument("--selftest-fuzz", action="store_true",
+                    help="fuzz-generality gate: only helpers correct on random inputs may bank (no GPU)")
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
@@ -832,6 +929,8 @@ def main() -> None:
         sys.exit(0 if _selftest_spec() else 1)
     if a.selftest_router:
         sys.exit(0 if _selftest_router() else 1)
+    if a.selftest_fuzz:
+        sys.exit(0 if _selftest_fuzz() else 1)
     ap.print_help()
 
 
