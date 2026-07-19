@@ -47,20 +47,166 @@ def _render(w) -> str:
 
 def realize(prog: AtomProgram, store: dict, entry: str) -> str:
     """Deterministic program -> code: prepend the atoms' verified source (deps first), emit the entry
-    that wires them. The realizer CANNOT inline -> the atoms are load-bearing."""
+    that wires them. The realizer CANNOT inline -> the atoms are load-bearing. This is the verified
+    FALLBACK floor; the writer path (algo_grr_specwrite) lets the MODEL own the full output instead."""
     closure = "\n".join(store[a].rstrip("\n") for a in prog.atoms if a in store)
     return f"{closure}\n\ndef {entry}(n):\n    return {_render(prog.wiring)}\n"
 
 
+def explain_program(prog: AtomProgram, store, task_text: str, mode: str = "realized",
+                    model_text: str = "") -> str:
+    """FAITHFUL-BY-CONSTRUCTION explanation: derived from the program that actually EXECUTED plus the
+    nodes' own metadata (description/approach/provenance) — never a post-hoc rationalization. When the
+    writer LM owned the output (mode=model_owned) its own narration leads and this template documents
+    what the graph contributed underneath it."""
+    prov_word = {"seed": "library atom", "authored": "authored+verified this session",
+                 "derived": "derived from banked atoms"}
+    steps = []
+    meta = getattr(store, "meta", {})
+    for a in prog.atoms:
+        if a == "n" or a not in meta:
+            continue
+        nd = meta[a]
+        ex = f"; e.g. {nd.examples[0]}" if nd.examples else ""
+        steps.append(f"  - {nd.signature or a}: {nd.description} "
+                     f"[{prov_word.get(nd.provenance, nd.provenance)}; {nd.approach}{ex}]")
+    lines = [f"Task: {task_text}", f"Plan: {_render(prog.wiring)}   [output: {mode}]",
+             "Atoms used:"] + (steps or ["  (none — direct)"])
+    if model_text:
+        lines = [model_text.strip(), "", "[graph contribution]"] + lines
+    return "\n".join(lines)
+
+
+# ── Rich nodes: a graph node is NEVER bare code ────────────────────────────────
+@dataclass
+class AtomNode:
+    """A RICH node — description/approach make the memory READABLE (router ranks the description, the
+    writer LM receives the card, the explanation cites it); examples are OBSERVED behavior harvested by
+    the fuzz gate; provenance records who wrote it. Bare `code` alone is not a valid node."""
+    name: str
+    code: str
+    description: str = ""      # WHAT it computes (retrieval key, human/LM readable)
+    approach: str = ""         # HOW it works (author-provided, else derived from the code's AST)
+    signature: str = ""        # the def line
+    examples: list = None      # observed I/O, e.g. ["catalan(4) == 14"] (fuzz-gate harvest)
+    provenance: str = "seed"   # seed | authored | derived
+    depends: list = None       # atom names this code calls
+
+    def card(self) -> str:
+        """The text the writer LM / a human sees — a library-doc card, never bare source."""
+        ex = ("# e.g. " + "; ".join(self.examples[:3]) + "\n") if self.examples else ""
+        dep = (" [uses: " + ", ".join(self.depends) + "]") if self.depends else ""
+        return (f"### {self.signature or self.name}\n# {self.description}\n"
+                f"# approach: {self.approach}{dep}\n{ex}{self.code.rstrip()}\n")
+
+
+def _sig_of(code: str, name: str) -> str:
+    for ln in code.splitlines():
+        if ln.strip().startswith(f"def {name}"):
+            return ln.strip().rstrip(":")
+    return f"{name}(n)"
+
+
+def _calls_in(code: str, names) -> list:
+    import re
+    return sorted(m for m in names if re.search(rf"\b{re.escape(m)}\s*\(", code))
+
+
+def _summarize_code(code: str) -> str:
+    """Honest structural summary of HOW the code works, derived from ITS OWN AST (used when the author
+    supplied no approach text — auto-derived, never invented intent)."""
+    import ast
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return "unparseable source"
+    fname = next((n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)), "")
+    feats: list = []
+
+    def add(f):
+        if f not in feats:
+            feats.append(f)
+    for nd in ast.walk(tree):
+        if isinstance(nd, ast.Call) and isinstance(nd.func, ast.Name):
+            if nd.func.id == fname:
+                add("recursion")
+            elif nd.func.id == "str":
+                add("digit-string manipulation")
+        elif isinstance(nd, ast.While):
+            add("while-loop")
+        elif isinstance(nd, ast.For):
+            add("for-loop")
+        elif isinstance(nd, (ast.ListComp, ast.GeneratorExp)):
+            add("comprehension")
+        elif isinstance(nd, ast.Subscript) and isinstance(nd.ctx, ast.Store):
+            add("table update (DP)")
+    return ", ".join(feats) if feats else "closed-form expression"
+
+
+def _compose_descs() -> dict:
+    """Atom descriptions straight from the corpus definitions — the SAME text the GPS router ranks,
+    now stored ON the node so the graph is self-describing (descriptions were previously thrown away
+    at store-build; that made code-only nodes)."""
+    from v5.runtime.algo_grr_compose import INNER, OUTER, OUTER_HELD, HARD
+    return {k: v[2].replace("{v}", "the value")
+            for d in (INNER, OUTER, OUTER_HELD, HARD) for k, v in d.items()}
+
+
 # ── Interfaces (stubs here; #2/#3 replace behind them) ──────────────────────────
 class AtomStore(dict):
-    """name -> verified source. Seeded from the compose primitive pool (+ grows via banking)."""
+    """name -> verified source (dict view, full back-compat) PLUS a rich node table (.meta). Plain
+    writes (store[n] = code) auto-wrap into an AtomNode with AST-derived metadata, so a node is never
+    code-only; set_rich() attaches real description/examples/provenance."""
+
+    def __init__(self, *a, **kw):
+        super().__init__()
+        self.meta: dict = {}
+        for k, v in dict(*a, **kw).items():
+            self[k] = v
+
+    def __setitem__(self, name, code):
+        super().__setitem__(name, code)
+        old = self.meta.get(name)
+        self.meta[name] = AtomNode(
+            name=name, code=code,
+            description=(old.description if old and old.description else name.replace("_", " ")),
+            approach=(old.approach if old and old.approach else _summarize_code(code)),
+            signature=_sig_of(code, name),
+            examples=(old.examples if old else None),
+            provenance=(old.provenance if old else "seed"),
+            depends=_calls_in(code, set(self) - {name}))
+
+    def update(self, *a, **kw):                    # dict.update bypasses __setitem__ — route it through
+        for k, v in dict(*a, **kw).items():
+            self[k] = v
+
+    def pop(self, name, *d):
+        self.meta.pop(name, None)
+        return super().pop(name, *d)
+
+    def set_rich(self, name, code, *, description="", approach="", examples=None,
+                 provenance="authored"):
+        self[name] = code
+        nd = self.meta[name]
+        if description:
+            nd.description = description
+        if approach:
+            nd.approach = approach
+        if examples:
+            nd.examples = list(examples)
+        nd.provenance = provenance
+
+    def node(self, name) -> AtomNode:
+        return self.meta[name]
+
+    def card(self, name) -> str:
+        return self.meta[name].card()
 
     @classmethod
     def from_compose(cls):
         s = cls()
-        for name, (code, *_ ) in {**INNER, **OUTER}.items():
-            s[name] = code
+        for name, (code, _fn, desc) in {**INNER, **OUTER}.items():
+            s.set_rich(name, code, description=desc.replace("{v}", "the value"), provenance="seed")
         return s
 
     @classmethod
