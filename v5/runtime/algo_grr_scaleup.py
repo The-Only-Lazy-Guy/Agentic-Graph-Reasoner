@@ -194,8 +194,11 @@ def main() -> None:
                          "on the HARD corpus + held-out set; requires --lm. No-GPU check: "
                          "python -m v5.runtime.algo_grr_pipeline --selftest-v2")
     ap.add_argument("--spec-step", action="store_true",
-                    help="step-speculation: batch-author + SpeculativePlanner (RankedNGram learns (ranked->program) "
-                         "from stream, predicts on held-out). Shows prediction accuracy.")
+                    help="SpeculativePlanner: RankedNGram learns (ranked->hard step) from stream, predicts on "
+                         "held-out. Authors PER-ATOM (quality). Shows prediction accuracy.")
+    ap.add_argument("--batch-author", action="store_true",
+                    help="author ALL missing atoms in ONE LM call (fewer calls, but the 3B writes multiple "
+                         "hard helpers worse -> weaker banks -> lower solve; measured regression, off by default)")
     ap.add_argument("--debug", type=int, nargs="?", const=5, default=0,
                     help="print per-task detail for first N held-out tasks (default 5)")
     a = ap.parse_args()
@@ -216,7 +219,7 @@ def main() -> None:
         gen = make_frozen_gen(a.lm, temperature=0.6, max_new_tokens=320)
         stream = gen_corpus_hard(a.n_compose, seed=0)
         holdout = gen_corpus_hard(40, seed=0, holdout=True)
-        batch_author_fn = make_lm_batch_author(gen) if a.spec_step else None
+        batch_author_fn = make_lm_batch_author(gen) if a.batch_author else None
         spec_tag = " + SPEC-STEP" if a.spec_step else ""
 
         if not a.spec_step:
@@ -242,7 +245,9 @@ def main() -> None:
         store = seed_store()
         router = TopologyAtomRouter(store)
         oracle = OraclePlanner()
-        ours = MembraneV2(store, router, oracle, batch_author_fn=batch_author_fn, bank=True)
+        # PER-ATOM author (quality) unless --batch-author is set; SpeculativePlanner only PREDICTS the step.
+        ours = MembraneV2(store, router, oracle, author_fn=make_lm_author(gen),
+                          batch_author_fn=batch_author_fn, bank=True)
 
         print(f"#4-v2 INTEGRATED (SPEC-STEP): train SpeculativePlanner during stream, predict on held-out | "
               f"stream {len(stream)} + held-out {len(holdout)} | lm={a.lm}\n", flush=True)
