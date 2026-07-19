@@ -517,7 +517,8 @@ def make_lm_batch_author(gen):
 
 
 def run_v2_compare(stream, holdout, author_fn, inline_fn, *, batch_author_fn=None,
-                   spec_planner=None, verbose=True, report_every=40) -> dict:
+                   spec_planner=None, verbose=True, report_every=40,
+                   debug_heldout_n: int = 0) -> dict:
     """OURS = MembraneV2 (route→plan→author-missing→realize→verify→BANK) vs RAG = inline (3B writes the
     whole entry, no reasoner, no memory). Held-out = same hard helpers under UNSEEN easy wrappers: the
     pure reuse test — OURS retrieves the helper it banked; RAG must re-derive the hard logic inline.
@@ -543,7 +544,29 @@ def run_v2_compare(stream, holdout, author_fn, inline_fn, *, batch_author_fn=Non
         if verbose and (i + 1) % report_every == 0:
             print(f"  [OURS {i+1:>4}] solved={o_stream} banked={ours.banked} "
                   f"deriv_reuse={ours.derived_reuse} author_calls={ours.author_calls}", flush=True)
-    o_hold = sum(int(ours.solve(t)["solved"]) for t in holdout)
+    o_hold = 0
+    for hi, t in enumerate(holdout):
+        r = ours.solve(t)
+        ok = r["solved"]
+        o_hold += int(ok)
+        if hi < debug_heldout_n:
+            bank_status = {a: "banked" if a in ours.store else "missing"
+                           for a in r["program"].atoms if a != "n"}
+            print(f"\n  ── HELD-OUT #{hi} ──")
+            print(f"  task : {t['text']}")
+            print(f"  atoms: {list(bank_status.items())}")
+            print(f"  wiring: {r['program'].wiring}")
+            print(f"  authored: {r.get('authored', [])}")
+            print(f"  solved: {'YES' if ok else 'NO'}")
+            if ok:
+                rag_code = inline_fn(t)
+                rag_ok = int(t["verify_fn"](rag_code)[0] >= 1.0)
+                print(f"  OURS code (abbr): {r['code'][:120]}...")
+                print(f"  RAG  code (abbr): {rag_code[:120]}...")
+                print(f"  RAG on this task: {'SOLVED' if rag_ok else 'FAILED'}")
+            else:
+                print(f"  OURS verify FAILED — atoms not authored correctly or wiring wrong")
+            print(f"  ────────────────")
 
     def rag_run(tasks, tag):
         solved = calls = 0

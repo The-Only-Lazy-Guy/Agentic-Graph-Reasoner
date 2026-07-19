@@ -194,8 +194,9 @@ def main() -> None:
                          "on the HARD corpus + held-out set; requires --lm. No-GPU check: "
                          "python -m v5.runtime.algo_grr_pipeline --selftest-v2")
     ap.add_argument("--spec-step", action="store_true",
-                    help="step-speculation: batch-author all missing atoms in ONE LM call (cuts LM calls ~2x) "
-                         "+ optional RankedNGram speculative planner from banked solves")
+                    help="step-speculation: batch-author all missing atoms in ONE LM call (cuts LM calls ~2x)")
+    ap.add_argument("--debug", type=int, nargs="?", const=5, default=0,
+                    help="print per-task detail for first N held-out tasks (default 5)")
     a = ap.parse_args()
 
     if a.selftest:
@@ -219,7 +220,8 @@ def main() -> None:
         batch_author_fn = make_lm_batch_author(gen) if a.spec_step else None
         run_v2_compare(stream, holdout, author_fn, make_lm_inline(gen),
                        batch_author_fn=batch_author_fn,
-                       report_every=a.report_every)
+                       report_every=a.report_every,
+                       debug_heldout_n=a.debug)
         return
 
     if a.run:
