@@ -32,9 +32,13 @@ _ARITY = {**{_UNARY[k][1]: 1 for k in _UNARY}, **{_BINARY[k][1]: 2 for k in _BIN
 _PTOK = ["<pad>", "<bos>", "<eos>", "n"] + _OPS
 _P2I = {t: i for i, t in enumerate(_PTOK)}
 
-# Composition-domain atom names (all unary)
+# Composition-domain atom names (all unary). Includes the --v2 HARD corpus atoms so a compose planner
+# can infer programs over josephus/partitions/... + wrappers (held-out wrappers included in the VOCAB so
+# the net CAN emit them, but they are NOT in the training data -> the honest generalisation test).
 _COMB_ATOMS = ["sum_of_squares", "nth_fibonacci", "factorial", "triangular", "digit_product",
-               "is_prime", "reverse_digits", "digit_sum", "num_divisors"]
+               "is_prime", "reverse_digits", "digit_sum", "num_divisors",
+               "num_partitions", "derangements", "josephus", "catalan", "mult_persistence",
+               "is_even", "last_digit", "count_digits"]
 _COMB_ARITY = {a: 1 for a in _COMB_ATOMS}
 _COMB_ARITY["n"] = 0
 _COMB_PTOK = ["<pad>", "<bos>", "<eos>", "n"] + _COMB_ATOMS
@@ -141,17 +145,50 @@ def _make_data(depths, n, seed, wvocab=None):
     return words, progs, wvocab
 
 
-def _make_compose_data(n, seed=0):
-    """Generate (text, program-tokens, word-vocab) from the compose corpus."""
-    from v5.runtime.algo_grr_compose import INNER, OUTER, gen_corpus
-    tasks = gen_corpus(n, seed=seed)
+def _wiring_prefix(w) -> list[str]:
+    """Prefix serialisation of an AtomProgram wiring tree (named-atom calls) -> program tokens."""
+    if isinstance(w, str):
+        return ["n"]
+    _, name, args = w
+    out = [name]
+    for a in args:
+        out += _wiring_prefix(a)
+    return out
+
+
+def _make_compose_data(n, seed=0, include_hard=True):
+    """Generate (text, program-tokens, word-vocab) from the compose corpus. include_hard adds the --v2
+    HARD stream (gen_corpus_hard non-holdout + gen_corpus_multihard). HELD-OUT tasks are NEVER added
+    (their OUTER_HELD wrappers stay unseen -> the planner must generalise or fall back, no leak)."""
+    from v5.runtime.algo_grr_compose import gen_corpus, gen_corpus_hard, gen_corpus_multihard
     words, progs = [], []
-    for t in tasks:
+    for t in gen_corpus(n, seed=seed):
         inner, outer = t["_prims"]
-        words.append(t["text"])
-        progs.append(["<bos>", outer, inner, "n", "<eos>"])
+        words.append(t["text"]); progs.append(["<bos>", outer, inner, "n", "<eos>"])
+    if include_hard:
+        for t in gen_corpus_hard(n, seed=seed):                 # STREAM only (holdout excluded)
+            hard, outer = t["_prims"]
+            words.append(t["text"]); progs.append(["<bos>", outer, hard, "n", "<eos>"])
+        for t in gen_corpus_multihard(n, seed=seed):
+            _atoms, wiring = t["_wprog"]
+            words.append(t["text"]); progs.append(["<bos>"] + _wiring_prefix(wiring) + ["<eos>"])
     wvocab = _word_vocab(words)
     return words, progs, wvocab
+
+
+def _make_hard_data(n, seed=1):
+    """HARD-ONLY (text, program-tokens, vocab) from gen_corpus_hard STREAM + gen_corpus_multihard. Mixing
+    the EASY gen_corpus in biased the inner decode toward sum_of_squares/triangular (measured); hard-only
+    -> the planner nails the hard inner (stream 30/30). Held-out wrappers still unseen (no leak)."""
+    from v5.runtime.algo_grr_compose import gen_corpus_hard, gen_corpus_multihard
+    words, progs = [], []
+    for t in gen_corpus_hard(n, seed=seed):
+        h, o = t["_prims"]
+        words.append(t["text"]); progs.append(["<bos>", o, h, "n", "<eos>"])
+    for t in gen_corpus_multihard(n, seed=seed):
+        _a, w = t["_wprog"]
+        words.append(t["text"]); progs.append(["<bos>"] + _wiring_prefix(w) + ["<eos>"])
+    return words, progs, _word_vocab(words)
 
 
 def _save_model(path, model, domain, wvocab):
@@ -187,11 +224,12 @@ def _train_and_save(domain, save_path, steps=3000):
     """Train a planner model and save it."""
     torch, nn, Seq2Seq = _build()
     torch.manual_seed(0)
-    if domain == "compose":
-        words_list, progs_list, wvocab = _make_compose_data(120, seed=1)
+    if domain in ("compose", "hard"):
+        mk = _make_hard_data if domain == "hard" else _make_compose_data
+        words_list, progs_list, wvocab = mk(150 if domain == "hard" else 120, seed=1)
         model = Seq2Seq(len(wvocab), len(_COMB_PTOK))
         model, _ = train_planner(model, words_list, progs_list, wvocab, p2i=_COMB_P2I, steps=steps)
-        _save_model(save_path, model, domain, wvocab)
+        _save_model(save_path, model, "compose", wvocab)   # compose ptok (now includes the hard atoms)
     else:
         words_list, progs_list, wvocab = _make_data([1, 2, 3], 1500, seed=1)
         model = Seq2Seq(len(wvocab), len(_PTOK))

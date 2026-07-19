@@ -99,6 +99,27 @@ class SearchPlanner:
         return prog
 
 
+class NeuralDecodePlanner:
+    """DECODE-only neural planner: the trained seq2seq greedily decodes the program STRUCTURE (atoms +
+    wiring) from the NL task — NO internal verification. Unlike SearchPlanner (verify-gated search, which
+    needs the atoms to ALREADY exist to realize+run), this fires in the author-on-demand flow: it proposes
+    the structure, MembraneV2 AUTHORS the missing atoms, and the verify gate confirms. This is the LEARNED
+    reasoner doing structure inference; a wrong decode (e.g. a novel held-out wrapper) fails verify and
+    MembraneV2 falls back to the oracle."""
+
+    def __init__(self, store, model_path):
+        from v5.runtime.algo_grr_planner import _load_model
+        self.store = store
+        self._model, self._enc_words, self._wvocab, self._ptok, self._p2i, self._arity = \
+            _load_model(model_path)
+
+    def plan(self, task: dict, ranked=None) -> AtomProgram:
+        from v5.runtime.algo_grr_planner import plan_program, _tokens_to_wiring
+        toks = plan_program(self._model, self._enc_words, self._wvocab, task["text"],
+                            ptok=self._ptok, p2i=self._p2i)
+        return _tokens_to_wiring(toks, arity=self._arity)
+
+
 class AtomRouter:
     """WAVE-0 stub: rank atoms by token overlap with the task text. #3 replaces with GraphGPS features
     (mpnet content + topology MPNN + LapPE/RWSE). Interface is `.rank(task_text) -> [name...]`."""
@@ -161,6 +182,26 @@ class OraclePlanner:
         inner, outer = task["_prims"]
         return AtomProgram(atoms=[inner, outer],
                            wiring=("call", outer, [("call", inner, ["n"])]))
+
+
+class PlannerWithFallback:
+    """NEURAL planner first (SearchPlanner = net-guided VERIFIED search); if it can't find a verifying
+    program (returns the trivial 'n' program), fall back to a controllable heuristic/oracle planner —
+    kept for real deployment, NOT removed. Tracks neural_used vs fallback_used = how much of the
+    reasoning the LEARNED planner actually carries (vs the oracle safety net)."""
+
+    def __init__(self, neural, fallback):
+        self.neural, self.fallback = neural, fallback
+        self.neural_used = 0
+        self.fallback_used = 0
+
+    def plan(self, task: dict, ranked=None) -> AtomProgram:
+        prog = self.neural.plan(task, ranked)          # SearchPlanner only returns a VERIFIED program
+        if prog is not None and prog.atoms != ["n"]:
+            self.neural_used += 1
+            return prog
+        self.fallback_used += 1
+        return self.fallback.plan(task, ranked)
 
 
 class ProgramOraclePlanner:
@@ -287,7 +328,7 @@ class MembraneV2:
     """
 
     def __init__(self, store, router, planner, ratify_fn=None, author_fn=None, bank=True,
-                 batch_author_fn=None, fuzz_gate=True, fuzz_n=12):
+                 batch_author_fn=None, fuzz_gate=True, fuzz_n=12, fallback_planner=None):
         self.store, self.router, self.planner = store, router, planner
         self.ratify_fn = ratify_fn
         self.author_fn = author_fn
@@ -295,6 +336,7 @@ class MembraneV2:
         self.bank = bank
         self.fuzz_gate = fuzz_gate                 # GRR-1: only GENERAL authored helpers may enter the store
         self.fuzz_n = fuzz_n
+        self.fallback_planner = fallback_planner   # if the LEARNED planner's program fails verify, retry with this
         self.seed = set(store)                     # seed atoms never count as "derived"
         self.reuse = {}                            # atom -> times used across tasks
         self.derived_reuse = 0                     # uses of BANKED (non-seed) atoms = the compounding signal
@@ -302,6 +344,8 @@ class MembraneV2:
         self.author_calls = 0                      # atoms authored (per-atom count)
         self.lm_calls = 0                          # ACTUAL LM invocations (batch spec cuts this)
         self.fuzz_rejected = 0                     # authored helpers REJECTED by the generality gate
+        self.plan_primary_ok = 0                   # tasks solved by the PRIMARY planner (the learned reasoner)
+        self.plan_fallback_ok = 0                  # tasks solved only after the oracle/heuristic fallback
 
     def _fuzz_general(self, name: str, src: str, task: dict) -> bool:
         """GRR-1 fuzz-generality: an authored helper enters the store ONLY if it matches its oracle on
@@ -329,14 +373,12 @@ class MembraneV2:
         except Exception:  # noqa: BLE001
             return False
 
-    def solve(self, task: dict) -> dict:
-        ranked = self.router.rank(task["text"])
-        prog = self.planner.plan(task, ranked)
+    def _attempt(self, task: dict, planner, ranked) -> tuple:
+        """One plan→author-missing→realize→(ratify)→verify pass with a given planner. Authors into the
+        store (fuzz-gated); the caller decides banking. Returns (ok, code, prog, authored)."""
+        prog = planner.plan(task, ranked)
         missing = [a for a in prog.atoms if a != "n" and a not in self.store]
-        authored_now = []
-        # STEP-SPECULATION: the tiny planner already proposed the whole K-atom program; author every
-        # missing atom in ONE LM call (batch) instead of one call per atom. Each authored atom is still
-        # gated by the composite verify below (a drifted atom fails → never banks) = mutual anti-drift.
+        authored = []
         if missing and self.batch_author_fn is not None:
             srcs = self.batch_author_fn(missing, task)
             self.lm_calls += 1
@@ -344,8 +386,7 @@ class MembraneV2:
             for a in missing:
                 src = srcs.get(a, "")
                 if src and _authored_ok(src, a) and self._fuzz_general(a, src, task):
-                    self.store[a] = src
-                    authored_now.append(a)
+                    self.store[a] = src; authored.append(a)
                 elif src and _authored_ok(src, a):
                     self.fuzz_rejected += 1        # wrong-but-compiles helper -> gate rejects, never banks
         elif missing and self.author_fn is not None:
@@ -354,14 +395,29 @@ class MembraneV2:
                 self.lm_calls += 1
                 self.author_calls += 1
                 if src and _authored_ok(src, a) and self._fuzz_general(a, src, task):
-                    self.store[a] = src
-                    authored_now.append(a)
+                    self.store[a] = src; authored.append(a)
                 elif src and _authored_ok(src, a):
                     self.fuzz_rejected += 1
         code = realize(prog, self.store, task["entry"])
         if self.ratify_fn:                         # real LM writes/ratifies the glue line
             code = self.ratify_fn(code, task, prog)
         ok = task["verify_fn"](code)[0] >= 1.0
+        return ok, code, prog, authored
+
+    def solve(self, task: dict) -> dict:
+        ranked = self.router.rank(task["text"])
+        # PRIMARY planner (the learned reasoner) attempts first; if its program can't be verified, retry
+        # with the controllable oracle/heuristic FALLBACK (kept for deployment, not removed).
+        ok, code, prog, authored_now = self._attempt(task, self.planner, ranked)
+        used_fallback = False
+        if not ok and self.fallback_planner is not None:
+            ok2, code2, prog2, authored2 = self._attempt(task, self.fallback_planner, ranked)
+            authored_now = authored_now + authored2
+            if ok2:
+                ok, code, prog, used_fallback = ok2, code2, prog2, True
+        if ok:
+            self.plan_fallback_ok += int(used_fallback)
+            self.plan_primary_ok += int(not used_fallback)
         route_ok = all(a in ranked[:6] for a in prog.atoms)   # did the router surface the needed atoms?
         if ok:
             for a in prog.atoms:
@@ -377,9 +433,9 @@ class MembraneV2:
         # pollute the store) — and only when banking is on. RAG / failed tasks drop what they authored.
         keep = self.bank and ok
         if keep:
-            self.banked += len(authored_now)
+            self.banked += len(set(authored_now))
         else:
-            for a in authored_now:
+            for a in set(authored_now):
                 self.store.pop(a, None)
         return dict(solved=ok, code=code, program=prog, route_ok=route_ok,
                     authored=authored_now, author_calls=self.author_calls)
@@ -608,7 +664,7 @@ def make_lm_batch_author(gen):
 
 
 def run_v2_compare(stream, holdout, author_fn, inline_fn, *, batch_author_fn=None,
-                   spec_planner=None, verbose=True, report_every=40,
+                   spec_planner=None, make_planner=None, make_fallback=None, verbose=True, report_every=40,
                    debug_heldout_n: int = 0) -> dict:
     """OURS = MembraneV2 (route→plan→author-missing→realize→verify→BANK) vs RAG = inline (3B writes the
     whole entry, no reasoner, no memory). Held-out = same hard helpers under UNSEEN easy wrappers: the
@@ -625,8 +681,9 @@ def run_v2_compare(stream, holdout, author_fn, inline_fn, *, batch_author_fn=Non
         return s
 
     store = seed_store()
-    planner = spec_planner or OraclePlanner()
-    ours = MembraneV2(store, TopologyAtomRouter(store), planner,
+    planner = spec_planner or (make_planner(store) if make_planner else OraclePlanner())
+    fb = make_fallback(store) if (make_fallback and not spec_planner) else None
+    ours = MembraneV2(store, TopologyAtomRouter(store), planner, fallback_planner=fb,
                       author_fn=None if batch_author_fn else author_fn,
                       batch_author_fn=batch_author_fn, bank=True)
     o_stream = 0
@@ -679,8 +736,13 @@ def run_v2_compare(stream, holdout, author_fn, inline_fn, *, batch_author_fn=Non
           f"(no bank, no reasoner)")
     print(f"\n  => HELD-OUT gap (the attack): OURS {o_hold}/{nh} vs RAG {r_hold}/{nh} — OURS reuses the "
           f"banked verified helper; RAG must re-derive the hard logic inline and fails.")
+    if ours.fallback_planner is not None:              # the LEARNED planner's share vs the oracle safety net
+        tot = ours.plan_primary_ok + ours.plan_fallback_ok
+        print(f"  => planner: LEARNED reasoner solved {ours.plan_primary_ok}/{tot} (in-distribution "
+              f"structure inference), oracle-fallback {ours.plan_fallback_ok}/{tot} (novel structure).")
     return dict(ours_stream=o_stream, ours_hold=o_hold, rag_stream=r_stream, rag_hold=r_hold,
-                author_calls=ours.author_calls, banked=ours.banked, derived_reuse=ours.derived_reuse)
+                author_calls=ours.author_calls, banked=ours.banked, derived_reuse=ours.derived_reuse,
+                plan_primary_ok=ours.plan_primary_ok, plan_fallback_ok=ours.plan_fallback_ok)
 
 
 def _selftest_v2() -> bool:

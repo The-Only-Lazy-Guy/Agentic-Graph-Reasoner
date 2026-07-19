@@ -199,6 +199,9 @@ def main() -> None:
     ap.add_argument("--batch-author", action="store_true",
                     help="author ALL missing atoms in ONE LM call (fewer calls, but the 3B writes multiple "
                          "hard helpers worse -> weaker banks -> lower solve; measured regression, off by default)")
+    ap.add_argument("--planner", choices=["oracle", "neural", "auto"], default="oracle",
+                    help="structure planner for --v2: oracle (reads _prims) | neural (trained SearchPlanner) "
+                         "| auto (neural + oracle FALLBACK, kept as controllable safety net)")
     ap.add_argument("--debug", type=int, nargs="?", const=5, default=0,
                     help="print per-task detail for first N held-out tasks (default 5)")
     a = ap.parse_args()
@@ -223,10 +226,22 @@ def main() -> None:
         spec_tag = " + SPEC-STEP" if a.spec_step else ""
 
         if not a.spec_step:
-            # ── Standard --v2 (no speculation) ──
+            # ── Standard --v2 (no speculation) ── planner = oracle | neural (SearchPlanner) | auto (both)
+            make_planner = make_fallback = None
+            if a.planner != "oracle":
+                from v5.runtime.algo_grr_planner import _train_and_save
+                from v5.runtime.algo_grr_pipeline import NeuralDecodePlanner, OraclePlanner
+                ppath = "artifacts/planner_hard.pt"
+                if not os.path.exists(ppath):
+                    print("  training HARD-domain planner (structure inference, no-GPU ~2min)...", flush=True)
+                    _train_and_save("hard", ppath, steps=3000)
+                make_planner = lambda store: NeuralDecodePlanner(store, ppath)             # noqa: E731
+                if a.planner == "auto":
+                    make_fallback = lambda store: OraclePlanner()                          # noqa: E731 — safety net
             print(f"#4-v2 INTEGRATED: MembraneV2(reason+author+bank) vs inline-RAG (no reasoner) | "
-                  f"stream {len(stream)} + held-out {len(holdout)} | lm={a.lm}\n", flush=True)
+                  f"planner={a.planner} | stream {len(stream)} + held-out {len(holdout)} | lm={a.lm}\n", flush=True)
             run_v2_compare(stream, holdout, make_lm_author(gen), make_lm_inline(gen),
+                           make_planner=make_planner, make_fallback=make_fallback,
                            report_every=a.report_every, debug_heldout_n=a.debug)
             return
 
