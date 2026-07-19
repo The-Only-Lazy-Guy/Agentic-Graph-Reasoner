@@ -33,6 +33,14 @@ DUAL-CHANNEL REALIZER (algo_grr_dcpd.py --selftest):
 REAL OUTPUT (demo): task "digit sum of the Josephus survivor position" ->
   EXPLANATION names josephus+digit_sum w/ descriptions/approach/provenance + "Composition: digit_sum(josephus(n))"
   CODE = exact josephus+digit_sum bodies from graph + LM-owned glue; closure_intact; verifies. OWNS+EXPLAINS.
+
+REAL 3B PROOF (Qwen2.5-3B-Instruct, algo_grr_dcpd --run --lm, n=40):
+  arm          | verifies | syntax errors shipped | explanation faithfulness
+  DUAL-CHANNEL |  39/40   |          0            | 1.00  (glue grammar-guard fired+repaired 1x)
+  FREE-INLINE  |  18/40   |          5            | none (no grounded explanation)
+  => 2.2x solve on the REAL 3B (hard bodies EXACT from graph, LM fills only a grammar-checked glue hole);
+     free-inline re-derives the hard logic + hallucinates syntax 5/40. Symbolic guarantee (0 broken
+     closures) holds on hardware, not just the stub. run_lm sets V5_HARD_VERIFY=1 (hard-kill subprocess).
 ```
 
 ### KEY DECISION (measured, not opinion)
