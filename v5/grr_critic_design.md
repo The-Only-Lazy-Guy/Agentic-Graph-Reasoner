@@ -107,3 +107,42 @@ real execution/sympy verdicts). Verifier stays the writer throughout — the cri
   (natural-language-ish) should transfer better. Report both; the limiter is a finding.
 - Subtle-numeric errors are out of a no-oracle critic's reach *by construction* — don't claim them.
 - Quarantine tier must be pruned aggressively or `(−)` clutter degrades retrieval.
+
+---
+
+# v6 Dual-Channel realizer (from the user's 2 brainstorm designs, built 2026-07-20)
+
+**Trigger:** nodes were bare code (`store[name] = code`) and the realizer PASTED atom bodies + hard-coded
+wiring → the LM wrote nothing, couldn't explain, output was spliced. User brainstormed **Design A
+(Dual-Channel Pointer-Decoding)** and **Design B (TRM owns computation, LM owns communication)**. Both =
+one idea: **separate SEMANTIC INTENT from SYMBOLIC EXECUTION; graph stores meaning, not code.**
+
+**The channels (both DISCRETE — the one design correction):**
+- **Symbolic** = exact structure from the graph: verified atom closure (immutable) + typed HOLES the LM
+  fills, grammar/AST-constrained. Zero syntax hallucination on the hard parts; a hallucinating filler can
+  only damage a hole, caught by grammar+verify. (Design A γ=0 / Design B AST-fragments + syntax lattice.)
+- **Semantic** = the explanation, **narrated from the execution-graph traversal + node cards** → faithful
+  by construction (can only cite atoms actually in the verified program). Measured: **1.0 vs 0.40**
+  post-hoc free-form.
+
+**The design correction (measured, not opinion):** Design A's semantic channel is *continuous latent*
+(`h_latent → LM` via soft-prompt/cross-attn). This project already measured that path failing — the
+z-wall / softprompt 73%→15% routing collapse; *text is THE memory interface*. So **both channels are
+discrete**: symbolic = grammar/AST, semantic = text. The continuous-latent channel stays a **registered,
+swappable seam** (`LatentSemanticChannel`) that must **win `fair_ab` vs text** before adoption — the
+beautiful idea gets a door and an honest gate, not a free pass and not the bin.
+
+**Mistake handling:** Design B's **negative-edge check** (prune the forbidden candidate BEFORE generation)
+gives the pink-elephant benefit (LM never sees the trap in-context; the reason is still narratable) with
+NONE of Design A's latent-repulsion risk (no hidden-state hooks / custom runner). Symbolic, safe, shippable.
+
+**Built (commit ceae538, all no-GPU green):** `AtomNode` rich nodes in `algo_grr_pipeline.py`;
+`algo_grr_dcpd.py` = `build_skeleton` / `dual_channel_realize` / `TextSemanticChannel` /
+`LatentSemanticChannel` (parked) / `MistakeNode`+`prune_candidates` / `fair_ab`. Selftest: code verifies
+24/24, closure exact 24/24, faithful 1.00 vs 0.40, hallucinated glue caught + closure survives, mistake
+prune fires, latent seam honestly NotImplemented.
+
+**Next:** wire `dual_channel_realize` into `MembraneV2.solve` (optional, default unchanged); real
+grammar-constrained hole-fill (Outlines / GBNF) on the `--lm` run; implement `LatentSemanticChannel` on a
+white-box runner only to feed `fair_ab`. Keep the code-atom compounding number as the proposal headline;
+dual-channel is the "explains its approach + stores meaning not code" story.

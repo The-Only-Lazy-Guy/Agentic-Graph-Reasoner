@@ -4,6 +4,52 @@
 > Updated each working session. Branch: fix/swe-slot-plan-gate-real-file. (Older sessions below the ═══ line.)
 
 ═══════════════════════════════════════════════════════════════════════════════════════════════
+## LATEST SESSION (2026-07-20) — v6 DUAL-CHANNEL: nodes store MEANING not code; model EXPLAINS + OWNS output
+═══════════════════════════════════════════════════════════════════════════════════════════════
+
+**One line:** user caught that graph nodes were BARE CODE (`store[name]=code`) and the realizer PASTED
+bodies + hard-coded wiring → LM wrote nothing, couldn't explain. Brainstormed 2 designs (A=Dual-Channel
+Pointer-Decoding, B=TRM-owns-compute). Both = split SEMANTIC INTENT from SYMBOLIC EXECUTION. Built the
+DISCRETE version (the latent semantic channel is PARKED behind a fair_ab gate — z-wall).
+
+### WHAT'S BUILT (commit ceae538, all no-GPU green)
+```
+RICH MEANING-NODES (algo_grr_pipeline.AtomNode): {code, description, approach(AST-derived), signature,
+  examples, provenance seed|authored|derived, depends}. AtomStore auto-wraps every write -> never bare
+  code. from_compose keeps corpus descriptions (were discarded). All 4 pipeline selftests still green.
+
+DUAL-CHANNEL REALIZER (algo_grr_dcpd.py --selftest):
+  SYMBOLIC channel : exact atom closure (immutable) + typed HOLES the LM fills (grammar/AST-constrained)
+                     -> code verifies 24/24, closure exact-from-graph 24/24; a HALLUCINATING filler only
+                        damages the hole -> caught by grammar+verify, verified closure SURVIVES.
+  SEMANTIC channel : explanation narrated from the EXECUTION-GRAPH traversal + node cards
+                     -> faithfulness 1.00 (narrate-from-graph) vs 0.40 (post-hoc free-form). FAITHFUL by
+                        construction (can only cite atoms actually in the verified program).
+  MISTAKE prune    : MistakeNode negative-edge check drops the forbidden candidate BEFORE generation =
+                     symbolic pink-elephant fix (Design B safe version; NO latent steering / hidden-state).
+  LATENT seam      : LatentSemanticChannel registered but NotImplemented -> must WIN fair_ab vs text
+                     before adoption (Design A's continuous channel; z-wall says text wins until proven).
+
+REAL OUTPUT (demo): task "digit sum of the Josephus survivor position" ->
+  EXPLANATION names josephus+digit_sum w/ descriptions/approach/provenance + "Composition: digit_sum(josephus(n))"
+  CODE = exact josephus+digit_sum bodies from graph + LM-owned glue; closure_intact; verifies. OWNS+EXPLAINS.
+```
+
+### KEY DECISION (measured, not opinion)
+Design A's SEMANTIC channel = continuous latent (h_latent→LM). This project ALREADY measured that failing
+(softprompt 73%→15% routing collapse; z-wall; "text is THE memory interface"). So BOTH channels DISCRETE:
+symbolic=grammar/AST, semantic=text. Latent kept as a swappable seam that must beat text on fair_ab
+(user: "the idea is beautiful, if it works it'd be great" — build the door, make it earn the room).
+
+### NEXT
+(1) wire dual_channel_realize into MembraneV2.solve (optional param, default unchanged); (2) real
+grammar-constrained hole-fill (Outlines/GBNF) on the --lm run; (3) LatentSemanticChannel on a white-box
+runner ONLY to feed fair_ab. Also pending from earlier today: algo_grr_critic (error-noticer + signed
+mistake tier) real-MiniLM data run (killed mid-run; rebuild was in progress). Headline for proposal stays
+the code-atom compounding (pure-neural real-3B 31/40 vs RAG 15); dual-channel = the "explains + meaning
+not code" story.
+
+═══════════════════════════════════════════════════════════════════════════════════════════════
 ## LATEST SESSION (2026-07-19) — the INTEGRATED --v2 pipeline: reasoner made NEURAL, end to end
 ═══════════════════════════════════════════════════════════════════════════════════════════════
 
