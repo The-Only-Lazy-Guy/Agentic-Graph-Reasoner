@@ -358,20 +358,31 @@ class MembraneV2:
         if orc is None:
             return True                            # no independent oracle -> defer to the composite gate
         import random
+        import threading
         rng = random.Random((hash(name) & 0xffffffff))
-        try:
-            ns: dict = {}
-            exec(compile(src, "<atom>", "exec"), ns)  # noqa: S102 — gated author, sandboxed by caller
-            fn = ns.get(name)
-            if not callable(fn):
-                return False
-            for _ in range(self.fuzz_n):
-                x = rng.randint(2, 30)
-                if fn(x) != orc(x):
-                    return False
-            return True
-        except Exception:  # noqa: BLE001
+        result = {"ok": None}
+
+        def _check():
+            try:
+                ns: dict = {}
+                exec(compile(src, "<atom>", "exec"), ns)  # noqa: S102 — gated author
+                fn = ns.get(name)
+                if not callable(fn):
+                    result["ok"] = False; return
+                for _ in range(self.fuzz_n):
+                    x = rng.randint(2, 14)         # small inputs: catches non-general helpers without
+                    if fn(x) != orc(x):            # exploding on a naive-recursive authored impl
+                        result["ok"] = False; return
+                result["ok"] = True
+            except Exception:  # noqa: BLE001
+                result["ok"] = False
+
+        th = threading.Thread(target=_check, daemon=True)
+        th.start()
+        th.join(2.0)                               # HARD TIMEOUT: a general helper is fast; slow/hung -> reject
+        if th.is_alive() or result["ok"] is None:
             return False
+        return result["ok"]
 
     def _attempt(self, task: dict, planner, ranked) -> tuple:
         """One plan→author-missing→realize→(ratify)→verify pass with a given planner. Authors into the
