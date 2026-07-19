@@ -73,6 +73,66 @@ def behavior_signature(run: Callable, probes) -> tuple[list[float], str]:
 
 
 # ---------------------------------------------------------------------------
+# subprocess code executor (OS-killable): a mutated atom can infinite-loop; daemon threads CANNOT kill a
+# CPU-bound Python loop (GIL) -> run untrusted code in a subprocess with a hard timeout, cached by code.
+# ---------------------------------------------------------------------------
+_EVAL_CACHE: dict = {}
+
+
+def _run_code_subprocess(code: str, fnname: str, xs, timeout: float = 2.0) -> list:
+    import json
+    import os
+    import subprocess
+    import sys
+    import tempfile
+    harness = (code + f"\nimport json as _j\n_xs = {list(xs)!r}\n_out = []\n"
+               f"for _x in _xs:\n    try:\n        _v = {fnname}(_x)\n"
+               "        _out.append(_v if isinstance(_v, (int, float, bool)) else None)\n"
+               "    except Exception:\n        _out.append(None)\n"
+               "print(_j.dumps(_out))\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = os.path.join(td, "t.py")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(harness)
+        try:
+            r = subprocess.run([sys.executable, "-I", p], capture_output=True, text=True, timeout=timeout)
+            lines = (r.stdout or "").strip().splitlines()
+            return json.loads(lines[-1]) if lines else [None] * len(xs)
+        except Exception:  # noqa: BLE001 — TimeoutExpired (infinite loop) / bad JSON -> treat as all-crash
+            return [None] * len(xs)
+
+
+def _cached_code_eval(code: str, fnname: str, xs) -> list:
+    key = (code, fnname, tuple(xs))
+    if key not in _EVAL_CACHE:
+        _EVAL_CACHE[key] = _run_code_subprocess(code, fnname, list(xs))
+    return _EVAL_CACHE[key]
+
+
+def _sig_from_outputs(outs: list) -> tuple[list[float], str]:
+    """Behavior signature from precomputed probe outputs (None = crash/timeout on that probe)."""
+    vals = [o for o in outs if o is not None]
+    crash = 1.0 if len(vals) < len(outs) else 0.0
+    monotone = 1.0 if len(vals) >= 2 and all(vals[i] <= vals[i + 1] for i in range(len(vals) - 1)) else 0.0
+    has_neg = 1.0 if any(v < 0 for v in vals) else 0.0
+    mean_mag = float(np.mean([math.tanh(math.log1p(abs(v))) for v in vals])) if vals else 0.0
+    bstr = " ".join("X" if o is None else str(round(o, 4)) for o in outs)
+    return [crash, monotone, has_neg, mean_mag], bstr
+
+
+def _matches_outputs(outputs: list, oracle, xs) -> bool:
+    for o, xi in zip(outputs, xs):
+        if o is None:
+            return False
+        try:
+            if o != oracle(xi):
+                return False
+        except Exception:  # noqa: BLE001
+            return False
+    return True
+
+
+# ---------------------------------------------------------------------------
 # CODE domain: correct atoms + oracles; negatives are verified real bugs (crash / semantic / subtle)
 # ---------------------------------------------------------------------------
 
@@ -158,20 +218,6 @@ def _oracle_for(name: str):
     return fn
 
 
-def _matches(run, oracle, xs) -> bool:
-    for xi in xs:
-        try:
-            v = _run_timeout(run, xi, 1.0)
-        except Exception:  # noqa: BLE001
-            return False
-        try:
-            if v != oracle(xi):
-                return False
-        except Exception:  # noqa: BLE001
-            return False
-    return True
-
-
 def _mutate_subtle(code: str, rng: random.Random) -> list[str]:
     """Small single-edit mutations likely to change behavior (off-by-one / operator swaps)."""
     cands = []
@@ -193,36 +239,35 @@ def gen_code_examples(seed: int = 0, per_atom: int = 6) -> list[dict]:
     rng = random.Random(seed)
     probes = [4, 5, 6, 7]
     check_xs = [3, 4, 5, 6, 7, 8, 9]
+    allx = check_xs + probes                            # eval on both in ONE (cached) subprocess call
+    nc = len(check_xs)
     out: list[dict] = []
     names = list(CODE_ATOMS)
+
+    def make(code, name, label, mode, oracle, want_match):
+        outs = _cached_code_eval(code, name, allx)      # OS-killable subprocess (infinite loops -> crash)
+        if _matches_outputs(outs[:nc], oracle, check_xs) != want_match:
+            return None                                 # label not as intended -> skip (keeps labels honest)
+        return dict(domain="code", task=CODE_ATOMS[name][2], attempt_text=code,
+                    _boutputs=outs[nc:], probes=probes, label=label, mode=mode)
+
     for name in names:
-        code, _, desc = CODE_ATOMS[name]
+        code, _, _ = CODE_ATOMS[name]
         oracle = _oracle_for(name)
-        # (+) correct
-        run = _make_runner(code, name)
-        if run and _matches(run, oracle, check_xs):
-            out.append(dict(domain="code", task=desc, attempt_text=code,
-                            run=_make_runner(code, name), probes=probes, label=1, mode="correct"))
-        # (-) crash: reference a name that doesn't exist / bad op
-        crash_code = code.replace("return", "return undefined_var +", 1)
-        out.append(dict(domain="code", task=desc, attempt_text=crash_code,
-                        run=_make_runner(crash_code, name), probes=probes, label=0, mode="crash"))
-        # (-) semantic: another atom's body under THIS name (computes the wrong thing entirely)
-        other = rng.choice([n for n in names if n != name])
-        ocode, _, _ = CODE_ATOMS[other]
-        sem_code = ocode.replace(f"def {other}(", f"def {name}(", 1)
-        sem_run = _make_runner(sem_code, name)
-        if sem_run and not _matches(sem_run, oracle, check_xs):
-            out.append(dict(domain="code", task=desc, attempt_text=sem_code,
-                            run=_make_runner(sem_code, name), probes=probes, label=0, mode="semantic"))
-        # (-) subtle: verified behavior-changing single edit (the hard-to-notice ones)
-        for m in _mutate_subtle(code, rng):
-            mrun = _make_runner(m, name)
-            if mrun and not _matches(mrun, oracle, check_xs):
-                out.append(dict(domain="code", task=desc, attempt_text=m,
-                                run=_make_runner(m, name), probes=probes, label=0, mode="subtle"))
+        for e in (make(code, name, 1, "correct", oracle, True),
+                  make(code.replace("return", "return undefined_var +", 1), name, 0, "crash", oracle, False)):
+            if e:
+                out.append(e)
+        other = rng.choice([n for n in names if n != name])         # (-) semantic: another atom's body
+        sem_code = CODE_ATOMS[other][0].replace(f"def {other}(", f"def {name}(", 1)
+        e = make(sem_code, name, 0, "semantic", oracle, False)
+        if e:
+            out.append(e)
+        for m in _mutate_subtle(code, rng):                          # (-) subtle: behavior-changing edit
+            e = make(m, name, 0, "subtle", oracle, False)
+            if e:
+                out.append(e)
                 break
-    # duplicate-augment to per_atom by paraphrasing the task text (cheap variety for training)
     return out
 
 
@@ -340,7 +385,10 @@ def featurize(examples: list[dict], embed_fn, use_emb: bool = True) -> tuple[np.
     crash / magnitude / task-attempt-mismatch symptom is domain-agnostic."""
     tasks, atexts, beh = [], [], []
     for e in examples:
-        bvec, bstr = behavior_signature(e["run"], e["probes"])
+        if "_boutputs" in e:                            # code: precomputed in a subprocess (no re-exec)
+            bvec, bstr = _sig_from_outputs(e["_boutputs"])
+        else:                                           # math: in-process eval (polynomial, can't hang)
+            bvec, bstr = behavior_signature(e["run"], e["probes"])
         tasks.append(e["task"])
         atexts.append(e["attempt_text"].replace("\n", " ") + " || behavior: " + bstr)
         beh.append(bvec)
@@ -409,32 +457,33 @@ def auc(y, p) -> float:
 
 
 def decay_savings(y, p, target_prec: float = 0.90) -> dict:
-    """How many verifier calls the critic can auto-decide at >= target precision (both directions)."""
+    """How many verifier calls the critic can auto-decide at >= target precision (both directions).
+
+    NOTE: with a heavy class imbalance (mostly negatives) the reject side can hit `target_prec` trivially
+    (predict-everything-wrong), so `saved_frac` is NOT skill — read AUC for that. err_recall counts TRUE
+    errors caught / total errors (bounded to 1.0), fixing an earlier all-rejects-over-n_err bug."""
     y = np.asarray(y)
     n = len(y)
     n_err = int((y == 0).sum())
-    # auto-REJECT: predict 0 for p <= tau; maximize count s.t. precision(class0) >= target
-    best_rej = 0
-    for tau in sorted(set(p)):
+    best_rej = best_rej_true = 0
+    for tau in sorted(set(p)):                          # auto-REJECT: predict 0 for p <= tau
         sel = p <= tau
         if sel.sum() == 0:
             continue
-        prec = (y[sel] == 0).mean()
-        if prec >= target_prec:
-            best_rej = max(best_rej, int(sel.sum()))
-    # auto-ACCEPT: predict 1 for p >= tau; precision(class1) >= target
+        if (y[sel] == 0).mean() >= target_prec and int(sel.sum()) > best_rej:
+            best_rej = int(sel.sum())
+            best_rej_true = int((y[sel] == 0).sum())    # TRUE errors inside the auto-rejected set
     best_acc = 0
-    for tau in sorted(set(p), reverse=True):
+    for tau in sorted(set(p), reverse=True):            # auto-ACCEPT: predict 1 for p >= tau
         sel = p >= tau
         if sel.sum() == 0:
             continue
-        prec = (y[sel] == 1).mean()
-        if prec >= target_prec:
+        if (y[sel] == 1).mean() >= target_prec:
             best_acc = max(best_acc, int(sel.sum()))
     saved = best_rej + best_acc
     return dict(n=n, n_err=n_err, auto_reject=best_rej, auto_accept=best_acc,
                 saved_frac=saved / n if n else 0.0,
-                err_recall=best_rej / n_err if n_err else 0.0)
+                err_recall=min(1.0, best_rej_true / n_err) if n_err else 0.0)
 
 
 def _split(examples, frac=0.7, seed=0):
