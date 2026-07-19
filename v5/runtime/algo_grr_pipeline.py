@@ -745,8 +745,13 @@ def run_v2_compare(stream, holdout, author_fn, inline_fn, *, batch_author_fn=Non
           f"(banked {ours.banked}, deriv_reuse {ours.derived_reuse})")
     print(f"  RAG  |   {r_stream:>3}/{ns}    |     {r_hold:>3}/{nh}     | {r_calls_s + r_calls_h} inline "
           f"(no bank, no reasoner)")
-    print(f"\n  => HELD-OUT gap (the attack): OURS {o_hold}/{nh} vs RAG {r_hold}/{nh} — OURS reuses the "
-          f"banked verified helper; RAG must re-derive the hard logic inline and fails.")
+    if o_hold > r_hold:
+        print(f"\n  => HELD-OUT: OURS {o_hold}/{nh} vs RAG {r_hold}/{nh} — OURS ahead: reuses banked "
+              f"verified helpers; RAG re-derives inline and fails.")
+    else:
+        print(f"\n  => HELD-OUT: OURS {o_hold}/{nh} vs RAG {r_hold}/{nh} — OURS BEHIND. The planner could "
+              f"not infer the NOVEL held-out structure and no fallback was set (run --planner auto). The "
+              f"banked helper is useless if the planner can't wire it.")
     if ours.fallback_planner is not None:              # the LEARNED planner's share vs the oracle safety net
         tot = ours.plan_primary_ok + ours.plan_fallback_ok
         print(f"  => planner: LEARNED reasoner solved {ours.plan_primary_ok}/{tot} (in-distribution "
