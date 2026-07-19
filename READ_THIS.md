@@ -1,7 +1,100 @@
-# READ_THIS — GRR: Graph Recursive Reasoner (2026-07-18)
+# READ_THIS — GRR: Graph Recursive Reasoner (2026-07-19)
 
 > At-a-glance dump of the latest session (raw numbers, decisions, repro commands).
-> Updated each working session. Branch: fix/swe-slot-plan-gate-real-file.
+> Updated each working session. Branch: fix/swe-slot-plan-gate-real-file. (Older sessions below the ═══ line.)
+
+═══════════════════════════════════════════════════════════════════════════════════════════════
+## LATEST SESSION (2026-07-19) — the INTEGRATED --v2 pipeline: reasoner made NEURAL, end to end
+═══════════════════════════════════════════════════════════════════════════════════════════════
+
+**One line:** the --v2 MembraneV2 pipeline went from "membrane mechanism + frozen LM (planner was an
+ORACLE reading ground-truth)" to a **pure-neural reasoner** — GraphGPS router + trained planner infer
+structure 40/40 (stream AND held-out), no oracle — on top of a compounding graph that beats RAG on the
+real 3B. Deadline moved to 2026-07-25.
+
+### HEADLINE RAW NUMBERS
+```
+REAL 3B (Qwen2.5-3B-Instruct), --v2 MembraneV2(route→plan→author→realize→verify→bank) vs inline-RAG:
+  per-atom, oracle planner : OURS held-out 37/40 vs RAG 16/40 | stream 78 vs 58 | deriv_reuse 110 | ~4.6x fewer LM calls
+  fuzz-gated, spec-step     : OURS held-out 31/40 vs RAG 21/40 | stream 90 vs 60 | deriv_reuse 117 | spec-pred 80%
+  --planner neural (no net) : COMPOUNDING CURVE per-window OURS 18→28→32 RISING, RAG 19→18→19 FLAT (deriv_reuse 77)
+                              held-out 3/40 (net can't emit NOVEL held-out wrappers, no fallback) — EXPECTED
+
+NO-GPU (stub author correct / sim 3B inline p=0.35):
+  compound gate  : OURS 5 author-calls vs RAG 60 = 12x cut | derived_reuse 55 vs 0
+  v2 (sim)       : OURS stream 60/60 held-out 30/30 | RAG 16/60 / 5/30
+  spec-step      : 2x fewer LM calls at SAME solve (batch author K atoms in 1 call)
+  v2-wiring      : planner load-bearing at depth — OURS 0.73 vs RAG(3B inline sim) 0.31
+  router (topo)  : structural-dep recall content 0.50 flat vs FOLLOW-EDGE 1.00 scale-free
+  fuzz gate      : noisy author 50% wrong -> NO GATE banks 3/5 wrong; GATE 0 wrong (6 rejected)
+  NEURAL PLANNER (trained hard-domain seq2seq, decode-only):
+    NeuralDecode                  : stream 40/40 | held-out 6/40 (novel wrapper)
+    CandidatePlanner + topo router: stream 34/40 | held-out 25/40 (router mispicks wrapper on token collisions)
+    CandidatePlanner + GraphGPS   : stream 40/40 | held-out 40/40  <-- PURE NEURAL, ZERO oracle
+```
+
+### THE COMPONENT MAP (what is neural / trained / in --v2)
+| component | neural? | trained? | in --v2 loop? |
+|---|---|---|---|
+| GraphGPS router (`GraphGPSRouter`) | ✅ MiniLM content + follow-edge | no (embed) | ✅ `--router gps` |
+| planner / structure (`NeuralDecodePlanner`+`CandidatePlanner`) | ✅ seq2seq | ✅ hard-domain (artifacts/planner_hard.pt) | ✅ `--planner candidate` |
+| frozen LM (author + ratify) | ✅ | **frozen** (STaR-trainable) | ✅ authors missing atoms |
+| realize / verify / bank / fuzz-gate | ❌ deterministic | — | ✅ |
+| **graph-editor** (bank/abstract/merge/edge) | ❌ | — | ✅ deterministic — **the ONE missing neural piece** |
+
+### KEY FINDINGS / DECISIONS (this session)
+- **USER CAUGHT THE ORACLE:** the --v2 "reasoner" was `OraclePlanner` reading `task['_prims']`; on held-out
+  the LM wasn't even called. 31/40 was MECHANISM, not a learned reasoner. Now the planner is neural (above).
+- **Islands → in the loop:** trained SearchPlanner/router/TRM existed but were NOT wired (BUILD_PLAN #1b
+  never run; #4 ran the bare MembraneSolver, not MembraneV2). Now wired.
+- **Compounding is real on the 3B** (per-window OURS rises, RAG flat) — the hero curve.
+- **Held-out attack** = tasks whose novel wrapper is unseen; RAG (no reasoner/memory) re-derives the hard
+  logic inline and fails; OURS reuses the banked helper — IF the planner can wire it (needs candidate+GPS).
+- **Batch-author REGRESSION:** `make_lm_batch_author` (K helpers in 1 call) -> 3B writes them worse ->
+  wrong helpers pass weak verify + BANK -> held-out 37→17. FIX: per-atom author (default); `--batch-author` opt-in.
+- **FUZZ-GENERALITY GATE (GRR-1):** only helpers correct on RANDOM inputs bank (kills the "wrong helper
+  passes n=5-8 + masking wrapper" variance). Thread 2s HARD TIMEOUT + n≤14 (a naive-recursive authored
+  `catalan` was exponential — hung the run 1h at task 80).
+- **CANDIDATE-CONDITIONING + GraphGPS COMPOUND** (user's call): candidate-conditioning makes the router
+  load-bearing (planner selects the wrapper from candidates), GraphGPS makes the router accurate (semantic
+  disambiguation of 'digits' vs 'divisors') -> 40/40 both.
+- **Fixed a DISHONEST print** that claimed "OURS reuses banked helper; RAG fails" even when OURS lost 3 vs 23.
+- **Training decision:** DON'T LoRA the frozen LM to memorize the 5 benchmark helpers (= redundant with the
+  graph + measured poison). STaR is for GENERAL authoring skill on diverse MBPP+ (378, `algo_star_epoch`,
+  poison-safe: rejection-sample + frozen holdout + discovery targets). The remaining --v2 cap is 3B AUTHORING
+  quality (banked helpers), handled by fuzz-gate + best-of-2 fallback.
+
+### RUN COMMANDS (real 3B)
+```
+# pure-neural reasoner + compounding vs RAG (the full stack):
+python -m v5.runtime.algo_grr_scaleup --run --v2 --planner candidate --router gps --n-compose 60 --lm Qwen/Qwen2.5-3B-Instruct
+# controllable fallbacks (kept, not removed):  --planner {oracle,neural,candidate,auto}  --router {topo,gps}  --batch-author
+# STaR-train the student (ship model, holdout-gated):
+python -m v5.runtime.algo_star_epoch --epochs 2 --model Qwen/Qwen2.5-3B-Instruct --corpus artifacts/mbpp_plus_prepped.jsonl --limit 300 --holdout 40
+# presentation flow (7 stages + spec recall + anti-drift gate):
+python -m v5.runtime.trace_heldout --spec --n 3
+```
+
+### NO-GPU SELFTESTS (10, all PASS) — `python -m v5.runtime.algo_grr_pipeline --<name>`
+`selftest` `selftest-compound` `selftest-v2` `selftest-spec` `selftest-router` `selftest-fuzz`
+`selftest-v2-wiring` ; also `algo_grr_scaleup --selftest`, `algo_star_epoch --selftest`, `algo_grr_specstep --selftest`
+
+### COMMITS (branch fix/swe-slot-plan-gate-real-file, this session)
+`1ad5292` spec: recall hard step only (held-out 0→100% no-GPU) · `6944460` per-atom author (batch regressed) ·
+`02bf78e` fuzz-generality gate · `5b20b19` NEURAL planner in --v2 (oracle fallback kept) · `016264a` fuzz-gate
+2s timeout+n≤14 (hang fix) · `c9fec43` honest held-out print · `19c91b3` CandidatePlanner (pure-neural held-out) ·
+`c2de807` GraphGPS router (40/40 both). New files: `trace_heldout.py`. Trained: `artifacts/planner_hard.pt`.
+
+### PROPOSAL DELIVERABLE (competition, TICTA/I-New-Gen)
+`Downloads/Proposal_I_NEW_GEN_5page.docx` (+ .pdf) — 5-page FORMAL rebuild from the I-New-Gen original (cover
+kept verbatim): new hook (composition ceiling 0.73→0.03), problem statement answering the 3 judge rejections
+(slow / context-grows / already-in-market), pipeline diagram, results table. Verified 5 pages in Word.
+
+### NEXT LEVERS (pick one, deadline 07-25)
+1. **STaR-train the LM** (ship model, poison-safe, `algo_star_epoch` ready) — general authoring on diverse code.
+2. **Neural GRAPH-EDITOR** (the one missing neural piece — "model learns to structure its own memory":
+   bank/abstract/merge/prune/edge as a learned policy). The genuinely novel core.
+Lock the proposal around the compounding curve + pure-neural reasoner FIRST, then pick.
 
 ## What GRR is
 A tiny OWNED reasoner (not a language model) whose vocabulary + memory ARE a verified, self-compressing
