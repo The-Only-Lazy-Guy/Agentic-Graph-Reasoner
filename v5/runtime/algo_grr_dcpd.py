@@ -338,10 +338,13 @@ def run_lm(model: str, n: int = 40):
     """Real 3B: DUAL-CHANNEL (exact closure + LM-filled validated glue + faithful narration) vs FREE-FORM
     inline (LM writes the whole entry). Measures the symbolic guarantee: dual-channel never ships a broken
     closure; free-form inline does."""
+    import os
+    os.environ["V5_HARD_VERIFY"] = "1"             # untrusted free-form 3B code -> hard-killable subprocess
     from v5.runtime.algo_grr_membrane import make_frozen_gen, _extract_code
     from v5.runtime.algo_grr_compose import gen_corpus_hard, HARD, OUTER, OUTER_HELD
     from v5.runtime.algo_grr_pipeline import OraclePlanner
     gen = make_frozen_gen(model, temperature=0.4, max_new_tokens=200)
+    print(f"  model loaded — running {n} tasks (2 LM calls each: glue-fill + inline baseline)...", flush=True)
 
     store = AtomStore()
     for name, (code, _fn, desc) in {**OUTER, **OUTER_HELD, **HARD}.items():
@@ -367,7 +370,7 @@ def run_lm(model: str, n: int = 40):
         icode = _extract_code(gen([ip])[0])
         inline_syntax_err += int(not grammar_valid(icode))
         inline_ok += int(t["verify_fn"](icode)[0] >= 1.0)
-        if (i + 1) % 10 == 0:
+        if (i + 1) % 5 == 0:
             print(f"  [{i+1}/{n}] dual-ok={dc_ok} (glue-rejected {dc_glue_rejected}) | inline-ok={inline_ok} "
                   f"(syntax-err {inline_syntax_err})", flush=True)
     print(f"\n  arm         | verifies | syntax errors shipped | explanation faithfulness")
