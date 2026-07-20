@@ -57,6 +57,23 @@ mistake tier) real-MiniLM data run (killed mid-run; rebuild was in progress). He
 the code-atom compounding (pure-neural real-3B 31/40 vs RAG 15); dual-channel = the "explains + meaning
 not code" story.
 
+### SCALING LIMITS (2026-07-20 — stress-testing where v6 breaks, no-GPU)
+```
+LIMIT 1 — THE COMPOUNDING WALL (algo_grr_scale --selftest/--run/--sweep):
+  "LM-cost/task falls as the graph grows" HOLDS but is BOUNDED. Long stream, large atom pool (Zipf reuse),
+  sim author: author-calls/task falls but PLATEAUS at a floor = rate a NEVER-SEEN atom appears (NOT cost->0).
+    skewed reuse (zipf 1.3, K400/T600): 0.33 -> 0.09   |  flat/heavy-tail (zipf 0.3): 0.93 -> 0.25
+  sweep (T=1500): amortized cost = banked/T set by SKEW not task-count — K500 zipf1.4 banks 165/1500=11%
+    (89% reused) vs zipf0.8 banks 378/1500=25%. LAW: cost ~= # distinct atoms the workload TOUCHES.
+  Real-3B validation ready: algo_grr_scale --run --K 100 --T 400 --lm Qwen/Qwen2.5-3B-Instruct (floor may
+    RISE with 3B author errors + fuzz-gate rejects). --lm sets V5_HARD_VERIFY=1.
+LIMIT 2 — THE RETRIEVAL WALL (algo_grr_graphgps --sweep):
+  content-only routing to a SPECIFIC dep atom = BLIND (0.51 flat, needle, no scale improvement);
+  GraphGPS (struct feats + 1-hop msg-pass) HOLDS ~0.85; topology FOLLOW-EDGE scale-free 1.00.
+  + a COMPUTE wall: flat O(N) neural router too slow past N~800 -> need hierarchical/cached/ANN retrieval.
+NEXT limits: real-3B compounding (--lm, their box); composition-DEPTH wall (planner INFERRING structure).
+```
+
 ═══════════════════════════════════════════════════════════════════════════════════════════════
 ## LATEST SESSION (2026-07-19) — the INTEGRATED --v2 pipeline: reasoner made NEURAL, end to end
 ═══════════════════════════════════════════════════════════════════════════════════════════════
