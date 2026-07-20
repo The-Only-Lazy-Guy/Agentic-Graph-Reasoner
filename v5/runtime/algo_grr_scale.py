@@ -103,7 +103,7 @@ def gen_stream(pool: dict, T: int, zipf_s: float, seed: int = 1) -> list[dict]:
 # ── run: MembraneV2 over the stream with a sim (correct) author; measure the compounding curve ────
 def run_scale(K: int, T: int, zipf_s: float, router: str = "topo", window: int = 50,
               seed: int = 0, verbose: bool = True, lm: str = "", noise: float = 0.0,
-              p_hard: float = 0.25, author_tries: int = 1, author_fail_cap=None) -> dict:
+              p_hard: float = 0.25, author_tries: int = 1, author_fail_cap=None, refract: bool = False) -> dict:
     pool = gen_atom_pool(K, seed=seed)
     stream = gen_stream(pool, T, zipf_s, seed=seed + 1)
     src = {**{k: v[0] for k, v in pool.items()}, **{k: v[0] for k, v in WRAP.items()}}
@@ -111,8 +111,13 @@ def run_scale(K: int, T: int, zipf_s: float, router: str = "topo", window: int =
         import os
         os.environ["V5_HARD_VERIFY"] = "1"                       # untrusted LM code -> hard-kill subprocess verify
         from v5.runtime.algo_grr_membrane import make_frozen_gen
-        from v5.runtime.algo_grr_pipeline import make_lm_author
-        author = make_lm_author(make_frozen_gen(lm, temperature=0.4, max_new_tokens=200))
+        gen = make_frozen_gen(lm, temperature=0.4, max_new_tokens=200)
+        if refract:                                              # SPEC REFRACTION: each --author-tries uses a
+            from v5.runtime.algo_grr_refract import make_refraction_author  # DIFFERENT (decorrelated) prompt
+            author = make_refraction_author(gen)
+        else:
+            from v5.runtime.algo_grr_pipeline import make_lm_author
+            author = make_lm_author(gen)
     elif noise > 0:                                              # WEAK sim author: a hard fraction fails the gate.
         hard = set(list(pool)[:int(len(pool) * noise)])          # the FREQUENT atoms are the hard ones (worst case:
         rng_a = random.Random(seed + 3)                          # the common tasks are the ones the model can't write)
@@ -250,6 +255,8 @@ def main():
                     "authoring errors + fuzz-gate rejections")
     ap.add_argument("--sweep", action="store_true", help="sweep K and zipf to map the compounding floor")
     ap.add_argument("--tax", action="store_true", help="the authoring-error tax + fix (best-of-N + mistake-node)")
+    ap.add_argument("--refract", action="store_true", help="Spec Refraction author: each --author-tries uses a "
+                    "DIFFERENT (decorrelated) prompt, not a resample — the real authoring-tax fix (use with --lm)")
     ap.add_argument("--author-tries", type=int, default=1, help="best-of-N author (resample per atom)")
     ap.add_argument("--author-fail-cap", type=int, default=None, help="failed-author mistake-node: skip an atom "
                     "after N failed authorings (cuts the real-3B tax; try with --lm)")
@@ -270,7 +277,7 @@ def main():
         return
     if a.run:
         r = run_scale(K=a.K, T=a.T, zipf_s=a.zipf, router=a.router, lm=a.lm,
-                      author_tries=a.author_tries, author_fail_cap=a.author_fail_cap)
+                      author_tries=a.author_tries, author_fail_cap=a.author_fail_cap, refract=a.refract)
         _print_summary(r)
         print(f"  (author_calls={r['author_calls']} banked={r['banked']} wasted={r['author_calls']-r['banked']} "
               f"skipped={r['skipped']} — with --author-fail-cap the mistake-node cuts the wasted re-authoring)")
