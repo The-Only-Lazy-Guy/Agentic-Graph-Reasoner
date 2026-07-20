@@ -258,7 +258,7 @@ def dump_authoring(lm: str, n: int = 6) -> None:
             ns: dict = {}
             exec(compile(src, "<a>", "exec"), ns)  # noqa: S102
             fn = ns.get(name)
-            return callable(fn) and all(fn(x) == orc(x) for x in (2, 3, 4, 5, 6, 7))
+            return callable(fn) and all(fn(x) == orc(x) for x in range(2, 15))  # match the fuzz gate's 2..14
         except Exception:  # noqa: BLE001
             return False
     # author each atom ONCE with the description prompt; report the pass RATE and SHOW the failures (the
