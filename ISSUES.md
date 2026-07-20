@@ -31,10 +31,24 @@ of the atoms in our synthetic domain.
   every sample, so N samples give N copies of the same wrong code. Best-of-N assumes independence that does
   not hold → it burns N× compute for near-zero rescue. **Resampling cannot fix understanding.**
 
-**So the core tension:** the frozen LM is a fixed-capability author. For the ~half of atoms it *can* write,
-the graph compounds beautifully (reuse, dual-channel, retrieval all proven). For the ~half it *cannot*
-write, no retry strategy over the *same frozen model on the same prompt* helps — the failure is in the
-model's understanding, not in sampling luck.
+**⚠ CORRECTION (2026-07-20, after `--dump` inspection — the raw refuted the aggregate).** Inspecting what
+the 3B *actually writes* (`algo_grr_scale --dump 6 --lm ...`) overturned the diagnosis above: on the poly
+domain the 3B authors the atoms **correctly** (~23/24 sampled: `4 * n**2 + 6 * n) % 11` — right power op,
+precedence, mod). So these are **NOT** capability-gap atoms. The measured banked 39–45/100 was largely a
+**system artifact**, not a model limit: (1) the failed-author mistake-node **cap skipped 166 authorable
+atoms** (over-aggressive on temp-0.4 single-sample misses); (2) the default `make_lm_author` prompt is weak
+("the quantity its **name** denotes" — the name is a meaningless `g47`), whereas the **description-focused**
+prompt passes; (3) verbose refract variants **truncate** at `max_new_tokens=200`. None of the three real-3B
+runs used {description prompt + no cap}. Decisive re-test queued: `--run --refract --author-tries 2` (no
+cap) — prediction: banked → ~75, floor → ~0.12. **Lesson (the user's methodology, vindicated again): inspect
+the raw before concluding a capability ceiling from an aggregate.** The genuine invention-ceiling question
+still stands but must be asked on a domain the 3B *demonstrably* fails on the raw dump — the poly domain was
+a false alarm caused by our own harness config.
+
+**The (now-qualified) core tension:** the frozen LM is a fixed-capability author. Where it genuinely can't
+author an atom (to be established by raw inspection, NOT aggregates), no same-prompt retry helps and the
+lever is teacher/decomposition. But our first "ceiling" was mostly harness config — so re-measure with a
+sane author (description prompt, no premature cap) before invoking the teacher.
 
 **Candidate directions (unranked — for thinking):**
 1. **Teacher escalation.** Atoms the 3B systematically fails → hand to the molab 32B teacher (offline),
