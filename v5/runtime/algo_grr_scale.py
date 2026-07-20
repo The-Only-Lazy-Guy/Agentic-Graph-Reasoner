@@ -96,7 +96,7 @@ def gen_stream(pool: dict, T: int, zipf_s: float, seed: int = 1) -> list[dict]:
         def _mk(a=asserts):
             return lambda code: verify_asserts(code, a)
         tasks.append(dict(text=text, entry=entry, examples=asserts, verify_fn=_mk(),
-                          _prims=(hard, wrap), atom_oracles={hard: h_orc}))
+                          _prims=(hard, wrap), atom_oracles={hard: h_orc, wrap: w_fn}))  # both -> sig-routable
     return tasks
 
 
@@ -127,19 +127,23 @@ def run_scale(K: int, T: int, zipf_s: float, router: str = "topo", window: int =
     store = AtomStore()
     for name, (code, *_ ) in WRAP.items():                        # wrappers seeded; hard atoms authored on demand
         store.set_rich(name, code, description=WRAP[name][2].replace("{v}", "the value"), provenance="seed")
-    rt = TopologyAtomRouter(store) if router == "topo" else AtomRouter(store)
+    if router == "sig":
+        from v5.runtime.algo_grr_sigroute import SignatureRouter
+        rt = SignatureRouter(store)                              # behavioral routing (fixes numeric-collision wall)
+    else:
+        rt = TopologyAtomRouter(store) if router == "topo" else AtomRouter(store)
     m = MembraneV2(store, rt, OraclePlanner(), author_fn=author, bank=True,
                    author_tries=author_tries, author_fail_cap=author_fail_cap)
 
     rows = []
     prev_author = prev_reuse = 0
-    win_solved = win_route = 0
+    win_solved = win_route = route_all = 0
     seen_hard = set()
     win_new = 0
     for i, t in enumerate(stream):
         r = m.solve(t)
         win_solved += int(r["solved"])
-        win_route += int(r["route_ok"])
+        win_route += int(r["route_ok"]); route_all += int(r["route_ok"])
         h_atom = t["_prims"][0]                     # NB: not `hard` — that would clobber the author closure's set
         if h_atom not in seen_hard:
             seen_hard.add(h_atom); win_new += 1
@@ -164,7 +168,8 @@ def run_scale(K: int, T: int, zipf_s: float, router: str = "topo", window: int =
     return dict(rows=rows, K=K, T=T, zipf=zipf_s, early=early, late=late,
                 floor=late_new_rate, banked=m.banked, graph=len(store), reuse=m.derived_reuse,
                 author_calls=m.author_calls, skipped=m.author_skipped, failed=len(m.failed_authors),
-                fuzz_rejected=m.fuzz_rejected)
+                fuzz_rejected=m.fuzz_rejected, route=route_all / max(1, T),
+                leverage=T / max(1, m.banked))                  # Λ = tasks processed / unique atoms authored
 
 
 def _print_summary(r: dict):
@@ -173,6 +178,8 @@ def _print_summary(r: dict):
           f"banked={r['banked']}/{r['K']} deriv_reuse={r['reuse']}")
     print(f"  => COMPOUNDING holds (author/task falls {r['early']:.2f}->{r['late']:.2f}) but PLATEAUS at the "
           f"tail-rate, not zero: the honest scaling law — cost floor = rate new atoms appear.")
+    print(f"  => Λ (Graph Leverage = tasks/unique-atoms) = {r['leverage']:.1f}  |  route_ok = {r['route']:.2f} "
+          f"(sig-router = behavioral, immune to text collisions)")
 
 
 def selftest() -> bool:
@@ -236,7 +243,8 @@ def main():
     ap.add_argument("--K", type=int, default=200)
     ap.add_argument("--T", type=int, default=1500)
     ap.add_argument("--zipf", type=float, default=1.1)
-    ap.add_argument("--router", choices=["topo", "flat"], default="topo")
+    ap.add_argument("--router", choices=["topo", "flat", "sig"], default="topo",
+                    help="sig = Execution-Signature Router (behavioral, fixes numeric-collision routing)")
     ap.add_argument("--lm", type=str, default="", help="real frozen author (e.g. Qwen/Qwen2.5-3B-Instruct); "
                     "else a correct stub author. Shows whether the compounding floor RISES with real 3B "
                     "authoring errors + fuzz-gate rejections")
@@ -261,7 +269,7 @@ def main():
                       f"{r['banked']:>7} {r['reuse']:>6}", flush=True)
         return
     if a.run:
-        r = run_scale(K=a.K, T=a.T, zipf_s=a.zipf, router=("topo" if a.router == "topo" else "flat"), lm=a.lm,
+        r = run_scale(K=a.K, T=a.T, zipf_s=a.zipf, router=a.router, lm=a.lm,
                       author_tries=a.author_tries, author_fail_cap=a.author_fail_cap)
         _print_summary(r)
         print(f"  (author_calls={r['author_calls']} banked={r['banked']} wasted={r['author_calls']-r['banked']} "

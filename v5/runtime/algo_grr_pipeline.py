@@ -653,7 +653,8 @@ class MembraneV2:
         return ok, code, prog, authored, explanation
 
     def solve(self, task: dict) -> dict:
-        ranked = self.router.rank(task["text"])
+        ranked = (self.router.rank(task["text"], task) if getattr(self.router, "needs_task", False)
+                  else self.router.rank(task["text"]))          # behavioral routers (SignatureRouter) want the task
         # PRIMARY planner (the learned reasoner) attempts first; if its program can't be verified, retry
         # with the controllable oracle/heuristic FALLBACK (kept for deployment, not removed).
         ok, code, prog, authored_now, explanation = self._attempt(task, self.planner, ranked)

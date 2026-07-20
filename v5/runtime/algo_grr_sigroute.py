@@ -83,6 +83,37 @@ class SignatureIndex:
         return cand
 
 
+class SignatureRouter:
+    """MembraneV2 router by BEHAVIOR, not text. Ranks store atoms whose execution signature matches the
+    task's required-atom behaviors (from task['atom_oracles']) FIRST -> exact functional routing on
+    low-semantic domains where text embeddings collide. `needs_task` tells MembraneV2 to pass the task."""
+
+    needs_task = True
+
+    def __init__(self, store):
+        self.store = store
+        self._sig: dict[str, tuple] = {}
+
+    def _refresh(self):
+        for name in self.store:
+            if name not in self._sig:
+                ns: dict = {}
+                try:
+                    exec(compile(self.store[name], "<atom>", "exec"), ns)  # noqa: S102 — verified store atom
+                    fn = ns.get(name)
+                except Exception:  # noqa: BLE001
+                    fn = None
+                self._sig[name] = signature(fn) if callable(fn) else None
+
+    def rank(self, task_text, task=None, k=None):
+        self._refresh()
+        req = {signature(orc) for orc in (task or {}).get("atom_oracles", {}).values()}
+        exact = [n for n, s in self._sig.items() if s is not None and s in req]
+        rest = [n for n in self.store if n not in exact]
+        ranked = exact + rest
+        return ranked[:k] if k else ranked
+
+
 # ── selftest (no-GPU) ────────────────────────────────────────────────────────────
 def _polys(K, seed=0):
     rng = random.Random(seed)
