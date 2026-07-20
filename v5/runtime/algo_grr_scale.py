@@ -102,11 +102,18 @@ def gen_stream(pool: dict, T: int, zipf_s: float, seed: int = 1) -> list[dict]:
 
 # ── run: MembraneV2 over the stream with a sim (correct) author; measure the compounding curve ────
 def run_scale(K: int, T: int, zipf_s: float, router: str = "topo", window: int = 50,
-              seed: int = 0, verbose: bool = True) -> dict:
+              seed: int = 0, verbose: bool = True, lm: str = "") -> dict:
     pool = gen_atom_pool(K, seed=seed)
     stream = gen_stream(pool, T, zipf_s, seed=seed + 1)
     src = {**{k: v[0] for k, v in pool.items()}, **{k: v[0] for k, v in WRAP.items()}}
-    author = lambda name, task: src.get(name, "")                 # noqa: E731 — correct stub author (real 3B may err)
+    if lm:                                                        # REAL 3B author: errors + fuzz-gate rejects
+        import os
+        os.environ["V5_HARD_VERIFY"] = "1"                       # untrusted LM code -> hard-kill subprocess verify
+        from v5.runtime.algo_grr_membrane import make_frozen_gen
+        from v5.runtime.algo_grr_pipeline import make_lm_author
+        author = make_lm_author(make_frozen_gen(lm, temperature=0.4, max_new_tokens=200))
+    else:
+        author = lambda name, task: src.get(name, "")            # noqa: E731 — correct stub author (real 3B may err)
 
     store = AtomStore()
     for name, (code, *_ ) in WRAP.items():                        # wrappers seeded; hard atoms authored on demand
@@ -187,6 +194,9 @@ def main():
     ap.add_argument("--T", type=int, default=1500)
     ap.add_argument("--zipf", type=float, default=1.1)
     ap.add_argument("--router", choices=["topo", "flat"], default="topo")
+    ap.add_argument("--lm", type=str, default="", help="real frozen author (e.g. Qwen/Qwen2.5-3B-Instruct); "
+                    "else a correct stub author. Shows whether the compounding floor RISES with real 3B "
+                    "authoring errors + fuzz-gate rejections")
     ap.add_argument("--sweep", action="store_true", help="sweep K and zipf to map the compounding floor")
     a = ap.parse_args()
     if a.selftest:
@@ -202,7 +212,7 @@ def main():
                       f"{r['banked']:>7} {r['reuse']:>6}", flush=True)
         return
     if a.run:
-        r = run_scale(K=a.K, T=a.T, zipf_s=a.zipf, router=("topo" if a.router == "topo" else "flat"))
+        r = run_scale(K=a.K, T=a.T, zipf_s=a.zipf, router=("topo" if a.router == "topo" else "flat"), lm=a.lm)
         _print_summary(r)
         return
     ap.print_help()
