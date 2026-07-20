@@ -242,6 +242,9 @@ def main():
                     "authoring errors + fuzz-gate rejections")
     ap.add_argument("--sweep", action="store_true", help="sweep K and zipf to map the compounding floor")
     ap.add_argument("--tax", action="store_true", help="the authoring-error tax + fix (best-of-N + mistake-node)")
+    ap.add_argument("--author-tries", type=int, default=1, help="best-of-N author (resample per atom)")
+    ap.add_argument("--author-fail-cap", type=int, default=None, help="failed-author mistake-node: skip an atom "
+                    "after N failed authorings (cuts the real-3B tax; try with --lm)")
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if selftest() else 1)
@@ -258,8 +261,11 @@ def main():
                       f"{r['banked']:>7} {r['reuse']:>6}", flush=True)
         return
     if a.run:
-        r = run_scale(K=a.K, T=a.T, zipf_s=a.zipf, router=("topo" if a.router == "topo" else "flat"), lm=a.lm)
+        r = run_scale(K=a.K, T=a.T, zipf_s=a.zipf, router=("topo" if a.router == "topo" else "flat"), lm=a.lm,
+                      author_tries=a.author_tries, author_fail_cap=a.author_fail_cap)
         _print_summary(r)
+        print(f"  (author_calls={r['author_calls']} banked={r['banked']} wasted={r['author_calls']-r['banked']} "
+              f"skipped={r['skipped']} — with --author-fail-cap the mistake-node cuts the wasted re-authoring)")
         return
     ap.print_help()
 
