@@ -184,7 +184,7 @@ def _print_summary(r: dict):
     print(f"  => COMPOUNDING holds (author/task falls {r['early']:.2f}->{r['late']:.2f}) but PLATEAUS at the "
           f"tail-rate, not zero: the honest scaling law — cost floor = rate new atoms appear.")
     print(f"  => Λ (Graph Leverage = tasks/unique-atoms) = {r['leverage']:.1f}  |  route_ok = {r['route']:.2f} "
-          f"(sig-router = behavioral, immune to text collisions)")
+          f"(use --router sig for behavioral routing, immune to text collisions)")
 
 
 def selftest() -> bool:
@@ -241,6 +241,35 @@ def tax_demo() -> bool:
     return ok
 
 
+def dump_authoring(lm: str, n: int = 6) -> None:
+    """INSPECT THE RAW: author n poly atoms with the real 3B across refraction variants; print exactly what
+    it writes + pass/fail. Confirms the failure MODE (e.g. `^` for power, precedence, mod placement) instead
+    of arguing from aggregates — so we pick the right fix (grammar-constraint vs teacher vs domain)."""
+    import os
+    os.environ["V5_HARD_VERIFY"] = "1"
+    from v5.runtime.algo_grr_membrane import make_frozen_gen, _extract_code
+    from v5.runtime.algo_lm_author import repair_code
+    from v5.runtime.algo_grr_refract import refract_specs
+    gen = make_frozen_gen(lm, temperature=0.4, max_new_tokens=200)
+    pool = gen_atom_pool(40, seed=0)
+
+    def _ok(src, name, orc):
+        try:
+            ns: dict = {}
+            exec(compile(src, "<a>", "exec"), ns)  # noqa: S102
+            fn = ns.get(name)
+            return callable(fn) and all(fn(x) == orc(x) for x in (2, 3, 4, 5, 6, 7))
+        except Exception:  # noqa: BLE001
+            return False
+    labels = ["canonical", "identifier", "closed-form", "restate"]
+    for name in list(pool)[:n]:
+        code, orc, desc = pool[name]
+        print(f"\n=== {name}: {desc} ===\n  TARGET: {code.strip()}")
+        for i, lab in enumerate(labels):
+            raw = repair_code(_extract_code(gen([refract_specs(name, desc)[i]])[0]), name)
+            print(f"  [{lab:<10} pass={str(_ok(raw, name, orc)):<5}] {raw.strip()[:130]}")
+
+
 def main():
     ap = argparse.ArgumentParser(description="compounding-at-scale stress test")
     ap.add_argument("--selftest", action="store_true")
@@ -260,9 +289,16 @@ def main():
     ap.add_argument("--author-tries", type=int, default=1, help="best-of-N author (resample per atom)")
     ap.add_argument("--author-fail-cap", type=int, default=None, help="failed-author mistake-node: skip an atom "
                     "after N failed authorings (cuts the real-3B tax; try with --lm)")
+    ap.add_argument("--dump", type=int, nargs="?", const=6, default=0, help="inspect the RAW 3B authoring of N "
+                    "atoms across refraction variants (needs --lm) — confirm the failure mode")
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if selftest() else 1)
+    if a.dump:
+        if not a.lm:
+            raise SystemExit("--dump needs --lm")
+        dump_authoring(a.lm, a.dump)
+        return
     if a.tax:
         sys.exit(0 if tax_demo() else 1)
     if a.sweep:
