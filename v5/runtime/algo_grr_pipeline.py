@@ -543,7 +543,7 @@ class MembraneV2:
 
     def __init__(self, store, router, planner, ratify_fn=None, author_fn=None, bank=True,
                  batch_author_fn=None, fuzz_gate=True, fuzz_n=12, fallback_planner=None,
-                 semantic_channel=None):
+                 semantic_channel=None, author_tries=1, author_fail_cap=None):
         self.store, self.router, self.planner = store, router, planner
         self.ratify_fn = ratify_fn
         self.author_fn = author_fn
@@ -563,6 +563,11 @@ class MembraneV2:
         self.fuzz_rejected = 0                     # authored helpers REJECTED by the generality gate
         self.plan_primary_ok = 0                   # tasks solved by the PRIMARY planner (the learned reasoner)
         self.plan_fallback_ok = 0                  # tasks solved only after the oracle/heuristic fallback
+        self.author_tries = author_tries           # best-of-N: resample the author up to N times per atom
+        self.author_fail_cap = author_fail_cap     # after N cumulative fails, mark atom unauthorable (mistake-node)
+        self.failed_authors = set()                # (-) mistake-tier: atoms the author persistently fails
+        self.author_fail_count = {}                # atom -> cumulative failed-authoring count
+        self.author_skipped = 0                    # authoring skipped because atom is a known failed-author
 
     def _fuzz_general(self, name: str, src: str, task: dict) -> bool:
         """GRR-1 fuzz-generality: an authored helper enters the store ONLY if it matches its oracle on
@@ -619,13 +624,22 @@ class MembraneV2:
                     self.fuzz_rejected += 1        # wrong-but-compiles helper -> gate rejects, never banks
         elif missing and self.author_fn is not None:
             for a in missing:
-                src = self.author_fn(a, task)
-                self.lm_calls += 1
-                self.author_calls += 1
-                if src and _authored_ok(src, a) and self._fuzz_general(a, src, task):
-                    self.store[a] = src; authored.append(a)
-                elif src and _authored_ok(src, a):
-                    self.fuzz_rejected += 1
+                if a in self.failed_authors:           # known-unauthorable (mistake-node) -> skip, no wasted call
+                    self.author_skipped += 1
+                    continue
+                ok_bank = False
+                for _ in range(max(1, self.author_tries)):   # best-of-N: resample until the gate passes
+                    src = self.author_fn(a, task)
+                    self.lm_calls += 1
+                    self.author_calls += 1
+                    if src and _authored_ok(src, a) and self._fuzz_general(a, src, task):
+                        self.store[a] = src; authored.append(a); ok_bank = True; break
+                    elif src and _authored_ok(src, a):
+                        self.fuzz_rejected += 1
+                if not ok_bank and self.author_fail_cap is not None:   # record the failed-authoring MISTAKE
+                    self.author_fail_count[a] = self.author_fail_count.get(a, 0) + 1
+                    if self.author_fail_count[a] >= self.author_fail_cap:
+                        self.failed_authors.add(a)     # stop wasting calls re-authoring a persistent failure
         explanation = ""
         if self.semantic_channel is not None:      # v6 dual-channel: symbolic skeleton + faithful narration
             from v5.runtime.algo_grr_dcpd import dual_channel_realize

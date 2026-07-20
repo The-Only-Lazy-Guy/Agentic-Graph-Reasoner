@@ -102,7 +102,8 @@ def gen_stream(pool: dict, T: int, zipf_s: float, seed: int = 1) -> list[dict]:
 
 # ── run: MembraneV2 over the stream with a sim (correct) author; measure the compounding curve ────
 def run_scale(K: int, T: int, zipf_s: float, router: str = "topo", window: int = 50,
-              seed: int = 0, verbose: bool = True, lm: str = "") -> dict:
+              seed: int = 0, verbose: bool = True, lm: str = "", noise: float = 0.0,
+              p_hard: float = 0.25, author_tries: int = 1, author_fail_cap=None) -> dict:
     pool = gen_atom_pool(K, seed=seed)
     stream = gen_stream(pool, T, zipf_s, seed=seed + 1)
     src = {**{k: v[0] for k, v in pool.items()}, **{k: v[0] for k, v in WRAP.items()}}
@@ -112,6 +113,14 @@ def run_scale(K: int, T: int, zipf_s: float, router: str = "topo", window: int =
         from v5.runtime.algo_grr_membrane import make_frozen_gen
         from v5.runtime.algo_grr_pipeline import make_lm_author
         author = make_lm_author(make_frozen_gen(lm, temperature=0.4, max_new_tokens=200))
+    elif noise > 0:                                              # WEAK sim author: a hard fraction fails the gate.
+        hard = set(list(pool)[:int(len(pool) * noise)])          # the FREQUENT atoms are the hard ones (worst case:
+        rng_a = random.Random(seed + 3)                          # the common tasks are the ones the model can't write)
+
+        def author(name, task):                                 # stochastic failure (best-of-N can retry past it)
+            if name in hard and rng_a.random() > p_hard:
+                return f"def {name}(n):\n    return 0\n"         # WRONG -> fuzz-gate rejects (never banks)
+            return src.get(name, "")
     else:
         author = lambda name, task: src.get(name, "")            # noqa: E731 — correct stub author (real 3B may err)
 
@@ -119,7 +128,8 @@ def run_scale(K: int, T: int, zipf_s: float, router: str = "topo", window: int =
     for name, (code, *_ ) in WRAP.items():                        # wrappers seeded; hard atoms authored on demand
         store.set_rich(name, code, description=WRAP[name][2].replace("{v}", "the value"), provenance="seed")
     rt = TopologyAtomRouter(store) if router == "topo" else AtomRouter(store)
-    m = MembraneV2(store, rt, OraclePlanner(), author_fn=author, bank=True)
+    m = MembraneV2(store, rt, OraclePlanner(), author_fn=author, bank=True,
+                   author_tries=author_tries, author_fail_cap=author_fail_cap)
 
     rows = []
     prev_author = prev_reuse = 0
@@ -130,9 +140,9 @@ def run_scale(K: int, T: int, zipf_s: float, router: str = "topo", window: int =
         r = m.solve(t)
         win_solved += int(r["solved"])
         win_route += int(r["route_ok"])
-        hard = t["_prims"][0]
-        if hard not in seen_hard:
-            seen_hard.add(hard); win_new += 1
+        h_atom = t["_prims"][0]                     # NB: not `hard` — that would clobber the author closure's set
+        if h_atom not in seen_hard:
+            seen_hard.add(h_atom); win_new += 1
         if (i + 1) % window == 0:
             da = m.author_calls - prev_author
             dr = m.derived_reuse - prev_reuse
@@ -152,7 +162,9 @@ def run_scale(K: int, T: int, zipf_s: float, router: str = "topo", window: int =
     # late in the stream ~ the probability mass still on unseen atoms. Approximated by measured late new-rate.
     late_new_rate = sum(x["new_atoms"] for x in rows[-3:]) / (3 * window) if len(rows) >= 3 else float("nan")
     return dict(rows=rows, K=K, T=T, zipf=zipf_s, early=early, late=late,
-                floor=late_new_rate, banked=m.banked, graph=len(store), reuse=m.derived_reuse)
+                floor=late_new_rate, banked=m.banked, graph=len(store), reuse=m.derived_reuse,
+                author_calls=m.author_calls, skipped=m.author_skipped, failed=len(m.failed_authors),
+                fuzz_rejected=m.fuzz_rejected)
 
 
 def _print_summary(r: dict):
@@ -186,6 +198,37 @@ def selftest() -> bool:
     return ok
 
 
+def tax_demo() -> bool:
+    """LIMIT 3 (the authoring-error tax) + THE FIX: a WEAK author (30% of atoms fail the gate stochastically,
+    p=0.25/call) inflates the compounding floor by re-authoring failures forever. best-of-N banks the
+    stochastically-hard atoms; a FAILED-AUTHOR mistake-node stops re-authoring persistent failures."""
+    print("algo_grr_scale --tax: the authoring-error tax (weak author) + the fix "
+          "(best-of-N + failed-author mistake-node)\n")
+    # PERSISTENT-hard: 30% of atoms (the FREQUENT ones) the author can NEVER write (p_hard=0) -> the
+    # fuzz-gate keeps rejecting them, so without memory they are re-authored on every reappearance forever.
+    base = dict(K=60, T=600, zipf_s=1.1, noise=0.30, p_hard=0.0, seed=0, verbose=False)
+    a = run_scale(**base, author_tries=1, author_fail_cap=None)      # baseline: re-authors failures forever
+    b = run_scale(**base, author_tries=1, author_fail_cap=2)         # fix: failed-author mistake-node (try 2, then skip)
+    # best-of-N helps the STOCHASTIC case (author sometimes right): show it banks more of those.
+    st = dict(K=60, T=600, zipf_s=1.1, noise=0.30, p_hard=0.25, seed=0, verbose=False)
+    s1 = run_scale(**st, author_tries=1, author_fail_cap=None)
+    s4 = run_scale(**st, author_tries=4, author_fail_cap=None)
+    print(f"  (persistent-hard: the model NEVER writes 30% of atoms; the gate rejects them)")
+    print(f"  arm                          | author_calls | banked | wasted re-auth | skipped(-node)")
+    print(f"  BASELINE (no memory)         | {a['author_calls']:>12} | {a['banked']:>6} | {a['author_calls']-a['banked']:>14} | {a['skipped']:>6}")
+    print(f"  FIX (failed-author -node,cap2)| {b['author_calls']:>11} | {b['banked']:>6} | {b['author_calls']-b['banked']:>14} | {b['skipped']:>6}")
+    print(f"  (stochastic-hard, RECURRING: best-of-1 banked {s1['banked']} -> best-of-4 banked {s4['banked']} of {st['K']} "
+          f"— small, because a recurring stream already supplies retries; best-of-N mainly helps RARE atoms)")
+    waste_a, waste_b = a["author_calls"] - a["banked"], b["author_calls"] - b["banked"]
+    ok = waste_b < waste_a * 0.3 and b["skipped"] > 0        # the real win: mistake-node kills the re-authoring waste
+    print(f"\n  => THE FIX: the FAILED-AUTHOR mistake-node cuts wasted re-authoring {waste_a}->{waste_b} (~{waste_a//max(1,waste_b)}x):")
+    print(f"     try-twice-then-skip instead of re-author-forever. Same banked; the weak-author tax stops")
+    print(f"     compounding. (best-of-N is situational — helps only where atoms don't recur.) The negative")
+    print(f"     memory tier finally earns its keep in the live loop.")
+    print(f"\n  ALGO_GRR_SCALE TAX SELFTEST -> {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
 def main():
     ap = argparse.ArgumentParser(description="compounding-at-scale stress test")
     ap.add_argument("--selftest", action="store_true")
@@ -198,9 +241,12 @@ def main():
                     "else a correct stub author. Shows whether the compounding floor RISES with real 3B "
                     "authoring errors + fuzz-gate rejections")
     ap.add_argument("--sweep", action="store_true", help="sweep K and zipf to map the compounding floor")
+    ap.add_argument("--tax", action="store_true", help="the authoring-error tax + fix (best-of-N + mistake-node)")
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if selftest() else 1)
+    if a.tax:
+        sys.exit(0 if tax_demo() else 1)
     if a.sweep:
         print("compounding floor vs pool size K and Zipf skew s (author/task late):")
         print(f"  {'K':>5} {'zipf':>5} | {'early':>6} {'late':>6} {'floor':>6} {'banked':>7} {'reuse':>6}")
