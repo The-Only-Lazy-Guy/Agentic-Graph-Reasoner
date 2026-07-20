@@ -59,12 +59,14 @@ def _split_tasks(N, dep, rng):
     return mk(tr), mk(te)
 
 
-def _eval(feat, train, test, epochs=120):
+def _eval(feat, train, test, epochs=120, max_test=None):
     """Return (Recall@2, Recall@10). The pipeline searches+verifies over a candidate SET, so top-K (K~10)
     is the operative metric — the router must keep the needed atoms in a small candidate set, not rank #1-2."""
     from v5.runtime.algo_grr_router import _build, train_router, _recall_at_k
     import torch
     torch, nn, NeuralRouter = _build()
+    if max_test:
+        test = test[:max_test]
     A = torch.as_tensor(feat)
     router = NeuralRouter(feat.shape[1])
     train_router(router, [(feat[q], nd) for q, nd in train], feat, epochs=epochs, lr=3e-3)
@@ -73,6 +75,28 @@ def _eval(feat, train, test, epochs=120):
     r2 = float(np.mean([_recall_at_k(s, nd, 2) for s, (_, nd) in zip(sc, test)]))
     r10 = float(np.mean([_recall_at_k(s, nd, 10) for s, (_, nd) in zip(sc, test)]))
     return r2, r10
+
+
+def sweep_router(sizes=(100, 300, 800, 2000)) -> None:
+    """The RETRIEVAL WALL: how routing recall degrades as the graph grows. content-only (semantic) vs
+    GraphGPS (content + LapPE/RWSE + message-passing) vs topology follow-edge. Recall@10 is operative
+    (the pipeline keeps a small candidate SET). Locates where flat routing dies and what stays scale-free."""
+    import time
+    print("routing recall vs graph size N — the retrieval wall (Recall@10; candidate-set metric):\n")
+    print(f"  {'N':>6} | {'content@10':>10} | {'GraphGPS@10':>11} | {'topo (follow-edge)':>18} | {'sec':>5}")
+    for N in sizes:
+        content, A, dep, comm = gen_deconfounded(N, seed=0)
+        train, test = _split_tasks(N, dep, np.random.default_rng(1))
+        ep = 120 if N <= 300 else (70 if N <= 1000 else 45)
+        t0 = time.time()
+        _, c10 = _eval(content, train, test, epochs=ep, max_test=120)
+        _, g10 = _eval(gps_features(content, A), train, test, epochs=ep, max_test=120)
+        topo = _topo_eval(A, test)
+        print(f"  {N:>6} | {c10:>10.2f} | {g10:>11.2f} | {topo:>18.2f} | {time.time()-t0:>5.0f}", flush=True)
+    print("\n  => content-only routing to a SPECIFIC dep atom degrades as N grows (needle in a growing")
+    print("     haystack); GraphGPS (structure features + one-hop message-passing) holds MUCH better; a")
+    print("     KNOWN structural edge is FOLLOWED (topology) = scale-free 1.0. LESSON: at deployment scale,")
+    print("     route semantic relevance with GraphGPS, and FOLLOW explicit dep-edges — don't LEARN them.")
 
 
 def _hier_eval(feat, comm, train, test, epochs=120):
@@ -138,9 +162,13 @@ def _selftest(sizes=(120, 300)) -> bool:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--sweep", action="store_true", help="routing recall vs graph size N (the retrieval wall)")
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
+    if a.sweep:
+        sweep_router()
+        return
     ap.print_help()
 
 
