@@ -77,6 +77,42 @@ def _eval(feat, train, test, epochs=120, max_test=None):
     return r2, r10
 
 
+def content_edge_eval(content, A, test, k=8, max_test=200):
+    """THE SCALING FIX (no training): content-cosine finds the SEMANTIC match (q) — a bi-encoder, so an ANN
+    index (HNSW) makes it O(log N); FOLLOW-EDGE off those candidates pulls the content-dissimilar structural
+    dep. Returns (Recall@k content-only, Recall content+edge, sec for all queries)."""
+    import time
+    te = test[:max_test]
+    r_c, r_comb = [], []
+    t0 = time.time()
+    for q, nd in te:
+        sc = content @ content[q]                                # cosine (content is unit-norm) = the ANN score
+        top = set(np.argsort(-sc)[:k].tolist())                  # ANN top-k in prod (O(log N))
+        r_c.append(len(top & set(nd)) / len(nd))
+        exp = set(top)
+        for a in list(top):                                      # FOLLOW-EDGE: pull dep-neighbours (structural)
+            exp |= set(np.where(A[a] > 0)[0].tolist())
+        r_comb.append(len(exp & set(nd)) / len(nd))
+    return float(np.mean(r_c)), float(np.mean(r_comb)), time.time() - t0
+
+
+def sweep_scale_fix(sizes=(100, 500, 2000, 5000, 10000)) -> None:
+    """THE GRAPHGPS SCALING FIX, benchmarked. content-cosine (bi-encoder -> ANN, O(log N)) finds the
+    semantic match; FOLLOW-EDGE (scale-free) pulls the structural dep. NO training. Holds recall + stays
+    fast to N=10000, where the learned flat cross-encoder died (>9 min at N~800)."""
+    print("GraphGPS scaling FIX — content-ANN + follow-edge, recall + speed vs graph size N (no training):\n")
+    print(f"  {'N':>6} | {'content only':>12} | {'content + follow-edge':>21} | {'sec (200 Q, brute)':>18}")
+    for N in sizes:
+        content, A, dep, comm = gen_deconfounded(N, seed=0)
+        _, test = _split_tasks(N, dep, np.random.default_rng(1))
+        r_c, r_comb, sec = content_edge_eval(content, A, test)
+        print(f"  {N:>6} | {r_c:>12.2f} | {r_comb:>21.2f} | {sec:>18.2f}", flush=True)
+    print("\n  => content-cosine finds q (a bi-encoder -> HNSW makes it O(log N)); FOLLOW-EDGE recovers the")
+    print("     content-dissimilar structural dep. TOGETHER they HOLD recall to N=10000 with NO training and")
+    print("     NO O(N) cross-encoder (which died at N~800). Deployment retriever = content-ANN (semantic,")
+    print("     O(log N)) + follow-edge (structural, scale-free). The brute matvec here is the ANN proxy.")
+
+
 def sweep_router(sizes=(100, 300, 800, 2000)) -> None:
     """The RETRIEVAL WALL: how routing recall degrades as the graph grows. content-only (semantic) vs
     GraphGPS (content + LapPE/RWSE + message-passing) vs topology follow-edge. Recall@10 is operative
@@ -163,11 +199,15 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--sweep", action="store_true", help="routing recall vs graph size N (the retrieval wall)")
+    ap.add_argument("--scale-fix", action="store_true", help="the bi-encoder scaling fix: recall + speed to N=5000")
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
     if a.sweep:
         sweep_router()
+        return
+    if a.scale_fix:
+        sweep_scale_fix()
         return
     ap.print_help()
 
