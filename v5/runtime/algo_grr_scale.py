@@ -261,13 +261,21 @@ def dump_authoring(lm: str, n: int = 6) -> None:
             return callable(fn) and all(fn(x) == orc(x) for x in (2, 3, 4, 5, 6, 7))
         except Exception:  # noqa: BLE001
             return False
-    labels = ["canonical", "identifier", "closed-form", "restate"]
-    for name in list(pool)[:n]:
+    # author each atom ONCE with the description prompt; report the pass RATE and SHOW the failures (the
+    # scale run banks ~41/75, so ~45% fail systematically — this finds WHICH and WHY).
+    npass = 0
+    fails = []
+    names = list(pool)[:n]
+    for name in names:
         code, orc, desc = pool[name]
-        print(f"\n=== {name}: {desc} ===\n  TARGET: {code.strip()}")
-        for i, lab in enumerate(labels):
-            raw = repair_code(_extract_code(gen([refract_specs(name, desc)[i]])[0]), name)
-            print(f"  [{lab:<10} pass={str(_ok(raw, name, orc)):<5}] {raw.strip()[:130]}")
+        raw = repair_code(_extract_code(gen([refract_specs(name, desc)[0]])[0]), name)
+        if _ok(raw, name, orc):
+            npass += 1
+        else:
+            fails.append((name, desc, code, raw))
+    print(f"\n  description-prompt authoring pass rate: {npass}/{len(names)}  (fails: {len(fails)})")
+    for name, desc, code, raw in fails[:10]:
+        print(f"\n  FAIL {name}: {desc}\n    TARGET: {code.strip()}\n    GOT   : {raw.strip()[:200]}")
 
 
 def main():
