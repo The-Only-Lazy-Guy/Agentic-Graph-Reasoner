@@ -6,13 +6,19 @@ stress-test surfaced.
 
 ---
 
-## PROBLEM 1 (headline) — the AUTHORING-ERROR TAX = the invention ceiling, now quantified
+## PROBLEM 1 (headline) — ~~the AUTHORING-ERROR TAX = the invention ceiling~~ → FALSE ALARM (see RESOLVED)
 
-**Statement.** The whole system's capability to *grow* is bounded by one thing: the frozen ~3B must
-**author each new atom correctly** at least once, or that atom never banks. The verify gate correctly
+> **Verdict (2026-07-20): this headline is WRONG.** Raw `--dump` shows the 3B authors **29/30 (97%)** of
+> these atoms correctly. There is no capability ceiling on this domain; the "tax" was our own cap + a
+> synthetic-description typo. The full journey is kept below because the *methodology lesson* is the point.
+> The genuine invention-ceiling question is UNMEASURED — it needs a domain the 3B demonstrably fails on the
+> raw dump, not this one.
+
+**Original (refuted) statement.** The whole system's capability to *grow* is bounded by one thing: the frozen
+~3B must **author each new atom correctly** at least once, or that atom never banks. The verify gate correctly
 rejects wrong atoms (the graph stays clean — anti-poison holds), but a rejected atom is *re-authored on
-every reappearance* (wasted LM calls) or *skipped* (its tasks fail). The 3B cannot author roughly **half**
-of the atoms in our synthetic domain.
+every reappearance* (wasted LM calls) or *skipped* (its tasks fail). ~~The 3B cannot author roughly half
+of the atoms in our synthetic domain.~~ ← refuted: it authors 97%; the misses were our data/config.
 
 **Evidence (real Qwen2.5-3B, `algo_grr_scale --run`, K=100 T=400 zipf=1.1):**
 
@@ -45,10 +51,18 @@ the raw before concluding a capability ceiling from an aggregate.** The genuine 
 still stands but must be asked on a domain the 3B *demonstrably* fails on the raw dump — the poly domain was
 a false alarm caused by our own harness config.
 
-**The (now-qualified) core tension:** the frozen LM is a fixed-capability author. Where it genuinely can't
-author an atom (to be established by raw inspection, NOT aggregates), no same-prompt retry helps and the
-lever is teacher/decomposition. But our first "ceiling" was mostly harness config — so re-measure with a
-sane author (description prompt, no premature cap) before invoking the teacher.
+**✅ RESOLVED (2026-07-20, `--dump 30`): the poly authoring-tax is a FALSE ALARM.** With the description
+prompt the 3B authors **29/30 (97%)** of atoms correctly. The single failure is a DATA bug, not capability:
+`g19 "1 n squared plus 6 n plus 5"` → the model wrote `(1 + 6*n + 5) % 17` — it parsed **"1 n squared" as
+the constant 1** and dropped the `n²`. Every `a=1` atom (~1/6 of the pool) hits this ambiguous phrasing.
+So the measured `banked 41/75` = over-aggressive cap (fixed: floor 0.71→0.45) + `a=1` description mis-parse
+(~17 atoms) + rare-atom under-sampling — ALL harness/data, ZERO of it a model ceiling. **The "invention
+ceiling / authoring tax" written above was wrong twice; the 3B is competent at this domain.** Cheap real
+fixes: (1) generate clean descriptions (`"n squared"` not `"1 n squared"` when a=1; explicit `n^2`); (2)
+don't cap authorable atoms. **The genuine invention-ceiling question is now OPEN and unmeasured** — it needs
+a domain where the raw `--dump` shows the 3B actually failing (named non-trivial algorithms it can't write),
+not a synthetic poly domain sunk by our own phrasing. METHODOLOGY (vindicated 3×): the aggregate said
+"model ceiling"; the raw dump said "your data has a typo." Inspect the raw.
 
 **Candidate directions (unranked — for thinking):**
 1. **Teacher escalation.** Atoms the 3B systematically fails → hand to the molab 32B teacher (offline),
@@ -119,9 +133,13 @@ task count (measured: skewed workload 11% authoring, flat 25%). This is honest a
 
 ---
 
-## The one-line framing
+## The one-line framing (CORRECTED 2026-07-20)
 
-**The graph is a great memory and reasoner on top of a frozen author whose ceiling is now measured: it can
-reuse/compose the ~half of atoms it can write, forever and cheaply, but it cannot invent the other half —
-and no same-model retry fixes that. The next real lever is where invention capability comes from (teacher /
-STaR / decomposition), not more of the frozen model.**
+**The graph is a great memory and reasoner on top of a frozen author that — on every domain we've actually
+inspected at the raw level — authors ~97% of atoms correctly. The "authoring tax / invention ceiling" we
+chased was a false alarm: an over-aggressive mistake-cap plus an ambiguous synthetic description (`"1 n
+squared"` mis-read as the constant 1). The machinery (compounding, retrieval, dual-channel, anti-poison
+gate) is solid AND the frozen author is competent here. The genuine invention-ceiling — where a frozen weak
+model truly can't write a needed primitive — remains UNMEASURED; finding it needs a domain that fails the
+raw `--dump`, and THAT is where teacher/STaR/decomposition earns its place. Until then, don't design around
+a ceiling we haven't observed. Methodology, vindicated 3×: inspect the raw before you name a limit.**
