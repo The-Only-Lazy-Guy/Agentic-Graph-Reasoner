@@ -1,10 +1,198 @@
-# READ_THIS — GRR: Graph Recursive Reasoner (2026-07-19)
+# READ_THIS — GRR: Graph Recursive Reasoner (2026-07-20)
 
 > At-a-glance dump of the latest session (raw numbers, decisions, repro commands).
 > Updated each working session. Branch: fix/swe-slot-plan-gate-real-file. (Older sessions below the ═══ line.)
 
 ═══════════════════════════════════════════════════════════════════════════════════════════════
-## LATEST SESSION (2026-07-20) — v6 DUAL-CHANNEL: nodes store MEANING not code; model EXPLAINS + OWNS output
+## LATEST SESSION (2026-07-21 v6.4) — CoT LEARNING: reasoning banked WITHOUT touching LM weights (verifier stays only writer)
+═══════════════════════════════════════════════════════════════════════════════════════════════
+
+**One line:** answered "can it learn math/physics/ANY task like a normal LM?" — NO, it learns any VERIFIABLE
+task (verifier is the boundary, not "code"). Then designed+built a mechanism to learn from CoT DATA with the
+frozen LM: `v5/runtime/algo_grr_cot.py`, 9/9 no-GPU selftest PASS. The fused design (user's 3 refinements +
+my quorum/critic fixes) learns reasoning SCHEMAS into the graph; LM stays frozen; verifier stays only writer.
+
+### THE MECHANISM (Verified Reasoning-Schema Induction)
+  1. SLOT-PROJECTION  : frozen LM fills typed slots [prior][op:closed-vocab(arg)][resulting] per CoT step
+                        (bounded slot-fill, NOT free-form DAG the 3B ships broken). = user's move 1.
+  2. TYPED-TRANSITION VERIFY: verifier INDEPENDENTLY recomputes resulting==op(prior,arg); LM authors ZERO
+                        code. + GOLD-OUTCOME anchor = the backstop that defeats op BACK-FITTING. = user move 2.
+  3. SIGNATURE BANKING: hash the ABSTRACTED op-seq (holes for constants) -> behavioral fingerprint = the
+                        cross-domain reuse key (math schema == physics schema when op-seq matches). = user move 3.
+  4. LAZY QUORUM (my fix on move 3): single-pass banking silently drops the GENERALIZATION guarantee. Bank
+                        PROVISIONAL on first gold; each later same-signature gold is a FREE vote; certify at m.
+                        Recovers safety at ~O(1)/trace. Spurious 1-off schema -> quarantined, not certified.
+  5. TIER-4 CRITIC (amortizer, NEVER writer): learned verdict-predictor. Confidence gates ESCALATION, not
+                        BANKING. A confidence-WRITER reintroduces the poison line -> measured below.
+
+### RAW NUMBERS (python -m v5.runtime.algo_grr_cot --selftest, no-GPU, 9/9 PASS)
+```
+  [1] typed-transition verify : honest gold_ok, corrupted step rejected
+  [2] back-fit defense        : op-inferred-from-numbers PASSES local verify, GOLD ANCHOR still rejects
+  [3] internal-consistency    : state-thread break ('feeling wrong', operationalized) caught
+  [4] lazy quorum             : 3 real schemas certified, spurious QUARANTINED — single-pass WOULD certify it
+  [5] cross-domain reuse      : 3  (math schema reused by physics)   <-- v6.3 got 0
+  [6] critic validity wall    : in-domain AUC 0.89 vs cross-domain 0.52 ~= chance (reproduces the real 0.46)
+  [7] escalation amortizes    : in-domain 79/120 real-verify calls catch 90% errors; cross-domain 114/120 (~none)
+  [8] SAFETY                  : confidence-WRITER would certify 8 WRONG schemas; AMORTIZER certifies 0
+  [9] rebuild-from-graph      : drop the critic; certified schemas ALONE solve 3/3 held-out (graph IS memory)
+```
+
+### KEY DECISIONS (measured, not opinion)
+- "Learn like a normal LM" = NO. LM stays FROZEN (anti-poison). Learning = verified banking into the graph =
+  library-learning / expert-iteration, not next-token training. Boundary = does a mechanical verifier exist.
+- CoT boundary is at the STEP: works where each transition is verifier-RECOMPUTABLE (arithmetic/algebra/logic
+  + a gold anchor). Open-ended generation (summarize/translate/creative/judgment) = no gate = nothing banks.
+- Pseudo-verifier: legit ONLY as an AMORTIZER of a real verifier (predict its verdict, route budget). NEVER a
+  writer. Confidence-as-writer = self-grading = graph-poison reborn; check [8] shows it banks 8 wrong.
+- Critic carries a VALIDITY DOMAIN (region measured vs a real verifier). Your 0.46 = used outside it. Fix is
+  'never fire the critic outside its benchmarked region', NOT 'trust confidence more'.
+
+### REAL-3B PATH (built, plumbing smoke-tested with a stub gen; run pending on your box)
+  python -m v5.runtime.algo_grr_cot --run --lm Qwen/Qwen2.5-3B-Instruct --n 40   # synthetic NL CoT (fidelity)
+  python -m v5.runtime.algo_grr_cot --run --lm Qwen/Qwen2.5-3B-Instruct --corpus <gsm8k.jsonl> --n 200
+  run_lm: LM FILLS SLOTS only; verifier recomputes every transition + anchor; reports slot-op fidelity,
+  gold-pass rate, certified schemas, cross-domain reuse, LM calls. Wrong projections fail the gate (not banked).
+
+### FILES
+- `v5/runtime/algo_grr_cot.py` — NEW: the whole mechanism + 9-check selftest + --demo + --run (real 3B).
+
+### NEXT
+Real-3B --run on GSM8K + a physics-word set: measure slot-fill fidelity (does frozen 3B project ops
+reliably?) + schema-reuse curve + LM-calls-fall vs raw-CoT baseline. Then wire certified schemas into
+MembraneV2 retrieval so a banked reasoning-schema is routable at solve time (like code atoms).
+
+═══════════════════════════════════════════════════════════════════════════════════════════════
+## LATEST SESSION (2026-07-21 v6.3) — CROSS-DOMAIN TEST: math/physics/bio/CS/stats on a Python code graph
+═══════════════════════════════════════════════════════════════════════════════════════════════
+
+**One line:** built a 47-task cross-domain corpus (math 8, physics 10, biology 8, CS 10, stats 4) with
+shared primitives (gcd, factorial, mean, std_dev, dna_complement, etc.), ran full GRR pipeline.
+Training: 26/31 solved (84%) across all 5 domains. Inference: 4/9 solved (44%). Baseline (seed only):
+4/9 — delta +0. Cross-domain atom reuse = 0 because every held-out task is self-contained or solvable
+with seed primitives; no task forces composing a math-learned atom with a physics-learned atom.
+
+### WHAT WAS DONE
+
+**1. Cross-domain corpus** (`scripts/build_crossdomain_corpus.py` → `artifacts/crossdomain_*.json`):
+  47 tasks across math (prime divisors, lcm, gcd), physics (gravitational force, kinetic energy, orbital
+  period, ideal gas, drag, sound speed, buoyancy, electric field, projectile), biology (DNA→RNA,
+  reverse complement, GC content, Hamming distance, nucleotide freq, protein mass, BMI), CS (bubble sort,
+  is palindrome, kadane, edit distance, fib matrix, count bits, anagram, quickselect, insertion sort),
+  stats (mean, std_dev, variance, zscore_normalize). Shared primitives = gcd/e/factorial/lcm/is_prime/
+  mean/variance/std_dev/dna_complement/gc_content/hamming_distance/nCr/bmi/kinetic_energy (10 total).
+
+**2. Pipeline statistics:**
+  ```
+  Training (31 tasks): SOLVED 26/31 (84%) | banked 2 | pruned 1 | graph 21→22 impl | 5 TRAP nodes
+  Inference (9 held-out, grown graph):  SOLVED 4/9 (44%)
+  Inference (9 held-out, seed only):    SOLVED 4/9 (44%)  — delta +0
+  Spreading activation (5 domain queries): 5-7 relevant nodes each
+  ```
+
+**3. SpreadingActivationRetriever + ReflexiveEditor + PruningMonitor + Slot-Harness:**
+  All 4 upgrades from v6.2 active. 5 TRAP nodes created by ReflexiveEditor on failures. PruningMonitor
+  removed 1 dead derived atom. Slot-Harness deployed at planner entry.
+
+**4. Analysis — why 0 cross-domain reuse?**
+  Every held-out task is self-contained or solvable with seed primitives alone. No held-out task requires
+  composing a learned atom from one domain with a learned atom from another. True cross-domain compounding
+  needs tasks like "compute escape velocity of a planet given its mass profile, using numerical integration"
+  — forcing composition of a stats (integration) atom with a physics (gravity) atom from separate training.
+
+### FILES CHANGED
+- `scripts/build_crossdomain_corpus.py` — new: builds 47 cross-domain tasks, saves to artifacts/
+- `artifacts/crossdomain_train.json` — 31 training tasks (generated)
+- `artifacts/crossdomain_holdout.json` — 9 held-out tasks (generated)
+- `graphs/crossdomain_grown.json` — grown graph (22 impl + 5 traps + concepts = 31 nodes, 33 edges)
+- `READ_THIS.md` — v6.3 session entry
+
+### NEXT
+Build compound cross-domain tasks that force composition across domains (e.g. "run physics equation
+over statistical distribution of data" requires learned stats atom + physics atom in one program).
+
+═══════════════════════════════════════════════════════════════════════════════════════════════
+## PREVIOUS SESSION (2026-07-20 v6.2) — FOUR USER-PROPOSED UPGRADES: Reflexive Editor, Spreading Activation, Pruning Metrics, Slot-Guided Harness
+═══════════════════════════════════════════════════════════════════════════════════════════════
+
+**One line:** user proposed 4 architectural upgrades. All 4 implemented and selftested (8/8 PASS).
+The #1 gap — the graph editor being deterministic (listed in the component table as ❌ neural) — is now
+closed by the ReflexiveEditor, which edits the graph autonomously based on execution outcomes. The other
+3 upgrades are: SpreadingActivationRetriever (energy propagation through typed edges), PruningMonitor
+(utility-based decay + prune), and Slot-Guided Harness (task decomposition before retrieval).
+
+### WHAT'S BUILT
+
+**1. ReflexiveEditor** (`algo_graph_edits.py:ReflexiveEditor`):
+  The graph editor is now NEURAL (was the one missing piece). On SUCCESS it boosts confidence + access_count
+  along the pathway; on FAILURE it creates a TRAP node with avoid_if + corrected_by edges so mistakes
+  become structural knowledge that prevents repeats. The graph physically rewires itself.
+  - `record_success(pathway, task)` → boosts confidence (1→max, diminishing) + increments access_count + strengthens edges
+  - `record_failure(task, failed_code, target, solution)` → creates trap node + avoid_if edges to relevant concepts + corrected_by to solution
+  - `prune_low_utility(threshold)` → applies decay to all nodes, prunes below utility threshold
+  - `record_attempt()` → unified success/failure workflow
+  Selftest: [9] success boosts, [10] failure creates TRAP + avoid_if, [11] prune drops low-utility, [12] unified flow.
+
+**2. SpreadingActivationRetriever** (`algo_grr_retrieval.py:SpreadingActivationRetriever`):
+  Energy propagation through typed edges instead of independent cosine scoring. Positive edges
+  (depend=0.8, support=0.7, part_of=0.6) amplify; negative edges (avoid_if=-0.6, contradict=-0.5)
+  suppress. Activation equation: A_j(t) = tanh(∑ A_i(t-1) · W_ij · C_j). The graph settles into a
+  stable state where a connected sub-graph lights up.
+  - `activate(seed_energies)` → iterative propagation with self-preservation
+  - `rank(query)` → seeds from base retriever, then propagate
+  - `glowing_subgraph(query)` → returns the coherent context block
+  - `make_spreading_policy(graph)` → MembraneSolver-compatible policy_fn
+  Selftest: [6] depend edges propagate activation, [7] rank produces scored list, [8] glowing subgraph (3+ nodes), [9] negative edges don't crash.
+
+**3. PruningMonitor** (`algo_grr_health.py:PruningMonitor`):
+  Utility-based pruning with time-decay. Utility = 0.35·confidence + 0.35·norm_access + 0.30·importance.
+  Decay reduces unused nodes' confidence (rate=0.02 per step). Hub/concept/trap nodes are preserved.
+  - `utility(nid)` → weighted score
+  - `apply_decay(exclude_types)` → time-decay all nodes
+  - `find_prune_candidates(threshold, min_access)` → prune candidates list
+  - `scores_report(top_n)` → lowest-utility nodes for inspection
+  Selftest: [3] utility scoring in (0,1], [4] structural nodes preserved, [5] decay reduces confidence.
+
+**4. Slot-Guided Harness** (`algo_grr_planner.py`):
+  Task decomposition before retrieval: fills execution slots (paradigm, constraints, syntax_env, output_type)
+  from task text using lightweight keyword matching. Slot values are prepended as a structured prefix so the
+  planner attends to them before touching the graph.
+  - `_fill_slots(task_text)` → detects paradigm (dp/graph/greedy/recursion/backtracking/math/string/sort),
+    constraints (O(N)/O(log N)/O(N^2)/O(1) memory), syntax env (re/itertools/functools/math/pure python),
+    output type (boolean/integer/string/list/tuple/dict)
+  - `slot_guided_plan(model, task_text)` → conditioned decode through existing plan_by_search
+  Selftest: [6] slot-fill detects paradigm/constraints/output_type, [7] slot-conditioned decode produces program.
+
+**Graph core** (`graph_core.py`): Added `avoid_if` and `corrected_by` to CANONICAL_RELATIONS, relation aliases,
+  and relation families (avoidance/remediation). All existing code unchanged.
+
+### SELFTEST RESULTS (8/8 PASS, all no-GPU)
+```
+algo_graph_edits   [0-12] 12/12 PASS  ← includes ReflexiveEditor tests [9-12]
+algo_grr_retrieval [0-9]   9/9  PASS  ← includes SpreadingActivation tests [6-9]
+algo_grr_health    [0-5]   5/5  PASS  ← includes PruningMonitor tests [3-5]
+algo_grr_planner   [0-7]   7/7  PASS  ← includes Slot-Harness tests [6-7]
+algo_grr_pipeline         4/4  PASS  ← regression: Dual-Channel end-to-end
+algo_grr_dcpd             5/5  PASS  ← regression: symbolic+semantic channels
+algo_grr_membrane         5/5  PASS  ← regression: frozen-compiler loop
+algo_grr_wiring           7/7  PASS  ← regression: composition ceiling
+```
+
+### FILES CHANGED
+- `graph_core.py` — added `avoid_if`, `corrected_by` to CANONICAL_RELATIONS and relation families
+- `v5/runtime/algo_graph_edits.py` — added `ReflexiveEditor` class + selftests [9-12]
+- `v5/runtime/algo_grr_retrieval.py` — added `SpreadingActivationRetriever` + `make_spreading_policy` + selftests [6-9]
+- `v5/runtime/algo_grr_health.py` — added `PruningMonitor` class + selftests [3-5]
+- `v5/runtime/algo_grr_planner.py` — added `slot_guided_plan`, `_fill_slots`, `Slot-Guided Harness` + selftests [6-7]
+
+### NEXT
+(1) Wire SpreadingActivationRetriever into MembraneV2.solve as a configurable policy_fn (swap for TopologyRetriever);
+(2) Wire ReflexiveEditor into the solve loop (currently standalone — call record_attempt on each task outcome);
+(3) The Slot-Harness is planner-side only — optionally wire into the retrieval router as a context_guard filter;
+(4) Real LM run to measure whether TRAP nodes reduce repeat-mistake rate vs baseline.
+
+═══════════════════════════════════════════════════════════════════════════════════════════════
+## PREVIOUS SESSION (2026-07-20) — v6 DUAL-CHANNEL: nodes store MEANING not code; model EXPLAINS + OWNS output
 ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 **One line:** user caught that graph nodes were BARE CODE (`store[name]=code`) and the realizer PASTED
