@@ -480,8 +480,7 @@ def run_real(lm_name: str):
         if text not in task_embs:
             task_embs[text] = torch.as_tensor(encode_batch([text])[0], dtype=torch.float32, device=wb.device)
 
-    train_pool = torch.stack([atom_embs[n] for n in atom_names], dim=0).to(wb.device)
-    train_pool = train_pool / (train_pool.norm(dim=-1, keepdim=True) + 1e-8)
+    atom_stack = torch.stack([atom_embs[n] for n in atom_names], dim=0).to(wb.device)  # [N, d_emb] MiniLM (384)
 
     prompt_ids = {}
     for text, _, _ in all_tasks:
@@ -543,6 +542,10 @@ def run_real(lm_name: str):
     best_held = 0.0
     for ep in range(100):
         R.train()
+        # DS candidate pool must live in d_lm space (the ds query = ds_proj(states) is d_lm). Project the
+        # MiniLM atom embeddings through proj_atom; recompute each epoch so it tracks the trained projection.
+        train_pool = R.proj_atom(atom_stack)
+        train_pool = (train_pool / (train_pool.norm(dim=-1, keepdim=True) + 1e-8)).detach()
         random.shuffle(train_ex)
         tot_lm, tot_ds, n = 0.0, 0.0, 0
         for task_emb, gold_idx, atoms_needed, pids, text, target_code in train_ex:
@@ -575,14 +578,14 @@ def run_real(lm_name: str):
                 slots, _ = R.refine(task_emb, K_atom_embs)
                 with torch.no_grad():
                     R.set_slots_direct(slots)
-                    out = wb.model.generate(pids, max_new_tokens=64, temperature=0.0,
+                    out = wb.model.generate(pids, max_new_tokens=64,
                                             do_sample=False, pad_token_id=wb.tok.eos_token_id)
                     code = wb.tok.decode(out[0][pids.shape[-1]:], skip_special_tokens=True).strip()
                 if verify(code):
                     held_ok += 1
                 R.clear()
                 with torch.no_grad():
-                    out = wb.model.generate(pids, max_new_tokens=64, temperature=0.0,
+                    out = wb.model.generate(pids, max_new_tokens=64,
                                             do_sample=False, pad_token_id=wb.tok.eos_token_id)
                     code_abl = wb.tok.decode(out[0][pids.shape[-1]:], skip_special_tokens=True).strip()
                 if verify(code_abl):
