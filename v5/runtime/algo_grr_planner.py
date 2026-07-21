@@ -341,6 +341,117 @@ def plan_by_search(model, enc_words, task_words, verify_fn, ptok=None, p2i=None,
     return None, verifies, False
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Slot-Guided Harness — task decomposition before retrieval (v6)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_SLOT_TEMPLATES = {
+    "paradigm": ["dynamic programming", "graph traversal", "greedy", "divide and conquer",
+                 "backtracking", "recursion", "math / number theory", "string processing",
+                 "sorting and searching", "simulation", "unknown"],
+    "constraints": ["O(1) time", "O(log N) time", "O(N) time", "O(N log N) time",
+                    "O(N^2) time", "O(1) memory", "O(N) memory", "unknown"],
+    "syntax_env": ["pure python", "python with itertools", "python with functools",
+                   "python with math", "python with re", "unknown"],
+    "output_type": ["boolean", "integer", "string", "list", "tuple", "dictionary", "unknown"],
+}
+
+
+def slot_guided_plan(model, enc_words, wvocab, task_text: str,
+                     ptok=None, p2i=None, arity=None,
+                     beam: int = 10, max_len: int = 40, verify_fn=None):
+    """Plan with slot-guided decomposition: first fill execution slots (paradigm, constraints, env)
+    from the task text, then use those slots to bias the planner's decode.
+
+    Slot-filling uses lightweight keyword matching (no extra model). The slot values are
+    prepended to the task text as a structured prefix so the planner attends to them.
+
+    Returns (AtomProgram | None, slots, n_verifies, solved).
+    """
+    import torch
+    if ptok is None:
+        ptok = _PTOK
+    if p2i is None:
+        p2i = _P2I
+    if arity is None:
+        arity = _ARITY
+    from v5.runtime.algo_grr_pipeline import AtomProgram
+
+    # Fill slots from task text
+    slots = _fill_slots(task_text)
+
+    # Build slot-conditioned text
+    slot_prefix = f"[paradigm: {slots['paradigm']}] [constraint: {slots['constraints']}] [env: {slots['syntax_env']}] "
+    conditioned_text = slot_prefix + task_text
+
+    # Use the existing plan_by_search with conditioned text
+    if verify_fn is not None:
+        return plan_by_search(model, enc_words, conditioned_text, verify_fn,
+                              ptok=ptok, p2i=p2i, arity=arity, beam=beam, max_len=max_len) + (slots,)
+
+    # Fall back to flat decode
+    toks = plan_program(model, enc_words, wvocab, conditioned_text,
+                        ptok=ptok, p2i=p2i, max_len=max_len)
+    prog = _tokens_to_wiring(toks, arity=arity)
+    return prog, slots, 0, prog is not None
+
+
+def _fill_slots(task_text: str) -> dict:
+    """Fill execution slots by keyword matching against the task description.
+    Returns dict with keys: paradigm, constraints, syntax_env, output_type."""
+    text_lower = task_text.lower()
+    slots: dict = {}
+
+    # Paradigm detection
+    paradigm_scores = []
+    for p in _SLOT_TEMPLATES["paradigm"]:
+        if p == "unknown":
+            continue
+        words = p.split()
+        score = sum(1 for w in words if w in text_lower)
+        if score > 0:
+            paradigm_scores.append((score, p))
+    paradigm_scores.sort(reverse=True)
+    slots["paradigm"] = paradigm_scores[0][1] if paradigm_scores else "unknown"
+
+    # Constraint detection
+    constraint_scores = []
+    for c in _SLOT_TEMPLATES["constraints"]:
+        if c == "unknown":
+            continue
+        if any(w in text_lower for w in c.lower().replace("(", "").replace(")", "").split()):
+            constraint_scores.append(c)
+    slots["constraints"] = constraint_scores[0] if constraint_scores else "unknown"
+
+    # Syntax environment
+    if any(kw in text_lower for kw in ("regex", "re.", "pattern", "match")):
+        slots["syntax_env"] = "python with re"
+    elif any(kw in text_lower for kw in ("itertools", "combinations", "permutations", "product")):
+        slots["syntax_env"] = "python with itertools"
+    elif any(kw in text_lower for kw in ("functools", "reduce", "lru_cache")):
+        slots["syntax_env"] = "python with functools"
+    elif any(kw in text_lower for kw in ("sqrt", "gcd", "lcm", "prime", "math.")):
+        slots["syntax_env"] = "python with math"
+    else:
+        slots["syntax_env"] = "pure python"
+
+    # Output type
+    if any(kw in text_lower for kw in ("true or false", "boolean", "whether", "if", "check", "is ")):
+        slots["output_type"] = "boolean"
+    elif any(kw in text_lower for kw in ("string", "concatenate", "substring", "prefix", "suffix")):
+        slots["output_type"] = "string"
+    elif any(kw in text_lower for kw in ("list", "array", "sequence")):
+        slots["output_type"] = "list"
+    elif any(kw in text_lower for kw in ("dict", "map", "hash")):
+        slots["output_type"] = "dictionary"
+    elif any(kw in text_lower for kw in ("tuple", "pair")):
+        slots["output_type"] = "tuple"
+    else:
+        slots["output_type"] = "integer"
+
+    return slots
+
+
 def _selftest() -> bool:
     print("algo_grr_planner --selftest: LEARNED planner infers atom-programs from NL (no GPU)\n")
     torch, nn, Seq2Seq = _build()
@@ -376,6 +487,29 @@ def _selftest() -> bool:
     print(f"  -> {'PASS' if ok else 'FAIL'}: net-GUIDED VERIFIED SEARCH clearly beats flat decode (search reasons,")
     print(f"     net guides, verify gates = GRR-7). HONEST: deep extrapolation (d>=4) is BUDGET-bound — beam=10 +")
     print(f"     OOD net-guidance can't contain the program; raise beam / train on deeper depths (GRR-8 tradeoff).")
+    # ═══════════════════════════════════════════════════════════════════
+    # Slot-Guided Harness selftests (v6)
+    # ═══════════════════════════════════════════════════════════════════
+
+    # [6] _fill_slots detects paradigm from task text
+    slots_dp = _fill_slots("longest increasing subsequence in O(N log N)")
+    slots_math = _fill_slots("check whether a number is prime")
+    slots_string = _fill_slots("reverse a string using recursion")
+    print(f"  [6] slot-fill: dp={slots_dp['paradigm']}/{slots_dp['constraints']}, "
+          f"math={slots_math['paradigm']}/{slots_math['output_type']}, "
+          f"string={slots_string['paradigm']}/{slots_string['syntax_env']}")
+    ok &= "dynamic" in slots_dp["paradigm"] or "searching" in slots_dp["paradigm"]
+    ok &= slots_math["output_type"] == "boolean"
+    ok &= slots_string["syntax_env"] in ("pure python",)
+
+    # [7] slot-conditioned text prepends structured prefix
+    cond_text = f"[paradigm: number theory] [constraint: O(N) time] [env: pure python] check prime"
+    cond_toks = plan_program(model, enc_words, wvocab, cond_text, max_len=15)
+    has_prog = len(cond_toks) > 0
+    print(f"  [7] slot-conditioned plan: toks={cond_toks}, produces_program={has_prog} -> "
+          f"{'PASS' if has_prog else 'FAIL'}")
+    ok &= has_prog
+
     print(f"\n  ALGO_GRR_PLANNER SELFTEST -> {'PASS' if ok else 'FAIL'}")
     return ok
 

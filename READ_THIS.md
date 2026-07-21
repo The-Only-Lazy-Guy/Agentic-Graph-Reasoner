@@ -4,6 +4,39 @@
 > Updated each working session. Branch: fix/swe-slot-plan-gate-real-file. (Older sessions below the ═══ line.)
 
 ═══════════════════════════════════════════════════════════════════════════════════════════════
+## LATEST SESSION (2026-07-21 v6.5) — WIRING AUDIT + FIX: the v6.2/v6.3 upgrades were ISLANDS, now wired to MembraneV2
+═══════════════════════════════════════════════════════════════════════════════════════════════
+
+**One line:** flowchart + wiring audit found the v6.2/v6.3 upgrades (ReflexiveEditor, SpreadingActivation,
+PruningMonitor, Slot-Harness) were ISLANDS — code existed + selftested, but NO runner imported them, and they
+were UNCOMMITTED. Root cause: they operate on graph_core.MemoryGraph; MembraneV2 uses AtomStore(dict). Built
+the bridge and wired all 4 + the CoT schemas into MembraneV2. algo_grr_v6wire 7/7 PASS, zero regression.
+
+### THE ISLAND FIX (algo_grr_v6wire.py, no-GPU 7/7)
+  - MembraneV2 got 2 optional hooks: on_solved / on_failed (default None -> byte-for-byte unchanged; regress [7]).
+  - AtomStoreMirror: maintains a real MemoryGraph of banked atoms (impl nodes + depend edges + concept nodes).
+  - wire_v6: on a REAL solve, ReflexiveEditor boosts used atoms / TRAPs failures; PruningMonitor sweeps.
+  - SpreadingRouter: SpreadingActivationRetriever as a MembraneV2 router (fixes the island's base_retriever
+    kwarg bug that meant make_spreading_policy could never run).
+  - schemas_to_atoms: CERTIFIED CoT reasoning-schemas (algo_grr_cot) banked as routable atoms in the SAME store.
+  Checks: [1] mirror 17 nodes/20 edges [2] 9 atoms boosted >0.6 [3] trap on fail [4] pruner finds dead atom
+  [5] spreading router ran 10/10 [6] 3 CoT schemas -> routable (router surfaces) [7] wired==baseline 40 (no regress).
+
+### HONESTY CORRECTION (the record)
+  READ_THIS v6.2/v6.3 said 'all 4 active / Slot-Harness deployed at planner entry / 5 TRAP nodes' — the CODE did
+  NOT back that: no solver imported them, build_crossdomain_corpus.py only BUILDS tasks (no --run/no solver), so
+  the v6.3 26/31 runner is not in the repo. NOW they are genuinely wired (import-verified) + committed.
+
+### FILES
+  - v5/runtime/algo_grr_v6wire.py (new) · algo_grr_pipeline.py (MembraneV2 hooks) · committed the 4 upgrade
+    modules that were uncommitted (algo_graph_edits/grr_health/grr_planner/grr_retrieval).
+  - Artifact (flowcharts + wiring status): claude.ai/code/artifact/cfcb379c-3ea1-43f7-b6f2-31fd779f85f7
+
+### NOTE
+  algo_grr_scale --selftest fails on its OWN compounding-threshold assertion (flat-floor > 0.20) — PRE-EXISTING,
+  unrelated to this change (verified by stashing the edit; scale passes no hooks). Not fixed here.
+
+═══════════════════════════════════════════════════════════════════════════════════════════════
 ## LATEST SESSION (2026-07-21 v6.4) — CoT LEARNING: reasoning banked WITHOUT touching LM weights (verifier stays only writer)
 ═══════════════════════════════════════════════════════════════════════════════════════════════
 

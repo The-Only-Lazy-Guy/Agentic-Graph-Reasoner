@@ -107,6 +107,78 @@ def graph_health(graph: MemoryGraph, reused: set | None = None) -> dict:
             "orphans": orphan, "dangling": dangling, "dead": dead}
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# PruningMonitor — utility-based pruning with decay (v6)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class PruningMonitor:
+    """Tracks node utility over time and identifies pruning candidates.
+    Utility = weighted combination of access_count, confidence, and importance.
+    Applies decay to unused nodes so 'trivial knowledge' naturally fades.
+
+    Usage:
+        pm = PruningMonitor(graph)
+        pm.apply_decay()
+        candidates = pm.find_prune_candidates(threshold=0.1)
+    """
+
+    def __init__(self, graph: MemoryGraph,
+                 confidence_weight: float = 0.35,
+                 access_weight: float = 0.35,
+                 importance_weight: float = 0.30,
+                 decay_rate: float = 0.02):
+        self.graph = graph
+        self.w_conf = confidence_weight
+        self.w_access = access_weight
+        self.w_import = importance_weight
+        self.decay_rate = decay_rate
+
+    def utility(self, nid: str) -> float:
+        """Compute utility score for a single node."""
+        n = self.graph.nodes.get(nid)
+        if n is None:
+            return 0.0
+        if n.node_type in ("hub", "concept"):
+            return 1.0
+        max_access = max((nd.access_count for nd in self.graph.nodes.values()), default=1)
+        norm_access = n.access_count / max(max_access, 1)
+        return (self.w_conf * n.confidence +
+                self.w_access * norm_access +
+                self.w_import * n.importance)
+
+    def apply_decay(self, exclude_types: set | None = None) -> None:
+        """Apply time-decay to every node's confidence and access_count.
+        Hub/concept/trap nodes are preserved by default."""
+        exclude = exclude_types or {"hub", "concept", "trap"}
+        for nid, n in list(self.graph.nodes.items()):
+            if n.node_type in exclude:
+                continue
+            n.confidence = max(0.05, n.confidence * (1.0 - self.decay_rate))
+            if n.access_count > 0 and not n.metadata.get("last_success", ""):
+                n.access_count = max(0, n.access_count - 1)
+
+    def find_prune_candidates(self, threshold: float = 0.08,
+                              min_access: int = 0,
+                              exclude_types: set | None = None) -> list[str]:
+        """Return node ids with utility below threshold.
+        exclude_types: node types that are never pruned (default: hub, concept, trap)."""
+        exclude = exclude_types or {"hub", "concept", "trap"}
+        candidates = []
+        for nid in list(self.graph.nodes):
+            n = self.graph.nodes[nid]
+            if n.node_type in exclude:
+                continue
+            if n.access_count <= min_access and self.utility(nid) < threshold:
+                candidates.append(nid)
+        return candidates
+
+    def scores_report(self, top_n: int = 10) -> list[tuple[str, float]]:
+        """Return (nid, utility) pairs sorted ascending (lowest first) for inspection."""
+        scores = [(nid, self.utility(nid)) for nid in self.graph.nodes]
+        scores.sort(key=lambda z: z[1])
+        return scores[:top_n]
+
+
 def report(graph: MemoryGraph, reused: set | None = None) -> dict:
     h = graph_health(graph, reused)
     print(f"  atoms: {h['atoms']}")
@@ -149,6 +221,36 @@ def _selftest() -> bool:
           f"{[[g.nodes[n].metadata.get('entry', n) for n in grp] for grp in h2['behav_dups']]}")
     print(f"      is_prime clone caught={caught} -> {'PASS' if caught else 'FAIL'}")
     ok &= caught
+
+    # ═══════════════════════════════════════════════════════════════════
+    # PruningMonitor selftests (v6)
+    # ═══════════════════════════════════════════════════════════════════
+
+    # [3] utility scoring
+    g3 = load_seed()
+    pm = PruningMonitor(g3)
+    u = pm.utility("impl_is_prime")
+    assert 0.0 < u <= 1.0, f"utility should be in (0,1], got {u}"
+    print(f"  [3] PruningMonitor.utility(impl_is_prime) = {u:.3f} -> PASS")
+    ok &= True
+
+    # [4] prune candidates exclude structural nodes
+    candidates = pm.find_prune_candidates(threshold=0.15)  # low threshold to find some
+    hub_pruned = [c for c in candidates if g3.nodes[c].node_type in ("hub", "concept")]
+    assert len(hub_pruned) == 0, f"hub/concept should not be pruned: {hub_pruned}"
+    print(f"  [4] find_prune_candidates (threshold=0.15): {len(candidates)} candidates, "
+          f"0 hubs pruned -> PASS")
+    ok &= len(hub_pruned) == 0
+
+    # [5] decay reduces confidence
+    g5 = load_seed()
+    pm5 = PruningMonitor(g5, decay_rate=0.1)
+    before = g5.nodes["impl_is_prime"].confidence
+    pm5.apply_decay()
+    after = g5.nodes["impl_is_prime"].confidence
+    assert after < before, f"decay should reduce confidence: {before} -> {after}"
+    print(f"  [5] apply_decay: confidence {before:.3f} -> {after:.3f} (rate=0.1) -> PASS")
+    ok &= after < before
 
     print(f"\n  ALGO_GRR_HEALTH SELFTEST -> {'PASS' if ok else 'FAIL'}")
     return ok

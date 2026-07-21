@@ -543,8 +543,13 @@ class MembraneV2:
 
     def __init__(self, store, router, planner, ratify_fn=None, author_fn=None, bank=True,
                  batch_author_fn=None, fuzz_gate=True, fuzz_n=12, fallback_planner=None,
-                 semantic_channel=None, author_tries=1, author_fail_cap=None):
+                 semantic_channel=None, author_tries=1, author_fail_cap=None,
+                 on_solved=None, on_failed=None):
         self.store, self.router, self.planner = store, router, planner
+        # v6 wiring hooks (default None -> zero behavior change): a solved/failed task calls these so the
+        # ReflexiveEditor (trap/boost), PruningMonitor, and graph mirror can observe outcomes. See algo_grr_v6wire.
+        self.on_solved = on_solved
+        self.on_failed = on_failed
         self.ratify_fn = ratify_fn
         self.author_fn = author_fn
         self.batch_author_fn = batch_author_fn     # STEP-SPEC: author ALL missing atoms in ONE LM call
@@ -691,6 +696,10 @@ class MembraneV2:
         else:
             for a in set(authored_now):
                 self.store.pop(a, None)
+        if ok and self.on_solved is not None:          # v6 wiring: reflexive boost / mirror sync on success
+            self.on_solved(prog, task)
+        elif not ok and self.on_failed is not None:    # v6 wiring: reflexive TRAP node on failure
+            self.on_failed(task, code)
         return dict(solved=ok, code=code, program=prog, route_ok=route_ok,
                     authored=authored_now, author_calls=self.author_calls, explanation=explanation)
 

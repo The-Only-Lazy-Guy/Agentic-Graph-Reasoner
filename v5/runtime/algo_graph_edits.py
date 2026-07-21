@@ -27,6 +27,8 @@ import random
 import sys
 from pathlib import Path
 
+from graph_core import Edge, MemoryGraph, Node  # type: ignore  # noqa: E402
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Probabilistic Health Gate
@@ -192,6 +194,235 @@ def grow(graph_path: str, out_path: str, candidates: list[dict],
                             degradation_threshold=degradation_threshold, dry_run=dry_run)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# ReflexiveEditor — failure-driven graph editing (TRAP nodes, confidence updates)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class ReflexiveEditor:
+    """Edits the graph autonomously based on execution outcomes. On SUCCESS it increases
+    confidence along the pathway; on FAILURE it creates a TRAP node documenting the mistake
+    with avoid_if and corrected_by edges, so the graph physically rewires to prevent repeats.
+
+    This makes the graph EDITOR neural (the one missing piece in the component table):
+    mistakes become structural knowledge, success pathways strengthen themselves.
+
+    Usage:
+        editor = ReflexiveEditor(graph)
+        editor.record_success(pathway_atoms, task_text)   # success → boost confidence
+        editor.record_failure(task_text, failed_code, target_description, solution_code)
+                                                           # failure → TRAP node
+        editor.prune_low_utility(threshold=0.05)           # self-cleaning
+    """
+
+    def __init__(self, graph: MemoryGraph,
+                 confidence_boost: float = 0.15,
+                 confidence_decay: float = 0.02,
+                 trap_prefix: str = "trap_"):
+        self.graph = graph
+        self.confidence_boost = confidence_boost
+        self.confidence_decay = confidence_decay
+        self.trap_prefix = trap_prefix
+        self._trap_counter = 0
+
+    def record_success(self, pathway: list[str], task_text: str = "") -> None:
+        """Boost confidence + access_count on every node in the successful pathway.
+        pathway: node ids that participated in the successful solve (ordered by execution).
+        """
+        for i, nid in enumerate(pathway):
+            if nid not in self.graph.nodes:
+                continue
+            n = self.graph.nodes[nid]
+            n.confidence = min(1.0, n.confidence + self.confidence_boost * (1.0 - n.confidence))
+            n.access_count += 1
+            n.importance = min(1.0, n.importance + 0.05)
+            meta = n.metadata
+            meta["last_success"] = task_text[:120] if task_text else meta.get("last_success", "")
+            # Propagate to downstream edges
+            for j in range(i + 1, len(pathway)):
+                edge = self.graph.directed_edge_between(pathway[i], pathway[j])
+                if edge is not None:
+                    edge.strength = min(1.0, edge.strength + 0.1)
+
+    def record_failure(self, task_text: str, failed_code: str,
+                       target_description: str = "", solution_code: str = "") -> str | None:
+        """Create a TRAP node documenting a specific mistake, wired with avoid_if + corrected_by.
+        Returns the trap node id, or None if no useful signature can be extracted.
+
+        The trap stores:
+          - The failed code (what went wrong)
+          - A description of the mistake pattern
+          - An avoid_if edge from related concept nodes to this trap
+          - A corrected_by edge from this trap to the solution (if provided)
+        """
+        self._trap_counter += 1
+        trap_id = f"{self.trap_prefix}{self._trap_counter}"
+
+        signature = _extract_mistake_signature(failed_code)
+        if not signature:
+            return None
+
+        desc = (f"TRAP: {signature} — {target_description or task_text[:100]}"
+                if target_description else f"TRAP: {signature}")
+        trap_node = Node(
+            id=trap_id,
+            text=desc,
+            node_type="trap",
+            confidence=1.0,
+            importance=0.3,
+            metadata={
+                "kind": "trap",
+                "mistake_code": failed_code,
+                "task_text": task_text[:200],
+                "target": target_description,
+                "signature": signature,
+                "origin": "reflexive_editor",
+                "created_at": self._trap_counter,
+            },
+            access_count=0,
+            context_guard={"mistake_signature": signature},
+        )
+        self.graph.nodes[trap_id] = trap_node
+
+        corrected_by_str = "corrected_by"
+
+        # Wire avoid_if from related concept nodes to this trap.
+        # Match: any word in the concept text appears in task OR target, OR vice versa (shared tokens).
+        concept_nodes = [nid for nid, n in self.graph.nodes.items()
+                         if n.node_type in ("concept", "hub") and nid in self.graph.nodes]
+        related_text = (task_text + " " + target_description).lower()
+        related_tokens = set(related_text.split())
+        for cid in concept_nodes:
+            ctext = self.graph.nodes[cid].text.lower()
+            ctokens = set(ctext.split())
+            if related_tokens & ctokens or any(t in related_text for t in ctokens if len(t) > 3):
+                avoid_edge = Edge(
+                    src=trap_id, dst=cid, relation="avoid_if",
+                    strength=0.8, directed=True, confidence=0.9,
+                    metadata={"mistake": signature, "task": task_text[:100]},
+                )
+                self.graph.edges.append(avoid_edge)
+        # If no concept matched, wire avoid_if to every concept (looser fallback)
+        if not any(e.relation == "avoid_if" for e in self.graph.edges[-len(concept_nodes):] if concept_nodes):
+            for cid in concept_nodes[:2]:  # limit to first 2 concepts
+                avoid_edge = Edge(
+                    src=trap_id, dst=cid, relation="avoid_if",
+                    strength=0.5, directed=True, confidence=0.7,
+                    metadata={"mistake": signature, "task": task_text[:100]},
+                )
+                self.graph.edges.append(avoid_edge)
+
+        # Wire corrected_by from trap to solution (if provided)
+        if solution_code:
+            solution_node_id = None
+            for nid, n in self.graph.nodes.items():
+                if n.node_type == "implementation" and n.metadata.get("code", "").strip() == solution_code.strip():
+                    solution_node_id = nid
+                    break
+            if solution_node_id:
+                fix_edge = Edge(
+                    src=trap_id, dst=solution_node_id, relation=corrected_by_str,
+                    strength=1.0, directed=True, confidence=1.0,
+                    metadata={"mistake": signature, "task": task_text[:100]},
+                )
+                self.graph.edges.append(fix_edge)
+
+        self.graph._rebuild_index()
+        return trap_id
+
+    def record_attempt(self, task_text: str, failed_code: str, succeeded: bool = False,
+                       pathway: list[str] | None = None, solution_code: str = "") -> str | None:
+        """Combined: on success boost pathway, on failure create a trap node."""
+        if succeeded and pathway:
+            self.record_success(pathway, task_text)
+            return None
+        elif not succeeded:
+            return self.record_failure(task_text, failed_code, task_text, solution_code)
+        return None
+
+    def prune_low_utility(self, threshold: float = 0.05,
+                          min_access_count: int = 0,
+                          decay_all: bool = True) -> list[str]:
+        """Apply decay to ALL nodes, then prune nodes below utility threshold.
+        Utility = f(access_count, confidence, importance).
+        Returns list of pruned node ids.
+
+        If decay_all=True, applies time-decay to every node's confidence first:
+            confidence *= (1 - decay_rate_per_step)
+            access_count for nodes not recently used decays toward 0
+        """
+        if decay_all:
+            for nid, n in list(self.graph.nodes.items()):
+                if n.node_type in ("trap", "hub", "concept"):
+                    continue  # protect traps and structural nodes
+                n.confidence = max(0.05, n.confidence * (1.0 - self.confidence_decay))
+                if n.access_count > 0 and n.metadata.get("last_success", "") == "":
+                    n.access_count = max(0, n.access_count - 1)
+
+        # compute utility per node
+        utilities: dict[str, float] = {}
+        max_access = max((n.access_count for n in self.graph.nodes.values()), default=1)
+        for nid, n in list(self.graph.nodes.items()):
+            if n.node_type in ("hub", "concept"):
+                utilities[nid] = 1.0  # always keep structural nodes
+                continue
+            norm_access = n.access_count / max(max_access, 1)
+            utilities[nid] = 0.4 * n.confidence + 0.3 * norm_access + 0.3 * n.importance
+
+        # Identify low-utility nodes
+        pruned = [nid for nid, u in utilities.items()
+                  if u < threshold and nid in self.graph.nodes
+                  and self.graph.nodes[nid].node_type not in ("hub", "concept")]
+        for nid in pruned:
+            if nid not in self.graph.nodes:
+                continue
+            if self.graph.nodes[nid].access_count > min_access_count:
+                continue
+            self.graph.nodes.pop(nid, None)
+            self.graph.edges = [e for e in self.graph.edges
+                                if e.src != nid and e.dst != nid]
+
+        self.graph._rebuild_index()
+        return pruned
+
+
+def _extract_mistake_signature(code: str) -> str:
+    """Extract a concise mistake signature from failed code.
+    Returns a short string like "off-by-one", "wrong-operator", "infinite-recursion", etc."""
+    import ast
+    sigs = []
+    try:
+        tree = ast.parse(code)
+        # Check for common mistake patterns
+        for node in ast.walk(tree):
+            if isinstance(node, ast.While) and node.orelse:
+                sigs.append("while-else-misuse")
+            if isinstance(node, ast.For):
+                sigs.append("iteration-structure")
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                if node.func.id == "range" and any(
+                        isinstance(a, ast.Call) and isinstance(a.func, ast.Name) and a.func.id == "len"
+                        for a in node.args):
+                    sigs.append("off-by-one-range")
+    except SyntaxError:
+        sigs.append("syntax-error")
+
+    if not sigs:
+        lines = code.strip().split("\n")
+        if len(lines) > 20:
+            sigs.append("overlong-body")
+        elif len(lines) <= 2:
+            sigs.append("trivial-body")
+        else:
+            sigs.append("unknown-mistake")
+
+    for kw in ("recursion", "catalan", "fib"):
+        if kw in code.lower():
+            if "recursion" not in sigs:
+                sigs.append("potential-recursion")
+            break
+    return "-".join(sigs[:3])
+
+
 def _load_existing_codes(graph_path: str) -> list[str]:
     """Load code strings from existing implementation nodes."""
     try:
@@ -315,6 +546,86 @@ def _selftest() -> bool:
         filtered_high = sample_gate(high, g)
         assert len(filtered_high) == 1
         print(f"  [8] sample_gate keeps high confidence (conf=0.95 nov=0.9 ver=1.0) -> PASS")
+
+    # ═══════════════════════════════════════════════════════════════════
+    # ReflexiveEditor selftests (v6 — failure-driven graph editing)
+    # ═══════════════════════════════════════════════════════════════════
+    from graph_core import Node, Edge, MemoryGraph
+
+    # [9] ReflexiveEditor.record_success boosts confidence + access_count
+    seed_nodes = {
+        "impl_is_prime": Node(id="impl_is_prime", text="checks primality", node_type="implementation",
+                              confidence=0.5, importance=0.5, access_count=0,
+                              metadata={"code": "def is_prime(n):\n    return n >= 2"}), }
+    seed_edges = []
+    rg = MemoryGraph(seed_nodes, seed_edges)
+    editor = ReflexiveEditor(rg)
+    editor.record_success(["impl_is_prime", ], "test primality")
+    assert rg.nodes["impl_is_prime"].confidence > 0.5
+    assert rg.nodes["impl_is_prime"].access_count == 1
+    print("  [9] ReflexiveEditor.record_success boosts confidence + access_count -> PASS")
+
+    # [10] ReflexiveEditor.record_failure creates a TRAP node + avoid_if edge
+    rg2 = MemoryGraph({
+        "impl_is_prime": Node(id="impl_is_prime", text="checks primality", node_type="implementation",
+                              confidence=0.5, importance=0.5, access_count=0,
+                              metadata={"code": "def is_prime(n):\n    return n >= 2"}),
+        "concept_number_theory": Node(id="concept_number_theory", text="number theory", node_type="concept",
+                                      confidence=0.9, importance=0.8, access_count=0),
+    }, [
+        Edge(src="concept_number_theory", dst="impl_is_prime", relation="part_of", directed=True),
+    ])
+    rg2._rebuild_index()
+    editor2 = ReflexiveEditor(rg2)
+    tid = editor2.record_failure(
+        task_text="find nth prime",
+        failed_code="def nth_prime(n):\n    while True:\n        pass",
+        target_description="off-by-one in prime search",
+        solution_code="def nth_prime(n):\n    return 2",
+    )
+    assert tid is not None
+    assert tid in rg2.nodes
+    assert rg2.nodes[tid].node_type == "trap"
+    # should have avoid_if edge to the concept node (text match: "number theory" vs "prime")
+    avoid_edges = [(e.src, e.dst) for e in rg2.edges if e.relation == "avoid_if"]
+    assert len(avoid_edges) > 0, f"expected avoid_if edges, got {avoid_edges}"
+    print(f"  [10] ReflexiveEditor.record_failure creates TRAP node '{tid}' + avoid_if edge -> PASS")
+
+    # [11] ReflexiveEditor.prune_low_utility removes low-utility nodes
+    rg3 = MemoryGraph({
+        "impl_used": Node(id="impl_used", text="used helper", node_type="implementation",
+                          confidence=0.9, importance=0.8, access_count=10,
+                          metadata={"code": "def used(): return 1", "last_success": "some task"}),
+        "impl_unused": Node(id="impl_unused", text="unused helper", node_type="implementation",
+                            confidence=0.1, importance=0.05, access_count=0,
+                            metadata={"code": "def unused(): return 0"}),
+        "concept_test": Node(id="concept_test", text="test", node_type="concept",
+                             confidence=0.5, importance=0.5, access_count=0),
+    }, [], rg2.metadata)
+    rg3._rebuild_index()
+    editor3 = ReflexiveEditor(rg3)
+    pruned = editor3.prune_low_utility(threshold=0.3, decay_all=False)
+    assert "impl_unused" in pruned, f"expected impl_unused pruned, got {pruned}"
+    assert "impl_used" not in pruned, "impl_used should survive"
+    assert "concept_test" not in pruned, "concept nodes should survive"
+    print(f"  [11] ReflexiveEditor.prune_low_utility pruned {pruned}, kept used + concept -> PASS")
+
+    # [12] ReflexiveEditor.record_attempt (unified method)
+    rg4 = MemoryGraph({
+        "impl_gcd": Node(id="impl_gcd", text="gcd", node_type="implementation",
+                         confidence=0.5, importance=0.5, access_count=0,
+                         metadata={"code": "def gcd(a,b):\n    return a"}),
+    }, [])
+    editor4 = ReflexiveEditor(rg4)
+    editor4.record_attempt("find lcm", "def lcm(a,b):\n    return a*b//gcd(a,b)", succeeded=True,
+                           pathway=["impl_gcd"])
+    assert rg4.nodes["impl_gcd"].confidence > 0.5
+    assert rg4.nodes["impl_gcd"].access_count == 1
+    # failure path
+    tid4 = editor4.record_attempt("find inverse", "def inv(n):\n    1/0", succeeded=False,
+                                  solution_code="def inv(n):\n    return 1/n if n else 0")
+    assert tid4 is not None
+    print(f"  [12] ReflexiveEditor.record_attempt success boosts, failure traps -> PASS")
 
     print("\n  ALGO_GRAPH_EDITS SELFTEST -> PASS")
     return True

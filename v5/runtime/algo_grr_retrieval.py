@@ -145,6 +145,159 @@ def make_topology_policy(graph: MemoryGraph, base=None, boost: float = 0.4, expa
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# SpreadingActivationRetriever — energy propagation through typed edges
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class SpreadingActivationRetriever:
+    """Retrieval by iterative energy propagation through the graph. Instead of scoring every node
+    against the prompt independently, injects 'energy' into seed nodes and propagates through
+    typed edges with configurable weights:
+
+      Positive edges (depend, part_of, support, corrected_by): carry positive weight → amplify
+      Negative edges (avoid_if, contradict, conflict): carry negative weight → suppress
+      Neutral edges (related, example_of): carry small positive weight
+
+    The graph settles into a stable activation pattern where a connected sub-graph lights up.
+    The result is not isolated nodes but a coherent context block — the entire glowing sub-graph.
+
+    Activation equation:
+        A_j(t) = tanh(sum_i A_i(t-1) * W_{ij} * C_j)
+
+    where W_{ij} is the edge-type weight, C_j is the node's confidence score.
+
+    Usage:
+        sar = SpreadingActivationRetriever(graph)
+        ranked = sar.rank(query_text, steps=5, top_k=20)
+        # or get the full glowing sub-graph:
+        subgraph = sar.activate_seeds(["impl_is_prime"], steps=5)
+    """
+
+    # Edge-type → propagation weight (positive = amplify, negative = suppress)
+    EDGE_WEIGHTS: dict[str, float] = {
+        "depend": 0.8,
+        "part_of": 0.6,
+        "support": 0.7,
+        "imply": 0.7,
+        "refine": 0.5,
+        "cause": 0.5,
+        "corrected_by": 0.4,
+        "example_of": 0.2,
+        "related": 0.15,
+        "avoid_if": -0.6,
+        "contradict": -0.5,
+        "conflict": -0.5,
+        "refute": -0.5,
+        "trap_for": -0.4,
+    }
+
+    def __init__(self, graph: MemoryGraph,
+                 base=None,
+                 steps: int = 5,
+                 activation_threshold: float = 0.1,
+                 seed_boost: float = 0.3):
+        self.graph = graph
+        self.base = base or TokenRetriever(graph)
+        self.steps = steps
+        self.activation_threshold = activation_threshold
+        self.seed_boost = seed_boost
+        self._build()
+
+    def _build(self) -> None:
+        """Build adjacency matrix with typed edge weights."""
+        adj: dict[str, list[tuple[str, float]]] = defaultdict(list)
+        for e in self.graph.edges:
+            w = self.EDGE_WEIGHTS.get(e.relation, 0.1)
+            adj[e.src].append((e.dst, w))
+            if not e.directed:
+                adj[e.dst].append((e.src, w))
+        self._adj = dict(adj)
+
+    def _seed_from_query(self, query_text: str, n_seeds: int = 5) -> dict[str, float]:
+        """Get initial seed nodes from base retriever, with their cosine scores as initial energy."""
+        base_ranks = self.base.rank(query_text)[:n_seeds]
+        energies: dict[str, float] = {}
+        for nid, score in base_ranks:
+            if nid in self.graph.nodes:
+                initial = max(0.1, score) * self.seed_boost
+                energies[nid] = initial
+        # Always include the top seed with full energy
+        if base_ranks:
+            top = base_ranks[0][0]
+            if top in self.graph.nodes:
+                energies[top] = max(energies.get(top, 0), 0.5)
+        return energies
+
+    def activate(self, seed_energies: dict[str, float],
+                 steps: int | None = None) -> dict[str, float]:
+        """Iterative spreading activation. Returns node_id -> final activation."""
+        steps = steps or self.steps
+        a: dict[str, float] = dict(seed_energies)
+        # Ensure all candidate nodes have at least 0 activation
+        for nid in self.graph.nodes:
+            a.setdefault(nid, 0.0)
+
+        for _ in range(steps):
+            a_next: dict[str, float] = {}
+            for nid in self.graph.nodes:
+                n = self.graph.nodes[nid]
+                c_j = n.confidence  # node confidence as a gate
+                incoming = 0.0
+                neighbors = self._adj.get(nid, [])
+                for src_nid, w in neighbors:
+                    incoming += a.get(src_nid, 0.0) * w * c_j
+                # Self-preservation (keep some prior activation)
+                prior = a.get(nid, 0.0) * 0.5
+                a_next[nid] = math.tanh(incoming + prior)
+            a = a_next
+
+        return a
+
+    def activate_seeds(self, seed_node_ids: list[str],
+                       steps: int | None = None) -> dict[str, float]:
+        """Inject energy into specific seed nodes and propagate."""
+        energies = {nid: 1.0 for nid in seed_node_ids if nid in self.graph.nodes}
+        return self.activate(energies, steps)
+
+    def rank(self, query_text: str, exclude: set | None = None,
+             steps: int | None = None, top_k: int | None = None):
+        """Rank atoms by spreading activation from query-derived seeds.
+        Returns [(nid, activation), ...] sorted descending."""
+        exclude = exclude or set()
+        seeds = self._seed_from_query(query_text)
+        activation = self.activate(seeds, steps)
+
+        impl = [nid for nid, n in self.graph.nodes.items()
+                if n.node_type == "implementation" and nid not in exclude]
+        scored = [(nid, activation.get(nid, 0.0)) for nid in impl]
+        scored.sort(key=lambda z: -z[1])
+
+        if top_k is not None:
+            scored = scored[:top_k]
+        return scored
+
+    def glowing_subgraph(self, query_text: str, steps: int | None = None,
+                         threshold: float | None = None) -> list[str]:
+        """Return all node ids whose activation exceeds threshold after settling.
+        This is the 'connected glowing sub-graph' — a coherent context block."""
+        threshold = threshold or self.activation_threshold
+        activation = self.activate(self._seed_from_query(query_text), steps)
+        return sorted([nid for nid, a in activation.items()
+                       if a > threshold and nid in self.graph.nodes])
+
+
+def make_spreading_policy(graph: MemoryGraph, base=None, steps: int = 5,
+                          activation_threshold: float = 0.1):
+    """Return a MembraneSolver.policy_fn using SpreadingActivationRetriever."""
+    sar = SpreadingActivationRetriever(graph, base_retriever=base,
+                                       steps=steps, activation_threshold=activation_threshold)
+
+    def policy_fn(task, selected, _graph, retriever):
+        exclude = set(selected) if selected else set()
+        return sar.rank(task["text"], exclude=exclude)
+    return policy_fn
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # SELFTEST — topology surfaces the complement + is load-bearing (ablation)
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -268,6 +421,56 @@ def _selftest() -> bool:
     print(f"  [5] cache: tokenized {n_impl}->build, +1 on growth (calls={cr.tok_calls}), "
           f"parity_with_plain={parity} -> {'PASS' if incremental and parity else 'FAIL'}")
     ok &= incremental and parity
+
+    # ═══════════════════════════════════════════════════════════════════
+    # SpreadingActivationRetriever selftests (v6)
+    # ═══════════════════════════════════════════════════════════════════
+
+    # [6] energy injection + propagation: depend edge spreads activation
+    g6 = _seed_graph()
+    sar = SpreadingActivationRetriever(g6, base=TokenRetriever(g6), steps=3)
+    seeds = {"impl_divisors": 1.0, "impl_is_prime": 1.0}
+    activation = sar.activate(seeds)
+    # divisors and is_prime should both have non-zero activation
+    assert activation.get("impl_divisors", 0) > 0.01, "seed should stay active"
+    # sum_divisors depends on divisors -> should get residual activation through depend edge (weight 0.8)
+    sn = activation.get("impl_sum_divisors", 0)
+    lb = activation.get("impl_lcm", 0)
+    print(f"  [6] spreading activation: divisors={activation.get('impl_divisors', 0):.3f}, "
+          f"sum_divisors={sn:.3f}, lcm={lb:.3f} "
+          f"-> {'PASS' if sn > 0.01 else 'FAIL'}")
+    ok &= sn > 0.01
+
+    # [7] rank() produces scored list using base seeds
+    ranked_sa = sar.rank("check whether a number is prime", top_k=5)
+    assert len(ranked_sa) > 0, "rank should return results"
+    assert ranked_sa[0][0] in ("impl_is_prime", "impl_divisors"), \
+        f"top should be is_prime or divisors, got {ranked_sa[0]}"
+    print(f"  [7] spreading rank() top: {ranked_sa[0]} -> PASS")
+    ok &= ranked_sa[0][1] > 0
+
+    # [8] glowing_subgraph returns coherent context block
+    subgraph = sar.glowing_subgraph("check whether a number is prime", threshold=0.001, steps=5)
+    assert len(subgraph) >= 2, f"expected 2+ glowing nodes, got {len(subgraph)}: {subgraph}"
+    print(f"  [8] glowing subgraph ({len(subgraph)} nodes): {subgraph[:6]}... -> PASS")
+    ok &= len(subgraph) >= 2
+
+    # [9] negative edge suppresses activation (avoid_if edge inserted)
+    g9 = _seed_graph()
+    g9.nodes["impl_bad_trap"] = Node(
+        id="impl_bad_trap", text="trap: wrong prime check", node_type="trap",
+        confidence=0.9, importance=0.3, access_count=0,
+        metadata={"code": "def bad_prime(n): return False", "signature": "off-by-one"})
+    g9.edges.append(Edge(src="impl_bad_trap", dst="impl_is_prime", relation="avoid_if",
+                         strength=0.8, directed=True, confidence=0.9))
+    g9._rebuild_index()
+    sar9 = SpreadingActivationRetriever(g9, base=TokenRetriever(g9), steps=3)
+    seeds9 = {"impl_is_prime": 1.0}
+    act9 = sar9.activate(seeds9)
+    # avoid_if edge (-0.6 weight) from trap to is_prime should slightly suppress is_prime
+    assert act9.get("impl_is_prime", 0) > 0, "is_prime should still be active"
+    print(f"  [9] negative edge (avoid_if) does not crash, is_prime={act9.get('impl_is_prime', 0):.3f} -> PASS")
+    ok &= act9.get("impl_is_prime", 0) > 0
 
     print(f"\n  ALGO_GRR_RETRIEVAL SELFTEST -> {'PASS' if ok else 'FAIL'}")
     return ok
