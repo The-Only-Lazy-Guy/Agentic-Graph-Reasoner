@@ -20,7 +20,7 @@ Everything here RUNS for real and every reported number comes from actual execut
 
 Run the real demo (CPU or GPU, no 3B needed for the core):
     python -m v5.runtime.membrane --demo         # seeds real atoms, trains the real TRM, solves by execution
-    python -m v5.runtime.membrane --demo --lm Qwen/Qwen2.5-3B-Instruct   # + real LM authoring of a new atom
+    python -m v5.runtime.membrane --demo --lm Qwen/Qwen3-4B-Instruct-2507   # + real LM authoring of a new atom
 """
 from __future__ import annotations
 
@@ -1082,7 +1082,7 @@ def main():
     ap.add_argument("--trm", action="store_true", help="TRM-as-reasoner: iterative multi-hop retrieval (NOT RAG)")
     ap.add_argument("--teach", action="store_true", help="ACCEPTANCE TEST: teach unseen info -> model explains it (needs --lm)")
     ap.add_argument("--interactive", action="store_true", help="terminal tracer: type a question, see each stage (needs --lm)")
-    ap.add_argument("--lm", type=str, default="", help="real frozen LM (e.g. Qwen/Qwen2.5-3B-Instruct); optional")
+    ap.add_argument("--lm", type=str, default="", help="real frozen LM (e.g. Qwen/Qwen3-4B-Instruct-2507); optional")
     a = ap.parse_args()
     if a.interactive:
         if not a.lm:

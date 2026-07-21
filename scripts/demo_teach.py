@@ -8,7 +8,7 @@ with a scripted lesson so the demo is deterministic. It shows, for real:
      it GROUNDED in the retrieved node.
 
     python scripts/demo_teach.py                                   # graph-editing proof (fast, no LM)
-    python scripts/demo_teach.py --lm Qwen/Qwen2.5-3B-Instruct     # + the teach->explain LM grounding
+    python scripts/demo_teach.py --lm Qwen/Qwen3-4B-Instruct-2507     # + the teach->explain LM grounding
 """
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ def _clean(t: str) -> str:
 
 def main():
     ap = argparse.ArgumentParser(description="scripted demo driver for the real membrane (teach -> explain)")
-    ap.add_argument("--lm", type=str, default="", help="real 4-bit LM for the grounding half, e.g. Qwen/Qwen2.5-3B-Instruct")
+    ap.add_argument("--lm", type=str, default="", help="real 4-bit LM for the grounding half, e.g. Qwen/Qwen3-4B-Instruct-2507")
     a = ap.parse_args()
 
     print("demo_teach.py -- driving the REAL membrane with a scripted lesson\n")
@@ -74,7 +74,7 @@ def main():
         print(f"        {sims[j]:.2f}  {order[j]:<14} <- {q[:52]}")
 
     if not a.lm:
-        print("\n  (pass --lm Qwen/Qwen2.5-3B-Instruct to see the frozen LM taught -> explain, grounded)")
+        print("\n  (pass --lm Qwen/Qwen3-4B-Instruct-2507 to see the frozen LM taught -> explain, grounded)")
         return
 
     # ---- 3) TEACH -> EXPLAIN with the real frozen 4-bit LM ----

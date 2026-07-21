@@ -16,8 +16,8 @@ manipulates logits and the residual stream). It is model-agnostic: verify the ma
 here, then run the true experiment on Qwen. NOTHING is simulated — the hooks fire on the actual network.
 
     python -m v5.runtime.dcpd_latent --smoke                         # tiny real model (distilgpt2): proves it runs
-    python -m v5.runtime.dcpd_latent --lm Qwen/Qwen2.5-3B-Instruct --exp gating
-    python -m v5.runtime.dcpd_latent --lm Qwen/Qwen2.5-3B-Instruct --exp repulsion
+    python -m v5.runtime.dcpd_latent --lm Qwen/Qwen3-4B-Instruct-2507 --exp gating
+    python -m v5.runtime.dcpd_latent --lm Qwen/Qwen3-4B-Instruct-2507 --exp repulsion
 """
 from __future__ import annotations
 
@@ -643,14 +643,14 @@ def smoke():
     ok = forced_present and steer["stat"]["steps"] > 0
     print(f"\n  MACHINERY REAL: forced-emit works + forward-hook steering runs on the actual network -> "
           f"{'PASS' if ok else 'FAIL'}")
-    print("  (run --lm Qwen/Qwen2.5-3B-Instruct --exp gating|repulsion for the real content experiment)")
+    print("  (run --lm Qwen/Qwen3-4B-Instruct-2507 --exp gating|repulsion for the real content experiment)")
     return ok
 
 
 def main():
     ap = argparse.ArgumentParser(description="real white-box latent Dual-Channel Pointer-Decoding")
     ap.add_argument("--smoke", action="store_true", help="prove the machinery on a tiny real model")
-    ap.add_argument("--lm", type=str, default="", help="open-weights causal LM (e.g. Qwen/Qwen2.5-3B-Instruct)")
+    ap.add_argument("--lm", type=str, default="", help="open-weights causal LM (e.g. Qwen/Qwen3-4B-Instruct-2507)")
     ap.add_argument("--exp", choices=["gating", "repulsion", "gating2", "repulsion2", "trained", "reasoner", "both", "v2"],
                     default="v2", help="reasoner = the novel core: tiny reasoner assists the real LM at decode (track+compute+inject)")
     ap.add_argument("--quant", choices=["auto", "4bit", "fp16", "fp32"], default="auto",

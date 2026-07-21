@@ -50,7 +50,7 @@ def _():
     from v5.runtime.membrane import AtomGraph, Atom, TRMRetriever, learn_any, seed_graph
     from v5.runtime.dcpd_latent import WhiteBox
 
-    MODEL = os.environ.get("TEACH_LM", "Qwen/Qwen2.5-3B-Instruct")
+    MODEL = os.environ.get("TEACH_LM", "Qwen/Qwen3-4B-Instruct-2507")
     wb = WhiteBox(MODEL, quant="4bit")            # 4-bit -> fits 6GB (measured ~2GB)
     graph = seed_graph()
     retr = TRMRetriever(graph)

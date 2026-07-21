@@ -8,8 +8,8 @@ The graph teaches; this trainer distills that verified knowledge two ways:
 QLoRA rides the 4-bit base -> fits a 6GB consumer GPU. Verified before/after: the LM goes from hallucinating
 the invented facts to answering them correctly from its own weights.
 
-    python -m v5.runtime.trainer --lm Qwen/Qwen2.5-3B-Instruct           # teach -> train LM+TRM -> before/after
-    python -m v5.runtime.trainer --lm Qwen/Qwen2.5-3B-Instruct --lm-steps 80 --trm-steps 120
+    python -m v5.runtime.trainer --lm Qwen/Qwen3-4B-Instruct-2507           # teach -> train LM+TRM -> before/after
+    python -m v5.runtime.trainer --lm Qwen/Qwen3-4B-Instruct-2507 --lm-steps 80 --trm-steps 120
 """
 from __future__ import annotations
 
@@ -46,12 +46,15 @@ def _clean(t):
 
 
 def _lora_targets(model) -> list:
-    """Which linear modules to attach LoRA to, per architecture."""
+    """Which linear modules to attach LoRA to, per architecture (model-agnostic):
+       q_proj/v_proj = llama/qwen/qwen3/gemma3/mistral · c_attn = gpt2 · query_key_value = neox/falcon ·
+       qkv_proj = phi/phi-4-mini · Wqkv = mpt. Falls back to any *_proj attn linear it can find."""
     names = {n.split(".")[-1] for n, _ in model.named_modules()}
-    for cand in (["q_proj", "v_proj"], ["c_attn"], ["query_key_value"]):
+    for cand in (["q_proj", "v_proj"], ["c_attn"], ["query_key_value"], ["qkv_proj"], ["Wqkv"]):
         if all(c in names for c in cand):
             return cand
-    return ["q_proj", "v_proj"]
+    proj = [n for n in names if n.endswith("_proj")]         # last-resort: attach to whatever proj exist
+    return proj[:2] if proj else ["q_proj", "v_proj"]
 
 
 def train_lm_lora(wb, traces, steps=60, lr=2e-4, r=8, verbose=True):
@@ -149,7 +152,7 @@ def demo(lm_name, lm_steps=60, trm_steps=120):
 
 def main():
     ap = argparse.ArgumentParser(description="train the student LM (QLoRA) + the TRM from the graph's traces")
-    ap.add_argument("--lm", type=str, required=True, help="e.g. Qwen/Qwen2.5-3B-Instruct")
+    ap.add_argument("--lm", type=str, required=True, help="e.g. Qwen/Qwen3-4B-Instruct-2507")
     ap.add_argument("--lm-steps", type=int, default=60)
     ap.add_argument("--trm-steps", type=int, default=120)
     a = ap.parse_args()
