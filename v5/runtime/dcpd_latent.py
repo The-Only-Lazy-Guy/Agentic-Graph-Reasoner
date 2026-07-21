@@ -516,34 +516,45 @@ def exp_gating_v2(wb: WhiteBox):
     return dict(leaked_code=leaked_code, on_topic=on_topic)
 
 
-def exp_reasoner(wb: WhiteBox, fillers=(0, 3, 6, 10, 16), n_samples: int = 6):
-    """THE NOVEL CORE, on the REAL LM (not the sim reason-demo): a tiny exact REASONER rides the LM's decode.
-    It tracks the state (x = A) and COMPUTES the exact result (A op B) — the two things the LM gets wrong
-    (state-drift over long context + bad arithmetic) — and INJECTS it via gamma-gating. The LM narrates; the
-    reasoner guarantees the number. We sweep filler length to show the LM DRIFTS on the REAL model while the
-    LM+reasoner stays correct. (Here the reasoner is symbolic-exact = the mechanism; a LEARNED TRM is next.)"""
-    import random
-    print("\n[EXP] real reasoner assists the real LM at decode (track state + compute + inject via gamma-gate)\n")
+def _chain(rng, length):
+    """A multi-step state chain the LM must carry: v0, then `length` ops with small constants. Returns
+    (steps_text, final_answer, per_step_values). The reasoner computes each step EXACTLY."""
+    v = rng.randint(2, 9)
+    parts, vals = [f"Start with {v}."], [v]
+    for _ in range(length):
+        op, c = rng.choice([("add", rng.randint(2, 9)), ("multiply by", rng.randint(2, 4)),
+                            ("subtract", rng.randint(1, 5))])
+        parts.append({"add": f"Add {c}.", "multiply by": f"Multiply by {c}.", "subtract": f"Subtract {c}."}[op])
+        v = {"add": v + c, "multiply by": v * c, "subtract": v - c}[op]
+        vals.append(v)
+    return " ".join(parts), v, vals
+
+
+def exp_reasoner(wb: WhiteBox, lengths=(1, 2, 3, 4, 5, 6), n_samples: int = 8):
+    """THE NOVEL CORE on the REAL LM, redesigned to be NON-TAUTOLOGICAL. A multi-step arithmetic/state chain
+    the LM must carry in its head -> it DEGRADES with chain length (accumulating state-drift + arithmetic).
+    We measure the LM's OWN final answer (not an injected one). The reasoner tracks + computes each step
+    EXACTLY (always right, and injectable via gamma-gate). The demo's real signal: does LM-alone accuracy FALL
+    with chain length while the exact reasoner stays flat? If yes, pairing the LM with the tiny reasoner
+    removes a REAL, measured failure. (Reasoner is symbolic-exact = the mechanism; a LEARNED TRM is next.)"""
+    import random, re
+    print("\n[EXP] reasoner assists real LM: MULTI-STEP chain, LM's OWN answer vs the exact reasoner\n")
     rng = random.Random(0)
-    print(f"  filler | LM alone (drifts) | LM + reasoner (exact-inject)")
-    for k in fillers:
-        lm_ok = ri_ok = 0
+    print(f"  chain_len | LM-alone final-answer acc | reasoner acc | (LM degrades? reasoner flat?)")
+    for L in lengths:
+        lm_ok = re_ok = 0
         for _ in range(n_samples):
-            a, b = rng.randint(3, 9), rng.randint(2, 9)
-            ans = a * b                                              # the reasoner's EXACT computation
-            filler = " ".join(rng.choice(["The sky is blue.", "Cats sleep often.", "Rivers flow downhill.",
-                                          "Bread is baked.", "Stars shine at night."]) for _ in range(k))
-            stem = (f"Let x = {a}. {filler} Now, the value of x multiplied by {b} is exactly")
-            # LM ALONE: does it recall x over the filler AND compute x*b?
-            out = wb.generate_plain(stem, max_new=6, temperature=0.0)
-            lm_ok += int(str(ans) in out)
-            # LM + REASONER: the reasoner INJECTS the exact answer (gamma=0), LM would only have to say it.
-            plan = [("emit", f" {ans}.")]                            # the exact computed value, forced
-            ri = wb.generate_gated(stem, plan, temperature=0.0)
-            ri_ok += int(str(ans) in ri["text"])
-        print(f"  {k:>5}  |     {lm_ok}/{n_samples}          |     {ri_ok}/{n_samples}")
-    print(f"  => on the REAL LM: accuracy falls with filler (state-drift + arithmetic), the reasoner-injected")
-    print(f"     answer stays exact. The tiny reasoner fixes precisely what the LM cannot -- coupled at decode.")
+            steps, ans, _vals = _chain(rng, L)
+            prompt = (f"Do this step by step and give ONLY the final integer.\n{steps}\n"
+                      f"Final answer (just the number):")
+            out = wb.generate_plain(prompt, max_new=12, temperature=0.0)
+            nums = re.findall(r"-?\d+", out)
+            lm_ok += int(bool(nums) and int(nums[-1]) == ans)       # the LM's OWN computed answer
+            re_ok += 1                                              # the reasoner computed `ans` exactly by construction
+        print(f"  {L:>8}  |         {lm_ok}/{n_samples}             |    {re_ok}/{n_samples}      |")
+    print(f"  => the HONEST question: LM-alone should FALL as the chain lengthens (real accumulating error);")
+    print(f"     the exact reasoner (which the LM would ride via gamma-gate injection) stays flat. If LM-alone")
+    print(f"     does NOT fall, Qwen is too strong for this task and the thesis needs a harder chain -- report as-is.")
 
 
 def smoke():
