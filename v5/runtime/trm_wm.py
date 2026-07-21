@@ -136,7 +136,7 @@ class WMReasoner(nn.Module):
         pooled = torch.tanh(self.ds_pool(flat.mean(1)))  # [B*T, d_lm]
         q = self.ds_proj(pooled)
         q = q / (q.norm(dim=-1, keepdim=True) + 1e-8)
-        logits = (answer_pool.float().unsqueeze(0) @ q.unsqueeze(-1)).squeeze(-1) / self._ds_scale  # [B*T, N]
+        logits = q @ answer_pool.float().T / self._ds_scale  # [B*T, N]
         gold = torch.tensor(gold_idxs, device=dev).repeat_interleave(T)
         return nn.functional.cross_entropy(logits, gold)
 
