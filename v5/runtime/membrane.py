@@ -993,11 +993,21 @@ def interactive_trace(lm_name: str):
             i = t.find(c); t = t[:i] if i > 0 else t
         return t.strip()
 
-    RELEVANCE = 0.35   # only GROUND when a node is genuinely relevant (taught facts scored ~0.6; junk ~0.1)
+    RELEVANCE = 0.35   # ground when a node is genuinely relevant (taught facts scored ~0.6; junk ~0.1)
+
+    def is_question(s):
+        s = s.strip().lower()
+        if s.endswith("?"):
+            return True
+        return any(s.startswith(w) for w in (
+            "who ", "what ", "when ", "where ", "why ", "how ", "which ", "whose ",
+            "is ", "are ", "was ", "were ", "do ", "does ", "did ", "can ", "could ",
+            "will ", "would ", "should ", "tell ", "explain", "list ", "name ", "define", "give "))
+
     print(f"\n  LM {lm_name}  quant={wb.quant}  VRAM={wb.vram_gb:.2f}GB "
           f"({'FITS 6GB' if wb.vram_gb <= 6 else 'OVER 6GB'})")
     print(f"  graph: {len(g)} nodes {g.census()}   (LM frozen; knowledge is in the graph)")
-    print(f"  type a QUESTION  |  'teach <fact>' to add knowledge  |  'quit' to exit")
+    print(f"  STATE a fact -> I learn it   |   ASK a question -> I answer (from memory if I know)   |   'quit'")
     while True:
         try:
             q = input("\nquery> ").strip()
@@ -1008,8 +1018,11 @@ def interactive_trace(lm_name: str):
         if q.lower() in ("quit", "exit", "q"):
             break
         if q.lower().startswith("teach "):
-            r = learn_any(g, retr, q[6:].strip(), name=f"taught_{len(g)}")
-            print(f"  learned -> node '{r['node']}' type={r['kind']}  (graph now {len(g)} nodes)")
+            q = q[6:].strip()
+        # AUTO-LEARN: a declarative statement is TAUGHT (conversational learning); a question is answered.
+        if not is_question(q):
+            r = learn_any(g, retr, q, name=f"mem_{len(g)}")
+            print(f"  [LEARN]   stored '{q[:60]}' as node '{r['node']}'  (graph now {len(g)} nodes) -- got it, I'll remember that")
             continue
         qv = encode_batch([q])[0]
         print(f"  [1] EMBED     query -> MiniLM 384-d vector (norm {np.linalg.norm(qv):.2f})")
@@ -1017,22 +1030,23 @@ def interactive_trace(lm_name: str):
         rank = sorted(zip(order, sims), key=lambda z: -z[1])[:5]
         print(f"  [2] RETRIEVE  top graph matches (neural):")
         for n, s in rank:
-            flag = "  <- relevant" if s >= RELEVANCE else ""
-            print(f"                {s:5.2f}  {n:<20} ({g.get(n).kind}){flag}")
+            print(f"                {s:5.2f}  {n:<20} ({g.get(n).kind}){'  <- relevant' if s >= RELEVANCE else ''}")
         top, ts = rank[0]
-        # proper INSTRUCT generation (chat template) -> the LM RESPONDS as an assistant, not base-completes
-        base = clean(wb.generate_chat(q, max_new=256))
-        if ts >= RELEVANCE:                                    # RELEVANCE GATE — only ground on a real match
-            node = g.get(top); content = node.code or node.description
-            print(f"  [3] SELECT    '{top}' RELEVANT (sim {ts:.2f} >= {RELEVANCE}): {content[:90]}")
-            print(f"  [4] LM ALONE  (no memory)   -> {base}")
+        hits = [(n, s) for n, s in rank if s >= RELEVANCE][:3]  # ALL relevant nodes (multi-fact grounding)
+        base = clean(wb.generate_chat(q, max_new=256))         # proper instruct assistant reply (chat template)
+        if hits:
+            facts = "\n".join(f"- {g.get(n).code or g.get(n).description}" for n, s in hits)
+            print(f"  [3] SELECT    {len(hits)} relevant node(s): {', '.join(n for n, _ in hits)}")
+            print(f"  [4] LM ALONE  (no memory) -> {base}")
             grounded = clean(wb.generate_chat(
-                q, system=f"Use this fact the user taught you to answer: {content}", max_new=256))
-            print(f"  [5] LM+GRAPH  (grounded)    -> {grounded}")
-        else:                                                 # nothing relevant -> DON'T force-inject junk (realistic)
-            print(f"  [3] SELECT    nothing relevant (top sim {ts:.2f} < {RELEVANCE}) -> the graph stays OUT")
-            print(f"  [4] ANSWER    (model directly) -> {base}")
-            print(f"  [5] LM+GRAPH  skipped -- no relevant knowledge, so the model answers on its own (realistic)")
+                q, system=f"Use these facts the user taught you to answer (pick the relevant one):\n{facts}",
+                max_new=256))
+            print(f"  [5] LM+GRAPH  (grounded)  -> {grounded}")
+        else:                                                 # [5] ALWAYS runs -- never blocked. No junk injected.
+            print(f"  [3] SELECT    nothing above {RELEVANCE} (top '{top}' {ts:.2f}) -> no stored fact matches")
+            print(f"  [4] LM ALONE  (no memory) -> {base}")
+            print(f"  [5] LM+GRAPH  -> nothing in memory about this yet; the answer above is from the model's "
+                  f"own knowledge (state a fact to teach me)")
     print("  bye")
 
 
