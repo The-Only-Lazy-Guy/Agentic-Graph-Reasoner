@@ -43,15 +43,34 @@ def _decoder_layers(model):
 class WhiteBox:
     """A real open-weights causal LM with logit-level + residual-stream control."""
 
-    def __init__(self, name: str, dtype=None):
+    def __init__(self, name: str, dtype=None, quant: str = "auto"):
+        """quant: '4bit' (NF4, ~2.2GB for a 3B -> fits a 6GB consumer GPU, the deployment target), 'fp16',
+        'fp32', or 'auto' (4bit on CUDA for a non-tiny model, else fp16/fp32). The white-box hooks + steering
+        still work on a 4-bit model (weights are quantized; the residual stream is fp16 in compute)."""
         from transformers import AutoTokenizer, AutoModelForCausalLM
         self.name = name
         self.tok = AutoTokenizer.from_pretrained(name)
         if self.tok.pad_token is None:
             self.tok.pad_token = self.tok.eos_token
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        dtype = dtype or (torch.float16 if self.device == "cuda" else torch.float32)
-        self.model = AutoModelForCausalLM.from_pretrained(name, torch_dtype=dtype).to(self.device).eval()
+        import importlib.util
+        bnb_ok = importlib.util.find_spec("bitsandbytes") is not None
+        tiny = "distilgpt2" in name or "gpt2" == name
+        want4 = (quant == "4bit" or (quant == "auto" and self.device == "cuda" and bnb_ok and not tiny)) and dtype is None
+        if self.device == "cuda":
+            torch.cuda.reset_peak_memory_stats(); torch.cuda.empty_cache()
+        if want4 and bnb_ok and self.device == "cuda":
+            from transformers import BitsAndBytesConfig
+            bnb = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
+                                     bnb_4bit_compute_dtype=torch.float16, bnb_4bit_use_double_quant=True)
+            self.model = AutoModelForCausalLM.from_pretrained(name, quantization_config=bnb,
+                                                              device_map={"": 0}).eval()
+            self.quant = "4bit-nf4"
+        else:
+            dt = dtype or (torch.float16 if self.device == "cuda" else torch.float32)
+            self.model = AutoModelForCausalLM.from_pretrained(name, torch_dtype=dt).to(self.device).eval()
+            self.quant = str(dt).replace("torch.", "")
+        self.vram_gb = (torch.cuda.memory_allocated() / 1e9) if self.device == "cuda" else 0.0
         self.layers = _decoder_layers(self.model)
         self.n_layers = len(self.layers)
         self.d_model = self.model.config.hidden_size
@@ -602,6 +621,8 @@ def main():
     ap.add_argument("--lm", type=str, default="", help="open-weights causal LM (e.g. Qwen/Qwen2.5-3B-Instruct)")
     ap.add_argument("--exp", choices=["gating", "repulsion", "gating2", "repulsion2", "trained", "reasoner", "both", "v2"],
                     default="v2", help="reasoner = the novel core: tiny reasoner assists the real LM at decode (track+compute+inject)")
+    ap.add_argument("--quant", choices=["auto", "4bit", "fp16", "fp32"], default="auto",
+                    help="4bit (NF4, ~2.2GB, fits 6GB consumer GPU = the deployment target) | fp16 | fp32")
     ap.add_argument("--layer", type=int, default=0, help="steering layer (0 = middle)")
     ap.add_argument("--trap", type=str, default="bubble sort")
     ap.add_argument("--alpha", type=float, default=10.0)
@@ -613,8 +634,10 @@ def main():
         sys.exit(0 if smoke() else 1)
     if not a.lm:
         ap.print_help(); return
-    wb = WhiteBox(a.lm)
-    print(f"loaded {wb.name}: {wb.n_layers} layers d_model={wb.d_model} device={wb.device}")
+    wb = WhiteBox(a.lm, quant=a.quant)
+    fits = " -> FITS a 6GB consumer GPU" if wb.vram_gb and wb.vram_gb <= 6.0 else (" -> OVER 6GB!" if wb.vram_gb else "")
+    print(f"loaded {wb.name}: {wb.n_layers} layers d_model={wb.d_model} device={wb.device} "
+          f"quant={wb.quant} VRAM={wb.vram_gb:.2f}GB{fits}")
     layer = a.layer or max(1, wb.n_layers // 2)
     if a.exp == "gating":
         exp_gating(wb)
