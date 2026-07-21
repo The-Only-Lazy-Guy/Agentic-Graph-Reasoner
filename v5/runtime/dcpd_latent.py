@@ -112,7 +112,8 @@ class WhiteBox:
         repetition penalty + EOS stop as generate_plain. Falls back to a plain prompt if no chat template."""
         if getattr(self.tok, "chat_template", None):
             msgs = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": user}]
-            ids = self.tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt").to(self.device)
+            enc = self.tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt")
+            ids = (enc if torch.is_tensor(enc) else enc["input_ids"]).to(self.device)  # transformers 5.x returns a dict
         else:
             ids = self.tok(((system + "\n") if system else "") + user + "\n", return_tensors="pt").input_ids.to(self.device)
         start = ids.shape[1]
