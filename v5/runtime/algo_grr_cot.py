@@ -383,7 +383,7 @@ def lm_project(gen, trace: dict):
 _LM_TOL = dict(rel_tol=1e-3, abs_tol=1e-3)
 
 
-def run_lm(lm: str, corpus_path: str = "", n: int = 40, quorum_m: int = 2):
+def run_lm(lm: str, corpus_path: str = "", n: int = 40, quorum_m: int = 2, dump: int = 0):
     """Real-3B run: frozen LM projects CoT steps into typed slots; the verifier INDEPENDENTLY recomputes
     each transition + the gold anchor; induction banks generalizing schemas. Reports slot-op fidelity
     (vs known op where available), gold-pass rate, certified schemas, cross-domain reuse, LM calls."""
@@ -392,11 +392,12 @@ def run_lm(lm: str, corpus_path: str = "", n: int = 40, quorum_m: int = 2):
     traces = (load_corpus(corpus_path)[:n] if corpus_path else gen_corpus(seed=0))
     store = SchemaStore(quorum_m)
     lm_calls = op_hits = op_total = gold_pass = local_pass = 0
+    fails = []                                               # (trace, slots, parse_ok) for the raw dump
     for t in traces:
         slots, ok = lm_project(gen, t)
         lm_calls += len(t["steps"])
         if not ok or len(slots) != len(t["steps"]):
-            continue
+            fails.append((t, slots, False)); continue
         for slot, step in zip(slots, t["steps"]):            # FIDELITY: LM op vs ground-truth op (synthetic only)
             if "op" in step:
                 op_total += 1; op_hits += int(slot["op"] == step["op"])
@@ -407,6 +408,8 @@ def run_lm(lm: str, corpus_path: str = "", n: int = 40, quorum_m: int = 2):
         local_pass += int(local_ok); gold_pass += int(gold_ok)
         if gold_ok:
             store.observe(t, slots)
+        elif dump:
+            fails.append((t, slots, True))
     store.sweep_quarantine()
     n_run = len(traces)
     print(f"\n  REAL-3B slot-projection ({lm}, {n_run} CoT traces):")
@@ -417,6 +420,16 @@ def run_lm(lm: str, corpus_path: str = "", n: int = 40, quorum_m: int = 2):
     print(f"  => the frozen LM only FILLS SLOTS; the verifier recomputed every transition + anchor "
           f"(rel-tol {_LM_TOL['rel_tol']:.0e} for LM-rounded floats). Wrong projections fail the gate (not")
     print(f"     banked) — the poison line holds on hardware, not just the stub.")
+    if dump and fails:                                        # INSPECT THE RAW: why did a trace fail the gate?
+        print(f"\n  RAW DUMP of {min(dump, len(fails))} failing trace(s) — is it a genuine 3B slip or the harness?")
+        for t, slots, parsed in fails[:dump]:
+            print(f"\n  {t['schema']}/{t['domain']}  x0={t['x0']:.4f}  gold={t['gold']:.4f}  "
+                  f"{'(parse failed)' if not parsed else ''}")
+            for s, ref in zip(slots, t["steps"]):
+                got = apply_op(s["op"], s["prior"], s["arg"]) if s["op"] in OPS else float("nan")
+                mark = "ok " if math.isclose(got, s["resulting"], **_LM_TOL) else "XX "
+                print(f"    {mark}LM: {s['prior']:.4f} --{s['op']}({s['arg']})--> {s['resulting']:.4f}   "
+                      f"recompute={got:.4f}  (true op={ref.get('op')})")
     return store
 
 
@@ -544,13 +557,15 @@ def main():
     ap.add_argument("--lm", type=str, default="", help="frozen LM, e.g. Qwen/Qwen2.5-3B-Instruct")
     ap.add_argument("--corpus", type=str, default="", help="CoT JSONL {question,cot,answer}; else synthetic NL")
     ap.add_argument("--n", type=int, default=40)
+    ap.add_argument("--dump", type=int, nargs="?", const=8, default=0,
+                    help="inspect the RAW: print N failing traces (LM slots vs recompute) — genuine 3B slip or harness?")
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if selftest() else 1)
     if a.run:
         if not a.lm:
             raise SystemExit("--run needs --lm")
-        run_lm(a.lm, a.corpus, a.n)
+        run_lm(a.lm, a.corpus, a.n, dump=a.dump)
         return
     if a.demo:
         traces = gen_corpus(seed=0)
