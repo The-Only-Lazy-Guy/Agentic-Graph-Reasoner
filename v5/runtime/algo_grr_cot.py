@@ -46,15 +46,17 @@ def apply_op(op: str, x: float, a: float) -> float:
     return OPS[op](x, a)
 
 
-def verify_transition(prior: float, op: str, arg: float, resulting: float) -> bool:
-    """The execution BYPASS: recompute the transition, don't run the LM's text. True iff it holds."""
+def verify_transition(prior: float, op: str, arg: float, resulting: float, tol: dict = None) -> bool:
+    """The execution BYPASS: recompute the transition, don't run the LM's text. True iff it holds.
+    tol overrides the default exact tolerance — the real-3B run loosens it because an LM emits ROUNDED
+    floats (physics), which a 1e-9 exact check rejects even when the reasoning is perfect."""
     if op not in OPS:
         return False
     try:
         got = apply_op(op, prior, arg)
     except Exception:  # noqa: BLE001
         return False
-    return isinstance(got, (int, float)) and not math.isnan(got) and math.isclose(got, resulting, **_TOL)
+    return isinstance(got, (int, float)) and not math.isnan(got) and math.isclose(got, resulting, **(tol or _TOL))
 
 
 # ── the latent reasoning-schemas (op-sequences) shared ACROSS math & physics wording ──────────────
@@ -365,13 +367,20 @@ def lm_project(gen, trace: dict):
     slots, prior_ok = [], True
     state = trace["x0"]
     for prior, text in render_nl(trace):
-        rec = _parse_record(gen([_PROJECT_PROMPT.format(prior=round(state, 4), text=text)])[0])
+        # show 6 digits (not 4) so the value the LM computes from matches what the verifier recomputes;
+        # store the RAW state as prior so the state-thread stays exact (prior_i == resulting_{i-1}).
+        rec = _parse_record(gen([_PROJECT_PROMPT.format(prior=round(state, 6), text=text)])[0])
         if rec is None:
             return slots, False
         op, arg, result = rec
         slots.append(dict(prior=state, op=op, arg=arg, resulting=result))
         state = result                                        # thread the LM's OWN output forward
     return slots, prior_ok
+
+
+# LM floats are ROUNDED (physics) — the real run verifies with a relative tolerance, not the exact 1e-9
+# used for the integer synthetic selftest. Loose enough for LM rounding, tight enough that back-fit still fails.
+_LM_TOL = dict(rel_tol=1e-3, abs_tol=1e-3)
 
 
 def run_lm(lm: str, corpus_path: str = "", n: int = 40, quorum_m: int = 2):
@@ -392,8 +401,9 @@ def run_lm(lm: str, corpus_path: str = "", n: int = 40, quorum_m: int = 2):
             if "op" in step:
                 op_total += 1; op_hits += int(slot["op"] == step["op"])
         cons = internal_consistency(slots)
-        local_ok = cons and all(verify_transition(s["prior"], s["op"], s["arg"], s["resulting"]) for s in slots)
-        gold_ok = local_ok and math.isclose(slots[-1]["resulting"], t["gold"], **_TOL)
+        local_ok = cons and all(verify_transition(s["prior"], s["op"], s["arg"], s["resulting"], _LM_TOL)
+                                for s in slots)
+        gold_ok = local_ok and math.isclose(slots[-1]["resulting"], t["gold"], **_LM_TOL)
         local_pass += int(local_ok); gold_pass += int(gold_ok)
         if gold_ok:
             store.observe(t, slots)
@@ -404,8 +414,9 @@ def run_lm(lm: str, corpus_path: str = "", n: int = 40, quorum_m: int = 2):
     print(f"    local-verify pass    : {local_pass}/{n_run}   gold-anchor pass : {gold_pass}/{n_run}")
     print(f"    certified schemas    : {len(store.certified)}   quarantined : {len(store.quarantine)}")
     print(f"    cross-domain reuse   : {store.cross_domain_reuse}   LM calls : {lm_calls}")
-    print(f"  => the frozen LM only FILLS SLOTS; the verifier recomputed every transition + anchor. Wrong")
-    print(f"     projections fail the gate (not banked) — the poison line holds on hardware, not just the stub.")
+    print(f"  => the frozen LM only FILLS SLOTS; the verifier recomputed every transition + anchor "
+          f"(rel-tol {_LM_TOL['rel_tol']:.0e} for LM-rounded floats). Wrong projections fail the gate (not")
+    print(f"     banked) — the poison line holds on hardware, not just the stub.")
     return store
 
 

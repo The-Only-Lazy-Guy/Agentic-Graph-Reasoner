@@ -81,6 +81,13 @@ my quorum/critic fixes) learns reasoning SCHEMAS into the graph; LM stays frozen
 - Critic carries a VALIDITY DOMAIN (region measured vs a real verifier). Your 0.46 = used outside it. Fix is
   'never fire the critic outside its benchmarked region', NOT 'trust confidence more'.
 
+### REAL-3B RESULT (Qwen2.5-3B-Instruct, --run --n 40, on the user's box 2026-07-21)
+  slot-op fidelity **36/36 = 100%** (frozen 3B fills op slots PERFECTLY — move-1 bet validated on hardware).
+  First run showed gold 9/18 + cross-domain reuse 0 = a HARNESS float bug (showed round(state,4) but verified
+  unrounded prior; exact 1e-9 tol rejects LM-rounded physics floats). FIX (round-6 display + rel-tol 1e-3 on the
+  real path only; selftest exact path untouched): rounded-float LM sim -> local 18/18, gold 18/18, certified 3,
+  **cross-domain reuse 3**. Inspect-the-raw again: aggregate said 50%, raw said model perfect + our floats broken.
+
 ### REAL-3B PATH (built, plumbing smoke-tested with a stub gen; run pending on your box)
   python -m v5.runtime.algo_grr_cot --run --lm Qwen/Qwen2.5-3B-Instruct --n 40   # synthetic NL CoT (fidelity)
   python -m v5.runtime.algo_grr_cot --run --lm Qwen/Qwen2.5-3B-Instruct --corpus <gsm8k.jsonl> --n 200
