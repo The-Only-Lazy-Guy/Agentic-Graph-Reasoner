@@ -92,7 +92,9 @@ class WMReasoner(nn.Module):
     def __init__(self, d_lm: int, couple_layers, d_emb: int = EMBED_DIM, T: int = 4, n_heads: int = 4):
         super().__init__()
         self.T = T
-        self.proj_atom = nn.Linear(d_emb, d_lm)
+        # MODALITY PROJECTOR (2-layer GELU): translate KG/MiniLM geometry -> the decoder's native space, so
+        # the cross-attention isn't handed 'foreign noise'. A single Linear is too weak to bridge the gap.
+        self.proj_atom = nn.Sequential(nn.Linear(d_emb, d_lm), nn.GELU(), nn.Linear(d_lm, d_lm))
         self.proj_task = nn.Linear(d_emb, d_lm)
         self.upd = nn.Sequential(nn.Linear(3 * d_lm, d_lm), nn.GELU(), nn.Linear(d_lm, d_lm))
         self.norm = nn.LayerNorm(d_lm)
@@ -102,7 +104,9 @@ class WMReasoner(nn.Module):
 
         self.ds_pool = nn.Linear(d_lm, d_lm)
         self.ds_proj = nn.Linear(d_lm, d_lm)
-        self._ds_scale = d_lm ** 0.5
+        # temperature for the DS cosine logits. q and pool are L2-normalized -> logits in [-1,1]; dividing by
+        # sqrt(d_lm) (~50) flattens them to ~uniform (ds_loss stuck at ln N, no gradient). 0.07 SHARPENS them.
+        self._ds_scale = 0.07
 
     def refine(self, task_emb: torch.Tensor, atom_embs: torch.Tensor) -> tuple[torch.Tensor, list[torch.Tensor]]:
         """task_emb [d_emb], atom_embs [K,d_emb] -> (working_memory [K,d_lm], per_step_states [[K,d_lm],...])"""
@@ -140,6 +144,25 @@ class WMReasoner(nn.Module):
         gold = torch.tensor(gold_idxs, device=dev).repeat_interleave(T)
         return nn.functional.cross_entropy(logits, gold)
 
+    def align_projector(self, kg_embs: torch.Tensor, lm_targets: torch.Tensor,
+                        steps: int = 300, lr: float = 1e-3) -> float:
+        """MODALITY PRE-ALIGNMENT (CLIP): train proj_atom so KG (MiniLM) embeddings land in the LM's OWN
+        representation space -> cross-attention stops seeing foreign noise. kg_embs [N,d_emb], lm_targets
+        [N,d_lm] (the LM's embedding of each atom). Trains proj_atom only; symmetric InfoNCE."""
+        opt = torch.optim.Adam(self.proj_atom.parameters(), lr=lr)
+        T = lm_targets / (lm_targets.norm(dim=-1, keepdim=True) + 1e-8)
+        last = float("nan")
+        for _ in range(steps):
+            P = self.proj_atom(kg_embs)
+            P = P / (P.norm(dim=-1, keepdim=True) + 1e-8)
+            logits = P @ T.t() / 0.07
+            labels = torch.arange(P.shape[0], device=P.device)
+            loss = 0.5 * (nn.functional.cross_entropy(logits, labels) +
+                          nn.functional.cross_entropy(logits.t(), labels))
+            opt.zero_grad(); loss.backward(); opt.step()
+            last = float(loss.detach())
+        return last
+
     def set_context(self, task_emb, atom_embs):
         te = torch.as_tensor(task_emb, dtype=torch.float32, device=self._device())
         ae = torch.as_tensor(atom_embs, dtype=torch.float32, device=self._device())
@@ -154,7 +177,7 @@ class WMReasoner(nn.Module):
         self._slots = None
 
     def _device(self):
-        return self.proj_atom.weight.device
+        return self.proj_task.weight.device
 
     def couple(self, wb) -> list:
         handles = []
@@ -260,16 +283,19 @@ def _run_probe(wb, R, pids, train, test, precomputed_states, answer_pool, tid_of
     return tr, te, te_abl, float(R.adapters[0].g), last
 
 
-def selftest():
+def selftest(wb=None, bs=128, steps_a=120, steps_b=250):
     from v5.runtime.dcpd_latent import WhiteBox
     torch.manual_seed(0)
-    print("trm_wm.py --selftest : TRM working memory coupled to a FROZEN distilgpt2 (mechanism proof)\n")
-    wb = WhiteBox("distilgpt2", quant="fp32")
-    if os.environ.get("GRAPH_FORCE_CPU"):
-        wb.model = wb.model.to("cpu"); wb.device = "cpu"
-        print("  (forced CPU)")
+    if wb is None:
+        print("trm_wm.py --selftest : TRM working memory coupled to a FROZEN distilgpt2 (mechanism proof)\n")
+        wb = WhiteBox("distilgpt2", quant="fp32")
+        if os.environ.get("GRAPH_FORCE_CPU"):
+            wb.model = wb.model.to("cpu"); wb.device = "cpu"
+            print("  (forced CPU)")
+    else:
+        print(f"trm_wm.py --probe on {wb.name} (real LM): copy(A) + bridge(B) mechanism test on a capable model\n")
     d_lm = wb.d_model
-    couple = [4, 5]
+    couple = [wb.n_layers - 2, wb.n_layers - 1]         # last two layers (was [4,5] for distilgpt2's 6)
     R = WMReasoner(d_lm, couple_layers=couple).to(wb.device)
     for p in wb.model.parameters():
         p.requires_grad_(False)
@@ -309,27 +335,35 @@ def selftest():
         z_a = lm_emb[tid_of[w]].detach()  # [d_lm]
         states_a.append([z_a.unsqueeze(0).clone() for _ in range(R.T)])
     tr_a, te_a, ab_a, g_a, l_a = _run_probe(
-        wb, R, pids, train_w, test_w, states_a, answer_pool, tid_of, steps=150, ds_weight=0.15)
+        wb, R, pids, train_w, test_w, states_a, answer_pool, tid_of, steps=steps_a, bs=bs, ds_weight=0.15)
     print(f"  (A) WIRING  (slot = LM's own embedding):  train {tr_a:.2f}  HELD-OUT {te_a:.2f}  "
           f"ablate->0 {ab_a:.2f}  gate {g_a:+.2f}  loss {l_a:.3f}")
 
-    # PROBE B — BRIDGE: precompute ALL per-step states via WMReasoner.refine() once
+    # PROBE B — BRIDGE (slot from MiniLM graph space). Run RAW vs CLIP-ALIGNED to isolate the modality gap.
     for h in handles:
         h.remove()
-    R2 = WMReasoner(d_lm, couple_layers=couple).to(wb.device)
-    handles = R2.couple(wb)
     task_emb = torch.as_tensor(encode_batch([prompt])[0], dtype=torch.float32, device=wb.device)
     memb = {w: torch.as_tensor(encode_batch([w])[0], dtype=torch.float32, device=wb.device) for w, _ in words}
-    states_b = []
-    with torch.no_grad():
-        for w, _ in words:
-            _, states = R2.refine(task_emb, memb[w].unsqueeze(0))
-            states_b.append([s.clone().detach() for s in states])
-
-    tr_b, te_b, ab_b, g_b, l_b = _run_probe(
-        wb, R2, pids, train_w, test_w, states_b, answer_pool, tid_of, steps=400, ds_weight=0.15)
-    print(f"  (B) BRIDGE  (slot from MiniLM graph emb):  train {tr_b:.2f}  HELD-OUT {te_b:.2f}  "
-          f"ablate->0 {ab_b:.2f}  gate {g_b:+.2f}  loss {l_b:.3f}")
+    align_kg = torch.stack([memb[w] for w, _ in train_w])                    # MiniLM of TRAIN atoms only
+    align_tgt = torch.stack([lm_emb[tid_of[w]].float() for w, _ in train_w]) # the LM's own embedding of each
+    te_b = 0.0
+    for tag, do_align in (("raw", False), ("CLIP-aligned", True)):
+        Rb = WMReasoner(d_lm, couple_layers=couple).to(wb.device)
+        hb = Rb.couple(wb)
+        al = Rb.align_projector(align_kg, align_tgt, steps=300) if do_align else None
+        states_b = []
+        with torch.no_grad():
+            for w, _ in words:
+                _, states = Rb.refine(task_emb, memb[w].unsqueeze(0))         # aligned projector -> LM-space slots
+                states_b.append([s.clone().detach() for s in states])
+        tr_b, te_b, ab_b, g_b, l_b = _run_probe(
+            wb, Rb, pids, train_w, test_w, states_b, answer_pool, tid_of, steps=steps_b, bs=bs, ds_weight=0.15)
+        alstr = f"  align_loss {al:.2f}" if al is not None else ""
+        print(f"  (B:{tag:>12}) BRIDGE MiniLM->LM:  train {tr_b:.2f}  HELD-OUT {te_b:.2f}  "
+              f"ablate {ab_b:.2f}  gate {g_b:+.2f}{alstr}")
+        for h in hb:
+            h.remove()
+    handles = []
 
     print()
     if te_a >= 0.5 and ab_a < te_a:
@@ -602,13 +636,28 @@ def run_real(lm_name: str):
         h.remove()
 
 
+def probe_real(lm_name: str):
+    """Run the copy(A)+bridge(B) mechanism test on the REAL 4B (not distilgpt2). Probe B is the decisive one:
+    can a capable LM READ graph-space (MiniLM) slots via the working memory and generalize? distilgpt2 can't
+    (0.04); this is the fair test. Smaller batch/steps since the 4B is heavy."""
+    from v5.runtime.dcpd_latent import WhiteBox
+    wb = WhiteBox(lm_name, quant="4bit")
+    for p in wb.model.parameters():
+        p.requires_grad_(False)
+    print(f"  LM {lm_name}  quant={wb.quant}  VRAM={wb.vram_gb:.2f}GB  layers={wb.n_layers}\n")
+    selftest(wb, bs=48, steps_a=80, steps_b=200)
+
+
 def main():
     ap = argparse.ArgumentParser(description="TRM working memory coupled to a frozen LM (real reasoner, design b)")
     ap.add_argument("--selftest", action="store_true", help="prove the mechanism on distilgpt2 (local, fast)")
-    ap.add_argument("--run", action="store_true", help="real experiment on --lm")
+    ap.add_argument("--probe", action="store_true", help="copy+bridge mechanism test on the real --lm (the fair bridge test)")
+    ap.add_argument("--run", action="store_true", help="full composition experiment on --lm (hardest task)")
     ap.add_argument("--lm", type=str, default="Qwen/Qwen3-4B-Instruct-2507")
     a = ap.parse_args()
-    if a.run:
+    if a.probe:
+        probe_real(a.lm)
+    elif a.run:
         run_real(a.lm)
     else:
         selftest()
