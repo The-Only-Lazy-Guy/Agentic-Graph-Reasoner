@@ -977,14 +977,69 @@ def demo_teach_explain(lm_name: str):
     print(f"  final graph node types: {g.census()}   (the knowledge lives in the graph, LM frozen)")
 
 
+def interactive_trace(lm_name: str):
+    """Terminal interactive tracer: you type a question, it shows each pipeline stage (embed -> retrieve ->
+    select -> LM alone vs LM+graph). Local, real 4-bit LM (~2GB, fits 6GB). 'teach <fact>' adds knowledge."""
+    from v5.runtime.dcpd_latent import WhiteBox
+    wb = WhiteBox(lm_name, quant="4bit")
+    g = seed_graph(); retr = TRMRetriever(g)
+    for f, n in [("The Klarn Protocol requires three handshake phases: greet, verify, and seal.", "fact_klarn"),
+                 ("Zephyrite melts at 812 degrees and conducts electricity only when wet.", "fact_zephyrite"),
+                 ("The Vora index measures how fast a market recovers after a shock, from 0 to 100.", "fact_vora")]:
+        learn_any(g, retr, f, name=n)
+
+    def clean(t):
+        for c in ("\nHuman:", "Human:", "\nYou are", "\n\n", "<|"):
+            i = t.find(c); t = t[:i] if i > 0 else t
+        return t.strip()
+
+    print(f"\n  LM {lm_name}  quant={wb.quant}  VRAM={wb.vram_gb:.2f}GB "
+          f"({'FITS 6GB' if wb.vram_gb <= 6 else 'OVER 6GB'})")
+    print(f"  graph: {len(g)} nodes {g.census()}   (LM frozen; knowledge is in the graph)")
+    print(f"  type a QUESTION  |  'teach <fact>' to add knowledge  |  'quit' to exit")
+    while True:
+        try:
+            q = input("\nquery> ").strip()
+        except EOFError:
+            break
+        if not q:
+            continue
+        if q.lower() in ("quit", "exit", "q"):
+            break
+        if q.lower().startswith("teach "):
+            r = learn_any(g, retr, q[6:].strip(), name=f"taught_{len(g)}")
+            print(f"  learned -> node '{r['node']}' type={r['kind']}  (graph now {len(g)} nodes)")
+            continue
+        qv = encode_batch([q])[0]
+        print(f"  [1] EMBED     query -> MiniLM 384-d vector (norm {np.linalg.norm(qv):.2f})")
+        M, order = g.matrix(); sims = (M @ qv).tolist()
+        rank = sorted(zip(order, sims), key=lambda z: -z[1])[:5]
+        print(f"  [2] RETRIEVE  top graph matches (neural):")
+        for n, s in rank:
+            print(f"                {s:5.2f}  {n:<20} ({g.get(n).kind})")
+        top, ts = rank[0]; node = g.get(top); content = node.code or node.description
+        print(f"  [3] SELECT    '{top}' (sim {ts:.2f}, {node.kind}): {content[:90]}")
+        base = clean(wb.generate_plain(f"Answer briefly. {q}", max_new=48))
+        print(f"  [4] LM ALONE  (no memory)     -> {base[:170]}")
+        grounded = clean(wb.generate_plain(f"Use ONLY this to answer.\n{content}\nQuestion: {q}\nAnswer:", max_new=48))
+        print(f"  [5] LM+GRAPH  (grounded)      -> {grounded[:170]}")
+    print("  bye")
+
+
 def main():
     ap = argparse.ArgumentParser(description="one real integrated membrane: neural retrieval + TRM + verify + learn")
     ap.add_argument("--demo", action="store_true", help="the integrated retrieval+TRM+verify+learn demo")
     ap.add_argument("--deploy", action="store_true", help="the deployment demo: universal graph learns ANY data + uses it")
     ap.add_argument("--trm", action="store_true", help="TRM-as-reasoner: iterative multi-hop retrieval (NOT RAG)")
     ap.add_argument("--teach", action="store_true", help="ACCEPTANCE TEST: teach unseen info -> model explains it (needs --lm)")
+    ap.add_argument("--interactive", action="store_true", help="terminal tracer: type a question, see each stage (needs --lm)")
     ap.add_argument("--lm", type=str, default="", help="real frozen LM (e.g. Qwen/Qwen2.5-3B-Instruct); optional")
     a = ap.parse_args()
+    if a.interactive:
+        if not a.lm:
+            raise SystemExit("--interactive needs --lm")
+        interactive_trace(a.lm)
+        return
     if a.teach:
         if not a.lm:
             raise SystemExit("--teach needs --lm")
