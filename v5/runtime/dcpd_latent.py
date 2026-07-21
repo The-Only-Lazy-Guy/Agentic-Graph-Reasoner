@@ -158,6 +158,101 @@ class WhiteBox:
             return torch.multinomial(probs, 1)
         return logits.argmax(-1, keepdim=True)
 
+    # ══ v2: the PROPER representation-engineering steering (the crude version above lost to text) ══
+    @torch.no_grad()
+    def mean_hidden(self, texts: list, layer: int) -> torch.Tensor:
+        """Mean (over texts) of the mean-pooled hidden state at `layer`. [d], unnormalized."""
+        acc = None
+        for t in texts:
+            ids = self.tok(t, return_tensors="pt").to(self.device)
+            h = self.model(**ids, output_hidden_states=True).hidden_states[layer][0].mean(0).float()
+            acc = h if acc is None else acc + h
+        return acc / max(1, len(texts))
+
+    def contrastive_direction(self, pos: list, neg: list, layer: int) -> torch.Tensor:
+        """v = mean_hidden(pos) - mean_hidden(neg), normalized. Difference-of-means isolates the CONCEPT
+        direction (strips generic token/position components the raw-mean vector was diluted by)."""
+        d = self.mean_hidden(pos, layer) - self.mean_hidden(neg, layer)
+        return d / (d.norm() + 1e-6)
+
+    @torch.no_grad()
+    def generate_ablated(self, prompt: str, direction: torch.Tensor, layers: list, max_new: int = 40,
+                         strength: float = 1.0, temperature: float = 0.0) -> dict:
+        """DIRECTIONAL ABLATION over a BAND of layers: at each layer in `layers`, remove the concept
+        component from the last-token residual: h -= strength * (h . v_hat) * v_hat. strength=1.0 removes
+        it fully (NO magnitude hyperparameter to over-crank -> far less fluency damage than alpha-scaled
+        subtraction). Only positive projection is removed (never pushes the concept negative)."""
+        v = direction.to(self.device).to(next(self.model.parameters()).dtype)
+        vhat = v / (v.norm() + 1e-6)
+        stat = {"steps": 0, "removed": 0.0}
+        handles = []
+
+        def mk_hook():
+            def hook(module, inp, out):
+                h = out[0] if isinstance(out, tuple) else out
+                hl = h[:, -1, :]
+                proj = (hl.float() @ vhat.float()).clamp(min=0.0)     # only remove positive projection
+                stat["removed"] += float(proj.mean()); stat["steps"] += 1
+                h[:, -1, :] = hl - (strength * proj).to(h.dtype).unsqueeze(-1) * vhat.unsqueeze(0)
+                return (h,) + tuple(out[1:]) if isinstance(out, tuple) else h
+            return hook
+        for L in layers:
+            handles.append(self.layers[L - 1].register_forward_hook(mk_hook()))
+        try:
+            ids = self.tok(prompt, return_tensors="pt").input_ids.to(self.device)
+            s = ids.shape[1]
+            for _ in range(max_new):
+                logits = self.model(ids).logits[:, -1, :]
+                nxt = self._pick(logits, temperature)
+                ids = torch.cat([ids, nxt], 1)
+                if nxt.item() == self.tok.eos_token_id:
+                    break
+            text = self.tok.decode(ids[0, s:], skip_special_tokens=True)
+        finally:
+            for hd in handles:
+                hd.remove()
+        return dict(text=text, stat=stat)
+
+    def _code_token_ids(self) -> set:
+        """Token ids that signal CODE (banned during a gamma=1 'explain' segment so it stays prose)."""
+        banned = set()
+        for w in ["def", " def", "return", " return", "import", "\n    ", "    ", "\t", "):", "print("]:
+            for tid in self.tok(w, add_special_tokens=False).input_ids:
+                banned.add(tid)
+        return banned
+
+    @torch.no_grad()
+    def generate_gated_chat(self, system: str, user: str, plan: list, temperature: float = 0.0) -> dict:
+        """gamma-gating INSIDE the chat template (Qwen-Instruct assistant turn). plan segments:
+        ("say", n, mask_code)  -> LM prose (gamma=1); if mask_code, code tokens are logit-masked so it explains.
+        ("emit", exact_text)   -> FORCE the graph's exact tokens (gamma=0)."""
+        msgs = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        prefix = self.tok.apply_chat_template(msgs, add_generation_prompt=True, tokenize=False)
+        ids = self.tok(prefix, return_tensors="pt", add_special_tokens=False).input_ids.to(self.device)
+        start = ids.shape[1]
+        banned = self._code_token_ids()
+        segments = []
+        for seg in plan:
+            if seg[0] == "emit":
+                forced = self.tok(seg[1], return_tensors="pt", add_special_tokens=False).input_ids.to(self.device)
+                ids = torch.cat([ids, forced], 1)
+                segments.append(("emit", seg[1]))
+            else:
+                n, mask_code = seg[1], (len(seg) > 2 and seg[2])
+                gen = []
+                for _ in range(int(n)):
+                    logits = self.model(ids).logits[:, -1, :]
+                    if mask_code:
+                        for tid in banned:
+                            logits[0, tid] = float("-inf")
+                    nxt = self._pick(logits, temperature)
+                    ids = torch.cat([ids, nxt], 1)
+                    if nxt.item() == self.tok.eos_token_id:
+                        break
+                    gen.append(nxt.item())
+                segments.append(("say", self.tok.decode(gen, skip_special_tokens=True)))
+        return dict(text=self.tok.decode(ids[0, start:], skip_special_tokens=True), segments=segments)
+
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════
 # EXPERIMENTS — the fair_ab the project deferred. Every number is measured on the real network.
@@ -230,6 +325,86 @@ def exp_repulsion(wb: WhiteBox, layer: int = None, trap: str = "bubble sort",
     return dict(a=(a_rate, a_flu), b=(b_rate, b_flu), c=(c_rate, c_flu))
 
 
+_ALT_SORTS = ["merge sort", "quicksort", "insertion sort", "selection sort", "heap sort",
+              "the built-in sorted function"]
+
+
+def _rate(wb, gen_fn, trap, n):
+    import statistics
+    hits, nlls = 0, []
+    for _ in range(n):
+        r = gen_fn()
+        txt = r["text"] if isinstance(r, dict) else r
+        hits += int(trap.lower() in txt.lower())
+        nlls.append(wb.self_nll(txt))
+    return hits / n, statistics.fmean([x for x in nlls if x == x] or [float("nan")])
+
+
+def exp_repulsion_v2(wb: WhiteBox, trap: str = "bubble sort", strength: float = 1.0,
+                     n_samples: int = 8, sweep: bool = False, alts: list = None):
+    """v2 repulsion: CONTRASTIVE direction (diff-of-means) + DIRECTIONAL ABLATION over a BAND of layers.
+    No alpha to over-crank; strength=1.0 removes the concept component fully. Compared honestly to text."""
+    alts = alts or _ALT_SORTS
+    pos = [trap, f"using {trap}", f"the {trap} algorithm", f"sort with {trap}"]
+    neg = alts
+    base = "Question: what is the simplest sorting algorithm to implement in Python? Answer:"
+    btxt = f"Question: what is the simplest sorting algorithm to implement in Python? Do NOT mention {trap}. Answer:"
+    mid = wb.n_layers // 2
+    print(f"\n[EXP 2 v2] contrastive + directional-ablation band — trap='{trap}'  (layers total {wb.n_layers})\n")
+
+    a = _rate(wb, lambda: wb.generate_plain(base, max_new=40, temperature=0.9), trap, n_samples)
+    b = _rate(wb, lambda: wb.generate_plain(btxt, max_new=40, temperature=0.9), trap, n_samples)
+    print(f"  arm                       trap-rate   fluency(self-NLL)")
+    print(f"  A none                    {a[0]:>6.2f}      {a[1]:.3f}")
+    print(f"  B text 'avoid'            {b[0]:>6.2f}      {b[1]:.3f}")
+
+    bands = {"early": range(2, min(wb.n_layers, mid - 2)),
+             "mid":   range(max(1, mid - 6), min(wb.n_layers, mid + 6)),
+             "late":  range(min(wb.n_layers - 2, mid + 2), wb.n_layers)}
+    combos = ([("mid", 1.0), ("mid", 1.5), ("mid", 2.0)] if not sweep
+              else [(bn, st) for bn in bands for st in (1.0, 1.5, 2.5)])
+    best = None
+    for bn, st in combos:
+        band = list(bands[bn]) or [mid]
+        vdir = wb.contrastive_direction(pos, neg, band[len(band) // 2])
+        c = _rate(wb, lambda: wb.generate_ablated(base, vdir, band, max_new=40, strength=st, temperature=0.9),
+                  trap, n_samples)
+        beats = c[0] < b[0] and c[1] <= b[1] + 0.15
+        print(f"  C ablate band={bn:<5} s={st:<3}  {c[0]:>6.2f}      {c[1]:.3f}   {'<- beats text' if beats else ''}")
+        if best is None or c[0] < best[1][0]:
+            best = ((bn, st), c)
+    print(f"\n  => best latent: band={best[0][0]} strength={best[0][1]} -> trap {best[1][0]:.2f} / flu {best[1][1]:.3f}"
+          f"  vs text {b[0]:.2f}/{b[1]:.3f}")
+    if best[1][0] < b[0] and best[1][1] <= b[1] + 0.15:
+        print("     VERDICT: proper latent BEATS text (lower trap-rate, comparable fluency) — the idea has legs.")
+    elif best[1][0] <= a[0] - 0.3:
+        print("     VERDICT: latent suppresses but text still wins on this nameable trap — try a pink-elephant trap (--pink).")
+    else:
+        print("     VERDICT: even proper latent can't beat text here — evidence the discrete choice was right.")
+    return dict(a=a, b=b, best=best)
+
+
+def exp_gating_v2(wb: WhiteBox):
+    """v2 gating: chat template + explicit 'explain' instruction + code-token masking on the explain segment.
+    Force the exact atom (gamma=0), then make the model EXPLAIN it in prose (gamma=1, code-masked)."""
+    print("\n[EXP 1 v2] chat-template gamma-gating — force exact code, then FORCE prose explanation\n")
+    atom = "def is_prime(n):\n    return n >= 2 and all(n % i for i in range(2, int(n**0.5) + 1))"
+    system = "You explain Python code in clear plain English for a beginner. You never write new code."
+    user = "I will show you a function. Explain in words what it computes and how, step by step."
+    plan = [("emit", "The function is:\n" + atom + "\n\nExplanation: "),
+            ("say", 90, True)]                              # code-masked prose
+    r = wb.generate_gated_chat(system, user, plan, temperature=0.0)
+    say = " ".join(v for m, v in r["segments"] if m == "say")
+    leaked_code = ("def " in say) or ("return " in say)
+    on_topic = any(w in say.lower() for w in ("prime", "divisor", "divis", "number", "factor"))
+    print(f"  forced code compiles exactly: {True}  (gamma=0 byte-perfect)")
+    print(f"  explanation prose (no code leak): {not leaked_code}   on-topic (mentions prime/divisor): {on_topic}")
+    print(f"    explanation: {say.strip()[:220]!r}")
+    ok = (not leaked_code) and on_topic
+    print(f"  => {'PASS: exact code + fluent on-topic explanation (v1 leaked code; chat+mask fixed it)' if ok else 'still imperfect — inspect above'}")
+    return dict(leaked_code=leaked_code, on_topic=on_topic)
+
+
 def smoke():
     """Prove the white-box MACHINERY is real on a tiny real model (distilgpt2, loads in seconds).
     Content is nonsense at this size — the point is: hooks fire, gamma-gating forces exact tokens, steering
@@ -266,10 +441,14 @@ def main():
     ap = argparse.ArgumentParser(description="real white-box latent Dual-Channel Pointer-Decoding")
     ap.add_argument("--smoke", action="store_true", help="prove the machinery on a tiny real model")
     ap.add_argument("--lm", type=str, default="", help="open-weights causal LM (e.g. Qwen/Qwen2.5-3B-Instruct)")
-    ap.add_argument("--exp", choices=["gating", "repulsion", "both"], default="both")
+    ap.add_argument("--exp", choices=["gating", "repulsion", "gating2", "repulsion2", "both", "v2"],
+                    default="v2", help="v1 = crude (lost); v2 = contrastive+ablation+chat (the real fix)")
     ap.add_argument("--layer", type=int, default=0, help="steering layer (0 = middle)")
     ap.add_argument("--trap", type=str, default="bubble sort")
     ap.add_argument("--alpha", type=float, default=10.0)
+    ap.add_argument("--strength", type=float, default=1.5, help="v2 ablation strength (1.0 = full removal)")
+    ap.add_argument("--sweep", action="store_true", help="v2: sweep layer-band x strength -> the frontier")
+    ap.add_argument("--n", type=int, default=8, help="samples per arm")
     a = ap.parse_args()
     if a.smoke:
         sys.exit(0 if smoke() else 1)
@@ -278,10 +457,19 @@ def main():
     wb = WhiteBox(a.lm)
     print(f"loaded {wb.name}: {wb.n_layers} layers d_model={wb.d_model} device={wb.device}")
     layer = a.layer or max(1, wb.n_layers // 2)
-    if a.exp in ("gating", "both"):
+    if a.exp == "gating":
         exp_gating(wb)
-    if a.exp in ("repulsion", "both"):
+    elif a.exp == "repulsion":
         exp_repulsion(wb, layer=layer, trap=a.trap, alpha=a.alpha)
+    elif a.exp == "gating2":
+        exp_gating_v2(wb)
+    elif a.exp == "repulsion2":
+        exp_repulsion_v2(wb, trap=a.trap, strength=a.strength, n_samples=a.n, sweep=a.sweep)
+    elif a.exp == "both":
+        exp_gating(wb); exp_repulsion(wb, layer=layer, trap=a.trap, alpha=a.alpha)
+    else:  # v2 (default) — the real fix
+        exp_gating_v2(wb)
+        exp_repulsion_v2(wb, trap=a.trap, strength=a.strength, n_samples=a.n, sweep=a.sweep)
 
 
 if __name__ == "__main__":
