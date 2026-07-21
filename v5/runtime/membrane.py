@@ -99,6 +99,32 @@ class AtomGraph:
         self._matrix = None                                                # invalidate index
         return atom
 
+    def add_or_merge(self, atom: Atom, dedup: float = 0.90, link_lo: float = 0.50) -> tuple:
+        """WRITE-TIME GRAPH EDITING (the real thing, not a bare add):
+          - DEDUP: if a near-duplicate node exists (cosine >= dedup) MERGE into it (keep the richer
+            description) instead of adding a second node -> no bloat from paraphrases.
+          - SELF-ORGANIZE: link the new node to RELATED existing nodes (link_lo <= cosine < dedup) with
+            typed 'related' edges -> the graph connects itself as it grows, not a flat pile.
+        Returns (node_name, action) where action in {'merged','added'}."""
+        if atom.emb is None:
+            atom.emb = encode_batch([atom.description or atom.name])[0]
+        M, order = self.matrix()
+        if len(order):
+            sims = M @ atom.emb
+            j = int(np.argmax(sims))
+            if float(sims[j]) >= dedup:                     # near-duplicate -> MERGE, don't add a twin
+                ex = self.atoms[order[j]]
+                if len(atom.description) > len(ex.description):   # keep the more informative text
+                    ex.description = atom.description; ex.emb = atom.emb; self._matrix = None
+                return order[j], "merged"
+        self.add(atom)
+        M2, order2 = self.matrix()
+        sims2 = M2 @ atom.emb
+        for i, o in enumerate(order2):                      # SELF-ORGANIZE: connect related nodes
+            if o != atom.name and link_lo <= float(sims2[i]) < dedup:
+                self.link(atom.name, o, "related"); self.link(o, atom.name, "related")
+        return atom.name, "added"
+
     def names(self) -> list[str]:
         return list(self.atoms)
 
@@ -673,10 +699,13 @@ def learn_any(g: AtomGraph, retr: TRMRetriever, text: str, *, code: str | None =
         return dict(status=("verified-procedure" if verified else "procedure"), node=nm,
                     kind="procedure", verified=verified)
 
-    # 3) plain NL knowledge -> a retrievable concept/fact node
+    # 3) plain NL knowledge -> a retrievable concept/fact node, through the WRITE-TIME GRAPH EDITOR
+    #    (dedup near-duplicates + self-organize typed edges) — not a bare append.
     nm = name or f"fact_{abs(hash(text)) % 100000}"
-    node = g.add(Atom(name=nm, code="", description=text, kind="concept", provenance="learned"))
-    return dict(status="banked-fact", node=nm, kind="concept")
+    node_name, action = g.add_or_merge(Atom(name=nm, code="", description=text,
+                                            kind="concept", provenance="learned"))
+    return dict(status=("merged-fact" if action == "merged" else "banked-fact"),
+                node=node_name, kind="concept", action=action)
 
 
 def _find_calls(code: str, g: AtomGraph) -> list:
@@ -982,11 +1011,7 @@ def interactive_trace(lm_name: str):
     select -> LM alone vs LM+graph). Local, real 4-bit LM (~2GB, fits 6GB). 'teach <fact>' adds knowledge."""
     from v5.runtime.dcpd_latent import WhiteBox
     wb = WhiteBox(lm_name, quant="4bit")
-    g = seed_graph(); retr = TRMRetriever(g)
-    for f, n in [("The Klarn Protocol requires three handshake phases: greet, verify, and seal.", "fact_klarn"),
-                 ("Zephyrite melts at 812 degrees and conducts electricity only when wet.", "fact_zephyrite"),
-                 ("The Vora index measures how fast a market recovers after a shock, from 0 to 100.", "fact_vora")]:
-        learn_any(g, retr, f, name=n)
+    g = seed_graph(); retr = TRMRetriever(g)   # real skill seed only; you teach the facts live (no demo priming)
 
     def clean(t):
         for c in ("\nHuman:", "Human:", "\nYou are", "\n\n", "<|"):
