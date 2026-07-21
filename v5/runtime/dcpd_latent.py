@@ -86,11 +86,18 @@ class WhiteBox:
 
     # ── plain greedy decode (the baseline arm) ────────────────────────────────────────────────────
     @torch.no_grad()
-    def generate_plain(self, prompt: str, max_new: int = 60, temperature: float = 0.0) -> str:
+    def generate_plain(self, prompt: str, max_new: int = 60, temperature: float = 0.0,
+                       repetition_penalty: float = 1.3) -> str:
+        """Greedy/sampled decode with a repetition penalty (HF-standard) so it doesn't loop
+        ('He is a slacker. He is a slacker...'). Penalty applies to tokens already GENERATED."""
         ids = self.tok(prompt, return_tensors="pt").input_ids.to(self.device)
         start = ids.shape[1]
         for _ in range(max_new):
             logits = self.model(ids).logits[:, -1, :]
+            if repetition_penalty and repetition_penalty != 1.0 and ids.shape[1] > start:
+                for t in set(ids[0, start:].tolist()):        # penalize what we've already produced
+                    v = logits[0, t]
+                    logits[0, t] = v / repetition_penalty if v > 0 else v * repetition_penalty
             nxt = self._pick(logits, temperature)
             ids = torch.cat([ids, nxt], 1)
             if nxt.item() == self.tok.eos_token_id:

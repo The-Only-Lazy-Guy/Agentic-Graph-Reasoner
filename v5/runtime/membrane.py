@@ -993,6 +993,7 @@ def interactive_trace(lm_name: str):
             i = t.find(c); t = t[:i] if i > 0 else t
         return t.strip()
 
+    RELEVANCE = 0.35   # only GROUND when a node is genuinely relevant (taught facts scored ~0.6; junk ~0.1)
     print(f"\n  LM {lm_name}  quant={wb.quant}  VRAM={wb.vram_gb:.2f}GB "
           f"({'FITS 6GB' if wb.vram_gb <= 6 else 'OVER 6GB'})")
     print(f"  graph: {len(g)} nodes {g.census()}   (LM frozen; knowledge is in the graph)")
@@ -1016,13 +1017,21 @@ def interactive_trace(lm_name: str):
         rank = sorted(zip(order, sims), key=lambda z: -z[1])[:5]
         print(f"  [2] RETRIEVE  top graph matches (neural):")
         for n, s in rank:
-            print(f"                {s:5.2f}  {n:<20} ({g.get(n).kind})")
-        top, ts = rank[0]; node = g.get(top); content = node.code or node.description
-        print(f"  [3] SELECT    '{top}' (sim {ts:.2f}, {node.kind}): {content[:90]}")
-        base = clean(wb.generate_plain(f"Answer briefly. {q}", max_new=48))
-        print(f"  [4] LM ALONE  (no memory)     -> {base[:170]}")
-        grounded = clean(wb.generate_plain(f"Use ONLY this to answer.\n{content}\nQuestion: {q}\nAnswer:", max_new=48))
-        print(f"  [5] LM+GRAPH  (grounded)      -> {grounded[:170]}")
+            flag = "  <- relevant" if s >= RELEVANCE else ""
+            print(f"                {s:5.2f}  {n:<20} ({g.get(n).kind}){flag}")
+        top, ts = rank[0]
+        base = clean(wb.generate_plain(f"Answer the question concisely. {q}", max_new=64))
+        if ts >= RELEVANCE:                                    # RELEVANCE GATE — only ground on a real match
+            node = g.get(top); content = node.code or node.description
+            print(f"  [3] SELECT    '{top}' RELEVANT (sim {ts:.2f} >= {RELEVANCE}): {content[:90]}")
+            print(f"  [4] LM ALONE  (no memory)   -> {base}")
+            grounded = clean(wb.generate_plain(
+                f"Use ONLY this fact to answer.\n{content}\nQuestion: {q}\nAnswer:", max_new=64))
+            print(f"  [5] LM+GRAPH  (grounded)    -> {grounded}")
+        else:                                                 # nothing relevant -> DON'T force-inject junk (realistic)
+            print(f"  [3] SELECT    nothing relevant (top sim {ts:.2f} < {RELEVANCE}) -> the graph stays OUT")
+            print(f"  [4] ANSWER    (model directly) -> {base}")
+            print(f"  [5] LM+GRAPH  skipped -- no relevant knowledge, so the model answers on its own (realistic)")
     print("  bye")
 
 
