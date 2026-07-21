@@ -73,7 +73,7 @@ def make_tasks(seed: int = 0):
     import random
     rng = random.Random(seed)
     for i, (domain, seq, text) in enumerate(specs):
-        for _ in range(3):
+        for _ in range(6):                               # 6 instances/intent = discriminating inputs for the fuzz gate
             x0 = rng.randint(2, 9) if domain in ("finance", "geometry", "time", "signal") else rng.uniform(2, 6)
             state = float(x0)
             for tool, arg in seq:
@@ -141,9 +141,15 @@ class ToolController:
     def __init__(self, registry: ToolRegistry, store: WorkflowStore, max_depth: int = 3):
         self.reg, self.store, self.max_depth = registry, store, max_depth
         self.tool_tries = 0
+        self.shortcuts_rejected = 0                      # candidates that hit one instance's gold but failed a sibling
 
-    def _args_from_text(self, text: str):               # candidate args = numbers in the intent (parsing, not LM)
+    _WORDNUM = {"triple": 3.0, "double": 2.0, "twice": 2.0, "quadruple": 4.0, "half": 0.5, "halve": 0.5}
+
+    def _args_from_text(self, text: str):               # candidate args = numbers + number-WORDS (a parser tool, not the LM)
         args = [float(x) for x in re.findall(r"-?\d+\.?\d*", text)]
+        for w, v in self._WORDNUM.items():
+            if w in text.lower():
+                args.append(v)
         return args or [1.0, 2.0, 3.0]
 
     def _run_seq(self, seq, x0):
@@ -154,23 +160,37 @@ class ToolController:
             state = self.reg.run(tool, state, arg)
         return state
 
-    def solve(self, task):
-        """Return (mode, seq, final) or (mode, None, None). mode in {'replay','search','fail'}. LM NOT called."""
+    def _general(self, seq, insts) -> bool:
+        """FUZZ-GENERALITY at the workflow level: the tool-seq must reach gold on EVERY instance (different
+        inputs), not just the one it was found on. Rejects instance-specific SHORTCUTS (e.g. `time` add-5 with
+        the wrap dropped because x0+5<12 for one input) — the same principle the atom fuzz-gate uses."""
+        for x0, gold in insts:
+            got = self._run_seq(seq, x0)
+            if got is None or not math.isclose(got, gold, **_TOL):
+                return False
+        return True
+
+    def solve(self, task, instances=None):
+        """Return (mode, seq, final). mode in {'replay','search','fail'}. LM NOT called. `instances` = the
+        task's sibling I/O examples [(x0,gold),...]; a candidate must generalize across ALL of them."""
+        insts = instances or [(task["x0"], task["gold"])]
         goal = _goal_vec(task["text"])
-        w = self.store.match(goal)                      # REPLAY a banked workflow (compounding: no search)
-        if w is not None:
-            final = self._run_seq(w["seq"], task["x0"])
-            if final is not None and math.isclose(final, task["gold"], **_TOL):
-                self.store.reuse += 1
-                return "replay", w["seq"], final
-        # EXPLORE: bounded DFS over (tool, arg) to reach gold (verified by the outcome anchor)
+        w = self.store.match(goal)                      # REPLAY a banked workflow (must still generalize)
+        if w is not None and self._general(w["seq"], insts):
+            self.store.reuse += 1
+            return "replay", w["seq"], self._run_seq(w["seq"], task["x0"])
+        # EXPLORE: ITERATIVE-DEEPENING DFS -> the SHORTEST generalizing workflow wins (MDL-minimal, drops
+        # redundant equivalents like inc+inc+wrap == inc+wrap). Anchor = "reaches gold on ALL instances".
         args = self._args_from_text(task["text"]) + [2.0]
         tools = list(self.reg)
+        gold0 = insts[0][1]
 
-        def dfs(state, seq):
-            if math.isclose(state, task["gold"], **_TOL) and seq:
-                return list(seq)
-            if len(seq) >= self.max_depth:
+        def dfs(state, seq, limit):
+            if seq and math.isclose(state, gold0, **_TOL):
+                if self._general(seq, insts):           # generalizes across instances -> a REAL workflow
+                    return list(seq)
+                self.shortcuts_rejected += 1            # hit gold0 but failed a sibling -> a shortcut, keep searching
+            if len(seq) >= limit:
                 return None
             for t in tools:
                 for a in args:
@@ -182,15 +202,16 @@ class ToolController:
                     if not isinstance(ns, (int, float)) or ns != ns or abs(ns) > 1e12:  # non-real/nan/blow-up guard
                         continue
                     seq.append((t, a))
-                    got = dfs(ns, seq)
+                    got = dfs(ns, seq, limit)
                     if got is not None:
                         return got
                     seq.pop()
             return None
 
-        found = dfs(float(task["x0"]), [])
-        if found is not None:
-            return "search", found, self._run_seq(found, task["x0"])
+        for limit in range(1, self.max_depth + 1):      # deepen: return the shortest workflow that generalizes
+            found = dfs(float(insts[0][0]), [], limit)
+            if found is not None:
+                return "search", found, self._run_seq(found, task["x0"])
         return "fail", None, None
 
 
@@ -224,9 +245,13 @@ def run_agent(tasks, reg, quorum_m: int = 2, gen=None, verbose: bool = False):
     ctrl = ToolController(reg, store)
     solved = banked = replays = 0
     tries_curve = []
+    # sibling I/O examples per task-intent -> the fuzz-general anchor (a workflow must hold across inputs)
+    siblings: dict = {}
+    for t in tasks:
+        siblings.setdefault(t["text"], []).append((t["x0"], t["gold"]))
     for i, t in enumerate(tasks):
         before = ctrl.tool_tries
-        mode, seq, final = ctrl.solve(t)
+        mode, seq, final = ctrl.solve(t, instances=siblings[t["text"]])
         tries_curve.append(ctrl.tool_tries - before)
         if mode == "fail":
             continue
