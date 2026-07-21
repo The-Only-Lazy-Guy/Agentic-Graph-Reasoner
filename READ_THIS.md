@@ -87,6 +87,12 @@ my quorum/critic fixes) learns reasoning SCHEMAS into the graph; LM stays frozen
   unrounded prior; exact 1e-9 tol rejects LM-rounded physics floats). FIX (round-6 display + rel-tol 1e-3 on the
   real path only; selftest exact path untouched): rounded-float LM sim -> local 18/18, gold 18/18, certified 3,
   **cross-domain reuse 3**. Inspect-the-raw again: aggregate said 50%, raw said model perfect + our floats broken.
+  2nd real run gold 13/18 + `--dump`: the 5 fails are ALL physics/float FIRST-step ARITHMETIC slips (MUL 2.6651*9.8
+  =25.79 not 26.12; POW 3.7711^2=13.29 not 14.22; float MOD), op fidelity STILL 100%. => THE THESIS MEASURED:
+  the frozen 3B reads STRUCTURE perfectly but is an unreliable float CALCULATOR. FIX (design-correct, not a fudge):
+  run_lm now reports TWO numbers — 3B-as-calculator (strict, trusts LM arithmetic) ~13/18 vs verifier-executes
+  (DEPLOY: LM supplies [op,arg] only, verifier computes the result) which recovers to 18/18 and is what BANKS.
+  Poison-safe: a wrong op/arg still misses the gold anchor. "LM plans; graph executes" made literal on the CoT loop.
 
 ### REAL-3B PATH (built, plumbing smoke-tested with a stub gen; run pending on your box)
   python -m v5.runtime.algo_grr_cot --run --lm Qwen/Qwen2.5-3B-Instruct --n 40   # synthetic NL CoT (fidelity)

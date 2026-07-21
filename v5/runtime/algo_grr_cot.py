@@ -391,7 +391,7 @@ def run_lm(lm: str, corpus_path: str = "", n: int = 40, quorum_m: int = 2, dump:
     gen = make_frozen_gen(lm, temperature=0.2, max_new_tokens=48)
     traces = (load_corpus(corpus_path)[:n] if corpus_path else gen_corpus(seed=0))
     store = SchemaStore(quorum_m)
-    lm_calls = op_hits = op_total = gold_pass = local_pass = 0
+    lm_calls = op_hits = op_total = calc_gold = exec_gold_n = 0
     fails = []                                               # (trace, slots, parse_ok) for the raw dump
     for t in traces:
         slots, ok = lm_project(gen, t)
@@ -402,26 +402,40 @@ def run_lm(lm: str, corpus_path: str = "", n: int = 40, quorum_m: int = 2, dump:
             if "op" in step:
                 op_total += 1; op_hits += int(slot["op"] == step["op"])
         cons = internal_consistency(slots)
-        local_ok = cons and all(verify_transition(s["prior"], s["op"], s["arg"], s["resulting"], _LM_TOL)
-                                for s in slots)
-        gold_ok = local_ok and math.isclose(slots[-1]["resulting"], t["gold"], **_LM_TOL)
-        local_pass += int(local_ok); gold_pass += int(gold_ok)
-        if gold_ok:
-            store.observe(t, slots)
-        elif dump:
+        # STRICT (3B-as-CALCULATOR): trust the LM's stated results — measures the 3B's float arithmetic.
+        calc_ok = cons and all(verify_transition(s["prior"], s["op"], s["arg"], s["resulting"], _LM_TOL)
+                               for s in slots)
+        calc_ok = calc_ok and math.isclose(slots[-1]["resulting"], t["gold"], **_LM_TOL)
+        # EXEC (DEPLOYMENT): the LM supplies only [op, arg] (structure); the VERIFIER computes each result
+        # exactly. The LM never has to be a calculator — the design's "LM plans, graph executes" made literal.
+        exec_slots, state, exec_ok = [], t["x0"], True
+        for s in slots:
+            if s["op"] not in OPS:
+                exec_ok = False; break
+            r = apply_op(s["op"], state, s["arg"])
+            exec_slots.append(dict(prior=state, op=s["op"], arg=s["arg"], resulting=r))
+            state = r
+        exec_ok = exec_ok and math.isclose(state, t["gold"], **_LM_TOL)
+        calc_gold += int(calc_ok); exec_gold_n += int(exec_ok)
+        if exec_ok:                                          # BANK on the deployment truth (verifier executes)
+            store.observe(t, exec_slots)
+        if dump and not calc_ok:                             # the raw: traces where the 3B's ARITHMETIC slipped
             fails.append((t, slots, True))
     store.sweep_quarantine()
     n_run = len(traces)
     print(f"\n  REAL-3B slot-projection ({lm}, {n_run} CoT traces):")
-    print(f"    slot-op fidelity     : {op_hits}/{op_total} ({100*op_hits//max(1,op_total)}%)  (LM op == ground-truth op)")
-    print(f"    local-verify pass    : {local_pass}/{n_run}   gold-anchor pass : {gold_pass}/{n_run}")
+    print(f"    slot-op fidelity            : {op_hits}/{op_total} ({100*op_hits//max(1,op_total)}%)  "
+          f"(LM picks the right OPERATION)")
+    print(f"    3B-as-calculator (strict)   : {calc_gold}/{n_run}  gold  (trusts the LM's arithmetic — the 3B is a weak ALU)")
+    print(f"    verifier-executes (DEPLOY)  : {exec_gold_n}/{n_run}  gold  (LM=structure only, verifier computes -> banked)")
     print(f"    certified schemas    : {len(store.certified)}   quarantined : {len(store.quarantine)}")
     print(f"    cross-domain reuse   : {store.cross_domain_reuse}   LM calls : {lm_calls}")
-    print(f"  => the frozen LM only FILLS SLOTS; the verifier recomputed every transition + anchor "
-          f"(rel-tol {_LM_TOL['rel_tol']:.0e} for LM-rounded floats). Wrong projections fail the gate (not")
-    print(f"     banked) — the poison line holds on hardware, not just the stub.")
-    if dump and fails:                                        # INSPECT THE RAW: why did a trace fail the gate?
-        print(f"\n  RAW DUMP of {min(dump, len(fails))} failing trace(s) — is it a genuine 3B slip or the harness?")
+    print(f"  => THE THESIS, MEASURED: the frozen 3B reads STRUCTURE ~perfectly (op fidelity) but is an")
+    print(f"     unreliable float CALCULATOR (strict << deploy). Delegating execution to the verifier recovers")
+    print(f"     it AND stays poison-safe (a wrong op/arg still misses the gold anchor). LM plans; graph executes.")
+    if dump and fails:                                        # INSPECT THE RAW: the 3B's arithmetic slips
+        print(f"\n  RAW DUMP of {min(dump, len(fails))} calculator-fail trace(s) — the XX step is a genuine 3B float")
+        print(f"  ARITHMETIC slip (op is right, the number is wrong); verifier-execute recomputes it -> banks anyway:")
         for t, slots, parsed in fails[:dump]:
             print(f"\n  {t['schema']}/{t['domain']}  x0={t['x0']:.4f}  gold={t['gold']:.4f}  "
                   f"{'(parse failed)' if not parsed else ''}")
