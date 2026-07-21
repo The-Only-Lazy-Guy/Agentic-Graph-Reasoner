@@ -4,6 +4,45 @@
 > Updated each working session. Branch: fix/swe-slot-plan-gate-real-file. (Older sessions below the ═══ line.)
 
 ═══════════════════════════════════════════════════════════════════════════════════════════════
+## LATEST SESSION (2026-07-21 v6.6) — THE AGENTIC LOOP: TRM CALLS graph tools, LM only SPEAKS
+═══════════════════════════════════════════════════════════════════════════════════════════════
+
+**One line:** stepped back to the actual goal (a small on-device model that gets better at hard/diverse tasks by
+banking VERIFIED reasoning into a graph, explains itself faithfully, LM frozen). Built the final piece:
+`algo_grr_agent.py` — tools live in the graph, the TRM CONTROLLER decides which tool to call (no LM in the
+decision loop), tools execute + COMPOSE exactly, verified tool-sequences bank as reusable WORKFLOWS, and the
+LM only SPEAKS (narrates the verified tool-graph). 8/8 no-GPU selftest.
+
+### WHY (the measured motivation, from the CoT run)
+  real-3B slot run: op fidelity 100% (LM picks the right OPERATION) but 3B-as-calculator 13/18 vs verifier-
+  executes 18/18. => the frozen 3B reads STRUCTURE perfectly, executes UNRELIABLY. So: LM never executes and
+  never decides tool calls; the TRM decides, graph tools execute, LM only puts the verified trace into words.
+
+### THE LOOP (algo_grr_agent.py, 8/8)
+  ToolNode/ToolRegistry (pluggable; a tool CALLS another tool = atoms activate each other: double->scale, square->power).
+  ToolController.solve(goal,state): REPLAY a banked workflow (goal-vec match) else bounded SEARCH over (tool,arg)
+    to reach the gold/outcome anchor. NO LM (structural check [7]: solve/__init__ take no gen; only narrate() speaks).
+  WorkflowStore: verified tool-seq banks (sig = tool-name seq, args=holes); lazy-quorum promote; replay = reuse.
+  narrate(): faithful by construction — cites only tools that actually ran; real path lets the LM REPHRASE the
+    given verified steps (speak-only, can't add/change a step).
+  Checks: [1] execute+compose [2] TRM solves 16/18 no-LM [3] bank+replay compounding (tool-tries/task 1122->901)
+  [4] workflow reuse 8 [5] narration faithful [6] wrong tool misses anchor (poison-safe) [7] decision path LM-free
+  [8] 5 certified workflow schemas. Swap the ToolRegistry for real agentic tools (search/call_api/run_code) = same loop.
+
+### HONEST BOUNDS
+  Controller search is O(tools*args*depth) — the routing-at-scale wall (READ_THIS open problem) still applies;
+  compounding (replay) cuts it but a learned TRM scorer (mpnet/trained) is the real fix, not brute DFS. Cross-domain
+  workflow reuse 0 here (search finds per-domain seqs); within-domain reuse 8. No-gold agentic case still needs
+  consensus+critic (soft tier). Real-3B --run is SPEAK-ONLY (decisions/execution already done).
+
+### FILES
+  - v5/runtime/algo_grr_agent.py (new). Fixed a Windows cp1252 crash (narration used a unicode arrow -> '->').
+
+### NEXT
+  Replace the DFS controller with a LEARNED tool-scorer (reuse mpnet router / CandidatePlanner) trained on the
+  banked workflows + the CoT-derived schemas (algo_grr_cot) as its policy. Then a real agentic ToolRegistry.
+
+═══════════════════════════════════════════════════════════════════════════════════════════════
 ## LATEST SESSION (2026-07-21 v6.5) — WIRING AUDIT + FIX: the v6.2/v6.3 upgrades were ISLANDS, now wired to MembraneV2
 ═══════════════════════════════════════════════════════════════════════════════════════════════
 
