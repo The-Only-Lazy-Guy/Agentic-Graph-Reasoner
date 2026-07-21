@@ -22,7 +22,9 @@ here, then run the true experiment on Qwen. NOTHING is simulated — the hooks f
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -48,8 +50,12 @@ class WhiteBox:
         'fp32', or 'auto' (4bit on CUDA for a non-tiny model, else fp16/fp32). The white-box hooks + steering
         still work on a 4-bit model (weights are quantized; the residual stream is fp16 in compute)."""
         from transformers import AutoTokenizer, AutoModelForCausalLM
+        # cache weights INSIDE the project (graph_v5/cache) so they persist + aren't re-downloaded, matching
+        # embedder.py's convention. Without this the ~8GB LM lands in ~/.cache/huggingface, outside the repo.
+        cache_dir = os.environ.get("GRAPH_CACHE") or str(Path(__file__).resolve().parents[2] / "cache")
+        os.environ.setdefault("HF_HOME", cache_dir)
         self.name = name
-        self.tok = AutoTokenizer.from_pretrained(name)
+        self.tok = AutoTokenizer.from_pretrained(name, cache_dir=cache_dir)
         if self.tok.pad_token is None:
             self.tok.pad_token = self.tok.eos_token
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -64,11 +70,12 @@ class WhiteBox:
             bnb = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
                                      bnb_4bit_compute_dtype=torch.float16, bnb_4bit_use_double_quant=True)
             self.model = AutoModelForCausalLM.from_pretrained(name, quantization_config=bnb,
-                                                              device_map={"": 0}).eval()
+                                                              device_map={"": 0}, cache_dir=cache_dir).eval()
             self.quant = "4bit-nf4"
         else:
             dt = dtype or (torch.float16 if self.device == "cuda" else torch.float32)
-            self.model = AutoModelForCausalLM.from_pretrained(name, torch_dtype=dt).to(self.device).eval()
+            self.model = AutoModelForCausalLM.from_pretrained(name, torch_dtype=dt,
+                                                              cache_dir=cache_dir).to(self.device).eval()
             self.quant = str(dt).replace("torch.", "")
         self.vram_gb = (torch.cuda.memory_allocated() / 1e9) if self.device == "cuda" else 0.0
         self.layers = _decoder_layers(self.model)

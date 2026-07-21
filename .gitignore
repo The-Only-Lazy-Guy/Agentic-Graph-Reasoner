@@ -17,6 +17,8 @@ env/
 # Model caches (large binary files, do not commit)
 reasoning/cache/
 .hf_cache/
+cache/hub/
+cache/models--*/
 *.safetensors
 *.bin
 *.gguf
