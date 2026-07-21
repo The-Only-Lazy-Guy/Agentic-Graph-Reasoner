@@ -541,16 +541,23 @@ def exp_reasoner(wb: WhiteBox, lengths=(1, 2, 3, 4, 5, 6), n_samples: int = 8):
     print("\n[EXP] reasoner assists real LM: MULTI-STEP chain, LM's OWN answer vs the exact reasoner\n")
     rng = random.Random(0)
     print(f"  chain_len | LM-alone final-answer acc | reasoner acc | (LM degrades? reasoner flat?)")
+    dumped = set()
     for L in lengths:
         lm_ok = re_ok = 0
         for _ in range(n_samples):
             steps, ans, _vals = _chain(rng, L)
-            prompt = (f"Do this step by step and give ONLY the final integer.\n{steps}\n"
-                      f"Final answer (just the number):")
-            out = wb.generate_plain(prompt, max_new=12, temperature=0.0)
+            # proven short prompt (the chat-template variant segfaulted -- longer ctx x no-KV-cache -> CUDA OOM):
+            prompt = f"{steps} What is the final result? Reply with only the number.\nAnswer:"
+            out = wb.generate_plain(prompt, max_new=8, temperature=0.0)
+            # robust parse: prefer the number right after 'Answer:'/'is'; else the last integer in the output
+            m = re.search(r"(?:answer\s*:?|is)\s*(-?\d+)", out.lower())
             nums = re.findall(r"-?\d+", out)
-            lm_ok += int(bool(nums) and int(nums[-1]) == ans)       # the LM's OWN computed answer
-            re_ok += 1                                              # the reasoner computed `ans` exactly by construction
+            got = int(m.group(1)) if m else (int(nums[-1]) if nums else None)
+            ok = (got == ans)
+            lm_ok += int(ok); re_ok += 1
+            if L not in dumped:                                    # MANUAL INSPECTION: 1 raw sample per length
+                print(f"      [raw L={L}] gold={ans} LM->{out.strip()[:50]!r} parsed={got} ok={ok}")
+                dumped.add(L)
         print(f"  {L:>8}  |         {lm_ok}/{n_samples}             |    {re_ok}/{n_samples}      |")
     print(f"  => the HONEST question: LM-alone should FALL as the chain lengthens (real accumulating error);")
     print(f"     the exact reasoner (which the LM would ride via gamma-gate injection) stays flat. If LM-alone")
