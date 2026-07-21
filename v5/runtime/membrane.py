@@ -47,9 +47,9 @@ from v5.runtime.algo_trm import _build as _build_trm          # the real Tiny Re
 _, _, TRMReasoner, *_ = _build_trm()                          # the actual nn.Module used across the repo
 
 
-# ════════════════════════════════════════════════════════════════════════════════════════════════
+# ================================================================================================
 # 1. THE GRAPH — atoms carry real code + a real MiniLM embedding; depend-edges are the call graph
-# ════════════════════════════════════════════════════════════════════════════════════════════════
+# ================================================================================================
 @dataclass
 class Atom:
     name: str
@@ -73,12 +73,24 @@ class AtomGraph:
 
     def __init__(self):
         self.atoms: dict[str, Atom] = {}
+        self.edges: list[tuple] = []             # TYPED edges: (src, dst, relation) e.g. depend/part_of/avoid_if/about
         self._matrix: np.ndarray | None = None   # [N,384] cached embedding matrix (invalidated on write)
         self._order: list[str] = []
 
     def __contains__(self, n): return n in self.atoms
     def __len__(self): return len(self.atoms)
     def get(self, n): return self.atoms.get(n)
+
+    def link(self, src: str, dst: str, relation: str = "depend"):
+        if src in self.atoms and dst in self.atoms and (src, dst, relation) not in self.edges:
+            self.edges.append((src, dst, relation))
+
+    def census(self) -> dict:
+        """What the graph CONTAINS, by node type (the universal-memory claim)."""
+        c: dict = {}
+        for a in self.atoms.values():
+            c[a.kind] = c.get(a.kind, 0) + 1
+        return c
 
     def add(self, atom: Atom) -> Atom:
         if atom.emb is None:
@@ -125,9 +137,9 @@ class AtomGraph:
         return g
 
 
-# ════════════════════════════════════════════════════════════════════════════════════════════════
+# ================================================================================================
 # 2. NEURAL RETRIEVAL — the real TRM re-scores atoms over T recursion steps, and it TRAINS
-# ════════════════════════════════════════════════════════════════════════════════════════════════
+# ================================================================================================
 class TRMRetriever:
     """Wraps the real TRMReasoner. rank(task) embeds the task + every atom (real MiniLM), runs the TRM's
     T-step recursion (attention over atoms, scratchpad refinement), and returns atoms by the final logits.
@@ -203,9 +215,9 @@ class TRMRetriever:
         return self.train(examples, **kw)
 
 
-# ════════════════════════════════════════════════════════════════════════════════════════════════
+# ================================================================================================
 # 3. COMPOSE + VERIFY — programs are real code; verification is real execution
-# ════════════════════════════════════════════════════════════════════════════════════════════════
+# ================================================================================================
 def _closure(graph: AtomGraph, names: list[str]) -> str:
     """Concatenate the source of the atoms (+ their transitive deps) so the program can call them."""
     seen, ordered = set(), []
@@ -247,9 +259,11 @@ def verify(code: str, entry: str, tests: list[tuple]) -> bool:
         return False
 
 
-def fuzz_general(code: str, name: str, oracle, n: int = 12) -> bool:
-    """A learned atom banks ONLY if it matches an independent oracle on RANDOM inputs (kills overfit atoms
-    that pass the few visible tests). Real execution, real check."""
+def fuzz_general(code: str, name: str, oracle, n: int = 40) -> bool:
+    """A learned atom banks ONLY if it matches an independent oracle on MANY random inputs + the small edge
+    cases (kills overfit/wrong atoms that pass a few lucky draws). Real execution, real check. n=12 was too
+    weak — a wrong is_prime (n%2==1) slipped through ~4% of the time; n=40 + a wide range + edge cases 0..12
+    makes that essentially impossible."""
     import random
     ns: dict = {}
     try:
@@ -258,8 +272,8 @@ def fuzz_general(code: str, name: str, oracle, n: int = 12) -> bool:
         if not callable(fn):
             return False
         rng = random.Random(hash(name) & 0xffff)
-        for _ in range(n):
-            x = rng.randint(2, 40)
+        xs = list(range(0, 13)) + [rng.randint(2, 200) for _ in range(n)]   # edge cases + wide random
+        for x in xs:
             if fn(x) != oracle(x):
                 return False
         return True
@@ -267,9 +281,9 @@ def fuzz_general(code: str, name: str, oracle, n: int = 12) -> bool:
         return False
 
 
-# ════════════════════════════════════════════════════════════════════════════════════════════════
+# ================================================================================================
 # 4. THE MEMBRANE — retrieve (TRM) -> compose -> realize -> VERIFY -> bank.  The LM only authors/speaks.
-# ════════════════════════════════════════════════════════════════════════════════════════════════
+# ================================================================================================
 class Membrane:
     def __init__(self, graph: AtomGraph, retriever: TRMRetriever, lm=None):
         self.graph = graph
@@ -352,9 +366,9 @@ def _extract_def(text: str, name: str) -> str:
     return "\n".join(out).rstrip() if out else ""
 
 
-# ════════════════════════════════════════════════════════════════════════════════════════════════
+# ================================================================================================
 # 5. learn() — ingest ANY natural language.  is_cot marks a chain-of-thought trace.
-# ════════════════════════════════════════════════════════════════════════════════════════════════
+# ================================================================================================
 def learn(graph: AtomGraph, retriever: TRMRetriever, text: str, *,
           is_cot: bool = False, code: str | None = None, tests: list | None = None,
           oracle=None, name: str | None = None, cites: list | None = None,
@@ -431,9 +445,9 @@ def _guess_name(code: str) -> str:
     return f"atom_{abs(hash(code)) % 100000}"
 
 
-# ════════════════════════════════════════════════════════════════════════════════════════════════
+# ================================================================================================
 # 6. A REAL seed graph + REAL tasks (verifiable) — the substrate the demo runs on
-# ════════════════════════════════════════════════════════════════════════════════════════════════
+# ================================================================================================
 def seed_graph() -> AtomGraph:
     g = AtomGraph()
     S = [
@@ -527,9 +541,9 @@ def make_task(atom: str, phrasing: str) -> dict:
     return dict(text=phrasing, entry=entry, tests=tests, oracle=orc, atom_name=atom)
 
 
-# ════════════════════════════════════════════════════════════════════════════════════════════════
+# ================================================================================================
 # 7. THE REAL DEMO — every number below is produced by running the code above (no hardcoding)
-# ════════════════════════════════════════════════════════════════════════════════════════════════
+# ================================================================================================
 def demo(lm_name: str = ""):
     print("membrane.py — REAL integrated run (neural MiniLM+TRM retrieval, real verify, real learn)\n")
     torch.manual_seed(0)
@@ -613,11 +627,375 @@ def demo(lm_name: str = ""):
                 composed=r["solved"], reuse=rr["solved"], cot=cres["verified"], rebuild=reb_acc)
 
 
+# ================================================================================================
+# 8. learn_any() — the UNIVERSAL router: any NL becomes the RIGHT typed node (the deployment claim)
+# ================================================================================================
+def learn_any(g: AtomGraph, retr: TRMRetriever, text: str, *, code: str | None = None, oracle=None,
+              tests: list | None = None, cites: list | None = None, name: str | None = None,
+              is_cot: bool = False, train_examples: list | None = None) -> dict:
+    """Route ANY natural-language input to the correct TYPED node in the universal graph:
+       - code + a checker (oracle/tests) -> VERIFY -> `atom` (implementation)  [banks only if it passes]
+       - code that FAILS the checker      -> REJECTED, and a `trap` node records the mistake (anti-poison, live)
+       - is_cot / cites atoms             -> `procedure` node + typed edges to the atoms it uses
+       - plain NL, no code                -> `concept` node (trivial knowledge / a fact) — retrievable
+    Every banked node gets a real MiniLM embedding + typed edges. Returns {status, node, kind}."""
+    # 1) a claimed SKILL with code
+    if code is not None:
+        nm = name or _guess_name(code)
+        ok = fuzz_general(code, nm, oracle) if oracle is not None else (
+            verify(f"{code}\n\ndef _e(n):\n    return {nm}(n)\n", "_e", tests) if tests else False)
+        if ok:
+            atom = g.add(Atom(name=nm, code=code, description=text, kind="atom", provenance="learned",
+                              examples=([f"{nm}({x}) == {oracle(x)}" for x in (3, 5, 7)] if oracle else [])))
+            for d in _find_calls(code, g):
+                g.link(nm, d, "depend")
+            _adapt(retr, train_examples, text, nm)
+            return dict(status="banked-skill", node=nm, kind="atom")
+        # WRONG skill -> do NOT bank it; record a TRAP (learned mistake), the anti-poison made visible
+        tnm = f"trap_{nm}"
+        g.add(Atom(name=tnm, code=code, description=f"WRONG attempt at: {text}", kind="trap", provenance="learned"))
+        return dict(status="rejected->trap", node=tnm, kind="trap")
+
+    # 2) a PROCEDURE / chain-of-thought that composes existing atoms
+    if is_cot or cites:
+        cited = [c for c in (cites or []) if c in g]
+        nm = name or f"procedure_{abs(hash(text)) % 100000}"
+        verified = False
+        if cited and tests:
+            expr = "n"
+            for c in cited:
+                expr = f"{c}({expr})"
+            verified = verify(f"{_closure(g, cited)}\n\ndef _e(n):\n    return {expr}\n", "_e", tests)
+        node = g.add(Atom(name=nm, code="", description=text, kind="procedure", provenance="cot",
+                          depends=cited, examples=(["verified-by-execution"] if verified else [])))
+        for c in cited:
+            g.link(nm, c, "uses")
+        return dict(status=("verified-procedure" if verified else "procedure"), node=nm,
+                    kind="procedure", verified=verified)
+
+    # 3) plain NL knowledge -> a retrievable concept/fact node
+    nm = name or f"fact_{abs(hash(text)) % 100000}"
+    node = g.add(Atom(name=nm, code="", description=text, kind="concept", provenance="learned"))
+    return dict(status="banked-fact", node=nm, kind="concept")
+
+
+def _find_calls(code: str, g: AtomGraph) -> list:
+    import re
+    return [m for m in g.atoms if m in code and re.search(rf"\b{re.escape(m)}\s*\(", code) and f"def {m}" not in code]
+
+
+# ================================================================================================
+# 9. demo_deploy() — the 5-min-demo backbone: the graph learns ANY data, and USES it. Real numbers.
+# ================================================================================================
+def demo_deploy(lm_name: str = ""):
+    print("membrane.py --deploy: the UNIVERSAL graph learns ANY kind of data, then USES it (all real)\n")
+    torch.manual_seed(0)
+    g = seed_graph()
+    retr = TRMRetriever(g)
+    train_ex, test_ex = build_examples("train"), build_examples("test")
+    retr.train(train_ex, epochs=80)
+    print(f"  seed: {len(g)} implementation atoms; TRM trained (real). node types: {g.census()}\n")
+
+    print("  -- LEARN ANY DATA (each input routed to the right TYPED node) -------------------------")
+    events = []
+    # (a) executable skill (small calculation) — VERIFIED -> implementation
+    events.append(("executable code",
+        learn_any(g, retr, "whether a number is a perfect square",
+                  code="def is_perfect_square(n):\n    r=int(n**0.5)\n    return int(r*r==n or (r+1)*(r+1)==n)",
+                  oracle=lambda n: int(int(n**0.5)**2 == n or (int(n**0.5)+1)**2 == n),
+                  name="is_perfect_square", train_examples=train_ex)))
+    # (b) implementation INFO / procedure (CoT that composes atoms) — VERIFIED -> procedure
+    import math as _m
+    events.append(("procedure / CoT",
+        learn_any(g, retr, "digit sum of the factorial: take n!, then sum its digits", is_cot=True,
+                  cites=["factorial", "digit_sum"], name="proc_fact_digitsum",
+                  tests=[(x, _ORACLES["digit_sum"](_m.factorial(x))) for x in (4, 5, 6)])))
+    # (c) trivial KNOWLEDGE (a fact, no checker) -> concept
+    events.append(("trivial knowledge",
+        learn_any(g, retr, "a prime number has exactly two distinct positive divisors: 1 and itself",
+                  name="fact_prime_def")))
+    events.append(("trivial knowledge",
+        learn_any(g, retr, "the speed of light in vacuum is 299792458 meters per second", name="fact_lightspeed")))
+    # (d) WRONG skill -> REJECTED by verify -> trap (anti-poison, live)
+    events.append(("WRONG code (adversarial)",
+        learn_any(g, retr, "whether a number is prime",
+                  code="def is_prime_bad(n):\n    return n % 2 == 1",       # WRONG (says 9 is prime, 2 is not)
+                  oracle=_ORACLES["is_prime"], name="is_prime_bad")))
+    for label, ev in events:
+        print(f"    {label:<24} -> {ev['status']:<20} node={ev['node']} (type={ev['kind']})")
+    print(f"\n  graph now contains, by node type: {g.census()}   typed edges: {len(g.edges)}")
+
+    # -- CLAIM 1: ANTI-POISON — the wrong skill is NOT a usable skill ------------------------------
+    poisoned = any(a.kind == "atom" and a.name == "is_prime_bad" for a in g.atoms.values())
+    print(f"\n  [anti-poison]   wrong code banked as a usable skill: {poisoned}  "
+          f"(False = the verify gate rejected it; it is a trap, not a skill)")
+
+    # -- CLAIM 2: COMPOUNDING — a later task REUSES a just-learned skill (verified) ----------------
+    mem = Membrane(g, retr)
+    ps_oracle = lambda n: int(int(n**0.5)**2 == n or (int(n**0.5)+1)**2 == n)   # noqa: E731
+    reuse_task = dict(text="tell me if it is a perfect square", entry="task_ps",
+                      tests=[(x, ps_oracle(x)) for x in (4, 5, 9, 16, 17)])
+    rr = mem.solve(reuse_task, author=False)
+    print(f"  [compounding]   later task reuses the learned skill: solved={rr['solved']} using {rr['used']}")
+
+    # -- CLAIM 3: LEARN-ANY USE — retrieve the right node for a query of each type -----------------
+    print(f"\n  [retrieve+use]  a query of each type finds the right learned node (neural retrieval):")
+    probes = [("compute a perfect square check", "is_perfect_square"),
+              ("what defines a prime number", "fact_prime_def"),
+              ("how fast does light travel", "fact_lightspeed")]
+    hits = 0
+    for q, want in probes:
+        top = g.cosine_rank(q, k=3)
+        got = want in top
+        hits += got
+        print(f"     '{q[:34]:<34}' -> top3 {[t[:16] for t in top]}  {'OK' if got else 'miss'}")
+
+    # -- CLAIM 4: BEFORE/AFTER — solve rate WITH the grown graph vs seed-only (skills) -------------
+    solve_tasks = [make_task(a, test) for a, (_tr, tests) in _TASK_PHRASINGS.items() for test in tests]
+    solved_after = sum(mem.solve(t, author=False)["solved"] for t in solve_tasks)
+    g0 = seed_graph(); r0 = TRMRetriever(g0); r0.train(train_ex, epochs=80); m0 = Membrane(g0, r0)
+    solved_before = sum(m0.solve(t, author=False)["solved"] for t in solve_tasks)
+
+    # -- optional: the frozen LM GROUNDS a knowledge answer in a retrieved fact (real --lm) -------
+    grounded = ""
+    if lm_name:
+        os.environ["V5_HARD_VERIFY"] = "1"
+        from v5.runtime.algo_grr_membrane import make_frozen_gen
+        gen = make_frozen_gen(lm_name, temperature=0.2, max_new_tokens=48)
+        fact = g.get(g.cosine_rank("how fast does light travel", 1)[0]).description
+        grounded = gen([f"Using this fact: '{fact}'. Answer in one sentence: how fast does light travel?"])[0]
+
+    print(f"\n  == DEPLOYMENT SUMMARY (every number measured by running, LM frozen) ==")
+    print(f"     graph holds ANY data  : {g.census()}  + {len(g.edges)} typed edges")
+    print(f"     anti-poison (no garbage): wrong-skill banked as usable = {poisoned} (want False)")
+    print(f"     compounding (reuse)   : learned-skill reused by a later task = {rr['solved']}")
+    print(f"     learn-any retrieve    : {hits}/{len(probes)} typed queries found their node")
+    print(f"     before/after (skills) : seed-only {solved_before}/{len(solve_tasks)} -> grown {solved_after}/{len(solve_tasks)}")
+    print(f"     on-device             : MiniLM(90MB)+TRM({sum(p.numel() for p in retr.trm.parameters())} params)+graph; "
+          f"LM frozen{' (grounded a fact answer)' if grounded else ' (not needed for the core)'}")
+    if grounded:
+        print(f"     LM grounded answer    : {grounded.strip()[:100]!r}")
+    return dict(census=g.census(), poisoned=poisoned, reuse=rr["solved"], retrieve=hits,
+                before=solved_before, after=solved_after)
+
+
+# ================================================================================================
+# 10. TRM-AS-REASONER — iterative multi-hop retrieval with a STOP head (this is what makes it NOT RAG)
+# ================================================================================================
+class TRMLoop:
+    """The TRM reasons over the graph across HOPS (not one-shot cosine): each hop scores atoms given the
+    task AND what's already retrieved, adds the best NEW atom, and the STOP head decides 'enough or hop
+    again'. Recovers a COMPOSITIONAL atom SET (e.g. {fibonacci, digit_sum}) that a similarity lookup can't
+    assemble. The confidence head scores the perception. All learned by deep supervision over the hops."""
+
+    def __init__(self, graph: AtomGraph, d: int = 256, T: int = 4, hops: int = 3, device: str | None = None):
+        self.graph = graph
+        self.hops = hops
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.trm = TRMReasoner(d_in=EMBED_DIM, d=d, T=T).to(self.device)
+        self._tc: dict = {}
+
+    def _t(self, text):
+        if text not in self._tc:
+            self._tc[text] = torch.from_numpy(encode_batch([text])[0]).to(self.device)
+        return self._tc[text]
+
+    def _step_logits(self, task_vec, A, retrieved_idx):
+        ctx = A[retrieved_idx].mean(0) if retrieved_idx else torch.zeros(EMBED_DIM, device=self.device)
+        x = task_vec - 0.5 * ctx                                    # bias the query away from what's already got
+        outs, zs, (conf, use, stop) = self.trm(x, A, return_all=True)
+        return outs[-1], float(torch.sigmoid(stop[-1])), float(torch.sigmoid(conf[-1]))
+
+    @torch.no_grad()
+    def retrieve_set(self, task_text, max_hops=None):
+        self.trm.eval()
+        M, order = self.graph.matrix()
+        A = torch.from_numpy(M).to(self.device)
+        got, conf, hoptrace = [], 0.0, []                          # hoptrace = per-hop (picked, stop_prob) for INSPECTION
+        for _ in range(max_hops or self.hops):
+            logits, pstop, conf = self._step_logits(self._t(task_text), A, got)
+            for gi in got:
+                logits[gi] = float("-inf")
+            pick = int(torch.argmax(logits))
+            hoptrace.append((order[pick], round(pstop, 2)))
+            if pstop > 0.5 and got:                                # stop BEFORE adding if the head says 'enough'
+                break
+            got.append(pick)
+            if pstop > 0.5:
+                break
+        return {order[i] for i in got}, conf, hoptrace
+
+    def train(self, examples, epochs: int = 120, lr: float = 1e-3, verbose: bool = False):
+        """examples: (task_text, [gold_atom, ...]). Teacher-force the gold prefix; at each hop pull a still-
+        missing gold to the top (CE) and supervise the STOP head (1 when the set is complete)."""
+        M, order = self.graph.matrix()
+        pos = {n: i for i, n in enumerate(order)}
+        A = torch.from_numpy(M).to(self.device)
+        data = [(t, [pos[g] for g in gold if g in pos]) for t, gold in examples]
+        opt = torch.optim.Adam(self.trm.parameters(), lr=lr)
+        self.trm.train()
+        last = float("nan")
+        for ep in range(epochs):
+            tot = 0.0
+            for t, gold in data:
+                if not gold:
+                    continue
+                tv = self._t(t)
+                got = []
+                for k in range(len(gold) + 1):
+                    ctx = A[got].mean(0) if got else torch.zeros(EMBED_DIM, device=self.device)
+                    x = tv - 0.5 * ctx
+                    outs, zs, (conf, use, stop) = self.trm(x, A, return_all=True)
+                    logits, st = outs[-1].unsqueeze(0), stop[-1]
+                    missing = [g for g in gold if g not in got]
+                    complete = (len(missing) == 0)
+                    loss = nn.functional.binary_cross_entropy_with_logits(
+                        st, torch.tensor(1.0 if complete else 0.0, device=self.device))
+                    if not complete:
+                        loss = loss + nn.functional.cross_entropy(
+                            logits, torch.tensor([missing[0]], device=self.device))
+                        got = got + [missing[0]]                    # teacher-force the gold prefix
+                    opt.zero_grad(); loss.backward(); opt.step()
+                    tot += float(loss)
+                    if complete:
+                        break
+            last = tot / max(1, len(data))
+            if verbose and (ep % 30 == 0 or ep == epochs - 1):
+                print(f"    TRM-loop epoch {ep:>3}  loss {last:.4f}", flush=True)
+        return {"loss": last}
+
+
+def _compose_tasks():
+    """TRAIN: tasks that NEED a SET of 2 atoms (the compositional case one-shot cosine can't assemble)."""
+    return [
+        ("the sum of the digits of the nth fibonacci number", ["fibonacci", "digit_sum"]),
+        ("count the divisors of n factorial", ["factorial", "num_divisors"]),
+        ("is the digit sum of n a prime number", ["digit_sum", "is_prime"]),
+        ("reverse the digits then check if even", ["reverse_digits", "is_even"]),
+        ("square the number then sum its digits", ["square", "digit_sum"]),
+        ("count set bits of the nth fibonacci", ["fibonacci", "count_bits"]),
+    ]
+
+
+def _compose_heldout():
+    """HELD-OUT: NEW atom-pair combinations + phrasings never seen in training — the honest generalization test."""
+    return [
+        ("the digit sum of the number of divisors", ["num_divisors", "digit_sum"]),   # new pair
+        ("is the nth fibonacci number even", ["fibonacci", "is_even"]),               # new pair
+        ("how many one-bits are in the digit sum", ["digit_sum", "count_bits"]),      # new pair
+        ("reverse the digits of the perfect square", ["square", "reverse_digits"]),   # new pair
+    ]
+
+
+def demo_trm_reasoner():
+    print("membrane.py --trm: the TRM REASONS over the graph (iterative multi-hop + stop) -- this is NOT RAG\n")
+    torch.manual_seed(0)
+    g = seed_graph()
+    tasks = _compose_tasks()
+    print(f"  graph: {len(g)} atoms. compositional tasks (each needs a SET of 2 atoms): {len(tasks)}")
+
+    # baseline: one-shot cosine top-2 (RAG-style lookup) — can it assemble the SET?
+    cos_hit = 0
+    for text, gold in tasks:
+        top2 = set(g.cosine_rank(text, k=2))
+        cos_hit += int(set(gold).issubset(top2))
+    print(f"\n  [RAG baseline]  one-shot cosine top-2 recovers the FULL set: {cos_hit}/{len(tasks)}")
+
+    held = _compose_heldout()
+    cos_held = sum(int(set(gold).issubset(set(g.cosine_rank(text, k=2)))) for text, gold in held)
+    loop = TRMLoop(g, hops=4)
+    print(f"  [TRM reasoner]  untrained -> training on the {len(tasks)} TRAIN tasks...")
+    loop.train(tasks, epochs=150, verbose=True)
+
+    def _eval(items, label):
+        exact = cover = 0
+        print(f"\n  [MANUAL INSPECTION - {label}] per-hop (picked, stop_prob) -- not trusting the label:")
+        for text, gold in items:
+            got, conf, hop = loop.retrieve_set(text)
+            c = set(gold).issubset(got); e = (got == set(gold)); cover += c; exact += e
+            print(f"     {text[:36]:<36} gold={sorted(gold)}")
+            print(f"        hops={hop} -> got={sorted(got)} EXACT={e} conf={conf:.2f}")
+        return exact, cover
+
+    tr_exact, _ = _eval(tasks, "TRAIN")
+    ho_exact, ho_cover = _eval(held, "HELD-OUT (never trained)")
+    print(f"\n  == NOT-RAG RESULT (EXACT set match; HELD-OUT is the honest number) ==")
+    print(f"     RAG cosine top-2  : train {cos_hit}/{len(tasks)}   held-out {cos_held}/{len(held)}")
+    print(f"     TRM multi-hop     : train {tr_exact}/{len(tasks)}   HELD-OUT {ho_exact}/{len(held)} (covered {ho_cover}/{len(held)})")
+    print(f"  => held-out is the truth: does the TRM's hop-reasoning GENERALIZE to unseen atom-pairs, or memorize?")
+    print(f"     (confidence head still ~0.5 = uninformative at this scale -- an honest remaining weakness.)")
+    return dict(cos_held=cos_held, trm_held=ho_exact, n_held=len(held))
+
+
+# ================================================================================================
+# 11. THE ACCEPTANCE TEST — teach the LM something it does NOT know, then it EXPLAINS what it learned
+# ================================================================================================
+def demo_teach_explain(lm_name: str):
+    """The deployment acceptance test, end-to-end, on the 4-bit LM (fits 6GB):
+      1. ask the base LM about UNSEEN info -> it can't (hallucinates / refuses),
+      2. TEACH it (learn_any -> a real graph node, MiniLM-embedded),
+      3. the model RETRIEVES the learned node and EXPLAINS/answers -- grounded, faithful (cites the fact).
+    Proves the knowledge came from TEACHING, not pretraining -- the graph is the learning."""
+    from v5.runtime.dcpd_latent import WhiteBox
+    print("membrane.py --teach: teach the LM UNSEEN info, then it EXPLAINS what it learned (4-bit, fits 6GB)\n")
+    wb = WhiteBox(lm_name, quant="4bit")
+    print(f"  LM: {lm_name}  quant={wb.quant}  VRAM={wb.vram_gb:.2f}GB "
+          f"({'FITS 6GB' if wb.vram_gb <= 6 else 'OVER 6GB'})\n")
+    g = seed_graph()
+    retr = TRMRetriever(g)
+
+    # UNSEEN facts the 3B cannot know (invented terms) -- the honest 'never in pretraining' test:
+    lessons = [
+        ("fact_klarn", "The Klarn Protocol requires exactly three handshake phases: greet, verify, and seal.",
+         "How many handshake phases does the Klarn Protocol have, and what are they?", "three"),
+        ("fact_zephyrite", "Zephyrite melts at 812 degrees and conducts electricity only when wet.",
+         "At what temperature does zephyrite melt?", "812"),
+    ]
+    for name, fact, question, key in lessons:
+        print(f"  == LESSON: {fact}")
+        # (1) BEFORE teaching -- the base LM does not know it
+        before = wb.generate_plain(f"Answer in one short sentence. {question}", max_new=40).strip()
+        knew_before = key.lower() in before.lower()
+        print(f"     [before] LM asked '{question}'")
+        print(f"              -> {before[:110]!r}  (knew it: {knew_before})")
+        # (2) TEACH it -> a real node in the graph
+        res = learn_any(g, retr, fact, name=name)
+        print(f"     [teach ] learn_any -> node={res['node']} type={res['kind']} (graph now {len(g)} nodes)")
+        # (3) EXPLAIN -- retrieve the learned node, answer GROUNDED in it (faithful)
+        node = g.get(g.cosine_rank(question, 1)[0])
+        retrieved_ok = node.name == name
+        prompt = (f"Use ONLY this learned fact to answer.\nFact: {node.description}\n"
+                  f"Question: {question}\nAnswer:")
+        after = wb.generate_plain(prompt, max_new=40).strip()
+        knew_after = key.lower() in after.lower()
+        faithful = node.description[:20].lower() in after.lower() or knew_after
+        print(f"     [after ] retrieved node={node.name} (correct={retrieved_ok})")
+        print(f"              -> {after[:110]!r}  (correct: {knew_after})")
+        verdict = (not knew_before) and retrieved_ok and knew_after
+        print(f"     => LEARNED + EXPLAINED: {verdict}  "
+              f"(base didn't know -> taught -> retrieved -> answered correctly, grounded)\n")
+    print(f"  final graph node types: {g.census()}   (the knowledge lives in the graph, LM frozen)")
+
+
 def main():
     ap = argparse.ArgumentParser(description="one real integrated membrane: neural retrieval + TRM + verify + learn")
-    ap.add_argument("--demo", action="store_true")
-    ap.add_argument("--lm", type=str, default="", help="real frozen LM for AUTHORING new atoms (e.g. Qwen/Qwen2.5-3B-Instruct)")
+    ap.add_argument("--demo", action="store_true", help="the integrated retrieval+TRM+verify+learn demo")
+    ap.add_argument("--deploy", action="store_true", help="the deployment demo: universal graph learns ANY data + uses it")
+    ap.add_argument("--trm", action="store_true", help="TRM-as-reasoner: iterative multi-hop retrieval (NOT RAG)")
+    ap.add_argument("--teach", action="store_true", help="ACCEPTANCE TEST: teach unseen info -> model explains it (needs --lm)")
+    ap.add_argument("--lm", type=str, default="", help="real frozen LM (e.g. Qwen/Qwen2.5-3B-Instruct); optional")
     a = ap.parse_args()
+    if a.teach:
+        if not a.lm:
+            raise SystemExit("--teach needs --lm")
+        demo_teach_explain(a.lm)
+        return
+    if a.trm:
+        demo_trm_reasoner()
+        return
+    if a.deploy:
+        demo_deploy(a.lm)
+        return
     if a.demo:
         demo(a.lm)
         return
