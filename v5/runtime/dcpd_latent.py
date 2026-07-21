@@ -104,6 +104,30 @@ class WhiteBox:
                 break
         return self.tok.decode(ids[0, start:], skip_special_tokens=True)
 
+    @torch.no_grad()
+    def generate_chat(self, user: str, system: str = None, max_new: int = 64, temperature: float = 0.0,
+                      repetition_penalty: float = 1.3) -> str:
+        """Proper INSTRUCT generation via the chat template (system/user/assistant) — so an instruct model
+        RESPONDS as an assistant instead of base text-completing ('Hi' -> 'there, can you tell me...'). Same
+        repetition penalty + EOS stop as generate_plain. Falls back to a plain prompt if no chat template."""
+        if getattr(self.tok, "chat_template", None):
+            msgs = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": user}]
+            ids = self.tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt").to(self.device)
+        else:
+            ids = self.tok(((system + "\n") if system else "") + user + "\n", return_tensors="pt").input_ids.to(self.device)
+        start = ids.shape[1]
+        for _ in range(max_new):
+            logits = self.model(ids).logits[:, -1, :]
+            if repetition_penalty and repetition_penalty != 1.0 and ids.shape[1] > start:
+                for t in set(ids[0, start:].tolist()):
+                    v = logits[0, t]
+                    logits[0, t] = v / repetition_penalty if v > 0 else v * repetition_penalty
+            nxt = self._pick(logits, temperature)
+            ids = torch.cat([ids, nxt], 1)
+            if nxt.item() == self.tok.eos_token_id:
+                break
+        return self.tok.decode(ids[0, start:], skip_special_tokens=True).strip()
+
     # ── 1. gamma-GATED POINTER-DECODE — force exact graph tokens (gamma=0) between LM prose (gamma=1) ─────────
     @torch.no_grad()
     def generate_gated(self, prompt: str, plan: list, temperature: float = 0.0) -> dict:

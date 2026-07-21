@@ -1020,13 +1020,14 @@ def interactive_trace(lm_name: str):
             flag = "  <- relevant" if s >= RELEVANCE else ""
             print(f"                {s:5.2f}  {n:<20} ({g.get(n).kind}){flag}")
         top, ts = rank[0]
-        base = clean(wb.generate_plain(f"Answer the question concisely. {q}", max_new=64))
+        # proper INSTRUCT generation (chat template) -> the LM RESPONDS as an assistant, not base-completes
+        base = clean(wb.generate_chat(q, max_new=256))
         if ts >= RELEVANCE:                                    # RELEVANCE GATE — only ground on a real match
             node = g.get(top); content = node.code or node.description
             print(f"  [3] SELECT    '{top}' RELEVANT (sim {ts:.2f} >= {RELEVANCE}): {content[:90]}")
             print(f"  [4] LM ALONE  (no memory)   -> {base}")
-            grounded = clean(wb.generate_plain(
-                f"Use ONLY this fact to answer.\n{content}\nQuestion: {q}\nAnswer:", max_new=64))
+            grounded = clean(wb.generate_chat(
+                q, system=f"Use this fact the user taught you to answer: {content}", max_new=256))
             print(f"  [5] LM+GRAPH  (grounded)    -> {grounded}")
         else:                                                 # nothing relevant -> DON'T force-inject junk (realistic)
             print(f"  [3] SELECT    nothing relevant (top sim {ts:.2f} < {RELEVANCE}) -> the graph stays OUT")
