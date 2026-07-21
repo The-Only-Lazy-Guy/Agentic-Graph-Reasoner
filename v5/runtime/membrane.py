@@ -656,9 +656,75 @@ def demo(lm_name: str = ""):
 # ================================================================================================
 # 8. learn_any() — the UNIVERSAL router: any NL becomes the RIGHT typed node (the deployment claim)
 # ================================================================================================
+def _slug(s: str) -> str:
+    import re
+    return re.sub(r"[^a-z0-9]+", "_", s.strip().lower()).strip("_")[:40] or "concept"
+
+
+def _uniq(g: AtomGraph, base: str) -> str:
+    n, i = base, 2
+    while n in g.atoms:
+        n, i = f"{base}_{i}", i + 1
+    return n
+
+
+def _is_rich(text: str) -> bool:
+    """Worth perceiving? Short one-liners ('Kun is lazy') go direct; rich paste gets structured."""
+    return len(text) >= 140 or text.count(". ") >= 2 or "\n" in text.strip()
+
+
+def _link_refs(g: AtomGraph, src: str, refs: list) -> list:
+    """Absorb the input's references into the graph: each ref -> a typed 'relates' edge to the EXISTING node
+    it names (no new node). This is what keeps one paste = one concept, connected — not K chunked siblings."""
+    linked = []
+    if not refs:
+        return linked
+    M, order = g.matrix()
+    for r in refs:
+        sims = M @ encode_batch([r])[0]
+        j = int(np.argmax(sims))
+        if order[j] != src and float(sims[j]) >= 0.55 and order[j] not in linked:
+            g.link(src, order[j], "relates"); linked.append(order[j])
+    return linked
+
+
+def _perceive(wb, text: str, guard: float = 0.88) -> dict | None:
+    """LM-as-PERCEIVER — the frozen LM in the write path, ANTI-POISON GUARDED. Read raw input, emit ONE clean
+    structured concept: title + canonical statement (the sharp retrieval handle) + a faithful cleaned body +
+    refs to related concepts. NOT chunked into K nodes — one node, references become edges (_link_refs).
+    Rejected (caller keeps raw) if the digest drifts from the source (cos < guard), bloats, or the JSON is
+    unusable -> the LM may CLEAN and STRUCTURE, never INVENT."""
+    import json as _json
+    import re
+    sys_p = ("Normalize the user's text into ONE knowledge-graph concept. Output ONLY JSON: "
+             '{"title":"<short concept name>","statement":"<one canonical sentence: the core fact>",'
+             '"body":"<the full info, fix typos/spacing, stay 100% faithful, add NOTHING>",'
+             '"refs":["<other concepts it references or compares to>"]}. No text outside the JSON.')
+    try:
+        out = wb.generate_chat(text, system=sys_p, max_new=min(640, 160 + len(text) // 2), temperature=0.0)
+    except Exception:
+        return None
+    m = re.search(r"\{.*\}", out, re.S)
+    if not m:
+        return None
+    try:
+        d = _json.loads(m.group(0))
+    except Exception:
+        return None
+    title, stmt = str(d.get("title", "")).strip(), str(d.get("statement", "")).strip()
+    body = str(d.get("body", "")).strip() or text
+    if not title or not stmt or len(body) > 2 * len(text) + 200:          # empty / padded -> reject
+        return None
+    refs = [str(r).strip() for r in (d.get("refs") or []) if str(r).strip()][:8]
+    digest = f"{title}. {stmt} {body}"
+    if float(encode_batch([text])[0] @ encode_batch([digest])[0]) < guard:  # ANTI-POISON faithfulness guard
+        return None
+    return {"title": title, "statement": stmt, "body": body, "refs": refs}
+
+
 def learn_any(g: AtomGraph, retr: TRMRetriever, text: str, *, code: str | None = None, oracle=None,
               tests: list | None = None, cites: list | None = None, name: str | None = None,
-              is_cot: bool = False, train_examples: list | None = None) -> dict:
+              is_cot: bool = False, train_examples: list | None = None, perceiver=None) -> dict:
     """Route ANY natural-language input to the correct TYPED node in the universal graph:
        - code + a checker (oracle/tests) -> VERIFY -> `atom` (implementation)  [banks only if it passes]
        - code that FAILS the checker      -> REJECTED, and a `trap` node records the mistake (anti-poison, live)
@@ -699,8 +765,18 @@ def learn_any(g: AtomGraph, retr: TRMRetriever, text: str, *, code: str | None =
         return dict(status=("verified-procedure" if verified else "procedure"), node=nm,
                     kind="procedure", verified=verified)
 
-    # 3) plain NL knowledge -> a retrievable concept/fact node, through the WRITE-TIME GRAPH EDITOR
-    #    (dedup near-duplicates + self-organize typed edges) — not a bare append.
+    # 3) plain NL knowledge -> a concept node, through the WRITE-TIME GRAPH EDITOR (dedup + self-organize).
+    #    Rich input first goes through the guarded LM-PERCEIVER: ONE clean structured node (title+canonical
+    #    statement = sharp handle, faithful body) + typed edges to EXISTING concepts — NOT K chunked siblings.
+    p = _perceive(perceiver, text) if (perceiver is not None and _is_rich(text)) else None
+    if p:
+        nm = name or _uniq(g, _slug(p["title"]))
+        handle = f"{p['title']}. {p['statement']}"            # embed the clean handle, not the diffuse blob
+        node_name, action = g.add_or_merge(Atom(name=nm, code=p["body"], description=handle,
+                                                kind="concept", provenance="perceived"))
+        refs = _link_refs(g, node_name, p["refs"]) if action == "added" else []
+        return dict(status=("merged-fact" if action == "merged" else "perceived-fact"),
+                    node=node_name, kind="concept", action=action, title=p["title"], refs=refs)
     nm = name or f"fact_{abs(hash(text)) % 100000}"
     node_name, action = g.add_or_merge(Atom(name=nm, code="", description=text,
                                             kind="concept", provenance="learned"))
@@ -1045,9 +1121,17 @@ def interactive_trace(lm_name: str):
         if q.lower().startswith("teach "):
             q = q[6:].strip()
         # AUTO-LEARN: a declarative statement is TAUGHT (conversational learning); a question is answered.
+        # Rich input is PERCEIVED by the frozen LM (guarded) into ONE clean structured node + ref-edges.
         if not is_question(q):
-            r = learn_any(g, retr, q, name=f"mem_{len(g)}")
-            print(f"  [LEARN]   stored '{q[:60]}' as node '{r['node']}'  (graph now {len(g)} nodes) -- got it, I'll remember that")
+            r = learn_any(g, retr, q, perceiver=wb)
+            if r["status"].startswith("perceived"):
+                rl = f"  relates-> {', '.join(r['refs'])}" if r.get("refs") else ""
+                print(f"  [PERCEIVE] '{q[:40]}...' -> node '{r['node']}'  title=\"{r['title']}\"{rl}")
+                print(f"             (LM cleaned+structured it, faithfulness-guarded; graph now {len(g)} nodes)")
+            elif r["status"].startswith("merged"):
+                print(f"  [MERGE]   near-duplicate of '{r['node']}' -- kept one node (graph {len(g)}, no bloat)")
+            else:
+                print(f"  [LEARN]   stored as node '{r['node']}'  (graph now {len(g)} nodes) -- got it, I'll remember that")
             continue
         qv = encode_batch([q])[0]
         print(f"  [1] EMBED     query -> MiniLM 384-d vector (norm {np.linalg.norm(qv):.2f})")
