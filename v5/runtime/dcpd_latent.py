@@ -213,6 +213,79 @@ class WhiteBox:
                 hd.remove()
         return dict(text=text, stat=stat)
 
+    # ══ v3: TRAINED steering — learn the control vector by gradient descent THROUGH the frozen LM ══
+    def train_steering(self, prompts: list, trap_ids: list, layers: list, steps: int = 120,
+                       lr: float = 0.03, kl_w: float = 5.0, reg: float = 1e-3, target_p: float = 0.02,
+                       verbose: bool = False) -> torch.Tensor:
+        """Learn a control vector v (added to the last-token residual at `layers`) that pushes the trap tokens'
+        probability BELOW target_p (a MARGIN, so it stops once suppressed and doesn't blow up), while a KL term
+        keeps the rest of the distribution close (fluency) and an L2 term bounds v. Gradients flow to v ONLY —
+        LM weights frozen (no poison). The honest trainable version of concept-space repulsion."""
+        v = torch.zeros(self.d_model, device=self.device, dtype=torch.float32, requires_grad=True)
+        opt = torch.optim.Adam([v], lr=lr)
+        trap = torch.tensor(trap_ids, device=self.device)
+        enc = [self.tok(p, return_tensors="pt").input_ids.to(self.device) for p in prompts]
+        tgt = torch.log(torch.tensor(target_p, device=self.device))      # margin: suppress only to target_p
+
+        def mk():
+            def hook(module, inp, out):
+                h = out[0] if isinstance(out, tuple) else out
+                h[:, -1, :] = h[:, -1, :] + v.to(h.dtype)
+                return (h,) + tuple(out[1:]) if isinstance(out, tuple) else h
+            return hook
+
+        for step in range(steps):
+            tot = 0.0
+            for ids in enc:
+                with torch.no_grad():
+                    ref = self.model(ids).logits[:, -1, :].float()
+                handles = [self.layers[L - 1].register_forward_hook(mk()) for L in layers]
+                try:
+                    logits = self.model(ids).logits[:, -1, :].float()
+                finally:
+                    for hd in handles:
+                        hd.remove()
+                lp = torch.log_softmax(logits, -1)
+                trap_lp = torch.logsumexp(lp[0, trap], 0)                 # log P(trap tokens)
+                supp = torch.relu(trap_lp - tgt)                         # only push DOWN to target_p, then stop
+                kl = torch.nn.functional.kl_div(lp, torch.softmax(ref, -1), reduction="batchmean")  # fluency
+                loss = supp + kl_w * kl + reg * (v * v).sum()            # + bound v
+                opt.zero_grad(); loss.backward(); opt.step()
+                tot += float(loss)
+            if verbose and (step % 30 == 0 or step == steps - 1):
+                print(f"    steer-train step {step:>3}  loss {tot/len(enc):.3f}  |v|={float(v.norm()):.2f}", flush=True)
+        return v.detach()
+
+    @torch.no_grad()
+    def generate_vector(self, prompt: str, v: torch.Tensor, layers: list, max_new: int = 40,
+                        temperature: float = 0.0) -> dict:
+        """Generate with a fixed (learned) control vector added to the last-token residual at `layers`."""
+        vv = v.to(self.device).to(next(self.model.parameters()).dtype)
+        handles = []
+
+        def mk():
+            def hook(module, inp, out):
+                h = out[0] if isinstance(out, tuple) else out
+                h[:, -1, :] = h[:, -1, :] + vv
+                return (h,) + tuple(out[1:]) if isinstance(out, tuple) else h
+            return hook
+        for L in layers:
+            handles.append(self.layers[L - 1].register_forward_hook(mk()))
+        try:
+            ids = self.tok(prompt, return_tensors="pt").input_ids.to(self.device)
+            s = ids.shape[1]
+            for _ in range(max_new):
+                logits = self.model(ids).logits[:, -1, :]
+                nxt = self._pick(logits, temperature)
+                ids = torch.cat([ids, nxt], 1)
+                if nxt.item() == self.tok.eos_token_id:
+                    break
+            text = self.tok.decode(ids[0, s:], skip_special_tokens=True)
+        finally:
+            for hd in handles:
+                hd.remove()
+        return dict(text=text)
+
     def _code_token_ids(self) -> set:
         """Token ids that signal CODE (banned during a gamma=1 'explain' segment so it stays prose)."""
         banned = set()
@@ -384,6 +457,44 @@ def exp_repulsion_v2(wb: WhiteBox, trap: str = "bubble sort", strength: float = 
     return dict(a=a, b=b, best=best)
 
 
+def exp_trained_steering(wb: WhiteBox, trap: str = "bubble sort", n_samples: int = 8, steps: int = 150):
+    """v3: TRAIN a control vector (LM FROZEN) to suppress the trap, then measure vs text. The honest test of
+    'make the intervention trainable' — does a LEARNED direction beat the hand-computed one (which failed)?"""
+    print(f"\n[EXP 3] TRAINED steering (LM frozen, gradient to the control vector only) — trap='{trap}'\n")
+    trap_word = trap.split()[0]                                          # e.g. "bubble"
+    trap_ids = sorted({tid for w in (f" {trap_word}", trap_word, f" {trap_word.capitalize()}")
+                       for tid in wb.tok(w, add_special_tokens=False).input_ids})
+    train_prompts = [
+        "Question: what is the simplest sorting algorithm to implement in Python? Answer:",
+        "The easiest sorting algorithm for a beginner to code is",
+        "What sorting algorithm is easiest to write from scratch? It is",
+        "The most basic sorting method is called",
+    ]
+    mid = wb.n_layers // 2
+    band = list(range(max(1, mid - 6), min(wb.n_layers, mid + 6)))
+    print(f"  trap tokens={trap_ids}  band={band[0]}..{band[-1]}  training the control vector...")
+    v = wb.train_steering(train_prompts, trap_ids, band, steps=steps, lr=0.05, kl_w=1.0, verbose=True)
+
+    base = "Question: what is the simplest sorting algorithm to implement in Python? Answer:"
+    btxt = f"Question: what is the simplest sorting algorithm to implement in Python? Do NOT mention {trap}. Answer:"
+    a = _rate(wb, lambda: wb.generate_plain(base, max_new=40, temperature=0.9), trap, n_samples)
+    b = _rate(wb, lambda: wb.generate_plain(btxt, max_new=40, temperature=0.9), trap, n_samples)
+    d = _rate(wb, lambda: wb.generate_vector(base, v, band, max_new=40, temperature=0.9), trap, n_samples)
+    print(f"\n  arm                    trap-rate   fluency(self-NLL)")
+    print(f"  A none                 {a[0]:>6.2f}      {a[1]:.3f}")
+    print(f"  B text 'avoid'         {b[0]:>6.2f}      {b[1]:.3f}")
+    print(f"  D TRAINED steer (v3)   {d[0]:>6.2f}      {d[1]:.3f}   (LM frozen; only v trained)")
+    if d[0] < b[0] and d[1] <= b[1] + 0.15:
+        print("     VERDICT: TRAINED steering BEATS text at comparable fluency -> a learned latent intervention")
+        print("              works where the hand-computed one failed. LM stayed frozen (poison line intact).")
+    elif d[0] <= a[0] - 0.4:
+        print("     VERDICT: training helped a lot (vs hand-computed 0.88) but text still edges it -- promising.")
+    else:
+        print("     VERDICT: even trained (LM frozen) it can't beat text -- the residual-steering channel is weak here.")
+    print(f"     sample: {wb.generate_vector(base, v, band, max_new=30)['text'].strip()[:120]!r}")
+    return dict(a=a, b=b, d=d)
+
+
 def exp_gating_v2(wb: WhiteBox):
     """v2 gating: chat template + explicit 'explain' instruction + code-token masking on the explain segment.
     Force the exact atom (gamma=0), then make the model EXPLAIN it in prose (gamma=1, code-masked)."""
@@ -441,8 +552,8 @@ def main():
     ap = argparse.ArgumentParser(description="real white-box latent Dual-Channel Pointer-Decoding")
     ap.add_argument("--smoke", action="store_true", help="prove the machinery on a tiny real model")
     ap.add_argument("--lm", type=str, default="", help="open-weights causal LM (e.g. Qwen/Qwen2.5-3B-Instruct)")
-    ap.add_argument("--exp", choices=["gating", "repulsion", "gating2", "repulsion2", "both", "v2"],
-                    default="v2", help="v1 = crude (lost); v2 = contrastive+ablation+chat (the real fix)")
+    ap.add_argument("--exp", choices=["gating", "repulsion", "gating2", "repulsion2", "trained", "both", "v2"],
+                    default="v2", help="v1 crude (lost); v2 contrastive+ablation (lost); trained = learned control vector, LM frozen")
     ap.add_argument("--layer", type=int, default=0, help="steering layer (0 = middle)")
     ap.add_argument("--trap", type=str, default="bubble sort")
     ap.add_argument("--alpha", type=float, default=10.0)
@@ -465,6 +576,8 @@ def main():
         exp_gating_v2(wb)
     elif a.exp == "repulsion2":
         exp_repulsion_v2(wb, trap=a.trap, strength=a.strength, n_samples=a.n, sweep=a.sweep)
+    elif a.exp == "trained":
+        exp_trained_steering(wb, trap=a.trap, n_samples=a.n)
     elif a.exp == "both":
         exp_gating(wb); exp_repulsion(wb, layer=layer, trap=a.trap, alpha=a.alpha)
     else:  # v2 (default) — the real fix
