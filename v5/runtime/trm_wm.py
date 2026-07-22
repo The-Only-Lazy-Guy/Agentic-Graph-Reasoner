@@ -112,10 +112,13 @@ class WMReasoner(nn.Module):
         # sqrt(d_lm) (~50) flattens them to ~uniform (ds_loss stuck at ln N, no gradient). 0.07 SHARPENS them.
         self._ds_scale = 0.07
 
-    def refine(self, task_emb: torch.Tensor, atom_embs: torch.Tensor) -> tuple[torch.Tensor, list[torch.Tensor]]:
-        """task_emb [d_emb], atom_embs [K,d_emb] -> (working_memory [K,d_lm], per_step_states [[K,d_lm],...])"""
+    def refine(self, task_emb: torch.Tensor, atom_embs: torch.Tensor, native: bool = False) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        """task_emb [d_emb], atom_embs [K,d_emb] (or [K,d_lm] if native=True) -> (working_memory [K,d_lm],
+        per_step_states [[K,d_lm],...]). native=True: atom_embs are ALREADY in the LM's own embedding space
+        (see native_text_embedding) -- skip proj_atom's MiniLM->LM bridge, which probe B showed collapses on
+        held-out; probe C showed native-space injection generalizes (0.19->0.29 under dilution)."""
         q = self.proj_task(task_emb)
-        z = self.proj_atom(atom_embs)
+        z = atom_embs if native else self.proj_atom(atom_embs)
         states = []
         for _ in range(self.T):
             ctx = z.mean(0, keepdim=True).expand_as(z)
@@ -199,6 +202,18 @@ class WMReasoner(nn.Module):
                 return (h2,) + tuple(out[1:])
             return h2
         return hook
+
+
+def native_text_embedding(wb, text: str) -> torch.Tensor:
+    """PROBE-C-VALIDATED path: embed text via the LM's OWN embedding table (mean-pooled over its tokens) --
+    zero cross-model gap, unlike routing through MiniLM + a trained bridge (probe B collapsed on held-out;
+    probe C generalized 0.19->0.29). Use this for anything injected into the LM's residual stream; MiniLM
+    stays fine for cheap cosine RETRIEVAL (picking which atom), which never goes through the adapter."""
+    tie = bool(getattr(wb.model.config, "tie_word_embeddings", False))
+    out_emb = wb.model.get_output_embeddings()
+    lm_emb = out_emb.weight if (out_emb is not None and not tie) else wb.model.get_input_embeddings().weight
+    ids = wb.tok(text, return_tensors="pt").input_ids.to(wb.device)
+    return lm_emb[ids[0]].float().mean(0).detach()
 
 
 # ================================================================================================
@@ -573,20 +588,28 @@ def run_real(lm_name: str, quant: str = "4bit"):
 
     descs, codes = _seed_atoms()
     atom_names = list(descs.keys())
-    print(f"  graph: {len(atom_names)} atoms (MiniLM embeddings)")
-
-    atom_embs = {n: torch.as_tensor(encode_batch([descs[n]])[0], dtype=torch.float32, device=wb.device)
-                 for n in atom_names}
+    # NATIVE-SPACE injection (probe-C-validated): embed each atom's description via the LM's OWN embedding
+    # table, not MiniLM + an untrained proj_atom bridge -- that bridge is exactly what probe B showed
+    # collapses on held-out (train fits, held-out ~0). This was very likely why composition scored 0/4 even
+    # after deep supervision was fixed: the atoms fed to refine() were never in a space the LM could read.
+    print(f"  graph: {len(atom_names)} atoms (NATIVE LM-embedding-table injection, MiniLM dropped for this path)")
+    atom_embs = {n: native_text_embedding(wb, descs[n]) for n in atom_names}
 
     train_tasks, held_tasks = _compose_tasks_real()
     all_tasks = train_tasks + held_tasks
     split = len(train_tasks)
     print(f"  tasks: {split} train, {len(all_tasks) - split} held-out (2-atom composition)\n")
 
-    opt = torch.optim.Adam([p for p in R.parameters() if p.requires_grad], lr=1e-3, weight_decay=1e-4)
+    gate_params = [a.g for a in R.adapters]
+    gate_ids = {id(p) for p in gate_params}
+    other_params = [p for p in R.parameters() if p.requires_grad and id(p) not in gate_ids]
+    opt = torch.optim.Adam([
+        {"params": other_params, "weight_decay": 1e-4},
+        {"params": gate_params, "weight_decay": 5e-2},
+    ], lr=1e-3)
     for a in R.adapters:
         with torch.no_grad():
-            a.g.fill_(1.5)
+            a.g.fill_(0.8)
 
     # Build raw prompts (no chat template, to avoid special-token issues with teacher-forcing)
     def build_prompt(task_text):
@@ -599,7 +622,7 @@ def run_real(lm_name: str, quant: str = "4bit"):
         if text not in task_embs:
             task_embs[text] = torch.as_tensor(encode_batch([text])[0], dtype=torch.float32, device=wb.device)
 
-    atom_stack = torch.stack([atom_embs[n] for n in atom_names], dim=0).to(wb.device)  # [N, d_emb] MiniLM (384)
+    atom_stack = torch.stack([atom_embs[n] for n in atom_names], dim=0).to(wb.device)  # [N, d_lm] NATIVE now
 
     prompt_ids = {}
     for text, _, _ in all_tasks:
@@ -661,15 +684,13 @@ def run_real(lm_name: str, quant: str = "4bit"):
     best_held = 0.0
     for ep in range(100):
         R.train()
-        # DS candidate pool must live in d_lm space (the ds query = ds_proj(states) is d_lm). Project the
-        # MiniLM atom embeddings through proj_atom; recompute each epoch so it tracks the trained projection.
-        train_pool = R.proj_atom(atom_stack)
-        train_pool = (train_pool / (train_pool.norm(dim=-1, keepdim=True) + 1e-8)).detach()
+        # DS candidate pool: atom_stack is ALREADY native d_lm (native_text_embedding) -- no projection needed.
+        train_pool = (atom_stack / (atom_stack.norm(dim=-1, keepdim=True) + 1e-8)).detach()
         random.shuffle(train_ex)
         tot_lm, tot_ds, n = 0.0, 0.0, 0
         for task_emb, gold_idx, atoms_needed, pids, text, target_code in train_ex:
             K_atom_embs = torch.stack([atom_embs[n] for n in atoms_needed], dim=0)
-            slots, states = R.refine(task_emb, K_atom_embs)
+            slots, states = R.refine(task_emb, K_atom_embs, native=True)
             R.set_slots_direct(slots)
             return_body = target_code.split(": ", 1)[1] if ": " in target_code else target_code
             tids = wb.tok(" " + return_body, return_tensors="pt").input_ids.to(wb.device)
@@ -694,7 +715,7 @@ def run_real(lm_name: str, quant: str = "4bit"):
             ablated_ok = 0
             for task_emb, gold_idx, atoms_needed, pids, text, target_code in held_ex:
                 K_atom_embs = torch.stack([atom_embs[n] for n in atoms_needed], dim=0)
-                slots, _ = R.refine(task_emb, K_atom_embs)
+                slots, _ = R.refine(task_emb, K_atom_embs, native=True)
                 with torch.no_grad():
                     R.set_slots_direct(slots)
                     out = wb.model.generate(pids, max_new_tokens=64,
