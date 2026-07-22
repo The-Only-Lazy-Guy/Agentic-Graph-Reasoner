@@ -294,7 +294,7 @@ def _run_probe(wb, R, pids, train, test, precomputed_states, answer_pool, tid_of
     return tr, te, te_abl, float(R.adapters[0].g), last
 
 
-def selftest(wb=None, bs=128, steps_a=120, steps_b=250):
+def selftest(wb=None, bs=128, steps_a=120, steps_b=250, words_n=120):
     from v5.runtime.dcpd_latent import WhiteBox
     torch.manual_seed(0)
     if wb is None:
@@ -314,7 +314,8 @@ def selftest(wb=None, bs=128, steps_a=120, steps_b=250):
 
     prompt = "The answer is"
     pids = wb.tok(prompt, return_tensors="pt").input_ids.to(wb.device)
-    words = _vocab_words(wb.tok, 120)
+    words = _vocab_words(wb.tok, words_n)
+    print(f"  atoms: {len(words)}  ({int(0.8*len(words))} train / {len(words)-int(0.8*len(words))} held-out)")
     split = max(1, int(0.8 * len(words)))
     train_w, test_w = words[:split], words[split:]
     tid_of = {w: t for w, t in words}
@@ -657,7 +658,7 @@ def run_real(lm_name: str, quant: str = "4bit"):
         h.remove()
 
 
-def probe_real(lm_name: str, quant: str = "4bit"):
+def probe_real(lm_name: str, quant: str = "4bit", words_n: int = 400, steps: int = 120):
     """Run the copy(A)+bridge(B) mechanism test on the REAL 4B (not distilgpt2). Probe B is the decisive one:
     can a capable LM READ graph-space (MiniLM) slots via the working memory and generalize? distilgpt2 can't
     (0.04); this is the fair test. Smaller batch/steps since the 4B is heavy."""
@@ -666,7 +667,7 @@ def probe_real(lm_name: str, quant: str = "4bit"):
     for p in wb.model.parameters():
         p.requires_grad_(False)
     print(f"  LM {lm_name}  quant={wb.quant}  VRAM={wb.vram_gb:.2f}GB  layers={wb.n_layers}\n")
-    selftest(wb, bs=48, steps_a=80, steps_b=200)
+    selftest(wb, bs=48, steps_a=steps, steps_b=steps, words_n=words_n)
 
 
 def main():
@@ -676,9 +677,11 @@ def main():
     ap.add_argument("--run", action="store_true", help="full composition experiment on --lm (hardest task)")
     ap.add_argument("--lm", type=str, default="Qwen/Qwen3-4B-Instruct-2507")
     ap.add_argument("--quant", type=str, default="4bit", help="quantization: 4bit, fp16, fp32, auto")
+    ap.add_argument("--words", type=int, default=400, help="#atoms for --probe (scale this to test the data hypothesis)")
+    ap.add_argument("--steps", type=int, default=120, help="training steps per probe")
     a = ap.parse_args()
     if a.probe:
-        probe_real(a.lm, a.quant)
+        probe_real(a.lm, a.quant, a.words, a.steps)
     elif a.run:
         run_real(a.lm, a.quant)
     else:
