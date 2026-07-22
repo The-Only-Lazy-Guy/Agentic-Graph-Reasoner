@@ -471,12 +471,12 @@ def _exec_verify(code: str, tests: list) -> bool:
         return False
 
 
-def run_real(lm_name: str):
+def run_real(lm_name: str, quant: str = "4bit"):
     from v5.runtime.dcpd_latent import WhiteBox
     import random
-    print(f"run_real: WMReasoner coupled to {lm_name} (4-bit) — real composition tasks\n")
+    print(f"run_real: WMReasoner coupled to {lm_name} ({quant}) — real composition tasks\n")
 
-    wb = WhiteBox(lm_name, quant="4bit")
+    wb = WhiteBox(lm_name, quant=quant)
     d_lm = wb.d_model
     couple = [wb.n_layers - 2, wb.n_layers - 1]
     print(f"  LM: {lm_name}  d={d_lm}  layers={wb.n_layers}  gate layers={couple}  device={wb.device}")
@@ -636,12 +636,12 @@ def run_real(lm_name: str):
         h.remove()
 
 
-def probe_real(lm_name: str):
+def probe_real(lm_name: str, quant: str = "4bit"):
     """Run the copy(A)+bridge(B) mechanism test on the REAL 4B (not distilgpt2). Probe B is the decisive one:
     can a capable LM READ graph-space (MiniLM) slots via the working memory and generalize? distilgpt2 can't
     (0.04); this is the fair test. Smaller batch/steps since the 4B is heavy."""
     from v5.runtime.dcpd_latent import WhiteBox
-    wb = WhiteBox(lm_name, quant="4bit")
+    wb = WhiteBox(lm_name, quant=quant)
     for p in wb.model.parameters():
         p.requires_grad_(False)
     print(f"  LM {lm_name}  quant={wb.quant}  VRAM={wb.vram_gb:.2f}GB  layers={wb.n_layers}\n")
@@ -654,11 +654,12 @@ def main():
     ap.add_argument("--probe", action="store_true", help="copy+bridge mechanism test on the real --lm (the fair bridge test)")
     ap.add_argument("--run", action="store_true", help="full composition experiment on --lm (hardest task)")
     ap.add_argument("--lm", type=str, default="Qwen/Qwen3-4B-Instruct-2507")
+    ap.add_argument("--quant", type=str, default="4bit", help="quantization: 4bit, fp16, fp32, auto")
     a = ap.parse_args()
     if a.probe:
-        probe_real(a.lm)
+        probe_real(a.lm, a.quant)
     elif a.run:
-        run_real(a.lm)
+        run_real(a.lm, a.quant)
     else:
         selftest()
 
