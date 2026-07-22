@@ -885,8 +885,13 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     best_held = 0.0
     eval_every = max(1, epochs // 8)
     last_dump = None
-    # SELF-CRITIQUE data collection: every eval checkpoint already computes a real trajectory (states) and
-    # a real verify() outcome as a byproduct -- free training data for the critic, no extra generation cost.
+    # SELF-CRITIQUE data collection (co-evolutionary arms-race idea, stage 1): every eval checkpoint runs
+    # real generate()+verify() on held_ex (free byproduct) AND, now, ALSO on train_ex (a small deliberate
+    # extra generation cost, see below) -- ~4x more real (trajectory, real-verify-label) pairs than
+    # held_ex alone, addressing the critic's small-sample-size problem directly. Still PASSIVE: this data
+    # trains the critic only, after the main loop -- does not touch the reasoner's own loss (that's stage 2,
+    # gated on stage 1's critic actually beating base rate first, to avoid training the reasoner against an
+    # unreliable judge -- Goodhart's law / reward-hacking risk, not built yet).
     critic_examples: list = []
     for ep in range(epochs):
         R.train()
@@ -945,6 +950,28 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 abl_ok = verify("def task(n): " + code_abl, target_code)
                 ablated_ok += int(abl_ok)
                 dump.append((text, target_code, code, wm_ok, code_abl, abl_ok, instability))
+
+            # CO-TRAINING data (stage 1, per user's arms-race idea): the held_ex loop above is the ONLY place
+            # real generate()+verify() happens, so it's the only place a real pass/fail label exists -- the
+            # main training loop is teacher-forced (target always fed as ground truth), so there's no
+            # natural label there. Extend the SAME real eval mechanism to train_ex too, at the SAME checkpoint
+            # cadence (9 times, not every epoch) -- ~4x more critic data (48+16 tasks vs 16), ~2x more
+            # generation cost (skip the ablated comparison here, not needed for critic data), NOT a 40x or
+            # 50x blowup. Still purely PASSIVE/monitoring -- does not touch the reasoner's own loss (stage 2,
+            # gated on stage 1 actually beating base rate, not built yet).
+            for task_emb, gold_idx, atoms_needed, pids, text, target_code in train_ex:
+                K_atom_embs = torch.stack([atom_embs[n] for n in atoms_needed], dim=0)
+                slots, tr_states = R.refine(task_emb, K_atom_embs, native=True)
+                with torch.no_grad():
+                    R.set_slots_direct(slots)
+                    out = wb.model.generate(pids, max_new_tokens=64,
+                                            do_sample=False, pad_token_id=wb.tok.eos_token_id)
+                    tr_code = wb.tok.decode(out[0][pids.shape[-1]:], skip_special_tokens=True).strip()
+                tr_ok = verify("def task(n): " + tr_code, target_code)
+                critic_examples.append(([s.detach() for s in tr_states], tr_ok))
+                R.clear()
+            R.train()
+
             best_held = max(best_held, held_ok)
             last_dump = dump
             inst_pass = [d[6] for d in dump if d[3]]
