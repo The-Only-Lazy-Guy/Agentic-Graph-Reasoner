@@ -346,7 +346,7 @@ def selftest(wb=None, bs=128, steps_a=120, steps_b=250):
     memb = {w: torch.as_tensor(encode_batch([w])[0], dtype=torch.float32, device=wb.device) for w, _ in words}
     align_kg = torch.stack([memb[w] for w, _ in train_w])                    # MiniLM of TRAIN atoms only
     align_tgt = torch.stack([lm_emb[tid_of[w]].float() for w, _ in train_w]) # the LM's own embedding of each
-    te_b = 0.0
+    te_b, bridge_res = 0.0, {}
     for tag, do_align in (("raw", False), ("CLIP-aligned", True)):
         Rb = WMReasoner(d_lm, couple_layers=couple).to(wb.device)
         hb = Rb.couple(wb)
@@ -354,10 +354,13 @@ def selftest(wb=None, bs=128, steps_a=120, steps_b=250):
         states_b = []
         with torch.no_grad():
             for w, _ in words:
-                _, states = Rb.refine(task_emb, memb[w].unsqueeze(0))         # aligned projector -> LM-space slots
-                states_b.append([s.clone().detach() for s in states])
+                # feed the projector output DIRECTLY as the slot (parallel to probe A's e_w) -- do NOT push it
+                # through the random-init recursion, which scrambles the alignment before the adapter reads it.
+                z = Rb.proj_atom(memb[w].unsqueeze(0)).detach()              # [1,d_lm]; aligned -> ~ e_w
+                states_b.append([z.clone() for _ in range(Rb.T)])
         tr_b, te_b, ab_b, g_b, l_b = _run_probe(
             wb, Rb, pids, train_w, test_w, states_b, answer_pool, tid_of, steps=steps_b, bs=bs, ds_weight=0.15)
+        bridge_res[tag] = te_b
         alstr = f"  align_loss {al:.2f}" if al is not None else ""
         print(f"  (B:{tag:>12}) BRIDGE MiniLM->LM:  train {tr_b:.2f}  HELD-OUT {te_b:.2f}  "
               f"ablate {ab_b:.2f}  gate {g_b:+.2f}{alstr}")
@@ -366,15 +369,14 @@ def selftest(wb=None, bs=128, steps_a=120, steps_b=250):
     handles = []
 
     print()
-    if te_a >= 0.5 and ab_a < te_a:
-        print("  => WIRING PROVEN: working memory causally + GENERALIZABLY drives the frozen LM (probe A).")
-        if te_b >= 0.5:
-            print("     BRIDGE also works on distilgpt2 -- graph-space slots read too.")
-        else:
-            print("     BRIDGE did NOT generalize on distilgpt2 -- expected: the tiny LM can't decode a")
-            print("     foreign embedding space. This is the job of the capable 4B (--run).")
+    raw_b, al_b = bridge_res.get("raw", 0.0), bridge_res.get("CLIP-aligned", 0.0)
+    print(f"  => probe A (wiring) held-out {te_a:.2f}  |  probe B bridge held-out: raw {raw_b:.2f} -> CLIP-aligned {al_b:.2f}")
+    if al_b >= 0.5 and al_b > raw_b:
+        print(f"     BRIDGE WORKS on {wb.name}: CLIP-aligned graph slots read + GENERALIZE. Modality gap CLOSED.")
+    elif al_b > raw_b + 0.1:
+        print(f"     BRIDGE PARTIAL on {wb.name}: alignment helps ({raw_b:.2f}->{al_b:.2f}) but not solved.")
     else:
-        print("  => WIRING still not generalizing -- the adapter architecture needs more work (report honest).")
+        print(f"     BRIDGE FAILS on {wb.name}: alignment did not transfer to held-out -> graph slots stay foreign.")
 
     print(f"\n  DEEP SUPERVISION (ds_weight=0.15):")
     print(f"     refinement steps: {R.T}  |  ds_head params: {sum(p.numel() for p in R.ds_pool.parameters()) + sum(p.numel() for p in R.ds_proj.parameters())}")
