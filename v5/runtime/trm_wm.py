@@ -118,6 +118,12 @@ class WMReasoner(nn.Module):
         (see native_text_embedding) -- skip proj_atom's MiniLM->LM bridge, which probe B showed collapses on
         held-out; probe C showed native-space injection generalizes (0.19->0.29 under dilution)."""
         q = self.proj_task(task_emb)
+        if native:
+            d_lm = self.upd[0].in_features // 3
+            assert atom_embs.shape[-1] == d_lm, (
+                f"refine(native=True) requires atom_embs already in the LM's own d_lm space "
+                f"(got last dim {atom_embs.shape[-1]}, expected {d_lm}) -- produce it via native_text_embedding, "
+                f"not a foreign encoder like MiniLM (that bridge collapses on held-out, see probe B).")
         z = atom_embs if native else self.proj_atom(atom_embs)
         states = []
         for _ in range(self.T):
@@ -692,7 +698,12 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 if _run_task(n, expr) != _run_task(n, target_expr):
                     return False
             return True
-        except Exception:
+        except Exception as e:
+            # a wrong atom name (NameError) or truncated/malformed expr (SyntaxError) SHOULD fail here -- that
+            # is correct, not a bug. But swallowing every exception identically makes it impossible to tell
+            # "wrong answer" apart from "extraction/harness broke" while debugging. Opt-in visibility:
+            if os.environ.get("GRAPH_DEBUG_VERIFY"):
+                print(f"    [verify exception] expr={expr!r}  {type(e).__name__}: {e}")
             return False
 
     train_ex = [(task_embs[text], atom_names.index(atoms_needed[0]), atoms_needed,
