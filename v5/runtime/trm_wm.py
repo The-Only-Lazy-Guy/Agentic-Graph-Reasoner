@@ -271,6 +271,26 @@ class WMReasoner(nn.Module):
     def clear(self):
         self._slots = None
 
+    def save(self, path: str):
+        """Persist the trained adapter (state_dict + the small shape config needed to reconstruct it) --
+        was missing entirely: trm_wm.py --run trains a real, verified adapter (16/16 held-out proven) but it
+        vanished the moment the process exited. Needed to ever load a trained adapter into membrane.py."""
+        torch.save({
+            "state_dict": self.state_dict(),
+            "d_lm": self.proj_task.out_features,
+            "couple_layers": self.couple_layers,
+            "T": self.T,
+            "n_heads": self.adapters[0].h if len(self.adapters) else 4,
+        }, path)
+
+    @classmethod
+    def load(cls, path: str, map_location=None) -> "WMReasoner":
+        """Reconstruct a WMReasoner from a save()'d checkpoint -- shape config first, then the weights."""
+        blob = torch.load(path, map_location=map_location, weights_only=False)
+        R = cls(blob["d_lm"], blob["couple_layers"], T=blob["T"], n_heads=blob["n_heads"])
+        R.load_state_dict(blob["state_dict"])
+        return R
+
     def _device(self):
         return self.proj_task.weight.device
 
@@ -739,7 +759,7 @@ def _exec_verify(code: str, tests: list) -> bool:
 
 
 def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int = 48, n_held: int = 16,
-            graph_path: str | None = None):
+            graph_path: str | None = None, save_path: str | None = None):
     """graph_path=None (default): UNCHANGED behavior, the hand-written 10-atom dict + hand-tuned templated
     tasks (the proven 13-15/16 held-out result) -- zero risk of regression, this path is untouched by Phase
     3. graph_path=<path>: real graph atoms (via membrane's AtomGraph.load/seed_graph + _atoms_from_graph)
@@ -1053,6 +1073,11 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         print(f"\n  (only {len(critic_examples)} labeled trajectories collected -- too few to train/report the "
               f"critic meaningfully; needs more epochs or a bigger held-out set)")
 
+    if save_path:
+        R.save(save_path)
+        print(f"\n  saved trained WMReasoner to {save_path} ({sum(p.numel() for p in R.parameters())} params) "
+              f"-- load it into membrane.py's Membrane(..., wb=..., wm_path=...) to use the trained adapter live.")
+
     for h in handles:
         h.remove()
 
@@ -1083,11 +1108,14 @@ def main():
     ap.add_argument("--n-held", type=int, default=16, help="#held-out composition pairs for --run")
     ap.add_argument("--graph-path", type=str, default=None,
                     help="--run: use REAL atoms from this membrane.py graph file instead of the hand-written 10")
+    ap.add_argument("--save-path", type=str, default=None,
+                    help="--run: persist the trained WMReasoner here (was previously impossible -- the "
+                         "proven adapter vanished when the process exited)")
     a = ap.parse_args()
     if a.probe:
         probe_real(a.lm, a.quant, a.words, a.steps)
     elif a.run:
-        run_real(a.lm, a.quant, a.epochs, a.n_train, a.n_held, a.graph_path)
+        run_real(a.lm, a.quant, a.epochs, a.n_train, a.n_held, a.graph_path, a.save_path)
     else:
         selftest()
 

@@ -360,10 +360,18 @@ def fuzz_general(code: str, name: str, oracle, n: int = 40) -> bool:
 # 4. THE MEMBRANE — retrieve (TRM) -> compose -> realize -> VERIFY -> bank.  The LM only authors/speaks.
 # ================================================================================================
 class Membrane:
-    def __init__(self, graph: AtomGraph, retriever: TRMRetriever, lm=None):
+    def __init__(self, graph: AtomGraph, retriever: TRMRetriever, lm=None, wb=None, wm=None):
         self.graph = graph
         self.retriever = retriever
         self.lm = lm                                         # real make_frozen_gen(...) or None
+        # wb (a real WhiteBox) + wm (a trained WMReasoner, ALREADY .couple()'d to wb by the caller -- hooks
+        # register once, at setup, matching trm_wm.py's own convention) -- when both given, _author() grounds
+        # its generation in the K most-related EXISTING atoms via native-embedding-table injection, the same
+        # mechanism proven at 16/16 held-out composition (v5/runtime/trm_wm.py), instead of a bare,
+        # context-free prompt. Optional: None,None (default) keeps _author()'s original bare-LM behavior,
+        # zero risk to any existing caller (demo()/demo_deploy() don't pass these).
+        self.wb = wb
+        self.wm = wm
         self.reuse = 0                                       # banked (non-seed) atoms reused across tasks
         self.authored = 0
 
@@ -410,11 +418,17 @@ class Membrane:
 
     def _author(self, task) -> str | None:
         """The frozen LM writes ONE atom from the task description; fuzz-gate + banking are the graph's job
-        (the LM never writes the graph). Real LM call; real gate."""
+        (the LM never writes the graph). Real LM call; real gate. If wb+wm are set, generation is GROUNDED
+        via WM-injection (_author_wm) instead of a bare, context-free prompt -- either way the exact same
+        fuzz-gate below decides what gets banked, so grounding can only change WHAT gets proposed, never
+        weaken the verification that follows it."""
         name = task.get("atom_name") or (task["entry"] + "_impl")
         prompt = (f"Write a single self-contained Python function named `{name}` taking one integer `n` and "
                   f"returning: {task['text']}. Return ONLY the def.")
-        raw = self.lm([prompt])[0]
+        if self.wb is not None and self.wm is not None:
+            raw = self._author_wm(prompt, task["text"])
+        else:
+            raw = self.lm([prompt])[0]
         code = _extract_def(raw, name)
         if not code or not fuzz_general(code, name, task["oracle"]):
             return None                                      # LM got it wrong -> gate rejects -> not banked
@@ -424,6 +438,30 @@ class Membrane:
                                    examples=[f"{name}({x}) == {oracle(x)}" for x in (3, 5, 7)]))
         self.authored += 1
         return atom.name
+
+    def _author_wm(self, prompt: str, task_text: str) -> str:
+        """WM-INJECTED authoring: ground the LM's authoring in the K most-related EXISTING atoms via
+        native-embedding-table injection through the trained WMReasoner -- the SAME mechanism proven at
+        16/16 held-out composition (v5/runtime/trm_wm.py), now grounding single-atom authoring instead of a
+        bare, context-free prompt. Requires self.wm already .couple()'d to self.wb by the caller (register
+        hooks once, at setup)."""
+        from v5.runtime.trm_wm import native_text_embedding
+        related = self.retriever.rank(task_text, k=min(3, len(self.graph)))
+        # task_emb stays MiniLM (matches run_real's established convention): it only conditions refine()'s
+        # internal recursion query via proj_task, which expects the 384-d MiniLM space -- it is NEVER
+        # injected into the LM directly, unlike atom_embs (native, injected via the coupled adapters).
+        task_emb = torch.as_tensor(encode_batch([task_text])[0], dtype=torch.float32, device=self.wb.device)
+        if related:
+            atom_embs = torch.stack([native_text_embedding(self.wb, self.graph.get(n).description)
+                                     for n in related])
+            slots, _ = self.wm.refine(task_emb, atom_embs, native=True)
+            self.wm.set_slots_direct(slots)
+        ids = self.wb.tok(prompt, return_tensors="pt").input_ids.to(self.wb.device)
+        with torch.no_grad():
+            out = self.wb.model.generate(ids, max_new_tokens=200, do_sample=False,
+                                         pad_token_id=self.wb.tok.eos_token_id)
+        self.wm.clear()
+        return self.wb.tok.decode(out[0][ids.shape[-1]:], skip_special_tokens=True)
 
 
 def _extract_def(text: str, name: str) -> str:
