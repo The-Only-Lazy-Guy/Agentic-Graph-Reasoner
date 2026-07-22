@@ -51,7 +51,7 @@ from embedder import encode_batch, EMBED_DIM
 class GatedCrossAttn(nn.Module):
     """h (LM hidden [B,S,d]) attends to slots [K,d]; output = h + tanh(g)*proj(attn). g init 0 -> identity."""
 
-    def __init__(self, d: int, n_heads: int = 4):
+    def __init__(self, d: int, n_heads: int = 4, delta_scale: float = 0.3):
         super().__init__()
         assert d % n_heads == 0
         self.h, self.dh = n_heads, d // n_heads
@@ -60,6 +60,10 @@ class GatedCrossAttn(nn.Module):
         self.v = nn.Linear(d, d)
         self.o = nn.Linear(d, d)
         self.g = nn.Parameter(torch.zeros(1))
+        # CAP the injection at delta_scale*||h|| (was 100% of ||h|| -- a sledgehammer that, combined with an
+        # unregularized gate free to swing to tanh~0.97, could overwrite rather than blend with the residual
+        # stream, encouraging memorization over a generalizable nudge).
+        self.delta_scale = delta_scale
         for lin in (self.v, self.o):
             nn.init.eye_(lin.weight)
             nn.init.zeros_(lin.bias)
@@ -75,7 +79,7 @@ class GatedCrossAttn(nn.Module):
         att = torch.softmax((q @ k.transpose(-1, -2)) / (self.dh ** 0.5), dim=-1)
         ctx = (att @ v).transpose(1, 2).reshape(B, S, d)
         delta = self.o(ctx)
-        delta = delta / (delta.norm(dim=-1, keepdim=True) + 1e-6) * h.norm(dim=-1, keepdim=True)
+        delta = delta / (delta.norm(dim=-1, keepdim=True) + 1e-6) * (h.norm(dim=-1, keepdim=True) * self.delta_scale)
         return h + torch.tanh(self.g) * delta
 
 
@@ -216,10 +220,19 @@ def _run_probe(wb, R, pids, train, test, precomputed_states, answer_pool, tid_of
                steps=200, lr=3e-3, bs=128, ds_weight=0.15, dump=0):
     """precomputed_states: list of [[K,d_lm], ...] per-step states for each word, one refine per word."""
     k = len(train)
-    opt = torch.optim.Adam([p for p in R.parameters() if p.requires_grad], lr=lr, weight_decay=1e-4)
+    # gate gets its OWN param group with much higher weight decay: unconstrained, it swung to tanh~0.97 (almost
+    # fully open) with nothing pulling it back, letting a high-magnitude, largely unconstrained edit memorize
+    # train pairs instead of learning a modest, generalizable nudge. Ordinary params keep the normal wd.
+    gate_params = [a.g for a in R.adapters]
+    gate_ids = {id(p) for p in gate_params}
+    other_params = [p for p in R.parameters() if p.requires_grad and id(p) not in gate_ids]
+    opt = torch.optim.Adam([
+        {"params": other_params, "weight_decay": 1e-4},
+        {"params": gate_params, "weight_decay": 5e-2},
+    ], lr=lr)
     for a in R.adapters:
         with torch.no_grad():
-            a.g.fill_(1.5)
+            a.g.fill_(0.8)          # more modest warm-start (was 1.5) now that delta itself is capped at 0.3*||h||
 
     R.train()
     last = float("nan")
@@ -384,6 +397,23 @@ def selftest(wb=None, bs=128, steps_a=120, steps_b=250, words_n=120):
         alstr = f"  align_loss {al:.2f}" if al is not None else ""
         print(f"  (B:{tag:>12}) BRIDGE MiniLM->LM:  train {tr_b:.2f}  HELD-OUT {te_b:.2f}  "
               f"ablate {ab_b:.2f}  gate {g_b:+.2f}{alstr}")
+        if do_align:
+            # RECURSED variant: push the ALIGNED slot through the actual T-step refine() this time (per the
+            # finding that probe B previously bypassed the TRM's own recursion entirely). upd/norm are still
+            # RANDOM/untrained here (states are precomputed once, detached, like every other probe) -- this
+            # isolates whether random recursion further scrambles the aligned signal, or leaves it roughly
+            # intact, without yet committing to training the recursion weights themselves.
+            states_b_rec = []
+            with torch.no_grad():
+                for w, _ in words:
+                    _, states = Rb.refine(task_emb, memb[w].unsqueeze(0))
+                    states_b_rec.append([s.clone().detach() for s in states])
+            tr_r, te_r, ab_r, g_r, l_r = _run_probe(
+                wb, Rb, pids, train_w, test_w, states_b_rec, answer_pool, tid_of,
+                steps=steps_b, bs=bs, ds_weight=0.15, dump=6)
+            bridge_res["CLIP-aligned+recursed"] = te_r
+            print(f"  (B:CLIP+recursed) BRIDGE through TRM's OWN recursion:  train {tr_r:.2f}  HELD-OUT {te_r:.2f}  "
+                  f"ablate {ab_r:.2f}  gate {g_r:+.2f}")
         for h in hb:
             h.remove()
     handles = []
@@ -391,12 +421,20 @@ def selftest(wb=None, bs=128, steps_a=120, steps_b=250, words_n=120):
     print()
     raw_b, al_b = bridge_res.get("raw", 0.0), bridge_res.get("CLIP-aligned", 0.0)
     print(f"  => probe A (wiring) held-out {te_a:.2f}  |  probe B bridge held-out: raw {raw_b:.2f} -> CLIP-aligned {al_b:.2f}")
+    rec_b = bridge_res.get("CLIP-aligned+recursed")
     if al_b >= 0.5 and al_b > raw_b:
         print(f"     BRIDGE WORKS on {wb.name}: CLIP-aligned graph slots read + GENERALIZE. Modality gap CLOSED.")
     elif al_b > raw_b + 0.1:
         print(f"     BRIDGE PARTIAL on {wb.name}: alignment helps ({raw_b:.2f}->{al_b:.2f}) but not solved.")
     else:
         print(f"     BRIDGE FAILS on {wb.name}: alignment did not transfer to held-out -> graph slots stay foreign.")
+    if rec_b is not None:
+        if abs(rec_b - al_b) < 0.05:
+            print(f"     recursion is roughly NEUTRAL through the TRM loop ({al_b:.2f} -> {rec_b:.2f}).")
+        elif rec_b > al_b:
+            print(f"     recursion HELPS ({al_b:.2f} -> {rec_b:.2f}) -- worth training the recursion weights too.")
+        else:
+            print(f"     recursion HURTS ({al_b:.2f} -> {rec_b:.2f}) -- random untrained recursion scrambles alignment.")
 
     print(f"\n  DEEP SUPERVISION (ds_weight=0.15):")
     print(f"     refinement steps: {R.T}  |  ds_head params: {sum(p.numel() for p in R.ds_pool.parameters()) + sum(p.numel() for p in R.ds_proj.parameters())}")
