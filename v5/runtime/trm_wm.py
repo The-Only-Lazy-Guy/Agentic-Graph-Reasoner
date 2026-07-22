@@ -276,7 +276,7 @@ def _run_probe(wb, R, pids, train, test, precomputed_states, answer_pool, tid_of
             idx = list(range(i, min(i + bs, len(data))))
             chunk_slots = torch.stack([precomputed_states[base + j][-1] for j in idx], dim=0).to(wb.device)
             R.set_slots_direct(chunk_slots.detach())
-            gs = [float(a.g) for a in R.adapters]
+            gs = [float(a.g.detach()) for a in R.adapters]
             if ablate:
                 for a in R.adapters:
                     with torch.no_grad():
@@ -418,6 +418,25 @@ def selftest(wb=None, bs=128, steps_a=120, steps_b=250, words_n=120):
             h.remove()
     handles = []
 
+    # PROBE C — NATIVE-SPACE, MULTI-TOKEN: mean-pool a short carrier phrase's tokens through the LM's OWN
+    # embedding table (zero cross-model gap, unlike B) -- tests whether probe A's win survives when the
+    # target's signal is DILUTED by surrounding phrase tokens, the realistic shape of a graph atom's
+    # natural-language description (not a bare single-token embedding).
+    Rc = WMReasoner(d_lm, couple_layers=couple).to(wb.device)
+    hc = Rc.couple(wb)
+    states_c = []
+    with torch.no_grad():
+        for w, _ in words:
+            ids = wb.tok(f"the concept of {w}", return_tensors="pt").input_ids.to(wb.device)
+            z_c = lm_emb[ids[0]].mean(0).detach()          # mean-pool -> ONE vector, still fully native space
+            states_c.append([z_c.unsqueeze(0).clone() for _ in range(Rc.T)])
+    tr_c, te_c, ab_c, g_c, l_c = _run_probe(
+        wb, Rc, pids, train_w, test_w, states_c, answer_pool, tid_of, steps=steps_a, bs=bs, ds_weight=0.15, dump=6)
+    print(f"  (C) NATIVE-PHRASE (mean-pooled LM-own embedding, diluted):  train {tr_c:.2f}  HELD-OUT {te_c:.2f}  "
+          f"ablate->0 {ab_c:.2f}  gate {g_c:+.2f}  loss {l_c:.3f}")
+    for h in hc:
+        h.remove()
+
     print()
     raw_b, al_b = bridge_res.get("raw", 0.0), bridge_res.get("CLIP-aligned", 0.0)
     print(f"  => probe A (wiring) held-out {te_a:.2f}  |  probe B bridge held-out: raw {raw_b:.2f} -> CLIP-aligned {al_b:.2f}")
@@ -435,6 +454,12 @@ def selftest(wb=None, bs=128, steps_a=120, steps_b=250, words_n=120):
             print(f"     recursion HELPS ({al_b:.2f} -> {rec_b:.2f}) -- worth training the recursion weights too.")
         else:
             print(f"     recursion HURTS ({al_b:.2f} -> {rec_b:.2f}) -- random untrained recursion scrambles alignment.")
+    if te_c >= 0.5 * te_a:
+        print(f"     PROBE C: native-space injection SURVIVES dilution ({te_a:.2f} single-token -> {te_c:.2f} phrase)"
+              f" -- inject via the LM's OWN embedding table for real atom text, skip the MiniLM bridge entirely.")
+    else:
+        print(f"     PROBE C: native-space injection DEGRADES under dilution ({te_a:.2f} -> {te_c:.2f})"
+              f" -- even native-space needs a sharp single-vector signal, not a diluted phrase mean.")
 
     print(f"\n  DEEP SUPERVISION (ds_weight=0.15):")
     print(f"     refinement steps: {R.T}  |  ds_head params: {sum(p.numel() for p in R.ds_pool.parameters()) + sum(p.numel() for p in R.ds_proj.parameters())}")
