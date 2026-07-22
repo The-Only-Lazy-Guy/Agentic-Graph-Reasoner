@@ -376,7 +376,7 @@ class Membrane:
         for a in ranked:
             code = realize_direct(self.graph, a, entry)
             if verify(code, entry, tests):
-                self._credit([a])
+                self._credit([a], task["text"])
                 return dict(solved=True, code=code, program=("direct", a), used=[a])
 
         # (b) COMPOSE: outer(inner(n)) over the retrieved candidates (real 2-atom composition)
@@ -386,7 +386,7 @@ class Membrane:
                     continue
                 code = realize_compose(self.graph, inner, outer, entry)
                 if verify(code, entry, tests):
-                    self._credit([inner, outer])
+                    self._credit([inner, outer], task["text"])
                     return dict(solved=True, code=code, program=("compose", inner, outer), used=[inner, outer])
 
         # (c) AUTHOR a missing atom with the REAL frozen LM (optional). No LM -> honest miss, not a fake.
@@ -396,9 +396,13 @@ class Membrane:
                 code = realize_direct(self.graph, new, entry)
                 if verify(code, entry, tests):
                     return dict(solved=True, code=code, program=("authored", new), used=[new])
+        from v5.runtime.membrane_edits import record_failure
+        record_failure(self.graph, task["text"])
         return dict(solved=False, code="", program=None, used=[])
 
-    def _credit(self, used):
+    def _credit(self, used, task_text: str = ""):
+        from v5.runtime.membrane_edits import record_success
+        record_success(self.graph, used, task_text)             # REAL verified-outcome hook (Phase 1b)
         for a in used:
             at = self.graph.get(a)
             if at and at.provenance != "seed":
@@ -1144,6 +1148,8 @@ def interactive_trace(lm_name: str, graph_path: str | None = None):
     else:
         g = seed_graph()   # real skill seed only; you teach the facts live (no demo priming)
     retr = TRMRetriever(g)
+    from v5.runtime.membrane_session import SessionFocus
+    session = SessionFocus(g)   # the SHORT/MID tier: this session's activated subgraph, boosts not filters
 
     def clean(t):
         for c in ("\nHuman:", "Human:", "\nYou are", "\n\n", "<|"):
@@ -1198,10 +1204,12 @@ def interactive_trace(lm_name: str, graph_path: str | None = None):
         qv = encode_batch([q])[0]
         print(f"  [1] EMBED     query -> MiniLM 384-d vector (norm {np.linalg.norm(qv):.2f})")
         M, order = g.matrix(); sims = (M @ qv).tolist()
-        rank = sorted(zip(order, sims), key=lambda z: -z[1])[:5]
-        print(f"  [2] RETRIEVE  top graph matches (neural):")
+        boosted = session.boost_sims(order, sims)              # session focus: BOOST only, never a filter
+        rank = sorted(zip(order, boosted.tolist()), key=lambda z: -z[1])[:5]
+        print(f"  [2] RETRIEVE  top graph matches (neural, session-focus boosted):")
         for n, s in rank:
-            print(f"                {s:5.2f}  {n:<20} ({g.get(n).kind}){'  <- relevant' if s >= RELEVANCE else ''}")
+            focus_tag = " *focus" if n in session.focus else ""
+            print(f"                {s:5.2f}  {n:<20} ({g.get(n).kind}){'  <- relevant' if s >= RELEVANCE else ''}{focus_tag}")
         top, ts = rank[0]
         hits = [(n, s) for n, s in rank if s >= RELEVANCE][:3]  # ALL relevant nodes (multi-fact grounding)
         base = clean(wb.generate_chat(q, max_new=256))         # proper instruct assistant reply (chat template)
@@ -1218,6 +1226,7 @@ def interactive_trace(lm_name: str, graph_path: str | None = None):
             print(f"  [4] LM ALONE  (no memory) -> {base}")
             print(f"  [5] LM+GRAPH  -> nothing in memory about this yet; the answer above is from the model's "
                   f"own knowledge (state a fact to teach me)")
+        session.update(q)   # this turn's topic stays activated for the NEXT turn (boost-not-filter, per Phase 2)
     print("  bye")
 
 
