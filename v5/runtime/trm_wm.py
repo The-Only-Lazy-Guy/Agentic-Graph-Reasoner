@@ -213,7 +213,7 @@ def _vocab_words(tok, n: int = 120):
 
 
 def _run_probe(wb, R, pids, train, test, precomputed_states, answer_pool, tid_of,
-               steps=200, lr=3e-3, bs=128, ds_weight=0.15):
+               steps=200, lr=3e-3, bs=128, ds_weight=0.15, dump=0):
     """precomputed_states: list of [[K,d_lm], ...] per-step states for each word, one refine per word."""
     k = len(train)
     opt = torch.optim.Adam([p for p in R.parameters() if p.requires_grad], lr=lr, weight_decay=1e-4)
@@ -280,6 +280,17 @@ def _run_probe(wb, R, pids, train, test, precomputed_states, answer_pool, tid_of
     tr = acc(train)
     te = acc(test)
     te_abl = acc(test, ablate=True)
+    if dump:
+        base = len(train)
+        print(f"       [dump] held-out  target -> top-5 predicted (slot injected):")
+        for j in range(min(dump, len(test))):
+            w, tokid = test[j]
+            R.set_slots_direct(precomputed_states[base + j][-1].unsqueeze(0).to(wb.device).detach())
+            with torch.no_grad():
+                lg = wb.model(pids).logits[0, -1]
+            top = lg.topk(5).indices.tolist()
+            toks = ", ".join(repr(wb.tok.decode([t])) for t in top)
+            print(f"          {w!r:>12} (tok {tokid}) -> {toks}  {'<- HIT' if top[0] == tokid else ''}")
     return tr, te, te_abl, float(R.adapters[0].g), last
 
 
@@ -324,7 +335,14 @@ def selftest(wb=None, bs=128, steps_a=120, steps_b=250):
     with torch.no_grad():
         R.adapters[0].g.zero_()
 
-    lm_emb = wb.model.get_input_embeddings().weight
+    # INJECT IN THE OUTPUT (unembedding) SPACE. logit_w = final_hidden . lm_head[w]; to make the LM emit w you
+    # must push the hidden toward the OUTPUT embedding of w, NOT the input embedding. They're equal only when
+    # the model TIES them (distilgpt2 does -> probe A "worked"); Qwen UNTIES them -> input-emb probe A can't
+    # generalize (0.88 on distilgpt2 was a tying artifact). get_output_embeddings==input for tied models.
+    tie = bool(getattr(wb.model.config, "tie_word_embeddings", False))
+    _out = wb.model.get_output_embeddings()
+    lm_emb = (_out.weight if _out is not None else wb.model.get_input_embeddings().weight)
+    print(f"  tie_word_embeddings={tie} -> inject in the {'tied' if tie else 'OUTPUT/unembedding'} space\n")
     ans_idx = {w: i for i, (w, _) in enumerate(words)}
     answer_pool = torch.stack([lm_emb[tid_of[w]] for w, _ in words], dim=0)
     answer_pool = answer_pool / (answer_pool.norm(dim=-1, keepdim=True) + 1e-8)
@@ -335,7 +353,7 @@ def selftest(wb=None, bs=128, steps_a=120, steps_b=250):
         z_a = lm_emb[tid_of[w]].detach()  # [d_lm]
         states_a.append([z_a.unsqueeze(0).clone() for _ in range(R.T)])
     tr_a, te_a, ab_a, g_a, l_a = _run_probe(
-        wb, R, pids, train_w, test_w, states_a, answer_pool, tid_of, steps=steps_a, bs=bs, ds_weight=0.15)
+        wb, R, pids, train_w, test_w, states_a, answer_pool, tid_of, steps=steps_a, bs=bs, ds_weight=0.15, dump=6)
     print(f"  (A) WIRING  (slot = LM's own embedding):  train {tr_a:.2f}  HELD-OUT {te_a:.2f}  "
           f"ablate->0 {ab_a:.2f}  gate {g_a:+.2f}  loss {l_a:.3f}")
 
@@ -359,7 +377,8 @@ def selftest(wb=None, bs=128, steps_a=120, steps_b=250):
                 z = Rb.proj_atom(memb[w].unsqueeze(0)).detach()              # [1,d_lm]; aligned -> ~ e_w
                 states_b.append([z.clone() for _ in range(Rb.T)])
         tr_b, te_b, ab_b, g_b, l_b = _run_probe(
-            wb, Rb, pids, train_w, test_w, states_b, answer_pool, tid_of, steps=steps_b, bs=bs, ds_weight=0.15)
+            wb, Rb, pids, train_w, test_w, states_b, answer_pool, tid_of, steps=steps_b, bs=bs, ds_weight=0.15,
+            dump=(6 if do_align else 0))
         bridge_res[tag] = te_b
         alstr = f"  align_loss {al:.2f}" if al is not None else ""
         print(f"  (B:{tag:>12}) BRIDGE MiniLM->LM:  train {tr_b:.2f}  HELD-OUT {te_b:.2f}  "
