@@ -118,13 +118,19 @@ class WMReasoner(nn.Module):
         # own unverified guess (same anti-poison target discipline as trainer.py, applied to the critic).
         # NEVER certifies a trace for banking on its own -- amortizes which attempts are worth a real verify
         # call / flags likely mistakes for retry. Needs no answer_pool -- works for free-form answers too.
+        # OWN pooling head (was reusing ds_pool): ds_pool is trained for a DIFFERENT objective (retrieval
+        # margin against an answer pool), so its representation isn't necessarily informative about
+        # generation-cleanliness (whether decoding stays valid vs degenerates/hallucinates a wrong name) --
+        # a first real run collapsed to exactly the base rate, and a shared, objective-fighting pooling
+        # layer was one of two diagnosed causes (the other: class imbalance, fixed at the training-loop level).
+        self.critic_pool = nn.Linear(d_lm, d_lm)
         self.critic = nn.Sequential(nn.Linear(self.T * d_lm, d_lm), nn.GELU(), nn.Linear(d_lm, 1))
 
     def critique(self, states: list[torch.Tensor]) -> torch.Tensor:
         """states: the [T per-step states] from refine() for ONE example. Returns a scalar in [0,1] -- the
         critic's own estimate of 'will this pass the real verifier', built PURELY from how the working
         memory's reasoning evolved across its T recursion steps -- not from re-checking the answer."""
-        traj = torch.stack([torch.tanh(self.ds_pool(s.mean(0, keepdim=True))) for s in states])  # [T,1,d_lm]
+        traj = torch.stack([torch.tanh(self.critic_pool(s.mean(0, keepdim=True))) for s in states])  # [T,1,d_lm]
         flat = traj.reshape(1, -1)                                        # [1, T*d_lm]
         return torch.sigmoid(self.critic(flat)).squeeze()
 
@@ -928,10 +934,27 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         random.Random(0).shuffle(critic_examples)
         split = max(4, int(0.8 * len(critic_examples)))
         c_train, c_test = critic_examples[:split], critic_examples[split:]
-        c_opt = torch.optim.Adam(R.critic.parameters(), lr=1e-2)
+
+        # CLASS-BALANCE the training set: with held WM mostly passing (11-14/16 by mid-training), 'always
+        # predict pass' already scores ~the base rate on plain BCE -- a first real run collapsed to EXACTLY
+        # the base rate, the signature of this degenerate solution. Oversample the minority class so the
+        # loss can't be minimized by ignoring the trajectory content.
+        pos = [ex for ex in c_train if ex[1]]
+        neg = [ex for ex in c_train if not ex[1]]
+        if pos and neg:
+            hi, lo = (pos, neg) if len(pos) >= len(neg) else (neg, pos)
+            lo_up = [lo[i % len(lo)] for i in range(len(hi))]     # oversample minority to match majority count
+            c_train_balanced = hi + lo_up
+        else:
+            c_train_balanced = c_train                            # only one class present -- nothing to balance
+        print(f"  class balance: train {len(pos)} pass / {len(neg)} fail -> balanced to "
+              f"{len(c_train_balanced)} examples for training")
+
+        c_opt = torch.optim.Adam(list(R.critic.parameters()) + list(R.critic_pool.parameters()), lr=1e-2)
         for _ in range(200):
+            random.shuffle(c_train_balanced)
             c_opt.zero_grad()
-            loss = R.critic_loss([s for s, _ in c_train], [y for _, y in c_train])
+            loss = R.critic_loss([s for s, _ in c_train_balanced], [y for _, y in c_train_balanced])
             loss.backward(); c_opt.step()
         with torch.no_grad():
             preds = [float(R.critique(s)) >= 0.5 for s, _ in c_test]
