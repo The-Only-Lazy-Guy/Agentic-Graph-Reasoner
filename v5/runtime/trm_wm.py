@@ -516,42 +516,44 @@ def _seed_atoms() -> tuple[dict, dict]:
     return descs, codes
 
 
-def _compose_tasks_real():
-    """(task_text, atoms_needed, target_code_template) for training and held-out."""
-    train = [
-        ("return the sum of the digits of the nth fibonacci number",
-         ["fibonacci", "digit_sum"],
-         "def task(n): return digit_sum(fibonacci(n))"),
-        ("count the divisors of n factorial",
-         ["factorial", "num_divisors"],
-         "def task(n): return num_divisors(factorial(n))"),
-        ("check if the digit sum of n is a prime",
-         ["digit_sum", "is_prime"],
-         "def task(n): return is_prime(digit_sum(n))"),
-        ("reverse the digits then check if even",
-         ["reverse_digits", "is_even"],
-         "def task(n): return is_even(reverse_digits(n))"),
-        ("square the number then sum its digits",
-         ["square", "digit_sum"],
-         "def task(n): return digit_sum(square(n))"),
-        ("count set bits of the nth fibonacci number",
-         ["fibonacci", "count_bits"],
-         "def task(n): return count_bits(fibonacci(n))"),
-    ]
-    held_out = [
-        ("the digit sum of the number of divisors of n",
-         ["num_divisors", "digit_sum"],
-         "def task(n): return digit_sum(num_divisors(n))"),
-        ("is the nth fibonacci number even",
-         ["fibonacci", "is_even"],
-         "def task(n): return is_even(fibonacci(n))"),
-        ("how many one-bits are in the digit sum of n",
-         ["digit_sum", "count_bits"],
-         "def task(n): return count_bits(digit_sum(n))"),
-        ("reverse the digits of the square of n",
-         ["square", "reverse_digits"],
-         "def task(n): return reverse_digits(square(n))"),
-    ]
+def _compose_tasks_real(n_train: int = 48, n_held: int = 16, seed: int = 0):
+    """(task_text, atoms_needed, target_code_template) for training and held-out.
+
+    AUTO-GENERATED from all (outer, inner) 2-atom composition pairs -- the hand-authored 6 train / 4 held-out
+    was far below the data volume everything else in this session needed to generalize (probes needed
+    ~hundreds-1000 atoms before held-out moved off 0). 8 numeric INNER atoms x 8 OUTER atoms = 64 pairs;
+    split so no exact (outer,inner) PAIR leaks into held-out, but every individual atom appears in many
+    training pairs -- the model must generalize COMPOSITION, not memorize a whole new atom."""
+    import random as _random
+    inner_phrase = {
+        "digit_sum": "the digit sum of n", "num_divisors": "the number of divisors of n",
+        "factorial": "n factorial", "fibonacci": "the nth Fibonacci number",
+        "reverse_digits": "n with its digits reversed", "count_bits": "the number of one bits in n",
+        "sum_to_n": "the sum of all integers from 1 to n", "square": "the square of n",
+    }
+    outer_template = {
+        "is_prime": "whether {inner} is prime", "digit_sum": "the digit sum of {inner}",
+        "num_divisors": "the number of divisors of {inner}",
+        # NOT "{inner} with its digits reversed" -- that's structurally identical to inner_phrase's own
+        # "n with its digits reversed" plugged into ANOTHER atom's outer template in the opposite order
+        # (X(reverse_digits(n)) vs reverse_digits(X(n))), a real attachment-ambiguity collision caught by
+        # a train/held text-overlap check. This phrasing is unambiguous.
+        "reverse_digits": "the digit-reversal of {inner}",
+        "count_bits": "the number of one bits in {inner}",
+        "sum_to_n": "the sum of all integers from 1 to {inner}",
+        "square": "the square of {inner}", "is_even": "whether {inner} is even",
+    }
+    pairs = [(o, i) for o in outer_template for i in inner_phrase]
+    _random.Random(seed).shuffle(pairs)
+    n_train, n_held = min(n_train, len(pairs) - 4), min(n_held, len(pairs) - n_train)
+
+    def _mk(outer, inner):
+        text = outer_template[outer].format(inner=inner_phrase[inner])
+        code = f"def task(n): return {outer}({inner}(n))"
+        return (text, [inner, outer], code)                 # atoms_needed order: inner first (applied first)
+
+    train = [_mk(o, i) for o, i in pairs[:n_train]]
+    held_out = [_mk(o, i) for o, i in pairs[n_train:n_train + n_held]]
     return train, held_out
 
 
@@ -571,7 +573,7 @@ def _exec_verify(code: str, tests: list) -> bool:
         return False
 
 
-def run_real(lm_name: str, quant: str = "4bit"):
+def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int = 48, n_held: int = 16):
     from v5.runtime.dcpd_latent import WhiteBox
     import random
     print(f"run_real: WMReasoner coupled to {lm_name} ({quant}) — real composition tasks\n")
@@ -595,10 +597,11 @@ def run_real(lm_name: str, quant: str = "4bit"):
     print(f"  graph: {len(atom_names)} atoms (NATIVE LM-embedding-table injection, MiniLM dropped for this path)")
     atom_embs = {n: native_text_embedding(wb, descs[n]) for n in atom_names}
 
-    train_tasks, held_tasks = _compose_tasks_real()
+    train_tasks, held_tasks = _compose_tasks_real(n_train=n_train, n_held=n_held)
     all_tasks = train_tasks + held_tasks
     split = len(train_tasks)
-    print(f"  tasks: {split} train, {len(all_tasks) - split} held-out (2-atom composition)\n")
+    print(f"  tasks: {split} train, {len(all_tasks) - split} held-out (2-atom composition, auto-generated, "
+          f"no train/held PAIR overlap)\n")
 
     gate_params = [a.g for a in R.adapters]
     gate_ids = {id(p) for p in gate_params}
@@ -680,9 +683,12 @@ def run_real(lm_name: str, quant: str = "4bit"):
                 prompt_ids[text], text, code)
                for text, atoms_needed, code in held_tasks]
 
-    print("  Training the adapter + WMReasoner (real-close loop: refine → LM → verify)...")
+    print(f"  Training the adapter + WMReasoner ({epochs} epochs, {len(train_ex)} pairs; "
+          f"real-close loop: refine -> LM -> verify)...")
     best_held = 0.0
-    for ep in range(100):
+    eval_every = max(1, epochs // 8)
+    last_dump = None
+    for ep in range(epochs):
         R.train()
         # DS candidate pool: atom_stack is ALREADY native d_lm (native_text_embedding) -- no projection needed.
         train_pool = (atom_stack / (atom_stack.norm(dim=-1, keepdim=True) + 1e-8)).detach()
@@ -709,10 +715,10 @@ def run_real(lm_name: str, quant: str = "4bit"):
             tot_ds += float(ds_loss.detach())
             n += 1
 
-        if ep % 10 == 0 or ep == 99:
+        if ep % eval_every == 0 or ep == epochs - 1:
             R.eval()
-            held_ok = 0
-            ablated_ok = 0
+            held_ok, ablated_ok = 0, 0
+            dump = []
             for task_emb, gold_idx, atoms_needed, pids, text, target_code in held_ex:
                 K_atom_embs = torch.stack([atom_embs[n] for n in atoms_needed], dim=0)
                 slots, _ = R.refine(task_emb, K_atom_embs, native=True)
@@ -721,19 +727,28 @@ def run_real(lm_name: str, quant: str = "4bit"):
                     out = wb.model.generate(pids, max_new_tokens=64,
                                             do_sample=False, pad_token_id=wb.tok.eos_token_id)
                     code = wb.tok.decode(out[0][pids.shape[-1]:], skip_special_tokens=True).strip()
-                if verify("def task(n): " + code):
-                    held_ok += 1
+                wm_ok = verify("def task(n): " + code)
+                held_ok += int(wm_ok)
                 R.clear()
                 with torch.no_grad():
                     out = wb.model.generate(pids, max_new_tokens=64,
                                             do_sample=False, pad_token_id=wb.tok.eos_token_id)
                     code_abl = wb.tok.decode(out[0][pids.shape[-1]:], skip_special_tokens=True).strip()
-                if verify("def task(n): " + code_abl):
-                    ablated_ok += 1
+                abl_ok = verify("def task(n): " + code_abl)
+                ablated_ok += int(abl_ok)
+                dump.append((text, target_code, code, wm_ok, code_abl, abl_ok))
             best_held = max(best_held, held_ok)
+            last_dump = dump
             print(f"  ep {ep:>3}  lm_loss {tot_lm/max(n,1):.3f}  ds_loss {tot_ds/max(n,1):.3f}  "
                   f"held WM {held_ok}/{len(held_ex)}  ablated {ablated_ok}/{len(held_ex)}  "
                   f"gate {float(R.adapters[0].g):+.2f}")
+
+    print(f"\n  [dump] final epoch, held-out generations (WM vs ablated) vs the verified target:")
+    for text, target_code, code, wm_ok, code_abl, abl_ok in (last_dump or []):
+        print(f"     task: {text}")
+        print(f"       target : {target_code}")
+        print(f"       WM     : def task(n): {code[:90]}{'  <- PASS' if wm_ok else ''}")
+        print(f"       ablated: def task(n): {code_abl[:90]}{'  <- PASS' if abl_ok else ''}")
 
     print(f"\n  Best held-out: {best_held}/{len(held_ex)}  (gate ablated = {ablated_ok} baseline)")
     verdict = "PROVEN" if best_held > ablated_ok else "PARTIAL"
@@ -763,11 +778,14 @@ def main():
     ap.add_argument("--quant", type=str, default="4bit", help="quantization: 4bit, fp16, fp32, auto")
     ap.add_argument("--words", type=int, default=400, help="#atoms for --probe (scale this to test the data hypothesis)")
     ap.add_argument("--steps", type=int, default=120, help="training steps per probe")
+    ap.add_argument("--epochs", type=int, default=40, help="training epochs for --run")
+    ap.add_argument("--n-train", type=int, default=48, help="#composition pairs to train on for --run")
+    ap.add_argument("--n-held", type=int, default=16, help="#held-out composition pairs for --run")
     a = ap.parse_args()
     if a.probe:
         probe_real(a.lm, a.quant, a.words, a.steps)
     elif a.run:
-        run_real(a.lm, a.quant)
+        run_real(a.lm, a.quant, a.epochs, a.n_train, a.n_held)
     else:
         selftest()
 
