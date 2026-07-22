@@ -55,11 +55,17 @@ class Atom:
     name: str
     code: str                       # executable implementation (REAL — it runs)
     description: str                # retrieval key (embedded by MiniLM)
-    kind: str = "atom"              # atom | concept | schema
+    kind: str = "atom"              # FREE natural-language label (atom/concept/procedure/trap/... occur, but
+                                     # this is not a closed enum -- nothing in the graph logic switches on it
+                                     # except structural facts like "has real code"; the model can use any string)
     provenance: str = "seed"        # seed | authored | learned | cot
     depends: list = field(default_factory=list)
     examples: list = field(default_factory=list)   # observed I/O harvested by the verifier
     emb: object = None              # np.float32[384] — set on insert (never None once in the graph)
+    confidence: float = 0.5         # LEARNED metric, moved only by record_success/record_failure (membrane_edits.py)
+                                     # -- 0.5 not 1.0: the boost formula min(1.0, c+boost*(1-c)) is a no-op if saturated
+    importance: float = 0.5         # LEARNED metric, same source
+    access_count: int = 0           # LEARNED metric, same source — real verified-use count, not a retrieval-hit count
 
     def card(self) -> str:
         dep = f"  [uses: {', '.join(self.depends)}]" if self.depends else ""
@@ -73,9 +79,16 @@ class AtomGraph:
 
     def __init__(self):
         self.atoms: dict[str, Atom] = {}
-        self.edges: list[tuple] = []             # TYPED edges: (src, dst, relation) e.g. depend/part_of/avoid_if/about
+        self.edges: list[tuple] = []             # TYPED edges: (src, dst, relation) — relation is FREE TEXT,
+                                                   # e.g. depend/uses/related/relates occur but nothing enforces
+                                                   # a closed set; any natural-language descriptor is valid.
         self._matrix: np.ndarray | None = None   # [N,384] cached embedding matrix (invalidated on write)
         self._order: list[str] = []
+        self._edge_strength: dict[tuple, float] = {}   # (src,dst,relation) -> LEARNED scalar, default 0.5.
+                                                   # Keyed by the edge INSTANCE, never derived from parsing
+                                                   # the relation string — moved only by real verified outcomes
+                                                   # (membrane_edits.record_success/record_failure).
+        self._adj: dict | None = None             # cached adjacency, same invalidate-on-write pattern as _matrix
 
     def __contains__(self, n): return n in self.atoms
     def __len__(self): return len(self.atoms)
@@ -84,6 +97,28 @@ class AtomGraph:
     def link(self, src: str, dst: str, relation: str = "depend"):
         if src in self.atoms and dst in self.atoms and (src, dst, relation) not in self.edges:
             self.edges.append((src, dst, relation))
+            self._adj = None                                # invalidate adjacency cache
+
+    def strength(self, src: str, dst: str, relation: str) -> float:
+        """The LEARNED per-edge scalar (default 0.5 -- neutral, never yet reinforced by a real outcome)."""
+        return self._edge_strength.get((src, dst, relation), 0.5)
+
+    def bump_strength(self, src: str, dst: str, relation: str, delta: float) -> float:
+        """Move an edge's strength by delta, clamped to [0,1]. delta>0 = success path, delta<0 = failure
+        path -- the SIGN comes from which caller/context is updating it, never from the relation text."""
+        cur = self.strength(src, dst, relation)
+        new = max(0.0, min(1.0, cur + delta))
+        self._edge_strength[(src, dst, relation)] = new
+        return new
+
+    def adjacency(self) -> dict:
+        """dict[src] -> list[(dst, relation)], cached until the next link() invalidates it."""
+        if self._adj is None:
+            adj: dict = {}
+            for s, d, r in self.edges:
+                adj.setdefault(s, []).append((d, r))
+            self._adj = adj
+        return self._adj
 
     def census(self) -> dict:
         """What the graph CONTAINS, by node type (the universal-memory claim)."""
@@ -150,16 +185,30 @@ class AtomGraph:
         return ranked[:k] if k else ranked
 
     def save(self, path: str):
-        blob = {n: {kk: vv for kk, vv in asdict(a).items() if kk != "emb"} for n, a in self.atoms.items()}
+        # BUG FIX: this used to save ONLY self.atoms -- self.edges (all topology) and _edge_strength (all
+        # learned metrics) were silently dropped on every save, which would have defeated the entire point
+        # of persistent long-term memory the moment it was used. Now saves both.
+        atoms = {n: {kk: vv for kk, vv in asdict(a).items() if kk != "emb"} for n, a in self.atoms.items()}
+        blob = {
+            "atoms": atoms,
+            "edges": self.edges,
+            "edge_strength": [[list(k), v] for k, v in self._edge_strength.items()],
+        }
         Path(path).write_text(json.dumps(blob, indent=2), encoding="utf-8")
 
     @classmethod
     def load(cls, path: str) -> "AtomGraph":
         g = cls()
         blob = json.loads(Path(path).read_text(encoding="utf-8"))
-        for n, d in blob.items():
+        if "atoms" not in blob:                             # backward-compat: old atoms-only save format
+            blob = {"atoms": blob, "edges": [], "edge_strength": []}
+        for n, d in blob["atoms"].items():
             d.pop("emb", None)
             g.add(Atom(**d))                                # re-embeds on insert
+        for s, d, r in blob.get("edges", []):
+            g.link(s, d, r)                                 # re-adds (dedup-safe, .link() already checks)
+        for k, v in blob.get("edge_strength", []):
+            g._edge_strength[tuple(k)] = v
         return g
 
 
@@ -1082,12 +1131,19 @@ def demo_teach_explain(lm_name: str):
     print(f"  final graph node types: {g.census()}   (the knowledge lives in the graph, LM frozen)")
 
 
-def interactive_trace(lm_name: str):
+def interactive_trace(lm_name: str, graph_path: str | None = None):
     """Terminal interactive tracer: you type a question, it shows each pipeline stage (embed -> retrieve ->
-    select -> LM alone vs LM+graph). Local, real 4-bit LM (~2GB, fits 6GB). 'teach <fact>' adds knowledge."""
+    select -> LM alone vs LM+graph). Local, real 4-bit LM (~2GB, fits 6GB). 'teach <fact>' adds knowledge.
+    graph_path: if given, LOADS the long-term graph from disk if it exists (cross-session memory) and SAVES
+    on exit -- persistence was previously dead code (AtomGraph.save/load existed but nothing called them)."""
     from v5.runtime.dcpd_latent import WhiteBox
     wb = WhiteBox(lm_name, quant="4bit")
-    g = seed_graph(); retr = TRMRetriever(g)   # real skill seed only; you teach the facts live (no demo priming)
+    if graph_path and Path(graph_path).exists():
+        g = AtomGraph.load(graph_path)
+        print(f"  loaded long-term graph from {graph_path} ({len(g)} nodes, {len(g.edges)} edges)")
+    else:
+        g = seed_graph()   # real skill seed only; you teach the facts live (no demo priming)
+    retr = TRMRetriever(g)
 
     def clean(t):
         for c in ("\nHuman:", "Human:", "\nYou are", "\n\n", "<|"):
@@ -1113,10 +1169,16 @@ def interactive_trace(lm_name: str):
         try:
             q = input("\nquery> ").strip()
         except EOFError:
+            if graph_path:
+                g.save(graph_path)
+                print(f"\n  saved long-term graph to {graph_path} ({len(g)} nodes, {len(g.edges)} edges)")
             break
         if not q:
             continue
         if q.lower() in ("quit", "exit", "q"):
+            if graph_path:
+                g.save(graph_path)
+                print(f"  saved long-term graph to {graph_path} ({len(g)} nodes, {len(g.edges)} edges)")
             break
         if q.lower().startswith("teach "):
             q = q[6:].strip()
@@ -1167,11 +1229,13 @@ def main():
     ap.add_argument("--teach", action="store_true", help="ACCEPTANCE TEST: teach unseen info -> model explains it (needs --lm)")
     ap.add_argument("--interactive", action="store_true", help="terminal tracer: type a question, see each stage (needs --lm)")
     ap.add_argument("--lm", type=str, default="", help="real frozen LM (e.g. Qwen/Qwen3-4B-Instruct-2507); optional")
+    ap.add_argument("--graph-path", type=str, default="graphs/long_term.json",
+                    help="long-term graph file: loaded if it exists, saved on exit (--interactive only)")
     a = ap.parse_args()
     if a.interactive:
         if not a.lm:
             raise SystemExit("--interactive needs --lm")
-        interactive_trace(a.lm)
+        interactive_trace(a.lm, graph_path=a.graph_path)
         return
     if a.teach:
         if not a.lm:
