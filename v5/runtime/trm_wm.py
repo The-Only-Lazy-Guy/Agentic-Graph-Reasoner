@@ -635,6 +635,51 @@ def _grow_from_cot(g, n: int, domains: str = "math,code,science,puzzle", keyword
     return {"seen": seen, "added": added, "merged": merged}
 
 
+def _grow_skills_from_corpus(g, n: int | None = None, domains: str = "") -> dict:
+    """Real EXECUTABLE-skill growth (Tier A: independent execution oracle) -- the piece _grow_from_cot
+    deliberately left out (that one only banks prose as concept nodes, no .code, never enters the composable
+    pool). scripts/build_crossdomain_corpus.py has 44 hand-written, oracle-verified (real Python reference
+    code + real test tuples) cross-domain tasks (math/physics/biology/cs/stats, deliberately sharing
+    primitives like gcd/mean/kinetic_energy across domains). Routes each through membrane's OWN
+    learn_any(code=..., tests=...) -- the SAME real fuzz-gate/verify() every other atom in the graph passes
+    through; nothing is banked as code without passing real execution against real tests.
+
+    KNOWN LIMIT, stated plainly (not silently worked around): membrane.py's Atom/verify/_closure/realize_*
+    machinery assumes a SINGLE-argument entry(n) throughout (every existing atom, direct/compose
+    realization, and learn_any's own '_e(n): return {nm}(n)' verify wrapper). This corpus has multi-arg
+    tasks too (gcd(a,b), bmi(weight,height), merge_sorted(a,b)) -- those are SKIPPED here, counted and
+    reported, not mis-banked. A handful of tasks also use an expected value of None (approximate-value
+    placeholders in the corpus, e.g. gravitational_force) -- also skipped, same reason: verify() needs a
+    real expected value to compare against."""
+    from v5.runtime.membrane import learn_any, TRMRetriever
+    from scripts.build_crossdomain_corpus import build_corpus
+    retr = TRMRetriever(g)
+    dom_filter = {d.strip() for d in domains.split(",") if d.strip()} or None
+    tasks = build_corpus()
+    seen = banked = trap = skipped_multiarg = skipped_notype = 0
+    for t in tasks:
+        if dom_filter and t["domain"] not in dom_filter:
+            continue
+        if n is not None and seen >= n:
+            break
+        seen += 1
+        raw_tests = t["tests"]
+        if any(len(args) != 1 for args, _ in raw_tests):
+            skipped_multiarg += 1
+            continue
+        if any(exp is None for _, exp in raw_tests):
+            skipped_notype += 1
+            continue
+        tests = [(args[0], exp) for args, exp in raw_tests]
+        res = learn_any(g, retr, t["text"], code=t["reference"], tests=tests, name=t["entry"])
+        if res["status"] == "banked-skill":
+            banked += 1
+        else:
+            trap += 1
+    return {"seen": seen, "banked": banked, "trap": trap,
+            "skipped_multiarg": skipped_multiarg, "skipped_notype": skipped_notype}
+
+
 def _dynamic_oracle(g, atom_names: list[str]):
     """Build ONE shared exec namespace from the graph's OWN atom code, via membrane._closure (already
     resolves transitive .depends -- critical: a naive per-atom exec breaks the moment a real banked atom
@@ -786,16 +831,17 @@ def _exec_verify(code: str, tests: list) -> bool:
 
 def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int = 48, n_held: int = 16,
             graph_path: str | None = None, save_path: str | None = None, grow_cot: int = 0,
-            grow_domains: str = "math,code,science,puzzle", grow_keywords: str = ""):
+            grow_domains: str = "math,code,science,puzzle", grow_keywords: str = "",
+            grow_skills: int = 0, grow_skills_domains: str = ""):
     """graph_path=None (default): UNCHANGED behavior, the hand-written 10-atom dict + hand-tuned templated
     tasks (the proven 13-15/16 held-out result) -- zero risk of regression, this path is untouched by Phase
     3. graph_path=<path>: real graph atoms (via membrane's AtomGraph.load/seed_graph + _atoms_from_graph)
     and a graph-derived dynamic oracle (_dynamic_oracle, via membrane._closure) -- scales to whatever atoms
     actually exist, not a fixed 10. grow_cot>0 (requires graph_path): ingest that many real OpenThoughts-114k
-    CoT docs into the graph via learn_any BEFORE training -- the graph genuinely grows (concept nodes; code
-    atoms for composition still come from whatever skills the graph already has -- ingested CoT text isn't
-    executable code, so it doesn't itself add composable atoms, but it does grow the long-term memory and
-    persists via graph_path's save at the end)."""
+    CoT docs into the graph via learn_any BEFORE training -- concept nodes only (see _grow_from_cot). grow_
+    skills>0 (requires graph_path): bank up to that many real oracle-verified EXECUTABLE atoms from
+    scripts/build_crossdomain_corpus.py (see _grow_skills_from_corpus) -- these DO enter the composable pool
+    (_atoms_from_graph filters on real .code), unlike grow_cot's concept nodes."""
     from v5.runtime.dcpd_latent import WhiteBox
     import random
     print(f"run_real: WMReasoner coupled to {lm_name} ({quant}) — real composition tasks\n")
@@ -820,6 +866,13 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             print(f"  grow: real OpenThoughts-114k CoT ingested via learn_any -> graph {n0} -> {len(g)} nodes "
                   f"(+{stats['added']} new concepts, {stats['merged']} deduped into existing, "
                   f"{stats['seen']} docs seen)")
+        if grow_skills > 0:
+            n0 = len(g)
+            sstats = _grow_skills_from_corpus(g, n=grow_skills, domains=grow_skills_domains)
+            print(f"  grow-skills: real oracle-verified corpus ingested via learn_any -> graph {n0} -> {len(g)} "
+                  f"nodes (+{sstats['banked']} new EXECUTABLE atoms, {sstats['trap']} failed verify->trap, "
+                  f"{sstats['skipped_multiarg']} skipped multi-arg, {sstats['skipped_notype']} skipped "
+                  f"no-expected-value, {sstats['seen']} tasks considered)")
         descs, codes = _atoms_from_graph(g)
         atom_names = list(descs.keys())
         print(f"  graph: {len(atom_names)} REAL atoms from {graph_path if _Path(graph_path).exists() else '(fresh seed_graph)'} "
@@ -1161,12 +1214,19 @@ def main():
                     help="--grow-cot: OpenThoughts domains to keep (comma-sep)")
     ap.add_argument("--grow-keywords", type=str, default="",
                     help="--grow-cot: comma-sep keywords, keep only docs mentioning one (optional filter)")
+    ap.add_argument("--grow-skills", type=int, default=0,
+                    help="--run (requires --graph-path): bank up to this many real oracle-verified EXECUTABLE "
+                         "atoms from scripts/build_crossdomain_corpus.py via learn_any before training -- "
+                         "these DO enter the composable pool (unlike --grow-cot's concept-only nodes). "
+                         "Single-arg tasks only (see _grow_skills_from_corpus docstring). 0 = off")
+    ap.add_argument("--grow-skills-domains", type=str, default="",
+                    help="--grow-skills: comma-sep domain filter (math,physics,biology,cs,stats); empty = all")
     a = ap.parse_args()
     if a.probe:
         probe_real(a.lm, a.quant, a.words, a.steps)
     elif a.run:
         run_real(a.lm, a.quant, a.epochs, a.n_train, a.n_held, a.graph_path, a.save_path,
-                 a.grow_cot, a.grow_domains, a.grow_keywords)
+                 a.grow_cot, a.grow_domains, a.grow_keywords, a.grow_skills, a.grow_skills_domains)
     else:
         selftest()
 
