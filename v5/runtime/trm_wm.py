@@ -491,8 +491,85 @@ def selftest(wb=None, bs=128, steps_a=120, steps_b=250, words_n=120):
 
 
 # ================================================================================================
-# run_real — deploy the WM reasoner on the real 4B LM with graph atoms + composition tasks
+# Phase 3 — wire the REAL membrane.py graph in, additively. _seed_atoms()/_compose_tasks_real()/the old
+# fn_map below stay COMPLETELY UNTOUCHED (run_real's default path is byte-identical to before this phase --
+# zero regression risk). These new functions activate only when run_real is given graph_path=... .
 # ================================================================================================
+def _atoms_from_graph(g) -> tuple[dict, dict]:
+    """Real graph atoms, not the hand-written 10-atom dict. Filters on the STRUCTURAL fact of having real
+    executable code -- NOT kind=='atom' (kind is a free natural-language label in membrane.py, not a closed
+    enum; whether a node is usable for composition is a fact about its code, not what string labels it)."""
+    descs, codes = {}, {}
+    for name, a in g.atoms.items():
+        if a.code:
+            descs[name] = a.description
+            codes[name] = a.code
+    return descs, codes
+
+
+def _dynamic_oracle(g, atom_names: list[str]):
+    """Build ONE shared exec namespace from the graph's OWN atom code, via membrane._closure (already
+    resolves transitive .depends -- critical: a naive per-atom exec breaks the moment a real banked atom
+    depends on another, exactly the bug class already found and fixed once this session in _run_task's
+    hardcoded fn_map). Returns a callable _run_task(n, code_line) with the SAME interface as the old
+    hardcoded one, but sourced from the graph itself -- scales to an arbitrary/growing atom set."""
+    from v5.runtime.membrane import _closure
+    src = _closure(g, atom_names)
+    ns: dict = {}
+    exec(compile(src, "<graph-oracle>", "exec"), ns)
+
+    def _run_task(n, code_line):
+        return eval(code_line, {"__builtins__": __builtins__}, {**ns, "n": n})
+    return _run_task
+
+
+# the ORIGINAL hand-tuned phrasings (from _compose_tasks_real) -- reused byte-identical for the 10 seed
+# atoms if they're present in the graph, so the default 10-atom case produces IDENTICAL task text to before.
+_KNOWN_INNER_PHRASE = {
+    "digit_sum": "the digit sum of n", "num_divisors": "the number of divisors of n",
+    "factorial": "n factorial", "fibonacci": "the nth Fibonacci number",
+    "reverse_digits": "n with its digits reversed", "count_bits": "the number of one bits in n",
+    "sum_to_n": "the sum of all integers from 1 to n", "square": "the square of n",
+}
+_KNOWN_OUTER_TEMPLATE = {
+    "is_prime": "whether {inner} is prime", "digit_sum": "the digit sum of {inner}",
+    "num_divisors": "the number of divisors of {inner}",
+    "reverse_digits": "the digit-reversal of {inner}",
+    "count_bits": "the number of one bits in {inner}",
+    "sum_to_n": "the sum of all integers from 1 to {inner}",
+    "square": "the square of {inner}", "is_even": "whether {inner} is even",
+}
+
+
+def _compose_tasks_from_graph(g, atom_names: list[str], n_train: int = 48, n_held: int = 16, seed: int = 0):
+    """Generic version of _compose_tasks_real: builds (outer,inner) 2-atom composition candidates from
+    WHATEVER atoms currently exist in the graph. Known atoms reuse the exact hand-tuned phrasing above
+    (byte-identical to _compose_tasks_real); atoms outside that set fall through to a generic
+    description-driven template. Flagged honestly: generic phrasing reads stiffer -- later polish, not a
+    blocker; the CODE (not the task text) is always exact regardless, since it's built from atom names."""
+    import random as _random
+
+    def inner_phrase(name):
+        return _KNOWN_INNER_PHRASE.get(name, f"the result of {name} applied to n")
+
+    def outer_template(name):
+        return _KNOWN_OUTER_TEMPLATE.get(name, f"the result of {name} applied to {{inner}}")
+
+    pairs = [(o, i) for o in atom_names for i in atom_names if o != i]
+    _random.Random(seed).shuffle(pairs)
+    n_train = min(n_train, max(0, len(pairs) - 4))
+    n_held = min(n_held, max(0, len(pairs) - n_train))
+
+    def _mk(outer, inner):
+        text = outer_template(outer).format(inner=inner_phrase(inner))
+        code = f"def task(n): return {outer}({inner}(n))"
+        return (text, [inner, outer], code)
+
+    train = [_mk(o, i) for o, i in pairs[:n_train]]
+    held_out = [_mk(o, i) for o, i in pairs[n_train:n_train + n_held]]
+    return train, held_out
+
+
 def _seed_atoms() -> tuple[dict, dict]:
     """Same 10 atoms as membrane.py. Returns {name: description} and {name: code}."""
     descs = {
@@ -579,7 +656,13 @@ def _exec_verify(code: str, tests: list) -> bool:
         return False
 
 
-def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int = 48, n_held: int = 16):
+def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int = 48, n_held: int = 16,
+            graph_path: str | None = None):
+    """graph_path=None (default): UNCHANGED behavior, the hand-written 10-atom dict + hand-tuned templated
+    tasks (the proven 13-15/16 held-out result) -- zero risk of regression, this path is untouched by Phase
+    3. graph_path=<path>: real graph atoms (via membrane's AtomGraph.load/seed_graph + _atoms_from_graph)
+    and a graph-derived dynamic oracle (_dynamic_oracle, via membrane._closure) -- scales to whatever atoms
+    actually exist, not a fixed 10."""
     from v5.runtime.dcpd_latent import WhiteBox
     import random
     print(f"run_real: WMReasoner coupled to {lm_name} ({quant}) — real composition tasks\n")
@@ -594,16 +677,28 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         p.requires_grad_(False)
     handles = R.couple(wb)
 
-    descs, codes = _seed_atoms()
-    atom_names = list(descs.keys())
-    # NATIVE-SPACE injection (probe-C-validated): embed each atom's description via the LM's OWN embedding
-    # table, not MiniLM + an untrained proj_atom bridge -- that bridge is exactly what probe B showed
-    # collapses on held-out (train fits, held-out ~0). This was very likely why composition scored 0/4 even
-    # after deep supervision was fixed: the atoms fed to refine() were never in a space the LM could read.
-    print(f"  graph: {len(atom_names)} atoms (NATIVE LM-embedding-table injection, MiniLM dropped for this path)")
+    if graph_path:
+        from pathlib import Path as _Path
+        from v5.runtime.membrane import AtomGraph, seed_graph
+        g = AtomGraph.load(graph_path) if _Path(graph_path).exists() else seed_graph()
+        descs, codes = _atoms_from_graph(g)
+        atom_names = list(descs.keys())
+        print(f"  graph: {len(atom_names)} REAL atoms from {graph_path if _Path(graph_path).exists() else '(fresh seed_graph)'} "
+              f"(NATIVE LM-embedding-table injection)")
+    else:
+        descs, codes = _seed_atoms()
+        atom_names = list(descs.keys())
+        # NATIVE-SPACE injection (probe-C-validated): embed each atom's description via the LM's OWN embedding
+        # table, not MiniLM + an untrained proj_atom bridge -- that bridge is exactly what probe B showed
+        # collapses on held-out (train fits, held-out ~0). This was very likely why composition scored 0/4 even
+        # after deep supervision was fixed: the atoms fed to refine() were never in a space the LM could read.
+        print(f"  graph: {len(atom_names)} atoms (NATIVE LM-embedding-table injection, MiniLM dropped for this path)")
     atom_embs = {n: native_text_embedding(wb, descs[n]) for n in atom_names}
 
-    train_tasks, held_tasks = _compose_tasks_real(n_train=n_train, n_held=n_held)
+    if graph_path:
+        train_tasks, held_tasks = _compose_tasks_from_graph(g, atom_names, n_train=n_train, n_held=n_held)
+    else:
+        train_tasks, held_tasks = _compose_tasks_real(n_train=n_train, n_held=n_held)
     all_tasks = train_tasks + held_tasks
     split = len(train_tasks)
     print(f"  tasks: {split} train, {len(all_tasks) - split} held-out (2-atom composition, auto-generated, "
@@ -644,26 +739,32 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             a, b = b, a + b
         return a
 
-    def _run_task(n, code_line):
-        """Execute the composition code_line (e.g. 'digit_sum(fibonacci(n))') at n.
+    if graph_path:
+        # DYNAMIC oracle, sourced from the graph's OWN atom code (Phase 3) -- scales to whatever atoms
+        # actually exist, instead of the fixed 10-lambda dict below.
+        _run_task = _dynamic_oracle(g, atom_names)
+    else:
+        def _run_task(n, code_line):
+            """Execute the composition code_line (e.g. 'digit_sum(fibonacci(n))') at n.
 
-        CRITICAL FIX: eval's namespace never included 'n' itself -- every composition expression references
-        n directly, so this raised NameError on EVERY call, silently caught by verify()'s except-> False.
-        This meant verify() could never return True for ANY input, correct or not, since _run_task was
-        written -- the true root cause under the 0/4 and 0/16 results, deeper than the decoding-loop issue."""
-        fn_map = {
-            "is_prime": lambda n: n>=2 and all(n%i for i in range(2,int(n**0.5)+1)),
-            "digit_sum": lambda n: sum(int(c) for c in str(abs(n))),
-            "num_divisors": lambda n: sum(1 for i in range(1,abs(n)+1) if n%i==0),
-            "factorial": lambda n: __import__('math').factorial(n),
-            "fibonacci": _fib,
-            "reverse_digits": lambda n: int(str(abs(n))[::-1]),
-            "count_bits": lambda n: bin(abs(n)).count('1'),
-            "sum_to_n": lambda n: n*(n+1)//2,
-            "square": lambda n: n*n,
-            "is_even": lambda n: int(n%2==0),
-        }
-        return eval(code_line, {"__builtins__": __builtins__}, {**fn_map, "n": n})
+            CRITICAL FIX: eval's namespace never included 'n' itself -- every composition expression
+            references n directly, so this raised NameError on EVERY call, silently caught by verify()'s
+            except-> False. This meant verify() could never return True for ANY input, correct or not,
+            since _run_task was written -- the true root cause under the 0/4 and 0/16 results, deeper than
+            the decoding-loop issue."""
+            fn_map = {
+                "is_prime": lambda n: n>=2 and all(n%i for i in range(2,int(n**0.5)+1)),
+                "digit_sum": lambda n: sum(int(c) for c in str(abs(n))),
+                "num_divisors": lambda n: sum(1 for i in range(1,abs(n)+1) if n%i==0),
+                "factorial": lambda n: __import__('math').factorial(n),
+                "fibonacci": _fib,
+                "reverse_digits": lambda n: int(str(abs(n))[::-1]),
+                "count_bits": lambda n: bin(abs(n)).count('1'),
+                "sum_to_n": lambda n: n*(n+1)//2,
+                "square": lambda n: n*n,
+                "is_even": lambda n: int(n%2==0),
+            }
+            return eval(code_line, {"__builtins__": __builtins__}, {**fn_map, "n": n})
 
     def _extract_first_return(raw: str) -> str | None:
         """Pull the FIRST return-expression out of raw generated text. Greedy decoding with no stopping
@@ -817,11 +918,13 @@ def main():
     ap.add_argument("--epochs", type=int, default=40, help="training epochs for --run")
     ap.add_argument("--n-train", type=int, default=48, help="#composition pairs to train on for --run")
     ap.add_argument("--n-held", type=int, default=16, help="#held-out composition pairs for --run")
+    ap.add_argument("--graph-path", type=str, default=None,
+                    help="--run: use REAL atoms from this membrane.py graph file instead of the hand-written 10")
     a = ap.parse_args()
     if a.probe:
         probe_real(a.lm, a.quant, a.words, a.steps)
     elif a.run:
-        run_real(a.lm, a.quant, a.epochs, a.n_train, a.n_held)
+        run_real(a.lm, a.quant, a.epochs, a.n_train, a.n_held, a.graph_path)
     else:
         selftest()
 
