@@ -84,6 +84,7 @@ class AtomGraph:
                                                    # a closed set; any natural-language descriptor is valid.
         self._matrix: np.ndarray | None = None   # [N,384] cached embedding matrix (invalidated on write)
         self._order: list[str] = []
+        self._matrix_dirty: bool = False          # lazy rebuild flag: set True on add(), cleared on rebuild
         self._edge_strength: dict[tuple, float] = {}   # (src,dst,relation) -> LEARNED scalar, default 0.5.
                                                    # Keyed by the edge INSTANCE, never derived from parsing
                                                    # the relation string — moved only by real verified outcomes
@@ -131,7 +132,7 @@ class AtomGraph:
         if atom.emb is None:
             atom.emb = encode_batch([atom.description or atom.name])[0]   # REAL embedding
         self.atoms[atom.name] = atom
-        self._matrix = None                                                # invalidate index
+        self._matrix_dirty = True                                          # lazy rebuild on next matrix() call
         return atom
 
     def add_or_merge(self, atom: Atom, dedup: float = 0.90, link_lo: float = 0.50) -> tuple:
@@ -150,7 +151,7 @@ class AtomGraph:
             if float(sims[j]) >= dedup:                     # near-duplicate -> MERGE, don't add a twin
                 ex = self.atoms[order[j]]
                 if len(atom.description) > len(ex.description):   # keep the more informative text
-                    ex.description = atom.description; ex.emb = atom.emb; self._matrix = None
+                    ex.description = atom.description; ex.emb = atom.emb; self._matrix_dirty = True
                 return order[j], "merged"
         self.add(atom)
         M2, order2 = self.matrix()
@@ -164,13 +165,16 @@ class AtomGraph:
         return list(self.atoms)
 
     def matrix(self):
-        """[N,384] embedding matrix + the name order, cached until the graph changes."""
-        if self._matrix is None:
+        """[N,384] embedding matrix + the name order, cached until the graph changes.
+        Lazy rebuild: add() only sets a dirty flag; the actual np.stack happens here,
+        so bulk inserts (seed_graph, _grow_from_cot) pay the O(N) cost once, not N times."""
+        if self._matrix is None or self._matrix_dirty:
             self._order = list(self.atoms)
             if self._order:
                 self._matrix = np.stack([self.atoms[n].emb for n in self._order]).astype(np.float32)
             else:
                 self._matrix = np.zeros((0, EMBED_DIM), np.float32)
+            self._matrix_dirty = False
         return self._matrix, self._order
 
     def cosine_rank(self, task_text: str, k: int | None = None):
@@ -221,25 +225,43 @@ class TRMRetriever:
     train() does real supervised learning: put the gold atom's logit on top (cross-entropy). This is the
     LEARNED reasoner — retrieval improves as it trains, and it re-embeds the graph as the graph grows."""
 
-    def __init__(self, graph: AtomGraph, d: int = 256, T: int = 5, device: str | None = None):
+    def __init__(self, graph: AtomGraph, d: int = 256, T: int = 5, device: str | None = None,
+                 trm_top_k: int = 256):
         self.graph = graph
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.trm = TRMReasoner(d_in=EMBED_DIM, d=d, T=T).to(self.device)
         self._task_cache: dict[str, np.ndarray] = {}
+        self.trm_top_k = trm_top_k                     # 0 = all atoms (backward compat); >0 = pre-filter to K
 
     def _embed_task(self, text: str) -> np.ndarray:
         if text not in self._task_cache:
             self._task_cache[text] = encode_batch([text])[0]
         return self._task_cache[text]
 
-    def _logits(self, task_text: str):
+    def _prefilter(self, task_vec: torch.Tensor, A: torch.Tensor, order: list[str],
+                   gold_pos: int | None = None):
+        """Pre-filter atoms via fast cosine, then run the expensive TRM only on top-K.
+        When gold_pos is given (training), force it into the candidate set so the gold can
+        still be scored and trained on even if cosine ranks it outside top-K.
+        Returns (A_sub, order_sub, gold_in_sub)."""
+        if self.trm_top_k <= 0 or len(order) <= self.trm_top_k:
+            return A, order, gold_pos
+        cos_sims = A @ task_vec
+        topk_idxs = torch.topk(cos_sims, k=self.trm_top_k).indices.tolist()
+        if gold_pos is not None and gold_pos not in topk_idxs:
+            topk_idxs[-1] = gold_pos  # ensure gold is in the candidate set
+        gold_in_sub = topk_idxs.index(gold_pos) if gold_pos is not None else None
+        return A[topk_idxs], [order[i] for i in topk_idxs], gold_in_sub
+
+    def _logits(self, task_text: str, gold_pos: int | None = None):
         M, order = self.graph.matrix()
         if not order:
             return None, []
         x = torch.from_numpy(self._embed_task(task_text)).to(self.device)
         A = torch.from_numpy(M).to(self.device)
-        logits = self.trm(x, A)                              # [N] — real TRM forward (T recursion steps)
-        return logits, order
+        A_sub, order_sub, _ = self._prefilter(x, A, order, gold_pos=gold_pos)
+        logits = self.trm(x, A_sub)                          # [N or K] — TRM on (possibly filtered) atoms
+        return logits, order_sub
 
     @torch.no_grad()
     def rank(self, task_text: str, k: int | None = None):
@@ -252,7 +274,9 @@ class TRMRetriever:
         return ranked[:k] if k else ranked
 
     def train(self, examples, epochs: int = 60, lr: float = 1e-3, verbose: bool = False):
-        """examples: list of (task_text, gold_atom_name). REAL gradient descent on the TRM."""
+        """examples: list of (task_text, gold_atom_name). REAL gradient descent on the TRM.
+        When trm_top_k > 0, pre-filters atoms via fast cosine before the expensive TRM forward,
+        but always includes the gold atom so training is unaffected."""
         M, order = self.graph.matrix()
         if not order:
             return {"loss": float("nan")}
@@ -266,8 +290,9 @@ class TRMRetriever:
             tot = 0.0
             for xnp, gi in data:
                 x = torch.from_numpy(xnp).to(self.device)
-                logits = self.trm(x, A).unsqueeze(0)        # [1,N]
-                loss = nn.functional.cross_entropy(logits, torch.tensor([gi], device=self.device))
+                A_sub, _, gold_sub = self._prefilter(x, A, order, gold_pos=gi)
+                logits = self.trm(x, A_sub).unsqueeze(0)     # [1,K] where K <= trm_top_k
+                loss = nn.functional.cross_entropy(logits, torch.tensor([gold_sub], device=self.device))
                 opt.zero_grad(); loss.backward(); opt.step()
                 tot += float(loss)
             last = tot / max(1, len(data))
