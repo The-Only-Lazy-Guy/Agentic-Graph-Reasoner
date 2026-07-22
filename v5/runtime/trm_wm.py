@@ -149,7 +149,7 @@ class WMReasoner(nn.Module):
         """MODALITY PRE-ALIGNMENT (CLIP): train proj_atom so KG (MiniLM) embeddings land in the LM's OWN
         representation space -> cross-attention stops seeing foreign noise. kg_embs [N,d_emb], lm_targets
         [N,d_lm] (the LM's embedding of each atom). Trains proj_atom only; symmetric InfoNCE."""
-        opt = torch.optim.Adam(self.proj_atom.parameters(), lr=lr)
+        opt = torch.optim.Adam(self.proj_atom.parameters(), lr=lr, weight_decay=1e-2)  # resist memorizing the pairs
         T = lm_targets / (lm_targets.norm(dim=-1, keepdim=True) + 1e-8)
         last = float("nan")
         for _ in range(steps):
@@ -615,14 +615,14 @@ def run_real(lm_name: str):
                     out = wb.model.generate(pids, max_new_tokens=64,
                                             do_sample=False, pad_token_id=wb.tok.eos_token_id)
                     code = wb.tok.decode(out[0][pids.shape[-1]:], skip_special_tokens=True).strip()
-                if verify(code):
+                if verify("def task(n): " + code):
                     held_ok += 1
                 R.clear()
                 with torch.no_grad():
                     out = wb.model.generate(pids, max_new_tokens=64,
                                             do_sample=False, pad_token_id=wb.tok.eos_token_id)
                     code_abl = wb.tok.decode(out[0][pids.shape[-1]:], skip_special_tokens=True).strip()
-                if verify(code_abl):
+                if verify("def task(n): " + code_abl):
                     ablated_ok += 1
             best_held = max(best_held, held_ok)
             print(f"  ep {ep:>3}  lm_loss {tot_lm/max(n,1):.3f}  ds_loss {tot_ds/max(n,1):.3f}  "
