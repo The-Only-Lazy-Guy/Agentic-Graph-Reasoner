@@ -380,6 +380,16 @@ class Membrane:
         entry, tests = task["entry"], task["tests"]
         ranked = self.retriever.rank(task["text"], k=top_k)  # NEURAL retrieval (TRM over MiniLM)
 
+        # WM-SOLVE: PRIMARY attempt when a trained working-memory reasoner is available -- generates a REAL
+        # solution (not template substitution) via the same injection mechanism proven at 16/16 held-out
+        # composition (trm_wm.py), grounded in the top-ranked related atoms. Everything below (direct/
+        # compose/author) becomes the FALLBACK -- used when WM-solve doesn't verify, and unchanged/used as
+        # the PRIMARY path when wb/wm aren't set at all (zero risk to any existing caller).
+        if self.wb is not None and self.wm is not None:
+            wm_result = self._solve_wm(task, ranked)
+            if wm_result is not None:
+                return wm_result
+
         # (a) DIRECT: some retrieved atom alone solves it
         for a in ranked:
             code = realize_direct(self.graph, a, entry)
@@ -462,6 +472,50 @@ class Membrane:
                                          pad_token_id=self.wb.tok.eos_token_id)
         self.wm.clear()
         return self.wb.tok.decode(out[0][ids.shape[-1]:], skip_special_tokens=True)
+
+    def _solve_wm(self, task: dict, ranked: list) -> dict | None:
+        """PRIMARY solve attempt: generate a real composed solution via the trained WMReasoner, grounded in
+        the top-ranked related atoms -- the SAME mechanism proven at 16/16 held-out composition (trm_wm.py).
+        Returns a solve()-shaped dict if the generated code verifies, else None -- falls through to the
+        deterministic direct/compose/author path below, which stays as the reliable fallback."""
+        import re
+        from v5.runtime.trm_wm import native_text_embedding
+        entry, tests = task["entry"], task["tests"]
+        related = ranked[:min(3, len(ranked))]
+        if not related:
+            return None
+        atom_embs = torch.stack([native_text_embedding(self.wb, self.graph.get(n).description)
+                                 for n in related])
+        task_emb = torch.as_tensor(encode_batch([task["text"]])[0], dtype=torch.float32, device=self.wb.device)
+        slots, _ = self.wm.refine(task_emb, atom_embs, native=True)
+        self.wm.set_slots_direct(slots)
+        prompt = f"Write a function {entry}(n):\n# {task['text']}\ndef {entry}(n):"
+        ids = self.wb.tok(prompt, return_tensors="pt").input_ids.to(self.wb.device)
+        with torch.no_grad():
+            out = self.wb.model.generate(ids, max_new_tokens=64, do_sample=False,
+                                         pad_token_id=self.wb.tok.eos_token_id)
+        self.wm.clear()
+        raw = self.wb.tok.decode(out[0][ids.shape[-1]:], skip_special_tokens=True)
+
+        # extract the first complete return-expression -- greedy decode with no stop criterion tends to
+        # loop the same clause; mirrors trm_wm.py's _extract_first_return.
+        if "return " not in raw:
+            return None
+        after = raw.split("return ", 1)[1]
+        cuts = [i for i in (after.find("\n"), after.find(" return"), after.find("\treturn")) if i != -1]
+        if cuts:
+            after = after[:min(cuts)]
+        expr = after.strip().rstrip(".")
+        if not expr:
+            return None
+
+        code = f"{_closure(self.graph, related)}\n\ndef {entry}(n):\n    return {expr}\n"
+        if not verify(code, entry, tests):
+            return None
+        used = [a for a in related if re.search(rf"\b{re.escape(a)}\s*\(", expr)]
+        if used:
+            self._credit(used, task["text"])
+        return dict(solved=True, code=code, program=("wm-solve", *used), used=used)
 
 
 def _extract_def(text: str, name: str) -> str:

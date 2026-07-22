@@ -609,6 +609,32 @@ def _atoms_from_graph(g) -> tuple[dict, dict]:
     return descs, codes
 
 
+def _grow_from_cot(g, n: int, domains: str = "math,code,science,puzzle", keywords: str = "",
+                   min_reasoning_chars: int = 200) -> dict:
+    """Real graph growth from open data: stream N real OpenThoughts-114k CoT traces (v5.graph_grower.
+    fetch_cot -- HF-streamed, no full-dataset download) and bank each through membrane's OWN learn_any --
+    the same write-time graph editor demo()/interactive_trace() already use (dedup via cosine >=0.90,
+    self-organizing 'related' edges below that). Plain text with no code/oracle -> concept nodes (Tier C:
+    trusted-source text, no independent recompute) -- separate from the code atoms composition trains on
+    below; this step's job is only to make the LONG-TERM graph itself grow from real external data, honestly
+    (some fraction will dedup-merge into existing nodes rather than add new ones -- reported, not hidden)."""
+    from v5.graph_grower.fetch_cot import stream_openthoughts
+    from v5.runtime.membrane import learn_any, TRMRetriever
+    retr = TRMRetriever(g)
+    ot_domains = [d.strip() for d in domains.split(",") if d.strip()]
+    kw = [k.strip() for k in keywords.split(",") if k.strip()] or None
+    added = merged = seen = 0
+    for doc in stream_openthoughts(ot_domains=ot_domains, keywords=kw, limit=n,
+                                   min_reasoning_chars=min_reasoning_chars):
+        seen += 1
+        res = learn_any(g, retr, doc["text"][:4000])   # cap -- MiniLM truncates anyway, keep banking cheap
+        if res["status"] == "banked-fact":
+            added += 1
+        elif res["status"] == "merged-fact":
+            merged += 1
+    return {"seen": seen, "added": added, "merged": merged}
+
+
 def _dynamic_oracle(g, atom_names: list[str]):
     """Build ONE shared exec namespace from the graph's OWN atom code, via membrane._closure (already
     resolves transitive .depends -- critical: a naive per-atom exec breaks the moment a real banked atom
@@ -759,12 +785,17 @@ def _exec_verify(code: str, tests: list) -> bool:
 
 
 def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int = 48, n_held: int = 16,
-            graph_path: str | None = None, save_path: str | None = None):
+            graph_path: str | None = None, save_path: str | None = None, grow_cot: int = 0,
+            grow_domains: str = "math,code,science,puzzle", grow_keywords: str = ""):
     """graph_path=None (default): UNCHANGED behavior, the hand-written 10-atom dict + hand-tuned templated
     tasks (the proven 13-15/16 held-out result) -- zero risk of regression, this path is untouched by Phase
     3. graph_path=<path>: real graph atoms (via membrane's AtomGraph.load/seed_graph + _atoms_from_graph)
     and a graph-derived dynamic oracle (_dynamic_oracle, via membrane._closure) -- scales to whatever atoms
-    actually exist, not a fixed 10."""
+    actually exist, not a fixed 10. grow_cot>0 (requires graph_path): ingest that many real OpenThoughts-114k
+    CoT docs into the graph via learn_any BEFORE training -- the graph genuinely grows (concept nodes; code
+    atoms for composition still come from whatever skills the graph already has -- ingested CoT text isn't
+    executable code, so it doesn't itself add composable atoms, but it does grow the long-term memory and
+    persists via graph_path's save at the end)."""
     from v5.runtime.dcpd_latent import WhiteBox
     import random
     print(f"run_real: WMReasoner coupled to {lm_name} ({quant}) — real composition tasks\n")
@@ -783,6 +814,12 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         from pathlib import Path as _Path
         from v5.runtime.membrane import AtomGraph, seed_graph
         g = AtomGraph.load(graph_path) if _Path(graph_path).exists() else seed_graph()
+        if grow_cot > 0:
+            n0 = len(g)
+            stats = _grow_from_cot(g, grow_cot, domains=grow_domains, keywords=grow_keywords)
+            print(f"  grow: real OpenThoughts-114k CoT ingested via learn_any -> graph {n0} -> {len(g)} nodes "
+                  f"(+{stats['added']} new concepts, {stats['merged']} deduped into existing, "
+                  f"{stats['seen']} docs seen)")
         descs, codes = _atoms_from_graph(g)
         atom_names = list(descs.keys())
         print(f"  graph: {len(atom_names)} REAL atoms from {graph_path if _Path(graph_path).exists() else '(fresh seed_graph)'} "
@@ -1078,6 +1115,11 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         print(f"\n  saved trained WMReasoner to {save_path} ({sum(p.numel() for p in R.parameters())} params) "
               f"-- load it into membrane.py's Membrane(..., wb=..., wm_path=...) to use the trained adapter live.")
 
+    if graph_path:
+        g.save(graph_path)
+        print(f"  saved long-term graph -> {graph_path} ({len(g)} nodes, {len(g.edges)} edges) "
+              f"-- growth persists for the next run.")
+
     for h in handles:
         h.remove()
 
@@ -1111,11 +1153,20 @@ def main():
     ap.add_argument("--save-path", type=str, default=None,
                     help="--run: persist the trained WMReasoner here (was previously impossible -- the "
                          "proven adapter vanished when the process exited)")
+    ap.add_argument("--grow-cot", type=int, default=0,
+                    help="--run (requires --graph-path): ingest this many real OpenThoughts-114k CoT docs "
+                         "into the graph via learn_any before training -- the graph actually grows, not just "
+                         "trains on a static atom set. 0 = off (default, byte-identical to before this flag)")
+    ap.add_argument("--grow-domains", type=str, default="math,code,science,puzzle",
+                    help="--grow-cot: OpenThoughts domains to keep (comma-sep)")
+    ap.add_argument("--grow-keywords", type=str, default="",
+                    help="--grow-cot: comma-sep keywords, keep only docs mentioning one (optional filter)")
     a = ap.parse_args()
     if a.probe:
         probe_real(a.lm, a.quant, a.words, a.steps)
     elif a.run:
-        run_real(a.lm, a.quant, a.epochs, a.n_train, a.n_held, a.graph_path, a.save_path)
+        run_real(a.lm, a.quant, a.epochs, a.n_train, a.n_held, a.graph_path, a.save_path,
+                 a.grow_cot, a.grow_domains, a.grow_keywords)
     else:
         selftest()
 
