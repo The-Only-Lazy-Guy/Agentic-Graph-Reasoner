@@ -673,7 +673,10 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         expr = after.strip().rstrip(".")
         return expr or None
 
-    def verify(code_str, target_code, test_ns=(5, 7, 10)):
+    def verify(code_str, target_code, test_ns=(2, 5, 7, 10)):
+        # test_ns includes n=2: is_prime(factorial(n)) is CONSTANT False for n=5,7,10 (factorial(n)>=120 is
+        # always composite), so a degenerate 'return False' trivially passed -- factorial(2)=2, which IS
+        # prime, breaks that degeneracy. Caught from a real spurious ablated PASS in a run's output.
         """Extract the model's first return-expression and check its BEHAVIOR against the target's, both
         evaluated through the oracle fn_map (via _run_task) -- not by exec'ing the model's raw code and
         calling it directly (the old approach: task_fn's globals never had the atom functions injected, so
@@ -740,16 +743,20 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 slots, _ = R.refine(task_emb, K_atom_embs, native=True)
                 with torch.no_grad():
                     R.set_slots_direct(slots)
-                    # repetition_penalty stops the greedy 'return EXPR return EXPR...' loop at the source
-                    # (was unconstrained -- the dump showed this looping until max_new_tokens cut it off).
-                    out = wb.model.generate(pids, max_new_tokens=64, repetition_penalty=1.3,
+                    # NO repetition_penalty: tried it to stop the 'return EXPR return EXPR...' loop, but it
+                    # penalizes reusing ANY prior token -- including the literal atom-name tokens the working
+                    # memory taught it. Composing e.g. count_bits(count_bits(n)) requires REPEATING a name;
+                    # even single-composition cases got pushed toward hallucinated paraphrases ('num_bits',
+                    # 'count_bits_to_n') instead of the real atom names. verify()'s extraction (stop at the
+                    # first newline or repeated 'return') already tolerates the loop without hurting quality.
+                    out = wb.model.generate(pids, max_new_tokens=64,
                                             do_sample=False, pad_token_id=wb.tok.eos_token_id)
                     code = wb.tok.decode(out[0][pids.shape[-1]:], skip_special_tokens=True).strip()
                 wm_ok = verify("def task(n): " + code, target_code)
                 held_ok += int(wm_ok)
                 R.clear()
                 with torch.no_grad():
-                    out = wb.model.generate(pids, max_new_tokens=64, repetition_penalty=1.3,
+                    out = wb.model.generate(pids, max_new_tokens=64,
                                             do_sample=False, pad_token_id=wb.tok.eos_token_id)
                     code_abl = wb.tok.decode(out[0][pids.shape[-1]:], skip_special_tokens=True).strip()
                 abl_ok = verify("def task(n): " + code_abl, target_code)
