@@ -639,7 +639,12 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         return a
 
     def _run_task(n, code_line):
-        """Execute the composition code_line (e.g. 'digit_sum(fibonacci(n))') at n."""
+        """Execute the composition code_line (e.g. 'digit_sum(fibonacci(n))') at n.
+
+        CRITICAL FIX: eval's namespace never included 'n' itself -- every composition expression references
+        n directly, so this raised NameError on EVERY call, silently caught by verify()'s except-> False.
+        This meant verify() could never return True for ANY input, correct or not, since _run_task was
+        written -- the true root cause under the 0/4 and 0/16 results, deeper than the decoding-loop issue."""
         fn_map = {
             "is_prime": lambda n: n>=2 and all(n%i for i in range(2,int(n**0.5)+1)),
             "digit_sum": lambda n: sum(int(c) for c in str(abs(n))),
@@ -652,27 +657,38 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             "square": lambda n: n*n,
             "is_even": lambda n: int(n%2==0),
         }
-        return eval(code_line, {"__builtins__": __builtins__}, fn_map)
+        return eval(code_line, {"__builtins__": __builtins__}, {**fn_map, "n": n})
 
-    def verify(code_str, test_ns=(5, 7, 10)):
-        """Verify that code_str defines task(n) matching oracle expectations."""
-        code_str = code_str.strip()
-        if not code_str.startswith("def task"):
+    def _extract_first_return(raw: str) -> str | None:
+        """Pull the FIRST return-expression out of raw generated text. Greedy decoding with no stopping
+        criterion tends to loop the same 'return EXPR' clause until max_new_tokens cuts it off mid-token --
+        an eval-harness artifact, not a reasoning failure. Cut at the next newline OR the next repeated
+        'return' (the loop) so the extracted expression is the model's actual (usually complete) first answer."""
+        if "return " not in raw:
+            return None
+        after = raw.split("return ", 1)[1]
+        cuts = [i for i in (after.find("\n"), after.find(" return"), after.find("\treturn")) if i != -1]
+        if cuts:
+            after = after[:min(cuts)]
+        expr = after.strip().rstrip(".")
+        return expr or None
+
+    def verify(code_str, target_code, test_ns=(5, 7, 10)):
+        """Extract the model's first return-expression and check its BEHAVIOR against the target's, both
+        evaluated through the oracle fn_map (via _run_task) -- not by exec'ing the model's raw code and
+        calling it directly (the old approach: task_fn's globals never had the atom functions injected, so
+        even a PERFECT composition would NameError internally and silently report as a failure). A wrong
+        atom name (e.g. 'digit_reverse' instead of 'reverse_digits') correctly still fails here -- fn_map
+        only knows the real atom names, so eval raises NameError on anything else."""
+        expr = _extract_first_return(code_str)
+        if not expr:
             return False
+        target_expr = target_code.split("return ", 1)[1].strip()
         try:
-            ns = {}
-            exec(code_str, ns)
-            task_fn = ns.get("task")
-            if not callable(task_fn):
-                return False
-            for line in code_str.split("\n"):
-                if "return " in line:
-                    expr = line.split("return ", 1)[1].strip()
-                    for n in test_ns:
-                        if task_fn(n) != _run_task(n, expr):
-                            return False
-                    return True
-            return False
+            for n in test_ns:
+                if _run_task(n, expr) != _run_task(n, target_expr):
+                    return False
+            return True
         except Exception:
             return False
 
@@ -724,17 +740,19 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 slots, _ = R.refine(task_emb, K_atom_embs, native=True)
                 with torch.no_grad():
                     R.set_slots_direct(slots)
-                    out = wb.model.generate(pids, max_new_tokens=64,
+                    # repetition_penalty stops the greedy 'return EXPR return EXPR...' loop at the source
+                    # (was unconstrained -- the dump showed this looping until max_new_tokens cut it off).
+                    out = wb.model.generate(pids, max_new_tokens=64, repetition_penalty=1.3,
                                             do_sample=False, pad_token_id=wb.tok.eos_token_id)
                     code = wb.tok.decode(out[0][pids.shape[-1]:], skip_special_tokens=True).strip()
-                wm_ok = verify("def task(n): " + code)
+                wm_ok = verify("def task(n): " + code, target_code)
                 held_ok += int(wm_ok)
                 R.clear()
                 with torch.no_grad():
-                    out = wb.model.generate(pids, max_new_tokens=64,
+                    out = wb.model.generate(pids, max_new_tokens=64, repetition_penalty=1.3,
                                             do_sample=False, pad_token_id=wb.tok.eos_token_id)
                     code_abl = wb.tok.decode(out[0][pids.shape[-1]:], skip_special_tokens=True).strip()
-                abl_ok = verify("def task(n): " + code_abl)
+                abl_ok = verify("def task(n): " + code_abl, target_code)
                 ablated_ok += int(abl_ok)
                 dump.append((text, target_code, code, wm_ok, code_abl, abl_ok))
             best_held = max(best_held, held_ok)
