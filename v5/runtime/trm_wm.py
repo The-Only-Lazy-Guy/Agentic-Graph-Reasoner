@@ -142,30 +142,40 @@ class WMReasoner(nn.Module):
         y = torch.tensor([float(l) for l in labels], device=preds.device)
         return nn.functional.binary_cross_entropy(preds, y)
 
-    def trajectory_instability(self, states: list[torch.Tensor]) -> float:
+    def trajectory_instability(self, deltas: list) -> float:
         """FAST, LABEL-FREE mistake signal (per user request: 'fast noticeable mistakes', not the slower
-        learned critic which needs GPU rounds just to validate it exists). No training, no labels -- computed
-        the instant refine() finishes, from the SAME states it already produced. Measures how much the
-        pooled working-memory representation is STILL CHANGING in the back half of its T recursion steps: a
-        trajectory that hasn't settled by the end is a directly observable sign the reasoning didn't
-        converge. Early-step movement is normal exploration (not counted); only late-step instability
-        counts. Returns >=0, higher = less settled = more likely an OBVIOUS mistake. Complementary to the
-        learned critic (critique()), which targets subtler failures that genuinely need supervision."""
-        pooled = [torch.tanh(self.critic_pool(s.mean(0, keepdim=True))).flatten() for s in states]
-        if len(pooled) < 2:
-            return 0.0
-        half = max(1, len(pooled) // 2)
-        dists = []
-        for i in range(half, len(pooled)):
-            a, b = pooled[i - 1], pooled[i]
-            cos = (a @ b) / (a.norm() * b.norm() + 1e-8)
-            dists.append(float((1.0 - cos).clamp(min=0.0)))
-        return sum(dists) / len(dists)
+        learned critic which needs GPU rounds just to validate it exists). No training, no labels.
 
-    def refine(self, task_emb: torch.Tensor, atom_embs: torch.Tensor, native: bool = False) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        deltas: the per-step PRE-LayerNorm update magnitudes from refine(track_deltas=True).
+
+        FIX (v2): the first version measured cosine-distance between POST-LayerNorm pooled states -- but
+        refine() applies LayerNorm every step, which renormalizes z's scale back to a fixed range
+        REGARDLESS of content, actively erasing the 'how much did this step want to move' signal this
+        metric needs. Empirically confirmed broken: 3 different random tasks at real model scale (d_lm=2560)
+        landed within 0.0005 of each other, and a real GPU run showed literally EVERY held-out task at the
+        exact same instab=0.059 regardless of pass/fail -- a metric that's constant regardless of input is
+        not measuring anything. Now measures the RAW update norm BEFORE LayerNorm erases it: does the
+        proposed change SHRINK over the recursion (settling = converged = low instability) or stay as large
+        as it started (still churning = hasn't converged = high instability)? Returns a ratio: late-step
+        mean / early-step mean. >1 = not settling (bad), <1 = settling (good)."""
+        if len(deltas) < 2:
+            return 1.0
+        vals = [float(d) for d in deltas]
+        half = max(1, len(vals) // 2)
+        early, late = vals[:half], vals[half:]
+        early_mean = sum(early) / len(early) + 1e-8
+        late_mean = sum(late) / len(late)
+        return late_mean / early_mean
+
+    def refine(self, task_emb: torch.Tensor, atom_embs: torch.Tensor, native: bool = False,
+              track_deltas: bool = False):
         """task_emb [d_emb], atom_embs [K,d_emb] (or [K,d_lm] if native=True) -> (working_memory [K,d_lm],
-        per_step_states [[K,d_lm],...]). native=True: atom_embs are ALREADY in the LM's own embedding space
-        (see native_text_embedding) -- skip proj_atom's MiniLM->LM bridge, which probe B showed collapses on
+        per_step_states [[K,d_lm],...]) or, if track_deltas=True, a 3rd return value: per-step PRE-LayerNorm
+        update magnitudes (see trajectory_instability -- LayerNorm renormalizes z's scale every step, which
+        erases the 'how much did this step actually want to move' signal; deltas capture it before that
+        erasure). Backward-compatible: default False keeps the old 2-value return, every existing caller
+        unaffected. native=True: atom_embs are ALREADY in the LM's own embedding space (see
+        native_text_embedding) -- skip proj_atom's MiniLM->LM bridge, which probe B showed collapses on
         held-out; probe C showed native-space injection generalizes (0.19->0.29 under dilution)."""
         q = self.proj_task(task_emb)
         if native:
@@ -176,11 +186,17 @@ class WMReasoner(nn.Module):
                 f"not a foreign encoder like MiniLM (that bridge collapses on held-out, see probe B).")
         z = atom_embs if native else self.proj_atom(atom_embs)
         states = []
+        deltas = [] if track_deltas else None
         for _ in range(self.T):
             ctx = z.mean(0, keepdim=True).expand_as(z)
             qb = q.unsqueeze(0).expand_as(z)
-            z = self.norm(z + self.upd(torch.cat([z, qb, ctx], dim=-1)))
+            raw_update = self.upd(torch.cat([z, qb, ctx], dim=-1))
+            z = self.norm(z + raw_update)
             states.append(z.clone())
+            if track_deltas:
+                deltas.append(raw_update.norm(dim=-1).mean().detach())
+        if track_deltas:
+            return z, states, deltas
         return z, states
 
     def ds_loss_batch(self, all_states: list[list[torch.Tensor]], answer_pool: torch.Tensor, gold_idxs: list[int]) -> torch.Tensor:
@@ -905,7 +921,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             dump = []
             for task_emb, gold_idx, atoms_needed, pids, text, target_code in held_ex:
                 K_atom_embs = torch.stack([atom_embs[n] for n in atoms_needed], dim=0)
-                slots, wm_states = R.refine(task_emb, K_atom_embs, native=True)
+                slots, wm_states, wm_deltas = R.refine(task_emb, K_atom_embs, native=True, track_deltas=True)
                 with torch.no_grad():
                     R.set_slots_direct(slots)
                     # NO repetition_penalty: tried it to stop the 'return EXPR return EXPR...' loop, but it
@@ -920,8 +936,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 wm_ok = verify("def task(n): " + code, target_code)
                 held_ok += int(wm_ok)
                 critic_examples.append(([s.detach() for s in wm_states], wm_ok))   # REAL trajectory + REAL label
-                with torch.no_grad():
-                    instability = R.trajectory_instability(wm_states)   # FAST, no-training mistake signal
+                instability = R.trajectory_instability(wm_deltas)   # FAST, no-training mistake signal (v2: pre-norm deltas)
                 R.clear()
                 with torch.no_grad():
                     out = wb.model.generate(pids, max_new_tokens=64,
