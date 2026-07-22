@@ -112,6 +112,30 @@ class WMReasoner(nn.Module):
         # sqrt(d_lm) (~50) flattens them to ~uniform (ds_loss stuck at ln N, no gradient). 0.07 SHARPENS them.
         self._ds_scale = 0.07
 
+        # SELF-CRITIQUE (tier-4 amortizer -- same doctrine as algo_grr_cot.py's critic): predicts the REAL
+        # verifier's verdict FROM THE REASONING TRAJECTORY itself ("does this look right"), not by calling
+        # the oracle. Trained supervised on (trajectory, real verify() outcome) pairs -- never the model's
+        # own unverified guess (same anti-poison target discipline as trainer.py, applied to the critic).
+        # NEVER certifies a trace for banking on its own -- amortizes which attempts are worth a real verify
+        # call / flags likely mistakes for retry. Needs no answer_pool -- works for free-form answers too.
+        self.critic = nn.Sequential(nn.Linear(self.T * d_lm, d_lm), nn.GELU(), nn.Linear(d_lm, 1))
+
+    def critique(self, states: list[torch.Tensor]) -> torch.Tensor:
+        """states: the [T per-step states] from refine() for ONE example. Returns a scalar in [0,1] -- the
+        critic's own estimate of 'will this pass the real verifier', built PURELY from how the working
+        memory's reasoning evolved across its T recursion steps -- not from re-checking the answer."""
+        traj = torch.stack([torch.tanh(self.ds_pool(s.mean(0, keepdim=True))) for s in states])  # [T,1,d_lm]
+        flat = traj.reshape(1, -1)                                        # [1, T*d_lm]
+        return torch.sigmoid(self.critic(flat)).squeeze()
+
+    def critic_loss(self, states_batch: list[list[torch.Tensor]], labels: list) -> torch.Tensor:
+        """Supervised BCE against REAL verify() outcomes (0/1) -- the target is always the verifier's own
+        past label, never the model's own guess, exactly the anti-poison discipline already established for
+        the LM (trainer.py), now applied to the critic."""
+        preds = torch.stack([self.critique(s) for s in states_batch])
+        y = torch.tensor([float(l) for l in labels], device=preds.device)
+        return nn.functional.binary_cross_entropy(preds, y)
+
     def refine(self, task_emb: torch.Tensor, atom_embs: torch.Tensor, native: bool = False) -> tuple[torch.Tensor, list[torch.Tensor]]:
         """task_emb [d_emb], atom_embs [K,d_emb] (or [K,d_lm] if native=True) -> (working_memory [K,d_lm],
         per_step_states [[K,d_lm],...]). native=True: atom_embs are ALREADY in the LM's own embedding space
@@ -819,6 +843,9 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     best_held = 0.0
     eval_every = max(1, epochs // 8)
     last_dump = None
+    # SELF-CRITIQUE data collection: every eval checkpoint already computes a real trajectory (states) and
+    # a real verify() outcome as a byproduct -- free training data for the critic, no extra generation cost.
+    critic_examples: list = []
     for ep in range(epochs):
         R.train()
         # DS candidate pool: atom_stack is ALREADY native d_lm (native_text_embedding) -- no projection needed.
@@ -852,7 +879,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             dump = []
             for task_emb, gold_idx, atoms_needed, pids, text, target_code in held_ex:
                 K_atom_embs = torch.stack([atom_embs[n] for n in atoms_needed], dim=0)
-                slots, _ = R.refine(task_emb, K_atom_embs, native=True)
+                slots, wm_states = R.refine(task_emb, K_atom_embs, native=True)
                 with torch.no_grad():
                     R.set_slots_direct(slots)
                     # NO repetition_penalty: tried it to stop the 'return EXPR return EXPR...' loop, but it
@@ -866,6 +893,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                     code = wb.tok.decode(out[0][pids.shape[-1]:], skip_special_tokens=True).strip()
                 wm_ok = verify("def task(n): " + code, target_code)
                 held_ok += int(wm_ok)
+                critic_examples.append(([s.detach() for s in wm_states], wm_ok))   # REAL trajectory + REAL label
                 R.clear()
                 with torch.no_grad():
                     out = wb.model.generate(pids, max_new_tokens=64,
@@ -890,6 +918,34 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     print(f"\n  Best held-out: {best_held}/{len(held_ex)}  (gate ablated = {ablated_ok} baseline)")
     verdict = "PROVEN" if best_held > ablated_ok else "PARTIAL"
     print(f"  => {verdict}: working memory {'improves' if best_held > ablated_ok else 'does not improve'} held-out composition on {lm_name}")
+
+    # SELF-CRITIQUE: train + report on the (trajectory, real-verify-outcome) pairs collected as a free
+    # byproduct of eval above. Held-out split within this set (not the SAME split as train/held composition
+    # tasks -- this is a separate check: can the critic predict PASS/FAIL of a trajectory it wasn't trained
+    # on). Mirrors algo_grr_cot.py's critic_demo() validation pattern (report accuracy, don't just claim it).
+    if len(critic_examples) >= 8:
+        print(f"\n  Training self-critique (tier-4 amortizer, {len(critic_examples)} real labeled trajectories)...")
+        random.Random(0).shuffle(critic_examples)
+        split = max(4, int(0.8 * len(critic_examples)))
+        c_train, c_test = critic_examples[:split], critic_examples[split:]
+        c_opt = torch.optim.Adam(R.critic.parameters(), lr=1e-2)
+        for _ in range(200):
+            c_opt.zero_grad()
+            loss = R.critic_loss([s for s, _ in c_train], [y for _, y in c_train])
+            loss.backward(); c_opt.step()
+        with torch.no_grad():
+            preds = [float(R.critique(s)) >= 0.5 for s, _ in c_test]
+            labels = [bool(y) for _, y in c_test]
+            acc = sum(int(p == y) for p, y in zip(preds, labels)) / max(1, len(c_test))
+            base_rate = sum(labels) / max(1, len(labels))
+        print(f"  critic held-out accuracy: {acc:.2f}  (base rate / always-predict-majority: "
+              f"{max(base_rate, 1-base_rate):.2f})  n_test={len(c_test)}")
+        print(f"  => critic {'beats' if acc > max(base_rate, 1-base_rate) else 'does NOT beat'} the base rate "
+              f"-- {'the trajectory carries a real self-assessment signal' if acc > max(base_rate, 1-base_rate) else 'no signal found yet, report honest'}")
+    else:
+        print(f"\n  (only {len(critic_examples)} labeled trajectories collected -- too few to train/report the "
+              f"critic meaningfully; needs more epochs or a bigger held-out set)")
+
     for h in handles:
         h.remove()
 
