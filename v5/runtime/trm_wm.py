@@ -126,19 +126,29 @@ class WMReasoner(nn.Module):
         self.critic_pool = nn.Linear(d_lm, d_lm)
         self.critic = nn.Sequential(nn.Linear(self.T * d_lm, d_lm), nn.GELU(), nn.Linear(d_lm, 1))
 
-    def critique(self, states: list[torch.Tensor]) -> torch.Tensor:
-        """states: the [T per-step states] from refine() for ONE example. Returns a scalar in [0,1] -- the
-        critic's own estimate of 'will this pass the real verifier', built PURELY from how the working
-        memory's reasoning evolved across its T recursion steps -- not from re-checking the answer."""
-        traj = torch.stack([torch.tanh(self.critic_pool(s.mean(0, keepdim=True))) for s in states])  # [T,1,d_lm]
+    def critique(self, raw_states: list[torch.Tensor]) -> torch.Tensor:
+        """raw_states: the [T PRE-LayerNorm per-step states] from refine(track_deltas=True) for ONE example
+        -- NOT the post-norm `states`. FIX: this used to take post-norm states, and the critic degenerately
+        collapsed to predicting the majority/minority class 4/4 real runs (0.62==base, 0.72==base,
+        0.31==1-base, 0.34==1-base) -- a 4x data increase (stage 1) did NOT move it, ruling out sample size
+        and pointing at the same LayerNorm content-erasure bug already found and fixed in
+        trajectory_instability. KEEP the tanh here (unlike trajectory_instability, which dropped it): raw_
+        states has no LayerNorm controlling its scale anymore, so critic_pool's output is UNBOUNDED --
+        without a bound, sigmoid saturates to exactly 0/1 and BCE explodes (measured: loss 0.71 -> 50 in an
+        offline test). tanh applied AFTER a TRAINABLE projection is not the same failure as LayerNorm applied
+        BEFORE any learned transform -- the projection can learn to keep useful signal inside tanh's
+        non-saturating range, whereas LayerNorm on raw content erases regardless of what's learned downstream.
+        Returns a scalar in [0,1]: the critic's own estimate of 'will this pass the real verifier', built
+        PURELY from how the working memory's reasoning evolved -- not from re-checking the answer."""
+        traj = torch.stack([torch.tanh(self.critic_pool(s.mean(0, keepdim=True))) for s in raw_states])  # [T,1,d_lm]
         flat = traj.reshape(1, -1)                                        # [1, T*d_lm]
         return torch.sigmoid(self.critic(flat)).squeeze()
 
-    def critic_loss(self, states_batch: list[list[torch.Tensor]], labels: list) -> torch.Tensor:
+    def critic_loss(self, raw_states_batch: list[list[torch.Tensor]], labels: list) -> torch.Tensor:
         """Supervised BCE against REAL verify() outcomes (0/1) -- the target is always the verifier's own
         past label, never the model's own guess, exactly the anti-poison discipline already established for
         the LM (trainer.py), now applied to the critic."""
-        preds = torch.stack([self.critique(s) for s in states_batch])
+        preds = torch.stack([self.critique(s) for s in raw_states_batch])
         y = torch.tensor([float(l) for l in labels], device=preds.device)
         return nn.functional.binary_cross_entropy(preds, y)
 
@@ -170,13 +180,16 @@ class WMReasoner(nn.Module):
     def refine(self, task_emb: torch.Tensor, atom_embs: torch.Tensor, native: bool = False,
               track_deltas: bool = False):
         """task_emb [d_emb], atom_embs [K,d_emb] (or [K,d_lm] if native=True) -> (working_memory [K,d_lm],
-        per_step_states [[K,d_lm],...]) or, if track_deltas=True, a 3rd return value: per-step PRE-LayerNorm
-        update magnitudes (see trajectory_instability -- LayerNorm renormalizes z's scale every step, which
-        erases the 'how much did this step actually want to move' signal; deltas capture it before that
-        erasure). Backward-compatible: default False keeps the old 2-value return, every existing caller
-        unaffected. native=True: atom_embs are ALREADY in the LM's own embedding space (see
-        native_text_embedding) -- skip proj_atom's MiniLM->LM bridge, which probe B showed collapses on
-        held-out; probe C showed native-space injection generalizes (0.19->0.29 under dilution)."""
+        per_step_states [[K,d_lm],...]) or, if track_deltas=True, 2 more return values: per-step
+        PRE-LayerNorm update magnitudes (deltas) AND per-step PRE-LayerNorm content (raw_states). LayerNorm
+        renormalizes z's scale every step, which erases BOTH the 'how much did this move' signal
+        (trajectory_instability's fix) AND, it turns out, enough CONTENT that the learned critic degenerately
+        collapsed 4/4 real runs even after a 4x data increase ruled out sample size as the cause -- raw_states
+        is the same pre-erasure fix, now feeding critique() too. Backward-compatible: default False keeps the
+        old 2-value return, every existing caller unaffected. native=True: atom_embs are ALREADY in the LM's
+        own embedding space (see native_text_embedding) -- skip proj_atom's MiniLM->LM bridge, which probe B
+        showed collapses on held-out; probe C showed native-space injection generalizes (0.19->0.29 under
+        dilution)."""
         q = self.proj_task(task_emb)
         if native:
             d_lm = self.upd[0].in_features // 3
@@ -187,16 +200,19 @@ class WMReasoner(nn.Module):
         z = atom_embs if native else self.proj_atom(atom_embs)
         states = []
         deltas = [] if track_deltas else None
+        raw_states = [] if track_deltas else None
         for _ in range(self.T):
             ctx = z.mean(0, keepdim=True).expand_as(z)
             qb = q.unsqueeze(0).expand_as(z)
             raw_update = self.upd(torch.cat([z, qb, ctx], dim=-1))
-            z = self.norm(z + raw_update)
+            z_pre = z + raw_update                          # PRE-LayerNorm -- content not yet erased
+            z = self.norm(z_pre)
             states.append(z.clone())
             if track_deltas:
                 deltas.append(raw_update.norm(dim=-1).mean().detach())
+                raw_states.append(z_pre.detach())
         if track_deltas:
-            return z, states, deltas
+            return z, states, deltas, raw_states
         return z, states
 
     def ds_loss_batch(self, all_states: list[list[torch.Tensor]], answer_pool: torch.Tensor, gold_idxs: list[int]) -> torch.Tensor:
@@ -926,7 +942,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             dump = []
             for task_emb, gold_idx, atoms_needed, pids, text, target_code in held_ex:
                 K_atom_embs = torch.stack([atom_embs[n] for n in atoms_needed], dim=0)
-                slots, wm_states, wm_deltas = R.refine(task_emb, K_atom_embs, native=True, track_deltas=True)
+                slots, wm_states, wm_deltas, wm_raw = R.refine(task_emb, K_atom_embs, native=True, track_deltas=True)
                 with torch.no_grad():
                     R.set_slots_direct(slots)
                     # NO repetition_penalty: tried it to stop the 'return EXPR return EXPR...' loop, but it
@@ -940,7 +956,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                     code = wb.tok.decode(out[0][pids.shape[-1]:], skip_special_tokens=True).strip()
                 wm_ok = verify("def task(n): " + code, target_code)
                 held_ok += int(wm_ok)
-                critic_examples.append(([s.detach() for s in wm_states], wm_ok))   # REAL trajectory + REAL label
+                critic_examples.append(([s.detach() for s in wm_raw], wm_ok))   # PRE-norm content + REAL label
                 instability = R.trajectory_instability(wm_deltas)   # FAST, no-training mistake signal (v2: pre-norm deltas)
                 R.clear()
                 with torch.no_grad():
@@ -961,14 +977,14 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             # gated on stage 1 actually beating base rate, not built yet).
             for task_emb, gold_idx, atoms_needed, pids, text, target_code in train_ex:
                 K_atom_embs = torch.stack([atom_embs[n] for n in atoms_needed], dim=0)
-                slots, tr_states = R.refine(task_emb, K_atom_embs, native=True)
+                slots, tr_states, tr_deltas, tr_raw = R.refine(task_emb, K_atom_embs, native=True, track_deltas=True)
                 with torch.no_grad():
                     R.set_slots_direct(slots)
                     out = wb.model.generate(pids, max_new_tokens=64,
                                             do_sample=False, pad_token_id=wb.tok.eos_token_id)
                     tr_code = wb.tok.decode(out[0][pids.shape[-1]:], skip_special_tokens=True).strip()
                 tr_ok = verify("def task(n): " + tr_code, target_code)
-                critic_examples.append(([s.detach() for s in tr_states], tr_ok))
+                critic_examples.append(([s.detach() for s in tr_raw], tr_ok))   # PRE-norm content + REAL label
                 R.clear()
             R.train()
 
