@@ -142,6 +142,26 @@ class WMReasoner(nn.Module):
         y = torch.tensor([float(l) for l in labels], device=preds.device)
         return nn.functional.binary_cross_entropy(preds, y)
 
+    def trajectory_instability(self, states: list[torch.Tensor]) -> float:
+        """FAST, LABEL-FREE mistake signal (per user request: 'fast noticeable mistakes', not the slower
+        learned critic which needs GPU rounds just to validate it exists). No training, no labels -- computed
+        the instant refine() finishes, from the SAME states it already produced. Measures how much the
+        pooled working-memory representation is STILL CHANGING in the back half of its T recursion steps: a
+        trajectory that hasn't settled by the end is a directly observable sign the reasoning didn't
+        converge. Early-step movement is normal exploration (not counted); only late-step instability
+        counts. Returns >=0, higher = less settled = more likely an OBVIOUS mistake. Complementary to the
+        learned critic (critique()), which targets subtler failures that genuinely need supervision."""
+        pooled = [torch.tanh(self.critic_pool(s.mean(0, keepdim=True))).flatten() for s in states]
+        if len(pooled) < 2:
+            return 0.0
+        half = max(1, len(pooled) // 2)
+        dists = []
+        for i in range(half, len(pooled)):
+            a, b = pooled[i - 1], pooled[i]
+            cos = (a @ b) / (a.norm() * b.norm() + 1e-8)
+            dists.append(float((1.0 - cos).clamp(min=0.0)))
+        return sum(dists) / len(dists)
+
     def refine(self, task_emb: torch.Tensor, atom_embs: torch.Tensor, native: bool = False) -> tuple[torch.Tensor, list[torch.Tensor]]:
         """task_emb [d_emb], atom_embs [K,d_emb] (or [K,d_lm] if native=True) -> (working_memory [K,d_lm],
         per_step_states [[K,d_lm],...]). native=True: atom_embs are ALREADY in the LM's own embedding space
@@ -900,6 +920,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 wm_ok = verify("def task(n): " + code, target_code)
                 held_ok += int(wm_ok)
                 critic_examples.append(([s.detach() for s in wm_states], wm_ok))   # REAL trajectory + REAL label
+                with torch.no_grad():
+                    instability = R.trajectory_instability(wm_states)   # FAST, no-training mistake signal
                 R.clear()
                 with torch.no_grad():
                     out = wb.model.generate(pids, max_new_tokens=64,
@@ -907,18 +929,22 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                     code_abl = wb.tok.decode(out[0][pids.shape[-1]:], skip_special_tokens=True).strip()
                 abl_ok = verify("def task(n): " + code_abl, target_code)
                 ablated_ok += int(abl_ok)
-                dump.append((text, target_code, code, wm_ok, code_abl, abl_ok))
+                dump.append((text, target_code, code, wm_ok, code_abl, abl_ok, instability))
             best_held = max(best_held, held_ok)
             last_dump = dump
+            inst_pass = [d[6] for d in dump if d[3]]
+            inst_fail = [d[6] for d in dump if not d[3]]
+            inst_str = (f"  instab(pass/fail) {sum(inst_pass)/len(inst_pass):.3f}/"
+                       f"{sum(inst_fail)/len(inst_fail):.3f}" if inst_pass and inst_fail else "")
             print(f"  ep {ep:>3}  lm_loss {tot_lm/max(n,1):.3f}  ds_loss {tot_ds/max(n,1):.3f}  "
-                  f"held WM {held_ok}/{len(held_ex)}  ablated {ablated_ok}/{len(held_ex)}  "
+                  f"held WM {held_ok}/{len(held_ex)}  ablated {ablated_ok}/{len(held_ex)}  {inst_str}  "
                   f"gate {float(R.adapters[0].g):+.2f}")
 
     print(f"\n  [dump] final epoch, held-out generations (WM vs ablated) vs the verified target:")
-    for text, target_code, code, wm_ok, code_abl, abl_ok in (last_dump or []):
+    for text, target_code, code, wm_ok, code_abl, abl_ok, instability in (last_dump or []):
         print(f"     task: {text}")
         print(f"       target : {target_code}")
-        print(f"       WM     : def task(n): {code[:90]}{'  <- PASS' if wm_ok else ''}")
+        print(f"       WM     : def task(n): {code[:90]}{'  <- PASS' if wm_ok else ''}  instab={instability:.3f}")
         print(f"       ablated: def task(n): {code_abl[:90]}{'  <- PASS' if abl_ok else ''}")
 
     print(f"\n  Best held-out: {best_held}/{len(held_ex)}  (gate ablated = {ablated_ok} baseline)")
