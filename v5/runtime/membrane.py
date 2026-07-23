@@ -470,7 +470,8 @@ def fuzz_general(code: str, name: str, oracle, n: int = 40) -> bool:
 # 4. THE MEMBRANE — retrieve (TRM) -> compose -> realize -> VERIFY -> bank.  The LM only authors/speaks.
 # ================================================================================================
 class Membrane:
-    def __init__(self, graph: AtomGraph, retriever: TRMRetriever, lm=None, wb=None, wm=None):
+    def __init__(self, graph: AtomGraph, retriever: TRMRetriever, lm=None, wb=None, wm=None,
+                 trm_loop=None, max_retries: int = 2):
         self.graph = graph
         self.retriever = retriever
         self.lm = lm                                         # real make_frozen_gen(...) or None
@@ -482,23 +483,56 @@ class Membrane:
         # zero risk to any existing caller (demo()/demo_deploy() don't pass these).
         self.wb = wb
         self.wm = wm
+        # trm_loop: optional TRMLoop for iterative retrieval (hops + STOP head) instead of single-shot
+        # TRMRetriever.rank(). When available, Membrane.solve() uses iterative retrieval in the WM path,
+        # with retries on failure (excluding previously tried atoms each retry).
+        self.trm_loop = trm_loop
+        self.max_retries = max_retries                       # WM retry attempts before fallback
         self.reuse = 0                                       # banked (non-seed) atoms reused across tasks
         self.authored = 0
 
-    def solve(self, task: dict, top_k: int = 6, author: bool = True) -> dict:
-        """task = {text, entry, tests, [oracle]}. Returns {solved, code, program, used}. Real throughout."""
+    def solve(self, task: dict, top_k: int = 6, author: bool = True, max_retries: int | None = None) -> dict:
+        """task = {text, entry, tests, [oracle]}. Returns {solved, code, program, used}. Real throughout.
+        When trm_loop is set, uses iterative retrieval (hops + STOP head) instead of single-shot
+        TRMRetriever.rank(), with retries on WM failure: punished atoms are excluded from the next
+        retrieval round. After all retries exhausted, falls through to direct/compose/author."""
         entry, tests = task["entry"], task["tests"]
-        ranked = self.retriever.rank(task["text"], k=top_k)  # NEURAL retrieval (TRM over MiniLM)
+        max_retries = max_retries if max_retries is not None else self.max_retries
+        ranked = []                                            # set by WM path or fallback below
 
         # WM-SOLVE: PRIMARY attempt when a trained working-memory reasoner is available -- generates a REAL
         # solution (not template substitution) via the same injection mechanism proven at 16/16 held-out
-        # composition (trm_wm.py), grounded in the top-ranked related atoms. Everything below (direct/
-        # compose/author) becomes the FALLBACK -- used when WM-solve doesn't verify, and unchanged/used as
-        # the PRIMARY path when wb/wm aren't set at all (zero risk to any existing caller).
+        # composition (trm_wm.py), grounded in the top-ranked related atoms. When trm_loop is available,
+        # retrieval is iterative (hops + STOP head) with retries on failure: punished atoms are excluded
+        # from subsequent retrieval rounds, forcing the reasoner to search elsewhere or derive.
+        # Everything below (direct/compose/author) becomes the FALLBACK -- used when WM-solve doesn't
+        # verify, and unchanged/used as the PRIMARY path when wb/wm aren't set at all.
         if self.wb is not None and self.wm is not None:
-            wm_result = self._solve_wm(task, ranked)
-            if wm_result is not None:
-                return wm_result
+            if self.trm_loop is not None:
+                from v5.runtime.membrane_edits import record_failure
+                excluded = set()
+                for attempt in range(max_retries + 1):
+                    atom_set, _, hoptrace = self.trm_loop.retrieve_set(
+                        task["text"], exclude=list(excluded))
+                    ranked = [n for n, _ in hoptrace[:top_k]]
+                    if not ranked:
+                        break
+                    wm_result = self._solve_wm(task, ranked)
+                    if wm_result is not None:
+                        return wm_result
+                    for name in ranked:
+                        a = self.graph.get(name)
+                        if a and a.confidence > 0.05:
+                            a.confidence = max(0.0, a.confidence - 0.1)
+                    excluded.update(ranked)
+                    record_failure(self.graph, task["text"])
+            else:
+                ranked = self.retriever.rank(task["text"], k=top_k)
+                wm_result = self._solve_wm(task, ranked)
+                if wm_result is not None:
+                    return wm_result
+        else:
+            ranked = self.retriever.rank(task["text"], k=top_k)
 
         # (a) DIRECT: some retrieved atom alone solves it
         for a in ranked:
@@ -1167,14 +1201,18 @@ class TRMLoop:
         return outs[-1], float(torch.sigmoid(stop[-1])), float(torch.sigmoid(conf[-1]))
 
     @torch.no_grad()
-    def retrieve_set(self, task_text, max_hops=None):
+    def retrieve_set(self, task_text, max_hops=None, exclude=None):
+        """Iteratively retrieve atoms. `exclude` is a list of atom names to skip
+        (e.g. previously failed atoms in a retry loop)."""
         self.trm.eval()
         M, order = self.graph.matrix()
         A = torch.from_numpy(M).to(self.device)
+        excluded_idx = {order.index(n) for n in (exclude or []) if n in order}
         got, conf, hoptrace = [], 0.0, []                          # hoptrace = per-hop (picked, stop_prob) for INSPECTION
         for _ in range(max_hops or self.hops):
             logits, pstop, conf = self._step_logits(self._t(task_text), A, got)
-            for gi in got:
+            blocked = set(got) | excluded_idx
+            for gi in blocked:
                 logits[gi] = float("-inf")
             pick = int(torch.argmax(logits))
             hoptrace.append((order[pick], round(pstop, 2)))

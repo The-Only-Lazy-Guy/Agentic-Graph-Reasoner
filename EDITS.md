@@ -114,7 +114,56 @@ trm_wm.py --selftest: ALL PASS (including probe A identity/causal/train)
 
 **Note**: The GNN is a single message-passing layer with d_hidden=64 (~30K params). On small graphs (<1K atoms) its overhead is negligible (<5% of TRM forward). At 10K+ atoms with dense edges, the GNN's `index_add_` aggregation may become measurable but remains O(E) where E = edges.
 
+## Changes (v3 — iterative TRMLoop retrieval with retries)
+
+### `v5/runtime/membrane.py`
+
+#### `TRMLoop.retrieve_set()` — `exclude` parameter
+- Added `exclude: list[str] | None = None` parameter: atom names to skip during iterative retrieval.
+- Previously failed atoms (e.g. from a retry loop) are excluded from subsequent hops by zeroing their logits (`float("-inf")`), forcing the reasoner to search elsewhere.
+
+#### `Membrane.__init__()` — optional `trm_loop` + `max_retries`
+- New `trm_loop` parameter: an optional `TRMLoop` instance for iterative (hops + STOP head) retrieval instead of single-shot `TRMRetriever.rank()`.
+- New `max_retries: int = 2` parameter: how many times to re-retrieve on WM failure before falling through to direct/compose/author.
+
+#### `Membrane.solve()` — iterative retrieval + punish + retry/derive
+- When `self.trm_loop` is available, the WM path uses iterative retrieval (via `trm_loop.retrieve_set()`) instead of single-shot `retriever.rank()`.
+- **Loop**: for `max_retries + 1` attempts:
+  1. Retrieve atom set (hops + STOP head), excluding names that already failed
+  2. Pass top-K atoms to WM (`_solve_wm` → refine → LM generate → verify)
+  3. If success → return immediately
+  4. If failure → **punish**: decrease `confidence` of each tried atom by 0.1 (floor 0.0) + call `record_failure()` (creates a trap node linked to related atoms with low edge strength)
+  5. Exclude tried atoms from the next retrieval round
+- After all retries exhausted, falls through to the deterministic direct/compose/author path (= **derive** via LM authoring when available).
+- When `trm_loop` is `None` (default), behavior is byte-identical to before (single-shot `retriever.rank()`).
+
+### Usage
+```bash
+python -m v5.runtime.trm_wm --run \
+  --lm Qwen/Qwen3-4B-Instruct-2507 --quant 4bit \
+  --graph-path graphs/long_term.json \
+  --grow-skills 40 --grow-cot 50 \
+  --grow-domains math,code,science,puzzle \
+  --epochs 40 --n-train 48 --n-held 16 \
+  --batch-size 8 \
+  --save-path artifacts/wm_qwen4b.pt
+```
+
+## Benchmarks (v1 — unchanged after v2/v3 structural changes)
+
+### Correctness (unchanged — all tests pass)
+```
+membrane.py --demo:
+    cosine: 0.80  TRM before: 0.10  TRM after: 0.70
+    solved: 9/10  composed: True  reuse: True  cot: True  rebuild: 0.70
+
+membrane.py --deploy: ALL CLAIMS VERIFIED
+membrane.py --trm: TRAIN EXACT 6/6, held-out 0/4 (pre-existing limitation)
+algo_trm.py --selftest: ALL PASS
+trm_wm.py --selftest: ALL PASS (including probe A identity/causal/train)
+```
+
 ## Files Changed
-- `v5/runtime/membrane.py`: `GraphAttnEncoder`, GNN-integrated `TRMRetriever`, `float(loss).detach()` fix
+- `v5/runtime/membrane.py`: `GraphAttnEncoder`, GNN-integrated `TRMRetriever`, `float(loss).detach()` fix, `TRMLoop.retrieve_set(exclude=...)`, `Membrane.__init__`/`solve` iterative retrieval + retry
 - `v5/runtime/trm_wm.py`: `_atoms_from_graph` trap exclusion, critic architecture fix
 - `EDITS.md`: this file
