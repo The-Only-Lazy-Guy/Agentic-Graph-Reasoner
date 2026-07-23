@@ -1019,7 +1019,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         if "return " not in raw:
             return None
         after = raw.split("return ", 1)[1]
-        cuts = [i for i in (after.find("\n"), after.find(" return"), after.find("\treturn")) if i != -1]
+        cuts = [i for i in (after.find("\n"), after.find(" return"), after.find("\treturn"),
+                            after.find(" is "), after.find(" == ")) if i != -1]
         if cuts:
             after = after[:min(cuts)]
         expr = after.strip().rstrip(".")
@@ -1130,7 +1131,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                     # even single-composition cases got pushed toward hallucinated paraphrases ('num_bits',
                     # 'count_bits_to_n') instead of the real atom names. verify()'s extraction (stop at the
                     # first newline or repeated 'return') already tolerates the loop without hurting quality.
-                    out = wb.model.generate(pids, max_new_tokens=64,
+                    out = wb.model.generate(pids, max_new_tokens=24,
                                             do_sample=False, pad_token_id=wb.tok.eos_token_id)
                     code = wb.tok.decode(out[0][pids.shape[-1]:], skip_special_tokens=True).strip()
                 wm_ok = verify("def task(n): " + code, target_code)
@@ -1139,7 +1140,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 instability = R.trajectory_instability(wm_deltas)   # FAST, no-training mistake signal (v2: pre-norm deltas)
                 R.clear()
                 with torch.no_grad():
-                    out = wb.model.generate(pids, max_new_tokens=64,
+                    out = wb.model.generate(pids, max_new_tokens=24,
                                             do_sample=False, pad_token_id=wb.tok.eos_token_id)
                     code_abl = wb.tok.decode(out[0][pids.shape[-1]:], skip_special_tokens=True).strip()
                 abl_ok = verify("def task(n): " + code_abl, target_code)
@@ -1159,7 +1160,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 slots, tr_states, tr_deltas, tr_raw = R.refine(task_emb, K_atom_embs, native=True, track_deltas=True)
                 with torch.no_grad():
                     R.set_slots_direct(slots)
-                    out = wb.model.generate(pids, max_new_tokens=64,
+                    out = wb.model.generate(pids, max_new_tokens=24,
                                             do_sample=False, pad_token_id=wb.tok.eos_token_id)
                     tr_code = wb.tok.decode(out[0][pids.shape[-1]:], skip_special_tokens=True).strip()
                 tr_ok = verify("def task(n): " + tr_code, target_code)
