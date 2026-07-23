@@ -636,7 +636,7 @@ class Membrane:
         prompt = f"Write a function {entry}(n):\n# {task['text']}\ndef {entry}(n):"
         ids = self.wb.tok(prompt, return_tensors="pt").input_ids.to(self.wb.device)
         with torch.no_grad():
-            out = self.wb.model.generate(ids, max_new_tokens=24, do_sample=False,
+            out = self.wb.model.generate(ids, max_new_tokens=64, do_sample=False,
                                          pad_token_id=self.wb.tok.eos_token_id)
         self.wm.clear()
         raw = self.wb.tok.decode(out[0][ids.shape[-1]:], skip_special_tokens=True)
@@ -646,8 +646,7 @@ class Membrane:
         if "return " not in raw:
             return None
         after = raw.split("return ", 1)[1]
-        cuts = [i for i in (after.find("\n"), after.find(" return"), after.find("\treturn"),
-                            after.find(" is "), after.find(" == ")) if i != -1]
+        cuts = [i for i in (after.find("\n"), after.find(" return"), after.find("\treturn")) if i != -1]
         if cuts:
             after = after[:min(cuts)]
         expr = after.strip().rstrip(".")
