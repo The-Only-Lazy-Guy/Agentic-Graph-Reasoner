@@ -84,6 +84,50 @@ class GatedCrossAttn(nn.Module):
 
 
 # ================================================================================================
+# ================================================================================================
+# AlgorithmicCell — explicit search, binding, and branching for a true reasoning engine
+# ================================================================================================
+class AlgorithmicCell(nn.Module):
+    """An algorithmic reasoning cell providing explicit operations missing from a standard MLP:
+    1. Search: Cross-attention to the retrieved memory (graph atoms).
+    2. Variable Binding: Self-attention among working memory registers and the task.
+    3. Branching: Gated state updates (highway/GRU style)."""
+    def __init__(self, d_lm: int, n_heads: int = 4):
+        super().__init__()
+        self.cross_attn = nn.MultiheadAttention(d_lm, n_heads, batch_first=False)
+        self.self_attn = nn.MultiheadAttention(d_lm, n_heads, batch_first=False)
+        self.ff = nn.Sequential(nn.Linear(d_lm, d_lm * 2), nn.GELU(), nn.Linear(d_lm * 2, d_lm))
+        self.norm1 = nn.LayerNorm(d_lm)
+        self.norm2 = nn.LayerNorm(d_lm)
+        self.norm3 = nn.LayerNorm(d_lm)
+        self.gate = nn.Linear(d_lm * 2, d_lm)
+
+    def forward(self, s: torch.Tensor, z_mem: torch.Tensor, q: torch.Tensor):
+        s_sq = s.unsqueeze(1)
+        z_mem_sq = z_mem.unsqueeze(1)
+        q_sq = q.view(1, 1, -1)
+        
+        # 1. Search / Fetch from graph memory (Cross-Attention)
+        s_fetch, _ = self.cross_attn(query=s_sq, key=z_mem_sq, value=z_mem_sq)
+        s_nxt = self.norm1(s + s_fetch.squeeze(1))
+        
+        # 2. Variable Binding / Planning (Attend to task + other registers)
+        ctx = torch.cat([q_sq, s_nxt.unsqueeze(1)], dim=0)
+        s_bind, _ = self.self_attn(query=s_nxt.unsqueeze(1), key=ctx, value=ctx)
+        s_nxt = self.norm2(s_nxt + s_bind.squeeze(1))
+        
+        # 3. Branching / Update (Gated transition)
+        s_upd = self.ff(s_nxt)
+        g = torch.sigmoid(self.gate(torch.cat([s_nxt, s_upd], dim=-1)))
+        
+        raw_update = g * s_upd
+        s_pre = s_nxt + raw_update
+        s_out = self.norm3(s_pre)
+        
+        return s_pre, s_out, raw_update
+
+
+# ================================================================================================
 # WMReasoner — the working memory + its recursive refinement + the coupling hooks + deep supervision
 # ================================================================================================
 class WMReasoner(nn.Module):
@@ -93,15 +137,17 @@ class WMReasoner(nn.Module):
     DEEP SUPERVISION: a lightweight retrieval head reads the working memory at each refinement step t
     and scores all candidate answers (cosine sim against answer_pool). CE loss at every step forces the
     entire refinement trajectory to converge toward the target, not just the final state."""
-    def __init__(self, d_lm: int, couple_layers, d_emb: int = EMBED_DIM, T: int = 4, n_heads: int = 4):
+    def __init__(self, d_lm: int, couple_layers, d_emb: int = EMBED_DIM, T: int = 4, n_heads: int = 4, M: int = 4):
         super().__init__()
         self.T = T
+        self.M = M
         # MODALITY PROJECTOR (2-layer GELU): translate KG/MiniLM geometry -> the decoder's native space, so
         # the cross-attention isn't handed 'foreign noise'. A single Linear is too weak to bridge the gap.
         self.proj_atom = nn.Sequential(nn.Linear(d_emb, d_lm), nn.GELU(), nn.Linear(d_lm, d_lm))
         self.proj_task = nn.Linear(d_emb, d_lm)
-        self.upd = nn.Sequential(nn.Linear(3 * d_lm, d_lm), nn.GELU(), nn.Linear(d_lm, d_lm))
-        self.norm = nn.LayerNorm(d_lm)
+        
+        self.cell = AlgorithmicCell(d_lm, n_heads)
+        self.register_init = nn.Parameter(torch.randn(M, d_lm) * 0.02)
         self.adapters = nn.ModuleList([GatedCrossAttn(d_lm, n_heads) for _ in couple_layers])
         self.couple_layers = list(couple_layers)
         self._slots = None
@@ -201,28 +247,32 @@ class WMReasoner(nn.Module):
         dilution)."""
         q = self.proj_task(task_emb)
         if native:
-            d_lm = self.upd[0].in_features // 3
+            d_lm = self.register_init.shape[-1]
             assert atom_embs.shape[-1] == d_lm, (
                 f"refine(native=True) requires atom_embs already in the LM's own d_lm space "
                 f"(got last dim {atom_embs.shape[-1]}, expected {d_lm}) -- produce it via native_text_embedding, "
                 f"not a foreign encoder like MiniLM (that bridge collapses on held-out, see probe B).")
-        z = atom_embs if native else self.proj_atom(atom_embs)
+        z_mem = atom_embs if native else self.proj_atom(atom_embs)
+        
+        # Initialize explicit reasoning registers
+        s = self.register_init + q.unsqueeze(0)
+        
         states = []
         deltas = [] if track_deltas else None
         raw_states = [] if track_deltas else None
         for _ in range(self.T):
-            ctx = z.mean(0, keepdim=True).expand_as(z)
-            qb = q.unsqueeze(0).expand_as(z)
-            raw_update = self.upd(torch.cat([z, qb, ctx], dim=-1))
-            z_pre = z + raw_update                          # PRE-LayerNorm -- content not yet erased
-            z = self.norm(z_pre)
-            states.append(z.clone())
+            s_pre, s, raw_update = self.cell(s, z_mem, q)
+            combined = torch.cat([z_mem, s], dim=0)
+            states.append(combined.clone())
             if track_deltas:
                 deltas.append(raw_update.norm(dim=-1).mean().detach())
-                raw_states.append(z_pre.detach())
+                combined_pre = torch.cat([z_mem, s_pre], dim=0)
+                raw_states.append(combined_pre.detach())
+        
+        combined_out = torch.cat([z_mem, s], dim=0)
         if track_deltas:
-            return z, states, deltas, raw_states
-        return z, states
+            return combined_out, states, deltas, raw_states
+        return combined_out, states
 
     def ds_loss_batch(self, all_states: list[list[torch.Tensor]], answer_pool: torch.Tensor, gold_idxs: list[int]) -> torch.Tensor:
         """Batch deep supervision: for each example, at each refinement step, pool K slots -> query ->
@@ -290,14 +340,16 @@ class WMReasoner(nn.Module):
             "couple_layers": self.couple_layers,
             "T": self.T,
             "n_heads": self.adapters[0].h if len(self.adapters) else 4,
+            "M": self.M,
         }, path)
 
     @classmethod
     def load(cls, path: str, map_location=None) -> "WMReasoner":
         """Reconstruct a WMReasoner from a save()'d checkpoint -- shape config first, then the weights."""
         blob = torch.load(path, map_location=map_location, weights_only=False)
-        R = cls(blob["d_lm"], blob["couple_layers"], T=blob["T"], n_heads=blob["n_heads"])
-        R.load_state_dict(blob["state_dict"])
+        M = blob.get("M", 4)
+        R = cls(blob["d_lm"], blob["couple_layers"], T=blob["T"], n_heads=blob["n_heads"], M=M)
+        R.load_state_dict(blob["state_dict"], strict=False)
         return R
 
     def _device(self):
