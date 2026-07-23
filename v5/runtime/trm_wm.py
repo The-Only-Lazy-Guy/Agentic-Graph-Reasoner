@@ -262,12 +262,10 @@ class WMReasoner(nn.Module):
         raw_states = [] if track_deltas else None
         for _ in range(self.T):
             s_pre, s, raw_update = self.cell(s, z_mem, q)
-            combined = torch.cat([z_mem, s], dim=0)
-            states.append(combined.clone())
+            states.append(s.clone())  # Deep supervision targets reasoning registers only
             if track_deltas:
                 deltas.append(raw_update.norm(dim=-1).mean().detach())
-                combined_pre = torch.cat([z_mem, s_pre], dim=0)
-                raw_states.append(combined_pre.detach())
+                raw_states.append(s_pre.detach())  # Critic targets reasoning registers only
         
         combined_out = torch.cat([z_mem, s], dim=0)
         if track_deltas:
