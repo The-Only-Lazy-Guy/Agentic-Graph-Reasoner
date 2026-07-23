@@ -1015,8 +1015,16 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             a.g.fill_(0.8)
 
     # Build raw prompts (no chat template, to avoid special-token issues with teacher-forcing)
-    def build_prompt(task_text):
-        return wb.tok(f"Write a function task(n):\n# {task_text}\ndef task(n):", return_tensors="pt").input_ids.to(wb.device)
+    def build_prompt(task_text, inner_name=None, outer_name=None):
+        """Build tokenized prompt. If inner/outer atom names are provided (decoded from registers),
+        prepend them as an explicit composition hint so the LM knows the exact order.
+        Without this hint, GatedCrossAttn is set-like -- the LM can't tell which slot is inner vs outer."""
+        if inner_name and outer_name:
+            hint = f"# atoms: inner={inner_name}, outer={outer_name}\n"
+        else:
+            hint = ""
+        return wb.tok(f"{hint}Write a function task(n):\n# {task_text}\ndef task(n):",
+                      return_tensors="pt").input_ids.to(wb.device)
 
     # Precompute static task embeddings and atom embeddings for all examples
     print("  Precomputing task + atom embeddings...")
@@ -1029,7 +1037,21 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
 
     prompt_ids = {}
     for text, _, _ in all_tasks:
-        prompt_ids[text] = build_prompt(text)
+        prompt_ids[text] = build_prompt(text)  # static fallback (no decoded slots yet)
+
+    def decode_slots(slots, pool, pool_names, M=None):
+        """Decode the reasoning registers back into atom names by argmax cosine similarity.
+        slots: [N_total, d_lm] = cat([z_mem, s]) from refine()
+        pool:  [N, d_lm] normalized atom embeddings (train_pool)
+        Returns (inner_name, outer_name) decoded from s[0] and s[1] respectively."""
+        M = M or R.M
+        # s occupies the LAST M rows of slots (z_mem occupies the first N rows)
+        s = slots[-M:].float()
+        s_norm = s / (s.norm(dim=-1, keepdim=True) + 1e-8)
+        sims = s_norm @ pool.float().T         # [M, N_atoms]
+        inner_idx = int(sims[0].argmax())
+        outer_idx = int(sims[1].argmax())
+        return pool_names[inner_idx], pool_names[outer_idx]
 
     # All 10 atom oracle functions (used for verification)
     def _fib(n):
@@ -1180,6 +1202,9 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             for task_emb, gold_idxs, atoms_needed, pids, text, target_code in batch:
                 slots, states = R.refine(task_emb, atom_stack, native=True)
                 R.set_slots_direct(slots)
+                # Decode registers -> atom names -> inject as text hint so LM knows inner/outer order
+                inner_name, outer_name = decode_slots(slots.detach(), train_pool, atom_names)
+                pids = build_prompt(text, inner_name, outer_name)
                 return_body = target_code.split(": ", 1)[1] if ": " in target_code else target_code
                 tids = wb.tok(" " + return_body, return_tensors="pt").input_ids.to(wb.device)
                 eos = torch.tensor([[wb.tok.eos_token_id]], device=wb.device)
@@ -1212,6 +1237,9 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             dump = []
             for task_emb, gold_idxs, atoms_needed, pids, text, target_code in held_ex:
                 slots, wm_states, wm_deltas, wm_raw = R.refine(task_emb, atom_stack, native=True, track_deltas=True)
+                # Decode registers for explicit ordering hint in the prompt
+                inner_name, outer_name = decode_slots(slots.detach(), train_pool, atom_names)
+                pids_wm = build_prompt(text, inner_name, outer_name)
                 with torch.no_grad():
                     R.set_slots_direct(slots)
                     # EOS termination trained: the training loop appends EOS to every target so the model
@@ -1222,9 +1250,9 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                     # count_bits(count_bits(n)) requires REPEATING a name; even single-composition cases got
                     # pushed toward hallucinated paraphrases ('num_bits', 'count_bits_to_n') instead of the
                     # real atom names.
-                    out = wb.model.generate(pids, max_new_tokens=64,
+                    out = wb.model.generate(pids_wm, max_new_tokens=64,
                                             do_sample=False, pad_token_id=wb.tok.eos_token_id)
-                    code = wb.tok.decode(out[0][pids.shape[-1]:], skip_special_tokens=True).strip()
+                    code = wb.tok.decode(out[0][pids_wm.shape[-1]:], skip_special_tokens=True).strip()
                 wm_ok = verify("def task(n): " + code, target_code)
                 held_ok += int(wm_ok)
                 critic_examples.append(([s.detach() for s in wm_raw], wm_ok))   # PRE-norm content + REAL label
