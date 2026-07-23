@@ -272,29 +272,33 @@ class WMReasoner(nn.Module):
             return combined_out, states, deltas, raw_states
         return combined_out, states
 
-    def ds_loss_batch(self, all_states: list[list[torch.Tensor]], answer_pool: torch.Tensor, gold_idxs: list[int]) -> torch.Tensor:
-        """Batch deep supervision: for each example, at each refinement step, pool K slots -> query ->
-        score against all candidates in answer_pool. CE on gold_idx at every step.
-
-        all_states: [[T states], ...] per-example per-step states
-        answer_pool: [N, d_lm] candidate embeddings
-        gold_idxs:   [B] correct answer indices
-
-        Vectorized: all examples + all steps are batched into one loss computation.
-        """
+    def ds_loss_batch(self, all_states: list[list[torch.Tensor]], answer_pool: torch.Tensor, all_atoms_needed: list[list[int]]) -> torch.Tensor:
+        """Batch deep supervision: explicit sequential supervision of reasoning registers.
+        s[0] is forced to fetch the first atom, s[1] the second, etc."""
         dev = answer_pool.device
         B = len(all_states)
         T = len(all_states[0]) if all_states else 1
-        K = all_states[0][0].shape[0]
-        # [B, T, K, d_lm] -> [B*T, K, d_lm]
+        M = all_states[0][0].shape[0]
+        # [B, T, M, d_lm]
         flat = torch.stack([torch.stack(s) for s in all_states], dim=0).float().to(dev)
-        flat = flat.view(B * T, K, -1)
-        pooled = torch.tanh(self.ds_pool(flat.mean(1)))  # [B*T, d_lm]
-        q = self.ds_proj(pooled)
-        q = q / (q.norm(dim=-1, keepdim=True) + 1e-8)
-        logits = q @ answer_pool.float().T / self._ds_scale  # [B*T, N]
-        gold = torch.tensor(gold_idxs, device=dev).repeat_interleave(T)
-        return nn.functional.cross_entropy(logits, gold)
+        
+        loss = 0.0
+        max_targets = max(len(needed) for needed in all_atoms_needed)
+        n_supervised = min(M, max_targets)
+        
+        for i in range(n_supervised):
+            # s_i: [B, T, d_lm] -> [B*T, d_lm]
+            s_i = flat[:, :, i, :].reshape(B * T, -1)
+            pooled = torch.tanh(self.ds_pool(s_i))
+            q = self.ds_proj(pooled)
+            q = q / (q.norm(dim=-1, keepdim=True) + 1e-8)
+            logits = q @ answer_pool.float().T / self._ds_scale  # [B*T, N]
+            
+            gold_i = [needed[i] if i < len(needed) else needed[-1] for needed in all_atoms_needed]
+            gold_i_t = torch.tensor(gold_i, device=dev).repeat_interleave(T)
+            loss = loss + nn.functional.cross_entropy(logits, gold_i_t)
+            
+        return loss / max(1, n_supervised)
 
     def align_projector(self, kg_embs: torch.Tensor, lm_targets: torch.Tensor,
                         steps: int = 300, lr: float = 1e-3) -> float:
@@ -453,7 +457,7 @@ def _run_probe(wb, R, pids, train, test, precomputed_states, answer_pool, tid_of
                 gold_list = []
                 for bi, j in enumerate(idx):
                     state_list.append(precomputed_states[j])
-                    gold_list.append(j)
+                    gold_list.append([j])
                 ds_acc = R.ds_loss_batch(state_list, answer_pool.to(wb.device), gold_list)
                 loss = lm_loss + ds_weight * ds_acc
             else:
@@ -1102,10 +1106,10 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 print(f"    [verify exception] expr={expr!r}  {type(e).__name__}: {e}")
             return False
 
-    train_ex = [(task_embs[text], atom_names.index(atoms_needed[0]), atoms_needed,
+    train_ex = [(task_embs[text], [atom_names.index(a) for a in atoms_needed], atoms_needed,
                  prompt_ids[text], text, code)
                 for text, atoms_needed, code in train_tasks]
-    held_ex = [(task_embs[text], atom_names.index(atoms_needed[0]), atoms_needed,
+    held_ex = [(task_embs[text], [atom_names.index(a) for a in atoms_needed], atoms_needed,
                 prompt_ids[text], text, code)
                for text, atoms_needed, code in held_tasks]
 
@@ -1137,16 +1141,15 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         for b0 in range(0, len(train_ex), batch_size):
             batch = train_ex[b0:b0 + batch_size]
             all_states, all_gold, pids_list, tids_list = [], [], [], []
-            for task_emb, gold_idx, atoms_needed, pids, text, target_code in batch:
-                K_atom_embs = torch.stack([atom_embs[n] for n in atoms_needed], dim=0)
-                slots, states = R.refine(task_emb, K_atom_embs, native=True)
+            for task_emb, gold_idxs, atoms_needed, pids, text, target_code in batch:
+                slots, states = R.refine(task_emb, atom_stack, native=True)
                 R.set_slots_direct(slots)
                 return_body = target_code.split(": ", 1)[1] if ": " in target_code else target_code
                 tids = wb.tok(" " + return_body, return_tensors="pt").input_ids.to(wb.device)
                 eos = torch.tensor([[wb.tok.eos_token_id]], device=wb.device)
                 tids = torch.cat([tids, eos], dim=-1)
                 pids_list.append(pids); tids_list.append(tids)
-                all_states.append(states); all_gold.append(gold_idx)
+                all_states.append(states); all_gold.append(gold_idxs)
 
             if batch_size > 1 and len(batch) > 1:
                 input_ids, labels, attn_mask = _pad_and_batch(pids_list, tids_list, pad_id, wb.device)
@@ -1171,9 +1174,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             R.eval()
             held_ok, ablated_ok = 0, 0
             dump = []
-            for task_emb, gold_idx, atoms_needed, pids, text, target_code in held_ex:
-                K_atom_embs = torch.stack([atom_embs[n] for n in atoms_needed], dim=0)
-                slots, wm_states, wm_deltas, wm_raw = R.refine(task_emb, K_atom_embs, native=True, track_deltas=True)
+            for task_emb, gold_idxs, atoms_needed, pids, text, target_code in held_ex:
+                slots, wm_states, wm_deltas, wm_raw = R.refine(task_emb, atom_stack, native=True, track_deltas=True)
                 with torch.no_grad():
                     R.set_slots_direct(slots)
                     # EOS termination trained: the training loop appends EOS to every target so the model
