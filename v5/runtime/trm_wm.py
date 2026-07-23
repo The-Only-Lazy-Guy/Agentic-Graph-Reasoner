@@ -1012,10 +1012,10 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             return eval(code_line, {"__builtins__": __builtins__}, {**fn_map, "n": n})
 
     def _extract_first_return(raw: str) -> str | None:
-        """Pull the FIRST return-expression out of raw generated text. Greedy decoding with no stopping
-        criterion tends to loop the same 'return EXPR' clause until max_new_tokens cuts it off mid-token --
-        an eval-harness artifact, not a reasoning failure. Cut at the next newline OR the next repeated
-        'return' (the loop) so the extracted expression is the model's actual (usually complete) first answer."""
+        """Pull the FIRST return-expression out of raw generated text. Safety net: the model is now trained
+        to emit EOS after the expression, so generation should normally terminate cleanly. But if EOS fails
+        (e.g. the model loops), cut at newline, repeated 'return', ' is ', or ' == ' to recover the first
+        complete answer."""
         if "return " not in raw:
             return None
         after = raw.split("return ", 1)[1]
@@ -1093,6 +1093,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 R.set_slots_direct(slots)
                 return_body = target_code.split(": ", 1)[1] if ": " in target_code else target_code
                 tids = wb.tok(" " + return_body, return_tensors="pt").input_ids.to(wb.device)
+                eos = torch.tensor([[wb.tok.eos_token_id]], device=wb.device)
+                tids = torch.cat([tids, eos], dim=-1)
                 pids_list.append(pids); tids_list.append(tids)
                 all_states.append(states); all_gold.append(gold_idx)
 
@@ -1124,12 +1126,14 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 slots, wm_states, wm_deltas, wm_raw = R.refine(task_emb, K_atom_embs, native=True, track_deltas=True)
                 with torch.no_grad():
                     R.set_slots_direct(slots)
-                    # NO repetition_penalty: tried it to stop the 'return EXPR return EXPR...' loop, but it
-                    # penalizes reusing ANY prior token -- including the literal atom-name tokens the working
-                    # memory taught it. Composing e.g. count_bits(count_bits(n)) requires REPEATING a name;
-                    # even single-composition cases got pushed toward hallucinated paraphrases ('num_bits',
-                    # 'count_bits_to_n') instead of the real atom names. verify()'s extraction (stop at the
-                    # first newline or repeated 'return') already tolerates the loop without hurting quality.
+                    # EOS termination trained: the training loop appends EOS to every target so the model
+                    # learns to stop after the expression. The _extract_first_return safety net below catches
+                    # any residual cases where EOS fails. NO repetition_penalty: tried it to stop the
+                    # 'return EXPR return EXPR...' loop, but it penalizes reusing ANY prior token -- including
+                    # the literal atom-name tokens the working memory taught it. Composing e.g.
+                    # count_bits(count_bits(n)) requires REPEATING a name; even single-composition cases got
+                    # pushed toward hallucinated paraphrases ('num_bits', 'count_bits_to_n') instead of the
+                    # real atom names.
                     out = wb.model.generate(pids, max_new_tokens=64,
                                             do_sample=False, pad_token_id=wb.tok.eos_token_id)
                     code = wb.tok.decode(out[0][pids.shape[-1]:], skip_special_tokens=True).strip()
