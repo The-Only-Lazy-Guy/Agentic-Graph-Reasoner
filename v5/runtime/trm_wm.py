@@ -1130,6 +1130,42 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     # gated on stage 1's critic actually beating base rate first, to avoid training the reasoner against an
     # unreliable judge -- Goodhart's law / reward-hacking risk, not built yet).
     critic_examples: list = []
+    # ── WARM-START ALIGNMENT ────────────────────────────────────────────────────
+    # Problem: register_init + proj_task live in a random initialisation space.
+    # ds_pool/ds_proj must bridge that space to atom_stack (LM native embeddings).
+    # If we start the main loop without bridging this gap first, lm_loss dominates
+    # the gradients in early epochs and the DS head never gets traction -- it stays
+    # at random chance (ln(N) ≈ 3.37) for all 40 epochs.
+    #
+    # Fix: a cheap pre-training phase (no LM forward, no generation, ~5s on GPU)
+    # that runs DS loss ONLY against the full atom pool. We force each register
+    # s_i = register_init[i] + proj_task(task_emb) to attend to atom_stack and
+    # have its ds_pool/ds_proj output land near the correct atom's embedding.
+    # After this phase, the DS head starts the main loop already aligned, so the
+    # subtle ds_loss signal (0.1x weight) can reinforce rather than start from scratch.
+    train_pool = (atom_stack / (atom_stack.norm(dim=-1, keepdim=True) + 1e-8)).detach()
+    warmup_steps = 200
+    warmup_opt = torch.optim.Adam(
+        list(R.cell.parameters()) + list(R.ds_pool.parameters()) +
+        list(R.ds_proj.parameters()) + list(R.proj_task.parameters()),
+        lr=5e-4)
+    print(f"  Warm-start alignment ({warmup_steps} steps, DS-only, no LM forward)...")
+    R.train()
+    for ws in range(warmup_steps):
+        warmup_batch = random.sample(train_ex, min(16, len(train_ex)))
+        ws_states, ws_gold = [], []
+        for task_emb, gold_idxs, atoms_needed, pids, text, target_code in warmup_batch:
+            _, states = R.refine(task_emb, atom_stack, native=True)
+            ws_states.append(states)
+            ws_gold.append(gold_idxs)
+        ws_loss = R.ds_loss_batch(ws_states, train_pool, ws_gold)
+        warmup_opt.zero_grad()
+        ws_loss.backward()
+        warmup_opt.step()
+        if (ws + 1) % 50 == 0:
+            print(f"    warmup step {ws+1:3d}/{warmup_steps}  ds_loss {float(ws_loss.detach()):.3f}")
+    print(f"  Warm-start done. Starting main training loop...\n")
+    # ── END WARM-START ──────────────────────────────────────────────────────────
     for ep in range(epochs):
         R.train()
         # DS candidate pool: atom_stack is ALREADY native d_lm (native_text_embedding) -- no projection needed.
