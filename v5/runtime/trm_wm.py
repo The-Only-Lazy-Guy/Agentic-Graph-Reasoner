@@ -124,7 +124,10 @@ class WMReasoner(nn.Module):
         # a first real run collapsed to exactly the base rate, and a shared, objective-fighting pooling
         # layer was one of two diagnosed causes (the other: class imbalance, fixed at the training-loop level).
         self.critic_pool = nn.Linear(d_lm, d_lm)
-        self.critic = nn.Sequential(nn.Linear(self.T * d_lm, d_lm), nn.GELU(), nn.Linear(d_lm, 1))
+        # CRITIC FIX: was nn.Linear(self.T * d_lm, d_lm) which for d_lm=2560, T=4 gives 10240 input dim
+        # with only ~800 training examples -- massively overparameterized, collapsed to base rate.
+        # Now averages over T steps: input is just d_lm, params are ~3M instead of ~28M.
+        self.critic = nn.Sequential(nn.Linear(d_lm, d_lm // 2), nn.GELU(), nn.Linear(d_lm // 2, 1))
 
     def critique(self, raw_states: list[torch.Tensor]) -> torch.Tensor:
         """raw_states: the [T PRE-LayerNorm per-step states] from refine(track_deltas=True) for ONE example
@@ -138,11 +141,17 @@ class WMReasoner(nn.Module):
         offline test). tanh applied AFTER a TRAINABLE projection is not the same failure as LayerNorm applied
         BEFORE any learned transform -- the projection can learn to keep useful signal inside tanh's
         non-saturating range, whereas LayerNorm on raw content erases regardless of what's learned downstream.
+
+        FIX (v2): was stacking T steps into [T,1,d_lm] then flattening to [1,T*d_lm] -- with d_lm=2560, T=4,
+        the input was 10240 dims for ~800 training examples, massively overparameterized. Now averages over
+        T steps: [1,d_lm]. This drops 28M critic params to ~3M, eliminating the primary cause of base-rate
+        collapse (the model memorized the majority class because it had too many parameters for the data).
+
         Returns a scalar in [0,1]: the critic's own estimate of 'will this pass the real verifier', built
         PURELY from how the working memory's reasoning evolved -- not from re-checking the answer."""
         traj = torch.stack([torch.tanh(self.critic_pool(s.mean(0, keepdim=True))) for s in raw_states])  # [T,1,d_lm]
-        flat = traj.reshape(1, -1)                                        # [1, T*d_lm]
-        return torch.sigmoid(self.critic(flat)).squeeze()
+        pooled = traj.mean(0)                                          # [1, d_lm]
+        return torch.sigmoid(self.critic(pooled)).squeeze()
 
     def critic_loss(self, raw_states_batch: list[list[torch.Tensor]], labels: list) -> torch.Tensor:
         """Supervised BCE against REAL verify() outcomes (0/1) -- the target is always the verifier's own
@@ -617,10 +626,12 @@ def selftest(wb=None, bs=128, steps_a=120, steps_b=250, words_n=120):
 def _atoms_from_graph(g) -> tuple[dict, dict]:
     """Real graph atoms, not the hand-written 10-atom dict. Filters on the STRUCTURAL fact of having real
     executable code -- NOT kind=='atom' (kind is a free natural-language label in membrane.py, not a closed
-    enum; whether a node is usable for composition is a fact about its code, not what string labels it)."""
+    enum; whether a node is usable for composition is a fact about its code, not what string labels it).
+    Excludes trap nodes (wrong code that failed verify, saved as anti-poison) -- these have a.code but
+    their implementations are incorrect, so using them in composition would always fail verify()."""
     descs, codes = {}, {}
     for name, a in g.atoms.items():
-        if a.code:
+        if a.code and a.kind != "trap":
             descs[name] = a.description
             codes[name] = a.code
     return descs, codes

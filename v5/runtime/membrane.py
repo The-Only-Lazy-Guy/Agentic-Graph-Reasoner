@@ -219,17 +219,71 @@ class AtomGraph:
 # ================================================================================================
 # 2. NEURAL RETRIEVAL — the real TRM re-scores atoms over T recursion steps, and it TRAINS
 # ================================================================================================
+# ================================================================================================
+# 2a. Graph Attention Encoder — produces graph-aware atom embeddings using edge structure
+# ================================================================================================
+# Edge type mapping: typed edges encode different relationships
+_EDGE_TYPES = {"depend": 0, "related": 1, "relates": 2, "uses": 3}
+
+
+class GraphAttnEncoder(nn.Module):
+    """Lightweight graph attention encoder: one message-passing layer over the atom graph.
+    Each atom's embedding is updated by attending over its neighbors (weighted by edge type
+    and learned edge strength), producing a graph-aware representation that cosine pre-filter
+    and the TRM both operate on.
+
+    Zero edges = identity (graph-unaware fallback, no degradation)."""
+
+    def __init__(self, d_in: int, d_hidden: int = 64, n_edge_types: int = 4):
+        super().__init__()
+        self.edge_type_emb = nn.Embedding(n_edge_types, 16)
+        self.W_msg = nn.Linear(d_in + 16, d_hidden)
+        self.W_self = nn.Linear(d_in, d_hidden)
+        self.W_out = nn.Linear(d_hidden, d_in)
+        self.norm = nn.LayerNorm(d_in)
+
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor,
+                edge_type: torch.Tensor, edge_strength: torch.Tensor) -> torch.Tensor:
+        """x: [N, d_in] atom embeddings.
+        edge_index: [2, E] (src -> dst).
+        edge_type: [E] index into n_edge_types.
+        edge_strength: [E] float weight in [0,1].
+        Returns [N, d_in] graph-aware embeddings."""
+        N = x.shape[0]
+        if edge_index.shape[-1] == 0:
+            return x
+        src, dst = edge_index[0], edge_index[1]
+        type_emb = self.edge_type_emb(edge_type)
+        src_feat = x[src]
+        msg_input = torch.cat([src_feat, type_emb], dim=-1)
+        msg = self.W_msg(msg_input) * edge_strength.unsqueeze(-1)
+        aggr = torch.zeros(N, msg.shape[-1], device=x.device, dtype=msg.dtype)
+        aggr = aggr.index_add_(0, dst, msg)
+        h = self.W_self(x) + aggr
+        h = torch.relu(h)
+        out = self.W_out(h)
+        return self.norm(x + out)
+
+
+# ================================================================================================
+# 2b. NEURAL RETRIEVAL — the real TRM re-scores atoms over T recursion steps, and it TRAINS
+# ================================================================================================
 class TRMRetriever:
     """Wraps the real TRMReasoner. rank(task) embeds the task + every atom (real MiniLM), runs the TRM's
     T-step recursion (attention over atoms, scratchpad refinement), and returns atoms by the final logits.
     train() does real supervised learning: put the gold atom's logit on top (cross-entropy). This is the
-    LEARNED reasoner — retrieval improves as it trains, and it re-embeds the graph as the graph grows."""
+    LEARNED reasoner — retrieval improves as it trains, and it re-embeds the graph as the graph grows.
+
+    GRAPH-AWARE PRE-FILTERING: a lightweight GraphAttnEncoder processes atom embeddings through the
+    graph's adjacency before cosine pre-filter. Atoms connected to similar atoms get aligned
+    representations, improving retrieval of structurally relevant atoms over isolated ones."""
 
     def __init__(self, graph: AtomGraph, d: int = 256, T: int = 5, device: str | None = None,
                  trm_top_k: int = 256):
         self.graph = graph
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.trm = TRMReasoner(d_in=EMBED_DIM, d=d, T=T).to(self.device)
+        self.graph_encoder = GraphAttnEncoder(d_in=EMBED_DIM, d_hidden=64).to(self.device)
         self._task_cache: dict[str, np.ndarray] = {}
         self.trm_top_k = trm_top_k                     # 0 = all atoms (backward compat); >0 = pre-filter to K
 
@@ -238,12 +292,40 @@ class TRMRetriever:
             self._task_cache[text] = encode_batch([text])[0]
         return self._task_cache[text]
 
-    def _prefilter(self, task_vec: torch.Tensor, A: torch.Tensor, order: list[str],
+    def _build_adj(self, order: list[str]):
+        """Build adjacency tensors from the current graph's edges for the GNN.
+        Returns (edge_index [2,E], edge_type [E], edge_strength [E]) or None if no edges."""
+        if not self.graph.edges:
+            return None
+        name_to_idx = {n: i for i, n in enumerate(order)}
+        edge_index, edge_type, edge_strength = [], [], []
+        for src, dst, rel in self.graph.edges:
+            if src in name_to_idx and dst in name_to_idx:
+                edge_index.append([name_to_idx[src], name_to_idx[dst]])
+                edge_type.append(_EDGE_TYPES.get(rel, 3))
+                edge_strength.append(self.graph.strength(src, dst, rel))
+        if not edge_index:
+            return None
+        return (torch.tensor(edge_index, dtype=torch.long, device=self.device).t(),
+                torch.tensor(edge_type, dtype=torch.long, device=self.device),
+                torch.tensor(edge_strength, dtype=torch.float32, device=self.device))
+
+    def _encode_graph(self, A: torch.Tensor, order: list[str]) -> torch.Tensor:
+        """Produce graph-aware atom embeddings via the GNN.
+        Falls back to raw A when there are no edges (e.g. seed graph)."""
+        adj = self._build_adj(order)
+        if adj is None:
+            return A
+        return self.graph_encoder(A, *adj)
+
+    def _prefilter(self, task_vec: torch.Tensor, A_raw: torch.Tensor, order: list[str],
                    gold_pos: int | None = None):
-        """Pre-filter atoms via fast cosine, then run the expensive TRM only on top-K.
+        """Encode atoms through the graph GNN, then pre-filter via cosine to top-K for TRM.
+        A_raw: original [N, d_in] embedding matrix before graph encoding.
         When gold_pos is given (training), force it into the candidate set so the gold can
         still be scored and trained on even if cosine ranks it outside top-K.
         Returns (A_sub, order_sub, gold_in_sub)."""
+        A = self._encode_graph(A_raw, order)                   # fresh GNN graph per call (avoids backward-through-graph-twice)
         if self.trm_top_k <= 0 or len(order) <= self.trm_top_k:
             return A, order, gold_pos
         cos_sims = A @ task_vec
@@ -283,7 +365,8 @@ class TRMRetriever:
         pos = {n: i for i, n in enumerate(order)}
         A = torch.from_numpy(M).to(self.device)
         data = [(self._embed_task(t), pos[g]) for t, g in examples if g in pos]
-        opt = torch.optim.Adam(self.trm.parameters(), lr=lr)
+        opt = torch.optim.Adam(
+            list(self.trm.parameters()) + list(self.graph_encoder.parameters()), lr=lr)
         self.trm.train()
         last = float("nan")
         for ep in range(epochs):
@@ -294,7 +377,7 @@ class TRMRetriever:
                 logits = self.trm(x, A_sub).unsqueeze(0)     # [1,K] where K <= trm_top_k
                 loss = nn.functional.cross_entropy(logits, torch.tensor([gold_sub], device=self.device))
                 opt.zero_grad(); loss.backward(); opt.step()
-                tot += float(loss)
+                tot += float(loss.detach())
             last = tot / max(1, len(data))
             if verbose and (ep % 20 == 0 or ep == epochs - 1):
                 print(f"    TRM epoch {ep:>3}  loss {last:.4f}", flush=True)
@@ -310,8 +393,10 @@ class TRMRetriever:
 
     def rebuild_from_graph(self, examples, **kw):
         """Fresh net trained PURELY from the graph's own (task->atom) evidence — proves the graph is the
-        memory (a reset net recovers the skill)."""
+        memory (a reset net recovers the skill). Also resets the graph encoder so the graph structure
+        itself (edges) must provide the inductive bias."""
         self.trm = TRMReasoner(d_in=EMBED_DIM, d=self.trm.d, T=self.trm.T).to(self.device)
+        self.graph_encoder = GraphAttnEncoder(d_in=EMBED_DIM, d_hidden=64).to(self.device)
         return self.train(examples, **kw)
 
 
