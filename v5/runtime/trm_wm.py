@@ -1017,10 +1017,12 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     # Build raw prompts (no chat template, to avoid special-token issues with teacher-forcing)
     def build_prompt(task_text, inner_name=None, outer_name=None):
         """Build tokenized prompt. If inner/outer atom names are provided (decoded from registers),
-        prepend them as an explicit composition hint so the LM knows the exact order.
-        Without this hint, GatedCrossAttn is set-like -- the LM can't tell which slot is inner vs outer."""
+        prepend them as an explicit CODE hint so the LM knows the exact composition to write.
+        Code form (outer(inner(n))) is unambiguous -- 'inner/outer' role labels are not, because
+        the LM interprets 'inner' as 'first in code left-to-right' (i.e. outer in function call
+        notation), causing systematic order reversal."""
         if inner_name and outer_name:
-            hint = f"# atoms: inner={inner_name}, outer={outer_name}\n"
+            hint = f"# return: {outer_name}({inner_name}(n))\n"
         else:
             hint = ""
         return wb.tok(f"{hint}Write a function task(n):\n# {task_text}\ndef task(n):",
@@ -1223,7 +1225,10 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 lm_loss = outs.loss
 
             ds_loss = R.ds_loss_batch(all_states, train_pool, all_gold)
-            loss = lm_loss + 0.1 * ds_loss
+            # DS weight 0.5: previously 0.1 caused the warmup alignment (ds_loss 0.067) to be
+            # obliterated by lm_loss in the very first epoch (ep0 ds_loss jumped back to 3.4).
+            # At 0.5, ds contribution ~1.7 > lm_loss ~0.06-0.12, preserving alignment.
+            loss = lm_loss + 0.5 * ds_loss
             opt.zero_grad()
             loss.backward()
             opt.step()
