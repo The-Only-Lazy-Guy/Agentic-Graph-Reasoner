@@ -696,7 +696,7 @@ def _compose_tasks_real(n_train: int = 48, n_held: int = 16, seed: int = 0):
     def _mk(outer, inner):
         text = outer_template[outer].format(inner=inner_phrase[inner])
         code = f"def task(n): return {outer}({inner}(n))"
-        return (text, [inner, outer], code)                 # atoms_needed order: inner first (applied first)
+        return (text, [inner, outer], code, f"{outer}({inner}(n))")
 
     train = [_mk(o, i) for o, i in pairs[:n_train]]
     held_out = [_mk(o, i) for o, i in pairs[n_train:n_train + n_held]]
@@ -846,11 +846,11 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     # Precompute static task embeddings and atom embeddings for all examples
     print("  Precomputing task + atom embeddings...")
     task_embs = {}
-    for text, atoms_needed, _ in all_tasks:
+    for text, atoms_needed, _, _ in all_tasks:
         if text not in task_embs:
             task_embs[text] = torch.as_tensor(encode_batch([text])[0], dtype=torch.float32, device=wb.device)
 
-    prompt_ids = {text: build_prompt(text) for text, _, _ in all_tasks}
+    prompt_ids = {text: build_prompt(text) for text, _, _, _ in all_tasks}
     # All 10 atom oracle functions (used for verification)
     def _fib(n):
         a, b = 0, 1
@@ -997,7 +997,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             R.eval()
             held_ok, ablated_ok = 0, 0
             dump = []
-            for task_emb, gold_idxs, atoms_needed, pids, text, target_code in held_ex:
+            for task_emb, gold_idxs, atoms_needed, pids, text, target_code, tests in held_ex:
                 # Use MiniLM atoms for TRM
                 held_mini_embs = torch.stack([
                     torch.as_tensor(encode_batch([atom_names[idx]])[0], dtype=torch.float32, device=wb.device)
@@ -1006,24 +1006,24 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 slots, wm_states, wm_deltas, wm_raw = R.refine(task_emb, held_mini_embs, track_deltas=True)
                 with torch.no_grad():
                     R.set_slots_direct(slots)
-                    out = wb.model.generate(pids, max_new_tokens=64,
+                    out = wb.model.generate(pids, max_new_tokens=128,
                                             do_sample=False, pad_token_id=wb.tok.eos_token_id)
                     code = wb.tok.decode(out[0][pids.shape[-1]:], skip_special_tokens=True).strip()
-                wm_ok = verify("def task(n): " + code, target_code)
+                wm_ok = verify(code, tests)
                 held_ok += int(wm_ok)
                 critic_examples.append(([s.detach() for s in wm_raw], wm_ok))
                 instability = R.trajectory_instability(wm_deltas)
                 R.clear()
                 with torch.no_grad():
-                    out = wb.model.generate(pids, max_new_tokens=64,
+                    out = wb.model.generate(pids, max_new_tokens=128,
                                             do_sample=False, pad_token_id=wb.tok.eos_token_id)
                     code_abl = wb.tok.decode(out[0][pids.shape[-1]:], skip_special_tokens=True).strip()
-                abl_ok = verify("def task(n): " + code_abl, target_code)
+                abl_ok = verify(code_abl, tests)
                 ablated_ok += int(abl_ok)
                 dump.append((text, target_code, code, wm_ok, code_abl, abl_ok, instability))
 
             # CO-TRAINING data (stage 1)
-            for task_emb, gold_idx, atoms_needed, pids, text, target_code in train_ex:
+            for task_emb, gold_idx, atoms_needed, pids, text, target_code, tests in train_ex:
                 K_atom_embs = torch.stack([
                     torch.as_tensor(encode_batch([atom_names[idx]])[0], dtype=torch.float32, device=wb.device)
                     for idx in gold_idx
@@ -1031,10 +1031,10 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 slots, tr_states, tr_deltas, tr_raw = R.refine(task_emb, K_atom_embs, track_deltas=True)
                 with torch.no_grad():
                     R.set_slots_direct(slots)
-                    out = wb.model.generate(pids, max_new_tokens=64,
+                    out = wb.model.generate(pids, max_new_tokens=128,
                                             do_sample=False, pad_token_id=wb.tok.eos_token_id)
                     tr_code = wb.tok.decode(out[0][pids.shape[-1]:], skip_special_tokens=True).strip()
-                tr_ok = verify("def task(n): " + tr_code, target_code)
+                tr_ok = verify(tr_code, tests)
                 critic_examples.append(([s.detach() for s in tr_raw], tr_ok))   # PRE-norm content + REAL label
                 R.clear()
             R.train()
