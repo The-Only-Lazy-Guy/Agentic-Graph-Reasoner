@@ -1055,6 +1055,12 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             inst_str = (f"  instab(pass/fail) {sum(inst_pass)/len(inst_pass):.3f}/"
                        f"{sum(inst_fail)/len(inst_fail):.3f}" if inst_pass and inst_fail else "")
             print(f"  held WM {held_ok}/{len(held_ex)}  ablated {ablated_ok}/{len(held_ex)}  {inst_str}")
+            if len(held_ex) <= 8:
+                for d in dump:
+                    t, tc, wm_code, wm_ok, abl_code, abl_ok, instab = d[:7]
+                    print(f"       target: {tc}")
+                    print(f"       WM:     {wm_code[:80]}  {'PASS' if wm_ok else 'FAIL'}  instab {instab:.3f}")
+                    print(f"       ablt:   {abl_code[:80]}  {'PASS' if abl_ok else 'FAIL'}")
 
     print(f"\n  [dump] final epoch, held-out generations (WM vs ablated) vs the verified target:")
     for row in (last_dump or []):
