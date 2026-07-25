@@ -27,14 +27,17 @@ import sys
 
 # ── TOOLS in the graph (pluggable; a tool may CALL another tool) ───────────────────────────────────
 class ToolNode:
-    def __init__(self, name, fn, description, calls=()):
+    def __init__(self, name, fn, description, calls=(), explain=None):
         self.name, self.fn, self.description = name, fn, description
         self.calls = tuple(calls)                       # other tool names this one activates (composition)
+        # explain = the KEY EXPLANATION POINT this node CONTRIBUTES to a narration. Lives IN THE GRAPH (not
+        # hardcoded in the narrator); edit it and every explanation that uses this node changes. {a}=arg, {r}=result.
+        self.explain = explain or description
 
 
 class ToolRegistry(dict):
-    def add(self, name, fn, description, calls=()):
-        self[name] = ToolNode(name, fn, description, calls)
+    def add(self, name, fn, description, calls=(), explain=None):
+        self[name] = ToolNode(name, fn, description, calls, explain)
 
     def run(self, name, state, arg):
         return self[name].fn(self, state, arg)          # fn(registry, state, arg) -> can call self.run(other,...)
@@ -42,14 +45,21 @@ class ToolRegistry(dict):
 
 def default_registry() -> ToolRegistry:
     r = ToolRegistry()
-    r.add("inc", lambda R, s, a: s + a, "add {a}")
-    r.add("dec", lambda R, s, a: s - a, "subtract {a}")
-    r.add("scale", lambda R, s, a: s * a, "multiply by {a}")
-    r.add("power", lambda R, s, a: s ** a, "raise to the power {a}")
-    r.add("wrap", lambda R, s, a: (s % a if a else float("nan")), "take modulo {a}")
-    # COMPOSED tools — activate other tools (atoms calling atoms):
-    r.add("double", lambda R, s, a: R.run("scale", s, 2), "double it", calls=("scale",))
-    r.add("square", lambda R, s, a: R.run("power", s, 2), "square it", calls=("power",))
+    r.add("inc", lambda R, s, a: s + a, "add {a}",
+          explain="add {a}, raising the running quantity to {r}")
+    r.add("dec", lambda R, s, a: s - a, "subtract {a}",
+          explain="subtract {a}, lowering the running quantity to {r}")
+    r.add("scale", lambda R, s, a: s * a, "multiply by {a}",
+          explain="scale by a factor of {a}, giving {r}")
+    r.add("power", lambda R, s, a: s ** a, "raise to the power {a}",
+          explain="raise to the power {a} (an area/growth step), giving {r}")
+    r.add("wrap", lambda R, s, a: (s % a if a else float("nan")), "take modulo {a}",
+          explain="wrap into a cyclic range of size {a} (a clock/modulo step), giving {r}")
+    # COMPOSED tools — activate other tools (atoms calling atoms); their explain notes the sub-tool it uses:
+    r.add("double", lambda R, s, a: R.run("scale", s, 2), "double it", calls=("scale",),
+          explain="double the value to {r} (built by calling the scale tool with factor 2)")
+    r.add("square", lambda R, s, a: R.run("power", s, 2), "square it", calls=("power",),
+          explain="square the value to {r} (built by calling the power tool with exponent 2)")
     return r
 
 

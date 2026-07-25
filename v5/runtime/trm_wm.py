@@ -87,142 +87,55 @@ class GatedCrossAttn(nn.Module):
 # ================================================================================================
 # AlgorithmicCell — explicit search, binding, and branching for a true reasoning engine
 # ================================================================================================
-class AlgorithmicCell(nn.Module):
-    """An algorithmic reasoning cell providing explicit operations missing from a standard MLP:
-    1. Search: Cross-attention to the retrieved memory (graph atoms).
-    2. Variable Binding: Self-attention among working memory registers and the task.
-    3. Branching: Gated state updates (highway/GRU style)."""
-    def __init__(self, d_lm: int, n_heads: int = 4):
-        super().__init__()
-        self.cross_attn = nn.MultiheadAttention(d_lm, n_heads, batch_first=False)
-        self.self_attn = nn.MultiheadAttention(d_lm, n_heads, batch_first=False)
-        self.ff = nn.Sequential(nn.Linear(d_lm, d_lm * 2), nn.GELU(), nn.Linear(d_lm * 2, d_lm))
-        self.norm1 = nn.LayerNorm(d_lm)
-        self.norm2 = nn.LayerNorm(d_lm)
-        self.norm3 = nn.LayerNorm(d_lm)
-        self.gate = nn.Linear(d_lm * 2, d_lm)
 
-    def forward(self, s: torch.Tensor, z_mem: torch.Tensor, q: torch.Tensor):
-        s_sq = s.unsqueeze(1)
-        z_mem_sq = z_mem.unsqueeze(1)
-        q_sq = q.view(1, 1, -1)
-        
-        # 1. Search / Fetch from graph memory (Cross-Attention)
-        s_fetch, _ = self.cross_attn(query=s_sq, key=z_mem_sq, value=z_mem_sq)
-        s_nxt = self.norm1(s + s_fetch.squeeze(1))
-        
-        # 2. Variable Binding / Planning (Attend to task + other registers)
-        ctx = torch.cat([q_sq, s_nxt.unsqueeze(1)], dim=0)
-        s_bind, _ = self.self_attn(query=s_nxt.unsqueeze(1), key=ctx, value=ctx)
-        s_nxt = self.norm2(s_nxt + s_bind.squeeze(1))
-        
-        # 3. Branching / Update (Gated transition)
-        s_upd = self.ff(s_nxt)
-        g = torch.sigmoid(self.gate(torch.cat([s_nxt, s_upd], dim=-1)))
-        
-        raw_update = g * s_upd
-        s_pre = s_nxt + raw_update
-        s_out = self.norm3(s_pre)
-        
-        return s_pre, s_out, raw_update
 
 
 # ================================================================================================
 # WMReasoner — the working memory + its recursive refinement + the coupling hooks + deep supervision
 # ================================================================================================
 class WMReasoner(nn.Module):
-    """K working-memory slots, initialized from retrieved atom embeddings, refined by T recursion steps
-    (the real TRM role: iterative refinement), then read by the LM via gated cross-attention adapters.
+    """Working memory slots produced by TRMReasoner (proper two-latent Tiny Recursive Model),
+    projected to LM space, then read by the LM via gated cross-attention adapters.
 
-    DEEP SUPERVISION: a lightweight retrieval head reads the working memory at each refinement step t
-    and scores all candidate answers (cosine sim against answer_pool). CE loss at every step forces the
-    entire refinement trajectory to converge toward the target, not just the final state."""
-    def __init__(self, d_lm: int, couple_layers, d_emb: int = EMBED_DIM, T: int = 4, n_heads: int = 4, M: int = 4):
+    DEEP SUPERVISION: intermediate y_t values from each TRM cycle are regressed against
+    oracle-computed intermediate targets (native_text_embedding of true intermediate results).
+    Loss is MSE in d_lm space — NOT CE against atom pools (TRM is not a ranker)."""
+    def __init__(self, d_lm: int, couple_layers, trm, n_heads: int = 4, M: int = 4):
         super().__init__()
-        self.T = T
+        self.T = trm.T
         self.M = M
-        # MODALITY PROJECTOR (2-layer GELU): translate KG/MiniLM geometry -> the decoder's native space, so
-        # the cross-attention isn't handed 'foreign noise'. A single Linear is too weak to bridge the gap.
-        self.proj_atom = nn.Sequential(nn.Linear(d_emb, d_lm), nn.GELU(), nn.Linear(d_lm, d_lm))
-        self.proj_task = nn.Linear(d_emb, d_lm)
-        
-        self.cell = AlgorithmicCell(d_lm, n_heads)
-        self.register_init = nn.Parameter(torch.randn(M, d_lm) * 0.02)
+        self.trm = trm                                         # shared TRMReasoner (two-latent)
+
+        # Project TRM's y_t [T, d] → [T, d_lm] for LM adapters
+        self.proj_y = nn.Linear(trm.d, d_lm)
+
+        # Gated cross-attention adapters (unchanged)
         self.adapters = nn.ModuleList([GatedCrossAttn(d_lm, n_heads) for _ in couple_layers])
         self.couple_layers = list(couple_layers)
         self._slots = None
 
-        self.ds_pool = nn.Linear(d_lm, d_lm)
-        self.ds_proj = nn.Linear(d_lm, d_lm)
-        # temperature for the DS cosine logits. q and pool are L2-normalized -> logits in [-1,1]; dividing by
-        # sqrt(d_lm) (~50) flattens them to ~uniform (ds_loss stuck at ln N, no gradient). 0.07 SHARPENS them.
-        self._ds_scale = 0.07
+        # Deep supervision: map y_t [d] → d_lm for MSE against native_text_embedding targets
+        self.ds_proj = nn.Linear(trm.d, d_lm)
 
-        # SELF-CRITIQUE (tier-4 amortizer -- same doctrine as algo_grr_cot.py's critic): predicts the REAL
-        # verifier's verdict FROM THE REASONING TRAJECTORY itself ("does this look right"), not by calling
-        # the oracle. Trained supervised on (trajectory, real verify() outcome) pairs -- never the model's
-        # own unverified guess (same anti-poison target discipline as trainer.py, applied to the critic).
-        # NEVER certifies a trace for banking on its own -- amortizes which attempts are worth a real verify
-        # call / flags likely mistakes for retry. Needs no answer_pool -- works for free-form answers too.
-        # OWN pooling head (was reusing ds_pool): ds_pool is trained for a DIFFERENT objective (retrieval
-        # margin against an answer pool), so its representation isn't necessarily informative about
-        # generation-cleanliness (whether decoding stays valid vs degenerates/hallucinates a wrong name) --
-        # a first real run collapsed to exactly the base rate, and a shared, objective-fighting pooling
-        # layer was one of two diagnosed causes (the other: class imbalance, fixed at the training-loop level).
+        # Self-critique (unchanged)
         self.critic_pool = nn.Linear(d_lm, d_lm)
-        # CRITIC FIX: was nn.Linear(self.T * d_lm, d_lm) which for d_lm=2560, T=4 gives 10240 input dim
-        # with only ~800 training examples -- massively overparameterized, collapsed to base rate.
-        # Now averages over T steps: input is just d_lm, params are ~3M instead of ~28M.
         self.critic = nn.Sequential(nn.Linear(d_lm, d_lm // 2), nn.GELU(), nn.Linear(d_lm // 2, 1))
 
     def critique(self, raw_states: list[torch.Tensor]) -> torch.Tensor:
-        """raw_states: the [T PRE-LayerNorm per-step states] from refine(track_deltas=True) for ONE example
-        -- NOT the post-norm `states`. FIX: this used to take post-norm states, and the critic degenerately
-        collapsed to predicting the majority/minority class 4/4 real runs (0.62==base, 0.72==base,
-        0.31==1-base, 0.34==1-base) -- a 4x data increase (stage 1) did NOT move it, ruling out sample size
-        and pointing at the same LayerNorm content-erasure bug already found and fixed in
-        trajectory_instability. KEEP the tanh here (unlike trajectory_instability, which dropped it): raw_
-        states has no LayerNorm controlling its scale anymore, so critic_pool's output is UNBOUNDED --
-        without a bound, sigmoid saturates to exactly 0/1 and BCE explodes (measured: loss 0.71 -> 50 in an
-        offline test). tanh applied AFTER a TRAINABLE projection is not the same failure as LayerNorm applied
-        BEFORE any learned transform -- the projection can learn to keep useful signal inside tanh's
-        non-saturating range, whereas LayerNorm on raw content erases regardless of what's learned downstream.
-
-        FIX (v2): was stacking T steps into [T,1,d_lm] then flattening to [1,T*d_lm] -- with d_lm=2560, T=4,
-        the input was 10240 dims for ~800 training examples, massively overparameterized. Now averages over
-        T steps: [1,d_lm]. This drops 28M critic params to ~3M, eliminating the primary cause of base-rate
-        collapse (the model memorized the majority class because it had too many parameters for the data).
-
-        Returns a scalar in [0,1]: the critic's own estimate of 'will this pass the real verifier', built
-        PURELY from how the working memory's reasoning evolved -- not from re-checking the answer."""
-        traj = torch.stack([torch.tanh(self.critic_pool(s.mean(0, keepdim=True))) for s in raw_states])  # [T,1,d_lm]
-        pooled = traj.mean(0)                                          # [1, d_lm]
-        return torch.sigmoid(self.critic(pooled)).squeeze()
+        """raw_states: [T per-step projected y_t values in d_lm space] from refine(track_deltas=True)."""
+        state = torch.stack(raw_states, dim=0)  # [T, d_lm]
+        pooled = torch.tanh(self.critic_pool(state))  # [T, d_lm]
+        return torch.sigmoid(self.critic(pooled.mean(0, keepdim=True))).squeeze()  # [1, d_lm] → scalar
 
     def critic_loss(self, raw_states_batch: list[list[torch.Tensor]], labels: list) -> torch.Tensor:
-        """Supervised BCE against REAL verify() outcomes (0/1) -- the target is always the verifier's own
-        past label, never the model's own guess, exactly the anti-poison discipline already established for
-        the LM (trainer.py), now applied to the critic."""
         preds = torch.stack([self.critique(s) for s in raw_states_batch])
         y = torch.tensor([float(l) for l in labels], device=preds.device)
         return nn.functional.binary_cross_entropy(preds, y)
 
     def trajectory_instability(self, deltas: list) -> float:
-        """FAST, LABEL-FREE mistake signal (per user request: 'fast noticeable mistakes', not the slower
-        learned critic which needs GPU rounds just to validate it exists). No training, no labels.
-
-        deltas: the per-step PRE-LayerNorm update magnitudes from refine(track_deltas=True).
-
-        FIX (v2): the first version measured cosine-distance between POST-LayerNorm pooled states -- but
-        refine() applies LayerNorm every step, which renormalizes z's scale back to a fixed range
-        REGARDLESS of content, actively erasing the 'how much did this step want to move' signal this
-        metric needs. Empirically confirmed broken: 3 different random tasks at real model scale (d_lm=2560)
-        landed within 0.0005 of each other, and a real GPU run showed literally EVERY held-out task at the
-        exact same instab=0.059 regardless of pass/fail -- a metric that's constant regardless of input is
-        not measuring anything. Now measures the RAW update norm BEFORE LayerNorm erases it: does the
-        proposed change SHRINK over the recursion (settling = converged = low instability) or stay as large
-        as it started (still churning = hasn't converged = high instability)? Returns a ratio: late-step
-        mean / early-step mean. >1 = not settling (bad), <1 = settling (good)."""
+        """Measures convergence of y_t values across TRM cycles.
+        deltas: per-cycle ||y_{t+1} - y_t|| norms.
+        Returns late/early ratio. <1 = settling (good), >1 = still churning."""
         if len(deltas) < 2:
             return 1.0
         vals = [float(d) for d in deltas]
@@ -234,90 +147,38 @@ class WMReasoner(nn.Module):
 
     def refine(self, task_emb: torch.Tensor, atom_embs: torch.Tensor, native: bool = False,
               track_deltas: bool = False):
-        """task_emb [d_emb], atom_embs [K,d_emb] (or [K,d_lm] if native=True) -> (working_memory [K,d_lm],
-        per_step_states [[K,d_lm],...]) or, if track_deltas=True, 2 more return values: per-step
-        PRE-LayerNorm update magnitudes (deltas) AND per-step PRE-LayerNorm content (raw_states). LayerNorm
-        renormalizes z's scale every step, which erases BOTH the 'how much did this move' signal
-        (trajectory_instability's fix) AND, it turns out, enough CONTENT that the learned critic degenerately
-        collapsed 4/4 real runs even after a 4x data increase ruled out sample size as the cause -- raw_states
-        is the same pre-erasure fix, now feeding critique() too. Backward-compatible: default False keeps the
-        old 2-value return, every existing caller unaffected. native=True: atom_embs are ALREADY in the LM's
-        own embedding space (see native_text_embedding) -- skip proj_atom's MiniLM->LM bridge, which probe B
-        showed collapses on held-out; probe C showed native-space injection generalizes (0.19->0.29 under
-        dilution)."""
-        q = self.proj_task(task_emb)
-        if native:
-            d_lm = self.register_init.shape[-1]
-            assert atom_embs.shape[-1] == d_lm, (
-                f"refine(native=True) requires atom_embs already in the LM's own d_lm space "
-                f"(got last dim {atom_embs.shape[-1]}, expected {d_lm}) -- produce it via native_text_embedding, "
-                f"not a foreign encoder like MiniLM (that bridge collapses on held-out, see probe B).")
-        z_mem = atom_embs if native else self.proj_atom(atom_embs)
-        
-        # Initialize explicit reasoning registers
-        s = self.register_init + q.unsqueeze(0)
-        
-        states = []
-        deltas = [] if track_deltas else None
-        raw_states = [] if track_deltas else None
-        for _ in range(self.T):
-            s_pre, s, raw_update = self.cell(s, z_mem, q)
-            states.append(s.clone())  # Deep supervision targets reasoning registers only
-            if track_deltas:
-                deltas.append(raw_update.norm(dim=-1).mean().detach())
-                raw_states.append(s_pre.detach())  # Critic targets reasoning registers only
-        
-        combined_out = torch.cat([z_mem, s], dim=0)
-        if track_deltas:
-            return combined_out, states, deltas, raw_states
-        return combined_out, states
+        """task_emb [d_in], atom_embs [N, d_in] (both in TRM's d_in space, typically MiniLM 384-d).
+        Runs the proper TRM (two-latent, cross-attn) to produce per-cycle y_t solution embeddings,
+        projects to d_lm for GatedCrossAttn adapters.
 
-    def ds_loss_batch(self, all_states: list[list[torch.Tensor]], answer_pool: torch.Tensor, all_atoms_needed: list[list[int]]) -> torch.Tensor:
-        """Batch deep supervision: explicit sequential supervision of reasoning registers.
-        s[0] is forced to fetch the first atom, s[1] the second, etc."""
-        dev = answer_pool.device
+        native=True is ACCEPTED for backward compat but no longer needed — TRMReasoner handles
+        its own internal projections regardless of input space."""
+        y_t = self.trm(task_emb, atom_embs)                    # [T, trm.d]
+        slots = self.proj_y(y_t)                               # [T, d_lm] — working memory
+        self._slots = slots
+        states = [y_t[i] for i in range(self.T)]                # per-step y_t for DS
+
+        if track_deltas:
+            deltas = [(y_t[i + 1] - y_t[i]).norm().item() for i in range(self.T - 1)] if self.T > 1 else [0.0]
+            raw_states = [s.detach() for s in slots]            # projected y_t in d_lm space for critic
+            return slots, states, deltas, raw_states
+        return slots, states
+
+    def ds_loss_batch(self, all_states: list[list[torch.Tensor]], targets: torch.Tensor | None = None,
+                      _unused=None) -> torch.Tensor:
+        """Deep supervision on intermediate y_t values. MSE between ds_proj(y_t[t]) and target[t]
+        in d_lm space. targets: [B, T, d_lm] oracle-computed intermediate values via
+        native_text_embedding, or None (returns 0)."""
         B = len(all_states)
         T = len(all_states[0]) if all_states else 1
-        M = all_states[0][0].shape[0]
-        # [B, T, M, d_lm]
-        flat = torch.stack([torch.stack(s) for s in all_states], dim=0).float().to(dev)
-        
-        loss = 0.0
-        max_targets = max(len(needed) for needed in all_atoms_needed)
-        n_supervised = min(M, max_targets)
-        
-        for i in range(n_supervised):
-            # s_i: [B, T, d_lm] -> [B*T, d_lm]
-            s_i = flat[:, :, i, :].reshape(B * T, -1)
-            pooled = torch.tanh(self.ds_pool(s_i))
-            q = self.ds_proj(pooled)
-            q = q / (q.norm(dim=-1, keepdim=True) + 1e-8)
-            logits = q @ answer_pool.float().T / self._ds_scale  # [B*T, N]
-            
-            gold_i = [needed[i] if i < len(needed) else needed[-1] for needed in all_atoms_needed]
-            gold_i_t = torch.tensor(gold_i, device=dev).repeat_interleave(T)
-            loss = loss + nn.functional.cross_entropy(logits, gold_i_t)
-            
-        return loss / max(1, n_supervised)
+        dev = self._device()
 
-    def align_projector(self, kg_embs: torch.Tensor, lm_targets: torch.Tensor,
-                        steps: int = 300, lr: float = 1e-3) -> float:
-        """MODALITY PRE-ALIGNMENT (CLIP): train proj_atom so KG (MiniLM) embeddings land in the LM's OWN
-        representation space -> cross-attention stops seeing foreign noise. kg_embs [N,d_emb], lm_targets
-        [N,d_lm] (the LM's embedding of each atom). Trains proj_atom only; symmetric InfoNCE."""
-        opt = torch.optim.Adam(self.proj_atom.parameters(), lr=lr, weight_decay=1e-2)  # resist memorizing the pairs
-        T = lm_targets / (lm_targets.norm(dim=-1, keepdim=True) + 1e-8)
-        last = float("nan")
-        for _ in range(steps):
-            P = self.proj_atom(kg_embs)
-            P = P / (P.norm(dim=-1, keepdim=True) + 1e-8)
-            logits = P @ T.t() / 0.07
-            labels = torch.arange(P.shape[0], device=P.device)
-            loss = 0.5 * (nn.functional.cross_entropy(logits, labels) +
-                          nn.functional.cross_entropy(logits.t(), labels))
-            opt.zero_grad(); loss.backward(); opt.step()
-            last = float(loss.detach())
-        return last
+        if targets is None or targets.shape[0] != B:
+            return torch.tensor(0.0, device=dev)
+
+        flat = torch.stack([torch.stack(s) for s in all_states], dim=0).float().to(dev)
+        y_t_proj = self.ds_proj(flat)                           # [B, T, d_lm]
+        return nn.functional.mse_loss(y_t_proj, targets.float().to(dev))
 
     def set_context(self, task_emb, atom_embs):
         te = torch.as_tensor(task_emb, dtype=torch.float32, device=self._device())
@@ -333,29 +194,29 @@ class WMReasoner(nn.Module):
         self._slots = None
 
     def save(self, path: str):
-        """Persist the trained adapter (state_dict + the small shape config needed to reconstruct it) --
-        was missing entirely: trm_wm.py --run trains a real, verified adapter (16/16 held-out proven) but it
-        vanished the moment the process exited. Needed to ever load a trained adapter into membrane.py."""
+        """Persist the trained adapter + TRMReasoner."""
         torch.save({
             "state_dict": self.state_dict(),
-            "d_lm": self.proj_task.out_features,
+            "d_lm": self.proj_y.out_features,
             "couple_layers": self.couple_layers,
             "T": self.T,
+            "trm_d": self.trm.d,
+            "trm_d_in": self.trm.d_in,
             "n_heads": self.adapters[0].h if len(self.adapters) else 4,
-            "M": self.M,
         }, path)
 
     @classmethod
-    def load(cls, path: str, map_location=None) -> "WMReasoner":
-        """Reconstruct a WMReasoner from a save()'d checkpoint -- shape config first, then the weights."""
+    def load(cls, path: str, trm, map_location=None) -> "WMReasoner":
+        """Reconstruct a WMReasoner from a save()'d checkpoint.
+        Requires an already-constructed TRMReasoner instance (passed as `trm`)."""
         blob = torch.load(path, map_location=map_location, weights_only=False)
-        M = blob.get("M", 4)
-        R = cls(blob["d_lm"], blob["couple_layers"], T=blob["T"], n_heads=blob["n_heads"], M=M)
+        R = cls(blob["d_lm"], blob["couple_layers"], trm,
+                n_heads=blob["n_heads"], M=blob.get("M", 4))
         R.load_state_dict(blob["state_dict"], strict=False)
         return R
 
     def _device(self):
-        return self.proj_task.weight.device
+        return self.proj_y.weight.device
 
     def couple(self, wb) -> list:
         handles = []
@@ -421,7 +282,9 @@ def _vocab_words(tok, n: int = 120):
 
 def _run_probe(wb, R, pids, train, test, precomputed_states, answer_pool, tid_of,
                steps=200, lr=3e-3, bs=128, ds_weight=0.15, dump=0):
-    """precomputed_states: list of [[K,d_lm], ...] per-step states for each word, one refine per word."""
+    """precomputed_states: list of [[K,d_lm], ...] per-step states for each word, one refine per word.
+    ds_weight > 0 calls ds_loss_batch(all_states, targets=None) which returns 0 with new MSE-based DS —
+    the old atom-pool CE is removed. Set ds_weight=0 unless you provide targets."""
     k = len(train)
     # gate gets its OWN param group with much higher weight decay: unconstrained, it swung to tanh~0.97 (almost
     # fully open) with nothing pulling it back, letting a high-magnitude, largely unconstrained edit memorize
@@ -452,13 +315,9 @@ def _run_probe(wb, R, pids, train, test, precomputed_states, answer_pool, tid_of
             lm_loss = nn.functional.cross_entropy(
                 logits, torch.tensor([tid_of[train[j][0]] for j in idx], device=wb.device))
 
-            if ds_weight > 0 and answer_pool is not None:
-                state_list = []
-                gold_list = []
-                for bi, j in enumerate(idx):
-                    state_list.append(precomputed_states[j])
-                    gold_list.append([j])
-                ds_acc = R.ds_loss_batch(state_list, answer_pool.to(wb.device), gold_list)
+            if ds_weight > 0:
+                state_list = [precomputed_states[j] for j in idx]
+                ds_acc = R.ds_loss_batch(state_list, targets=None)
                 loss = lm_loss + ds_weight * ds_acc
             else:
                 loss = lm_loss
@@ -498,32 +357,42 @@ def _run_probe(wb, R, pids, train, test, precomputed_states, answer_pool, tid_of
     te_abl = acc(test, ablate=True)
     if dump:
         base = len(train)
-        print(f"       [dump] held-out  target -> top-5 predicted (slot injected):")
-        for j in range(min(dump, len(test))):
-            w, tokid = test[j]
-            R.set_slots_direct(precomputed_states[base + j][-1].unsqueeze(0).to(wb.device).detach())
-            with torch.no_grad():
-                lg = wb.model(pids).logits[0, -1]
-            top = lg.topk(5).indices.tolist()
-            toks = ", ".join(repr(wb.tok.decode([t])) for t in top)
-            print(f"          {w!r:>12} (tok {tokid}) -> {toks}  {'<- HIT' if top[0] == tokid else ''}")
+        try:
+            out_lines = [f"       [dump] held-out  target -> top-5 predicted (slot injected):"]
+            for j in range(min(dump, len(test))):
+                w, tokid = test[j]
+                R.set_slots_direct(precomputed_states[base + j][-1].unsqueeze(0).to(wb.device).detach())
+                with torch.no_grad():
+                    lg = wb.model(pids).logits[0, -1]
+                top = lg.topk(5).indices.tolist()
+                toks = ", ".join(repr(wb.tok.decode([t])) for t in top)
+                out_lines.append(f"          {w!r:>12} (tok {tokid}) -> {toks}  {'<- HIT' if top[0] == tokid else ''}")
+            print("\n".join(out_lines))
+        except UnicodeEncodeError:
+            pass  # terminal encoding may not support special chars; skip dump
     return tr, te, te_abl, float(R.adapters[0].g), last
 
 
-def selftest(wb=None, bs=128, steps_a=120, steps_b=250, words_n=120):
+def selftest(wb=None, bs=128, steps_a=120, words_n=120):
     from v5.runtime.dcpd_latent import WhiteBox
+    from v5.runtime.algo_trm import _build as _build_trm
     torch.manual_seed(0)
+
+    _, _, TRMReasoner = _build_trm()
+
     if wb is None:
-        print("trm_wm.py --selftest : TRM working memory coupled to a FROZEN distilgpt2 (mechanism proof)\n")
+        print("trm_wm.py --selftest : WMReasoner (TRM V3) coupled to FROZEN distilgpt2\n")
         wb = WhiteBox("distilgpt2", quant="fp32")
         if os.environ.get("GRAPH_FORCE_CPU"):
             wb.model = wb.model.to("cpu"); wb.device = "cpu"
             print("  (forced CPU)")
     else:
-        print(f"trm_wm.py --probe on {wb.name} (real LM): copy(A) + bridge(B) mechanism test on a capable model\n")
+        print(f"trm_wm.py --probe on {wb.name}: WMReasoner+TRM mechanism test\n")
     d_lm = wb.d_model
-    couple = [wb.n_layers - 2, wb.n_layers - 1]         # last two layers (was [4,5] for distilgpt2's 6)
-    R = WMReasoner(d_lm, couple_layers=couple).to(wb.device)
+    couple = [wb.n_layers - 2, wb.n_layers - 1]
+
+    trm = TRMReasoner(d_in=EMBED_DIM, d=256, T=4, n_heads=4)
+    R = WMReasoner(d_lm, couple_layers=couple, trm=trm).to(wb.device)
     for p in wb.model.parameters():
         p.requires_grad_(False)
     handles = R.couple(wb)
@@ -552,122 +421,60 @@ def selftest(wb=None, bs=128, steps_a=120, steps_b=250, words_n=120):
     with torch.no_grad():
         R.adapters[0].g.zero_()
 
-    # INJECT IN THE OUTPUT (unembedding) SPACE. logit_w = final_hidden . lm_head[w]; to make the LM emit w you
-    # must push the hidden toward the OUTPUT embedding of w, NOT the input embedding. They're equal only when
-    # the model TIES them (distilgpt2 does -> probe A "worked"); Qwen UNTIES them -> input-emb probe A can't
-    # generalize (0.88 on distilgpt2 was a tying artifact). get_output_embeddings==input for tied models.
+    # INJECT IN THE OUTPUT (unembedding) SPACE
     tie = bool(getattr(wb.model.config, "tie_word_embeddings", False))
     _out = wb.model.get_output_embeddings()
     lm_emb = (_out.weight if _out is not None else wb.model.get_input_embeddings().weight)
     print(f"  tie_word_embeddings={tie} -> inject in the {'tied' if tie else 'OUTPUT/unembedding'} space\n")
-    ans_idx = {w: i for i, (w, _) in enumerate(words)}
     answer_pool = torch.stack([lm_emb[tid_of[w]] for w, _ in words], dim=0)
     answer_pool = answer_pool / (answer_pool.norm(dim=-1, keepdim=True) + 1e-8)
 
-    # PROBE A — WIRING: precompute ALL per-step states at once
+    # PROBE A — WIRING: precompute ALL per-step states (direct slot injection, bypasses TRM)
     states_a = []
     for w, _ in words:
-        z_a = lm_emb[tid_of[w]].detach()  # [d_lm]
+        z_a = lm_emb[tid_of[w]].detach()
         states_a.append([z_a.unsqueeze(0).clone() for _ in range(R.T)])
     tr_a, te_a, ab_a, g_a, l_a = _run_probe(
-        wb, R, pids, train_w, test_w, states_a, answer_pool, tid_of, steps=steps_a, bs=bs, ds_weight=0.15, dump=6)
+        wb, R, pids, train_w, test_w, states_a, answer_pool, tid_of,
+        steps=steps_a, bs=bs, ds_weight=0.0, dump=6)
     print(f"  (A) WIRING  (slot = LM's own embedding):  train {tr_a:.2f}  HELD-OUT {te_a:.2f}  "
           f"ablate->0 {ab_a:.2f}  gate {g_a:+.2f}  loss {l_a:.3f}")
 
-    # PROBE B — BRIDGE (slot from MiniLM graph space). Run RAW vs CLIP-ALIGNED to isolate the modality gap.
-    for h in handles:
-        h.remove()
+    # PROBE D — TRM INTEGRATION: run TRMReasoner through WMReasoner.refine()
+    trm2 = TRMReasoner(d_in=EMBED_DIM, d=256, T=4, n_heads=4)
+    Rd = WMReasoner(d_lm, couple_layers=couple, trm=trm2).to(wb.device)
+    hd = Rd.couple(wb)
+    states_d = []
     task_emb = torch.as_tensor(encode_batch([prompt])[0], dtype=torch.float32, device=wb.device)
-    memb = {w: torch.as_tensor(encode_batch([w])[0], dtype=torch.float32, device=wb.device) for w, _ in words}
-    align_kg = torch.stack([memb[w] for w, _ in train_w])                    # MiniLM of TRAIN atoms only
-    align_tgt = torch.stack([lm_emb[tid_of[w]].float() for w, _ in train_w]) # the LM's own embedding of each
-    te_b, bridge_res = 0.0, {}
-    for tag, do_align in (("raw", False), ("CLIP-aligned", True)):
-        Rb = WMReasoner(d_lm, couple_layers=couple).to(wb.device)
-        hb = Rb.couple(wb)
-        al = Rb.align_projector(align_kg, align_tgt, steps=300) if do_align else None
-        states_b = []
-        with torch.no_grad():
-            for w, _ in words:
-                # feed the projector output DIRECTLY as the slot (parallel to probe A's e_w) -- do NOT push it
-                # through the random-init recursion, which scrambles the alignment before the adapter reads it.
-                z = Rb.proj_atom(memb[w].unsqueeze(0)).detach()              # [1,d_lm]; aligned -> ~ e_w
-                states_b.append([z.clone() for _ in range(Rb.T)])
-        tr_b, te_b, ab_b, g_b, l_b = _run_probe(
-            wb, Rb, pids, train_w, test_w, states_b, answer_pool, tid_of, steps=steps_b, bs=bs, ds_weight=0.15,
-            dump=(6 if do_align else 0))
-        bridge_res[tag] = te_b
-        alstr = f"  align_loss {al:.2f}" if al is not None else ""
-        print(f"  (B:{tag:>12}) BRIDGE MiniLM->LM:  train {tr_b:.2f}  HELD-OUT {te_b:.2f}  "
-              f"ablate {ab_b:.2f}  gate {g_b:+.2f}{alstr}")
-        if do_align:
-            # RECURSED variant: push the ALIGNED slot through the actual T-step refine() this time (per the
-            # finding that probe B previously bypassed the TRM's own recursion entirely). upd/norm are still
-            # RANDOM/untrained here (states are precomputed once, detached, like every other probe) -- this
-            # isolates whether random recursion further scrambles the aligned signal, or leaves it roughly
-            # intact, without yet committing to training the recursion weights themselves.
-            states_b_rec = []
-            with torch.no_grad():
-                for w, _ in words:
-                    _, states = Rb.refine(task_emb, memb[w].unsqueeze(0))
-                    states_b_rec.append([s.clone().detach() for s in states])
-            tr_r, te_r, ab_r, g_r, l_r = _run_probe(
-                wb, Rb, pids, train_w, test_w, states_b_rec, answer_pool, tid_of,
-                steps=steps_b, bs=bs, ds_weight=0.15, dump=6)
-            bridge_res["CLIP-aligned+recursed"] = te_r
-            print(f"  (B:CLIP+recursed) BRIDGE through TRM's OWN recursion:  train {tr_r:.2f}  HELD-OUT {te_r:.2f}  "
-                  f"ablate {ab_r:.2f}  gate {g_r:+.2f}")
-        for h in hb:
-            h.remove()
-    handles = []
-
-    # PROBE C — NATIVE-SPACE, MULTI-TOKEN: mean-pool a short carrier phrase's tokens through the LM's OWN
-    # embedding table (zero cross-model gap, unlike B) -- tests whether probe A's win survives when the
-    # target's signal is DILUTED by surrounding phrase tokens, the realistic shape of a graph atom's
-    # natural-language description (not a bare single-token embedding).
-    Rc = WMReasoner(d_lm, couple_layers=couple).to(wb.device)
-    hc = Rc.couple(wb)
-    states_c = []
     with torch.no_grad():
         for w, _ in words:
-            ids = wb.tok(f"the concept of {w}", return_tensors="pt").input_ids.to(wb.device)
-            z_c = lm_emb[ids[0]].mean(0).detach()          # mean-pool -> ONE vector, still fully native space
-            states_c.append([z_c.unsqueeze(0).clone() for _ in range(Rc.T)])
-    tr_c, te_c, ab_c, g_c, l_c = _run_probe(
-        wb, Rc, pids, train_w, test_w, states_c, answer_pool, tid_of, steps=steps_a, bs=bs, ds_weight=0.15, dump=6)
-    print(f"  (C) NATIVE-PHRASE (mean-pooled LM-own embedding, diluted):  train {tr_c:.2f}  HELD-OUT {te_c:.2f}  "
-          f"ablate->0 {ab_c:.2f}  gate {g_c:+.2f}  loss {l_c:.3f}")
-    for h in hc:
+            atom_emb = torch.as_tensor(encode_batch([w])[0], dtype=torch.float32, device=wb.device)
+            slots, y_states = Rd.refine(task_emb, atom_emb.unsqueeze(0))
+            slots_direct = slots.detach()
+            # Use the FINAL y_t as the slot (same per-step states for all T for probe compat)
+            states_d.append([slots_direct[i].unsqueeze(0).clone() if i < len(slots_direct)
+                           else slots_direct[-1].unsqueeze(0).clone() for i in range(Rd.T)])
+    tr_d, te_d, ab_d, g_d, l_d = _run_probe(
+        wb, Rd, pids, train_w, test_w, states_d, answer_pool, tid_of,
+        steps=steps_a, bs=bs, ds_weight=0.0, dump=6)
+    print(f"  (D) TRM-INTEG  (TRM y_t -> proj_y -> slots):  train {tr_d:.2f}  HELD-OUT {te_d:.2f}  "
+          f"ablate->0 {ab_d:.2f}  gate {g_d:+.2f}  loss {l_d:.3f}")
+    for h in hd:
         h.remove()
 
-    print()
-    raw_b, al_b = bridge_res.get("raw", 0.0), bridge_res.get("CLIP-aligned", 0.0)
-    print(f"  => probe A (wiring) held-out {te_a:.2f}  |  probe B bridge held-out: raw {raw_b:.2f} -> CLIP-aligned {al_b:.2f}")
-    rec_b = bridge_res.get("CLIP-aligned+recursed")
-    if al_b >= 0.5 and al_b > raw_b:
-        print(f"     BRIDGE WORKS on {wb.name}: CLIP-aligned graph slots read + GENERALIZE. Modality gap CLOSED.")
-    elif al_b > raw_b + 0.1:
-        print(f"     BRIDGE PARTIAL on {wb.name}: alignment helps ({raw_b:.2f}->{al_b:.2f}) but not solved.")
-    else:
-        print(f"     BRIDGE FAILS on {wb.name}: alignment did not transfer to held-out -> graph slots stay foreign.")
-    if rec_b is not None:
-        if abs(rec_b - al_b) < 0.05:
-            print(f"     recursion is roughly NEUTRAL through the TRM loop ({al_b:.2f} -> {rec_b:.2f}).")
-        elif rec_b > al_b:
-            print(f"     recursion HELPS ({al_b:.2f} -> {rec_b:.2f}) -- worth training the recursion weights too.")
-        else:
-            print(f"     recursion HURTS ({al_b:.2f} -> {rec_b:.2f}) -- random untrained recursion scrambles alignment.")
-    if te_c >= 0.5 * te_a:
-        print(f"     PROBE C: native-space injection SURVIVES dilution ({te_a:.2f} single-token -> {te_c:.2f} phrase)"
-              f" -- inject via the LM's OWN embedding table for real atom text, skip the MiniLM bridge entirely.")
-    else:
-        print(f"     PROBE C: native-space injection DEGRADES under dilution ({te_a:.2f} -> {te_c:.2f})"
-              f" -- even native-space needs a sharp single-vector signal, not a diluted phrase mean.")
+    # TRMReasoner integrity: y_t shape [T, d], values evolve across cycles
+    atom_emb = torch.as_tensor(encode_batch(["banana"])[0], dtype=torch.float32, device=wb.device)
+    y_ts = trm(task_emb, atom_emb.unsqueeze(0))
+    assert y_ts.shape == (trm.T, trm.d), f"y_ts {y_ts.shape}"
+    y_diffs = [(y_ts[t + 1] - y_ts[t]).norm().item() for t in range(trm.T - 1)]
+    evolving = any(d > 1e-6 for d in y_diffs)
+    print(f"\n  TRM integrity: y_ts {list(y_ts.shape)} diffs {[f'{d:.3f}' for d in y_diffs]} -> "
+          f"{'PASS' if evolving else 'FAIL'}")
 
-    print(f"\n  DEEP SUPERVISION (ds_weight=0.15):")
-    print(f"     refinement steps: {R.T}  |  ds_head params: {sum(p.numel() for p in R.ds_pool.parameters()) + sum(p.numel() for p in R.ds_proj.parameters())}")
-    print(f"     each step's working memory must independently retrieve the target from {len(words)} candidates")
-    print(f"     -> gradients flow through ALL T steps, not just the final output")
+    print(f"\n  WMReasoner: {sum(p.numel() for p in R.parameters())} total params "
+          f"(TRM {sum(p.numel() for p in trm.parameters())} + WM {sum(p.numel() for p in R.parameters()) - sum(p.numel() for p in trm.parameters())})")
+    print(f"     refinement steps: {R.T}  |  each y_t is a {trm.d}-d solution embedding")
+    print(f"     DS: MSE(y_t_proj, oracle_target) in d_lm space — NOT atom-pool CE (TRM is not a ranker)")
     for h in handles:
         h.remove()
 
@@ -945,15 +752,18 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     scripts/build_crossdomain_corpus.py (see _grow_skills_from_corpus) -- these DO enter the composable pool
     (_atoms_from_graph filters on real .code), unlike grow_cot's concept nodes."""
     from v5.runtime.dcpd_latent import WhiteBox
+    from v5.runtime.algo_trm import _build as _build_trm
     import random
-    print(f"run_real: WMReasoner coupled to {lm_name} ({quant}) — real composition tasks\n")
+    print(f"run_real: WMReasoner + TRMReasoner V3 coupled to {lm_name} ({quant}) — real composition tasks\n")
 
+    _, _, TRMReasoner = _build_trm()
     wb = WhiteBox(lm_name, quant=quant)
     d_lm = wb.d_model
     couple = [wb.n_layers - 2, wb.n_layers - 1]
     print(f"  LM: {lm_name}  d={d_lm}  layers={wb.n_layers}  gate layers={couple}  device={wb.device}")
 
-    R = WMReasoner(d_lm, couple_layers=couple).to(wb.device)
+    trm = TRMReasoner(d_in=EMBED_DIM, d=256, T=4, n_heads=4)
+    R = WMReasoner(d_lm, couple_layers=couple, trm=trm, n_heads=4).to(wb.device)
     for p in wb.model.parameters():
         p.requires_grad_(False)
     handles = R.couple(wb)
@@ -1035,26 +845,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         if text not in task_embs:
             task_embs[text] = torch.as_tensor(encode_batch([text])[0], dtype=torch.float32, device=wb.device)
 
-    atom_stack = torch.stack([atom_embs[n] for n in atom_names], dim=0).to(wb.device)  # [N, d_lm] NATIVE now
-
-    prompt_ids = {}
-    for text, _, _ in all_tasks:
-        prompt_ids[text] = build_prompt(text)  # static fallback (no decoded slots yet)
-
-    def decode_slots(slots, pool, pool_names, M=None):
-        """Decode the reasoning registers back into atom names by argmax cosine similarity.
-        slots: [N_total, d_lm] = cat([z_mem, s]) from refine()
-        pool:  [N, d_lm] normalized atom embeddings (train_pool)
-        Returns (inner_name, outer_name) decoded from s[0] and s[1] respectively."""
-        M = M or R.M
-        # s occupies the LAST M rows of slots (z_mem occupies the first N rows)
-        s = slots[-M:].float()
-        s_norm = s / (s.norm(dim=-1, keepdim=True) + 1e-8)
-        sims = s_norm @ pool.float().T         # [M, N_atoms]
-        inner_idx = int(sims[0].argmax())
-        outer_idx = int(sims[1].argmax())
-        return pool_names[inner_idx], pool_names[outer_idx]
-
+    prompt_ids = {text: build_prompt(text) for text, _, _ in all_tasks}
     # All 10 atom oracle functions (used for verification)
     def _fib(n):
         a, b = 0, 1
@@ -1153,78 +944,59 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     # trains the critic only, after the main loop -- does not touch the reasoner's own loss (that's stage 2,
     # gated on stage 1's critic actually beating base rate first, to avoid training the reasoner against an
     # unreliable judge -- Goodhart's law / reward-hacking risk, not built yet).
+    # Precompute oracle DS targets: first half of T steps target inner(n), second half target full composition
+    inner_expr_set = {f"{a[0]}(n)" for _, _, a, _, _, _ in train_ex + held_ex}
+    final_expr_set = {c.split("return ", 1)[1].strip() for _, _, _, _, _, c in train_ex + held_ex}
+    ds_texts = list(inner_expr_set | final_expr_set)
+    ds_target_embs = native_text_embedding_batch(wb, ds_texts).to(wb.device)  # [N, d_lm]
+    ds_target_map = {t: ds_target_embs[i].detach() for i, t in enumerate(ds_texts)}
+    ds_train_targets = []
+    for _, _, atoms_needed, _, _, target_code in train_ex:
+        inner_expr = f"{atoms_needed[0]}(n)"
+        final_expr = target_code.split("return ", 1)[1].strip()
+        half = R.T // 2
+        tgt = torch.stack([ds_target_map[inner_expr]] * half + [ds_target_map[final_expr]] * (R.T - half), dim=0)
+        ds_train_targets.append(tgt.detach())  # [T, d_lm]
+    print(f"  Oracle DS targets: {len(ds_texts)} unique expressions ({len(ds_train_targets)} examples)")
+
     critic_examples: list = []
-    # ── WARM-START ALIGNMENT ────────────────────────────────────────────────────
-    # Problem: register_init + proj_task live in a random initialisation space.
-    # ds_pool/ds_proj must bridge that space to atom_stack (LM native embeddings).
-    # If we start the main loop without bridging this gap first, lm_loss dominates
-    # the gradients in early epochs and the DS head never gets traction -- it stays
-    # at random chance (ln(N) ≈ 3.37) for all 40 epochs.
-    #
-    # Fix: a cheap pre-training phase (no LM forward, no generation, ~5s on GPU)
-    # that runs DS loss ONLY against the full atom pool. We force each register
-    # s_i = register_init[i] + proj_task(task_emb) to attend to atom_stack and
-    # have its ds_pool/ds_proj output land near the correct atom's embedding.
-    # After this phase, the DS head starts the main loop already aligned, so the
-    # subtle ds_loss signal (0.1x weight) can reinforce rather than start from scratch.
-    train_pool = (atom_stack / (atom_stack.norm(dim=-1, keepdim=True) + 1e-8)).detach()
-    warmup_steps = 200
-    warmup_opt = torch.optim.Adam(
-        list(R.cell.parameters()) + list(R.ds_pool.parameters()) +
-        list(R.ds_proj.parameters()) + list(R.proj_task.parameters()),
-        lr=5e-4)
-    print(f"  Warm-start alignment ({warmup_steps} steps, DS-only, no LM forward)...")
-    R.train()
-    for ws in range(warmup_steps):
-        warmup_batch = random.sample(train_ex, min(16, len(train_ex)))
-        ws_states, ws_gold = [], []
-        for task_emb, gold_idxs, atoms_needed, pids, text, target_code in warmup_batch:
-            _, states = R.refine(task_emb, atom_stack, native=True)
-            ws_states.append(states)
-            ws_gold.append(gold_idxs)
-        ws_loss = R.ds_loss_batch(ws_states, train_pool, ws_gold)
-        warmup_opt.zero_grad()
-        ws_loss.backward()
-        warmup_opt.step()
-        if (ws + 1) % 50 == 0:
-            print(f"    warmup step {ws+1:3d}/{warmup_steps}  ds_loss {float(ws_loss.detach()):.3f}")
-    print(f"  Warm-start done. Starting main training loop...\n")
-    # ── END WARM-START ──────────────────────────────────────────────────────────
     for ep in range(epochs):
         R.train()
-        # DS candidate pool: atom_stack is ALREADY native d_lm (native_text_embedding) -- no projection needed.
-        train_pool = (atom_stack / (atom_stack.norm(dim=-1, keepdim=True) + 1e-8)).detach()
         random.shuffle(train_ex)
         tot_lm, tot_ds, n = 0.0, 0.0, 0
-        # Process examples in batches: refine is per-example (stateful), but LM forward is batched
-        # (padded sequences) for ~batch_size speedup with 90GB VRAM.
         for b0 in range(0, len(train_ex), batch_size):
             batch = train_ex[b0:b0 + batch_size]
-            all_states, all_gold, pids_list, tids_list = [], [], [], []
+            all_states, pids_list, tids_list = [], [], []
+            ds_batch_targets = []
             for task_emb, gold_idxs, atoms_needed, pids, text, target_code in batch:
-                slots, states = R.refine(task_emb, atom_stack, native=True)
+                mini_atom_embs = torch.stack([
+                    torch.as_tensor(encode_batch([atom_names[idx]])[0], dtype=torch.float32, device=wb.device)
+                    for idx in gold_idxs
+                ])
+                slots, states = R.refine(task_emb, mini_atom_embs)
                 R.set_slots_direct(slots)
-                # Decode registers -> atom names -> inject as text hint so LM knows inner/outer order
-                inner_name, outer_name = decode_slots(slots.detach(), train_pool, atom_names)
-                pids = build_prompt(text, inner_name, outer_name)
+                pids = build_prompt(text)
                 return_body = target_code.split(": ", 1)[1] if ": " in target_code else target_code
                 tids = wb.tok(" " + return_body, return_tensors="pt").input_ids.to(wb.device)
                 eos = torch.tensor([[wb.tok.eos_token_id]], device=wb.device)
                 tids = torch.cat([tids, eos], dim=-1)
                 pids_list.append(pids); tids_list.append(tids)
-                all_states.append(states); all_gold.append(gold_idxs)
+                all_states.append(states)
+                # DS target index: find position in train_ex
+                ti = next(j for j, (_, _, an, _, _, tc) in enumerate(train_ex)
+                          if an == atoms_needed and tc == target_code)
+                ds_batch_targets.append(ds_train_targets[ti])
 
             if batch_size > 1 and len(batch) > 1:
                 input_ids, labels, attn_mask = _pad_and_batch(pids_list, tids_list, pad_id, wb.device)
                 outs = wb.model(input_ids=input_ids, attention_mask=attn_mask, labels=labels)
                 lm_loss = outs.loss
             else:
-                # Single-example path (backward compat, no padding overhead)
                 outs = wb.model(input_ids=torch.cat([pids_list[0], tids_list[0]], dim=-1),
                                 labels=torch.cat([torch.full_like(pids_list[0], -100), tids_list[0]], dim=-1))
                 lm_loss = outs.loss
 
-            ds_loss = R.ds_loss_batch(all_states, train_pool, all_gold)
+            ds_loss = R.ds_loss_batch(all_states, targets=torch.stack(ds_batch_targets, dim=0))
             # DS weight 0.5: previously 0.1 caused the warmup alignment (ds_loss 0.067) to be
             # obliterated by lm_loss in the very first epoch (ep0 ds_loss jumped back to 3.4).
             # At 0.5, ds contribution ~1.7 > lm_loss ~0.06-0.12, preserving alignment.
@@ -1236,32 +1008,27 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             tot_ds += float(ds_loss.detach())
             n += 1
 
+        print(f"  ep {ep:>3}  lm_loss {tot_lm/max(n,1):.3f}  ds_loss {tot_ds/max(n,1):.3f}  gate {float(R.adapters[0].g):+.2f}", end="")
         if ep % eval_every == 0 or ep == epochs - 1:
             R.eval()
             held_ok, ablated_ok = 0, 0
             dump = []
             for task_emb, gold_idxs, atoms_needed, pids, text, target_code in held_ex:
-                slots, wm_states, wm_deltas, wm_raw = R.refine(task_emb, atom_stack, native=True, track_deltas=True)
-                # Decode registers for explicit ordering hint in the prompt
-                inner_name, outer_name = decode_slots(slots.detach(), train_pool, atom_names)
-                pids_wm = build_prompt(text, inner_name, outer_name)
+                # Use MiniLM atoms for TRM
+                held_mini_embs = torch.stack([
+                    torch.as_tensor(encode_batch([atom_names[idx]])[0], dtype=torch.float32, device=wb.device)
+                    for idx in gold_idxs
+                ])
+                slots, wm_states, wm_deltas, wm_raw = R.refine(task_emb, held_mini_embs, track_deltas=True)
                 with torch.no_grad():
                     R.set_slots_direct(slots)
-                    # EOS termination trained: the training loop appends EOS to every target so the model
-                    # learns to stop after the expression. The _extract_first_return safety net below catches
-                    # any residual cases where EOS fails. NO repetition_penalty: tried it to stop the
-                    # 'return EXPR return EXPR...' loop, but it penalizes reusing ANY prior token -- including
-                    # the literal atom-name tokens the working memory taught it. Composing e.g.
-                    # count_bits(count_bits(n)) requires REPEATING a name; even single-composition cases got
-                    # pushed toward hallucinated paraphrases ('num_bits', 'count_bits_to_n') instead of the
-                    # real atom names.
-                    out = wb.model.generate(pids_wm, max_new_tokens=64,
+                    out = wb.model.generate(pids, max_new_tokens=64,
                                             do_sample=False, pad_token_id=wb.tok.eos_token_id)
-                    code = wb.tok.decode(out[0][pids_wm.shape[-1]:], skip_special_tokens=True).strip()
+                    code = wb.tok.decode(out[0][pids.shape[-1]:], skip_special_tokens=True).strip()
                 wm_ok = verify("def task(n): " + code, target_code)
                 held_ok += int(wm_ok)
-                critic_examples.append(([s.detach() for s in wm_raw], wm_ok))   # PRE-norm content + REAL label
-                instability = R.trajectory_instability(wm_deltas)   # FAST, no-training mistake signal (v2: pre-norm deltas)
+                critic_examples.append(([s.detach() for s in wm_raw], wm_ok))
+                instability = R.trajectory_instability(wm_deltas)
                 R.clear()
                 with torch.no_grad():
                     out = wb.model.generate(pids, max_new_tokens=64,
@@ -1271,17 +1038,13 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 ablated_ok += int(abl_ok)
                 dump.append((text, target_code, code, wm_ok, code_abl, abl_ok, instability))
 
-            # CO-TRAINING data (stage 1, per user's arms-race idea): the held_ex loop above is the ONLY place
-            # real generate()+verify() happens, so it's the only place a real pass/fail label exists -- the
-            # main training loop is teacher-forced (target always fed as ground truth), so there's no
-            # natural label there. Extend the SAME real eval mechanism to train_ex too, at the SAME checkpoint
-            # cadence (9 times, not every epoch) -- ~4x more critic data (48+16 tasks vs 16), ~2x more
-            # generation cost (skip the ablated comparison here, not needed for critic data), NOT a 40x or
-            # 50x blowup. Still purely PASSIVE/monitoring -- does not touch the reasoner's own loss (stage 2,
-            # gated on stage 1 actually beating base rate, not built yet).
+            # CO-TRAINING data (stage 1)
             for task_emb, gold_idx, atoms_needed, pids, text, target_code in train_ex:
-                K_atom_embs = torch.stack([atom_embs[n] for n in atoms_needed], dim=0)
-                slots, tr_states, tr_deltas, tr_raw = R.refine(task_emb, K_atom_embs, native=True, track_deltas=True)
+                K_atom_embs = torch.stack([
+                    torch.as_tensor(encode_batch([atom_names[idx]])[0], dtype=torch.float32, device=wb.device)
+                    for idx in gold_idx
+                ])
+                slots, tr_states, tr_deltas, tr_raw = R.refine(task_emb, K_atom_embs, track_deltas=True)
                 with torch.no_grad():
                     R.set_slots_direct(slots)
                     out = wb.model.generate(pids, max_new_tokens=64,
@@ -1298,9 +1061,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             inst_fail = [d[6] for d in dump if not d[3]]
             inst_str = (f"  instab(pass/fail) {sum(inst_pass)/len(inst_pass):.3f}/"
                        f"{sum(inst_fail)/len(inst_fail):.3f}" if inst_pass and inst_fail else "")
-            print(f"  ep {ep:>3}  lm_loss {tot_lm/max(n,1):.3f}  ds_loss {tot_ds/max(n,1):.3f}  "
-                  f"held WM {held_ok}/{len(held_ex)}  ablated {ablated_ok}/{len(held_ex)}  {inst_str}  "
-                  f"gate {float(R.adapters[0].g):+.2f}")
+            print(f"  held WM {held_ok}/{len(held_ex)}  ablated {ablated_ok}/{len(held_ex)}  {inst_str}")
 
     print(f"\n  [dump] final epoch, held-out generations (WM vs ablated) vs the verified target:")
     for text, target_code, code, wm_ok, code_abl, abl_ok, instability in (last_dump or []):
@@ -1380,7 +1141,7 @@ def probe_real(lm_name: str, quant: str = "4bit", words_n: int = 400, steps: int
     for p in wb.model.parameters():
         p.requires_grad_(False)
     print(f"  LM {lm_name}  quant={wb.quant}  VRAM={wb.vram_gb:.2f}GB  layers={wb.n_layers}\n")
-    selftest(wb, bs=48, steps_a=steps, steps_b=steps, words_n=words_n)
+    selftest(wb, bs=48, steps_a=steps, words_n=words_n)
 
 
 def main():

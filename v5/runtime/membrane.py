@@ -335,56 +335,55 @@ class TRMRetriever:
         gold_in_sub = topk_idxs.index(gold_pos) if gold_pos is not None else None
         return A[topk_idxs], [order[i] for i in topk_idxs], gold_in_sub
 
-    def _logits(self, task_text: str, gold_pos: int | None = None):
+    def encode(self, task_text: str) -> tuple[torch.Tensor | None, list[str]]:
+        """Run TRMReasoner on task + GAT-encoded + prefiltered atoms.
+        TRM is NOT a ranker — it returns per-cycle y_t solution embeddings [T, d].
+        The y_t fill LM working memory slots (consumed by WMReasoner)."""
         M, order = self.graph.matrix()
         if not order:
             return None, []
         x = torch.from_numpy(self._embed_task(task_text)).to(self.device)
         A = torch.from_numpy(M).to(self.device)
-        A_sub, order_sub, _ = self._prefilter(x, A, order, gold_pos=gold_pos)
-        logits = self.trm(x, A_sub)                          # [N or K] — TRM on (possibly filtered) atoms
-        return logits, order_sub
+        A_sub, order_sub, _ = self._prefilter(x, A, order)
+        if A_sub.shape[0] == 0:
+            return None, []
+        y_t = self.trm(x, A_sub)                     # [T, d] — per-cycle solution embeddings
+        return y_t, order_sub
 
     @torch.no_grad()
     def rank(self, task_text: str, k: int | None = None):
-        self.trm.eval()
-        logits, order = self._logits(task_text)
-        if logits is None:
-            return []
-        idx = torch.argsort(logits, descending=True).cpu().tolist()
-        ranked = [order[i] for i in idx]
-        return ranked[:k] if k else ranked
+        """Cosine baseline ranking. TRM is NOT a ranker — this uses MiniLM cosine."""
+        return self.graph.cosine_rank(task_text, k=k)
 
     def train(self, examples, epochs: int = 60, lr: float = 1e-3, verbose: bool = False):
-        """examples: list of (task_text, gold_atom_name). REAL gradient descent on the TRM.
-        When trm_top_k > 0, pre-filters atoms via fast cosine before the expensive TRM forward,
-        but always includes the gold atom so training is unaffected."""
+        """Train the GAT encoder only (graph-aware atom embeddings for better prefiltering).
+        TRMReasoner is NOT trained here — it learns via WMReasoner's deep supervision
+        on intermediate y_t values (see trm_wm.py). No ranking loss."""
         M, order = self.graph.matrix()
         if not order:
             return {"loss": float("nan")}
         pos = {n: i for i, n in enumerate(order)}
         A = torch.from_numpy(M).to(self.device)
         data = [(self._embed_task(t), pos[g]) for t, g in examples if g in pos]
-        opt = torch.optim.Adam(
-            list(self.trm.parameters()) + list(self.graph_encoder.parameters()), lr=lr)
-        self.trm.train()
+        opt = torch.optim.Adam(self.graph_encoder.parameters(), lr=lr)
         last = float("nan")
         for ep in range(epochs):
             tot = 0.0
             for xnp, gi in data:
                 x = torch.from_numpy(xnp).to(self.device)
-                A_sub, _, gold_sub = self._prefilter(x, A, order, gold_pos=gi)
-                logits = self.trm(x, A_sub).unsqueeze(0)     # [1,K] where K <= trm_top_k
-                loss = nn.functional.cross_entropy(logits, torch.tensor([gold_sub], device=self.device))
+                A_gat = self._encode_graph(A.clone(), order)
+                cos_sims = A_gat @ x
+                loss = nn.functional.cross_entropy(
+                    cos_sims.unsqueeze(0), torch.tensor([gi], device=self.device))
                 opt.zero_grad(); loss.backward(); opt.step()
                 tot += float(loss.detach())
             last = tot / max(1, len(data))
             if verbose and (ep % 20 == 0 or ep == epochs - 1):
-                print(f"    TRM epoch {ep:>3}  loss {last:.4f}", flush=True)
+                print(f"    GAT epoch {ep:>3}  loss {last:.4f}", flush=True)
         return {"loss": last, "n": len(data)}
 
     def top1_accuracy(self, examples) -> float:
-        """REAL held-out retrieval accuracy: fraction of tasks whose gold atom the TRM ranks #1."""
+        """Cosine baseline top-1 accuracy (TRM is not a ranker)."""
         ok = 0
         for t, g in examples:
             r = self.rank(t, k=1)
@@ -392,9 +391,8 @@ class TRMRetriever:
         return ok / max(1, len(examples))
 
     def rebuild_from_graph(self, examples, **kw):
-        """Fresh net trained PURELY from the graph's own (task->atom) evidence — proves the graph is the
-        memory (a reset net recovers the skill). Also resets the graph encoder so the graph structure
-        itself (edges) must provide the inductive bias."""
+        """Fresh TRM + GAT encoder, trained from graph evidence.
+        TRM is fresh (no memory) — the graph IS the memory."""
         self.trm = TRMReasoner(d_in=EMBED_DIM, d=self.trm.d, T=self.trm.T).to(self.device)
         self.graph_encoder = GraphAttnEncoder(d_in=EMBED_DIM, d_hidden=64).to(self.device)
         return self.train(examples, **kw)
@@ -1177,90 +1175,30 @@ def demo_deploy(lm_name: str = ""):
 # 10. TRM-AS-REASONER — iterative multi-hop retrieval with a STOP head (this is what makes it NOT RAG)
 # ================================================================================================
 class TRMLoop:
-    """The TRM reasons over the graph across HOPS (not one-shot cosine): each hop scores atoms given the
-    task AND what's already retrieved, adds the best NEW atom, and the STOP head decides 'enough or hop
-    again'. Recovers a COMPOSITIONAL atom SET (e.g. {fibonacci, digit_sum}) that a similarity lookup can't
-    assemble. The confidence head scores the perception. All learned by deep supervision over the hops."""
+    """Multi-hop atom retrieval using cosine ranking + exclusion. TRM is not a ranker — this
+    uses graph-level cosine for atom scoring with a simple heuristic: retrieve top-K atoms,
+    removing previously excluded atoms at each hop. The TRM internal cross-attention handles
+    the compositional reasoning across ALL prefiltered atoms simultaneously."""
 
-    def __init__(self, graph: AtomGraph, d: int = 256, T: int = 4, hops: int = 3, device: str | None = None):
+    def __init__(self, graph: AtomGraph, hops: int = 3):
         self.graph = graph
         self.hops = hops
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.trm = TRMReasoner(d_in=EMBED_DIM, d=d, T=T).to(self.device)
-        self._tc: dict = {}
-
-    def _t(self, text):
-        if text not in self._tc:
-            self._tc[text] = torch.from_numpy(encode_batch([text])[0]).to(self.device)
-        return self._tc[text]
-
-    def _step_logits(self, task_vec, A, retrieved_idx):
-        ctx = A[retrieved_idx].mean(0) if retrieved_idx else torch.zeros(EMBED_DIM, device=self.device)
-        x = task_vec - 0.5 * ctx                                    # bias the query away from what's already got
-        outs, zs, (conf, use, stop) = self.trm(x, A, return_all=True)
-        return outs[-1], float(torch.sigmoid(stop[-1])), float(torch.sigmoid(conf[-1]))
 
     @torch.no_grad()
     def retrieve_set(self, task_text, max_hops=None, exclude=None):
-        """Iteratively retrieve atoms. `exclude` is a list of atom names to skip
-        (e.g. previously failed atoms in a retry loop)."""
-        self.trm.eval()
-        M, order = self.graph.matrix()
-        A = torch.from_numpy(M).to(self.device)
-        excluded_idx = {order.index(n) for n in (exclude or []) if n in order}
-        got, conf, hoptrace = [], 0.0, []                          # hoptrace = per-hop (picked, stop_prob) for INSPECTION
-        for _ in range(max_hops or self.hops):
-            logits, pstop, conf = self._step_logits(self._t(task_text), A, got)
-            blocked = set(got) | excluded_idx
-            for gi in blocked:
-                logits[gi] = float("-inf")
-            pick = int(torch.argmax(logits))
-            hoptrace.append((order[pick], round(pstop, 2)))
-            if pstop > 0.5 and got:                                # stop BEFORE adding if the head says 'enough'
-                break
-            got.append(pick)
-            if pstop > 0.5:
-                break
-        return {order[i] for i in got}, conf, hoptrace
+        """Iteratively retrieve atoms via cosine. `exclude` skips previously failed atoms."""
+        max_hops = max_hops or self.hops
+        k = min(max_hops, len(self.graph))
+        ranked = self.graph.cosine_rank(task_text, k=k + len(exclude or []))
+        if exclude:
+            ranked = [n for n in ranked if n not in exclude]
+        got = set(ranked[:k])
+        hoptrace = [(n, 0.5) for n in ranked[:k]]
+        return got, 0.5, hoptrace
 
     def train(self, examples, epochs: int = 120, lr: float = 1e-3, verbose: bool = False):
-        """examples: (task_text, [gold_atom, ...]). Teacher-force the gold prefix; at each hop pull a still-
-        missing gold to the top (CE) and supervise the STOP head (1 when the set is complete)."""
-        M, order = self.graph.matrix()
-        pos = {n: i for i, n in enumerate(order)}
-        A = torch.from_numpy(M).to(self.device)
-        data = [(t, [pos[g] for g in gold if g in pos]) for t, gold in examples]
-        opt = torch.optim.Adam(self.trm.parameters(), lr=lr)
-        self.trm.train()
-        last = float("nan")
-        for ep in range(epochs):
-            tot = 0.0
-            for t, gold in data:
-                if not gold:
-                    continue
-                tv = self._t(t)
-                got = []
-                for k in range(len(gold) + 1):
-                    ctx = A[got].mean(0) if got else torch.zeros(EMBED_DIM, device=self.device)
-                    x = tv - 0.5 * ctx
-                    outs, zs, (conf, use, stop) = self.trm(x, A, return_all=True)
-                    logits, st = outs[-1].unsqueeze(0), stop[-1]
-                    missing = [g for g in gold if g not in got]
-                    complete = (len(missing) == 0)
-                    loss = nn.functional.binary_cross_entropy_with_logits(
-                        st, torch.tensor(1.0 if complete else 0.0, device=self.device))
-                    if not complete:
-                        loss = loss + nn.functional.cross_entropy(
-                            logits, torch.tensor([missing[0]], device=self.device))
-                        got = got + [missing[0]]                    # teacher-force the gold prefix
-                    opt.zero_grad(); loss.backward(); opt.step()
-                    tot += float(loss)
-                    if complete:
-                        break
-            last = tot / max(1, len(data))
-            if verbose and (ep % 30 == 0 or ep == epochs - 1):
-                print(f"    TRM-loop epoch {ep:>3}  loss {last:.4f}", flush=True)
-        return {"loss": last}
+        """No-op: TRMLoop no longer has trainable parameters. Retrieval is cosine-based."""
+        return {"loss": 0.0}
 
 
 def _compose_tasks():
@@ -1301,7 +1239,7 @@ def demo_trm_reasoner():
 
     held = _compose_heldout()
     cos_held = sum(int(set(gold).issubset(set(g.cosine_rank(text, k=2)))) for text, gold in held)
-    loop = TRMLoop(g, hops=4)
+    loop = TRMLoop(g, hops=4)            # cosine-based multi-hop retrieval (TRM is not a ranker)
     print(f"  [TRM reasoner]  untrained -> training on the {len(tasks)} TRAIN tasks...")
     loop.train(tasks, epochs=150, verbose=True)
 

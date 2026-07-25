@@ -37,6 +37,8 @@ RELATION_ALIAS_MAP: Dict[str, str] = {
     "connects": "related", "connect": "related", "links": "related", "link": "related",
     "associated_with": "related", "depends_on": "depend", "dependent_on": "depend",
     "precedes": "precede", "follows": "follow",
+    "avoids": "avoid_if", "avoids_if": "avoid_if", "trap_for": "avoid_if",
+    "corrected_by": "corrected_by", "corrected": "corrected_by", "fixed_by": "corrected_by",
 }
 
 NODE_TYPE_FAMILY_MAP: Dict[str, str] = {
@@ -53,12 +55,14 @@ RELATION_FAMILY_MAP: Dict[str, str] = {
     "cause": "causal", "depend": "causal",
     "contradict": "contradict", "conflict": "contradict", "refute": "contradict",
     "part_of": "part_of", "example_of": "part_of", "related": "related",
-    "precede": "temporal", "follow": "temporal", "unknown": "unknown",
+    "precede": "temporal", "follow": "temporal",
+    "avoid_if": "avoidance", "corrected_by": "remediation", "unknown": "unknown",
 }
 
 CONTRADICTION_RELATIONS = {"contradict", "conflict", "refute"}
 SUPPORT_RELATIONS = {"support", "imply", "part_of", "example_of", "refine", "cause", "depend"}
-CANONICAL_RELATIONS = ["support", "contradict", "refine", "depend", "cause", "part_of", "example_of", "related"]
+AVOID_RELATIONS = {"avoid_if", "trap_for", "frequent_mistake"}
+CANONICAL_RELATIONS = ["support", "contradict", "refine", "depend", "cause", "part_of", "example_of", "related", "avoid_if", "corrected_by"]
 RELATION_TO_ID = {r: i for i, r in enumerate(CANONICAL_RELATIONS)}
 ID_TO_RELATION = {i: r for r, i in RELATION_TO_ID.items()}
 
