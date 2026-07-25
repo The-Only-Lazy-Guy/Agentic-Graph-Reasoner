@@ -742,6 +742,10 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             grow_domains: str = "math,code,science,puzzle", grow_keywords: str = "",
             grow_skills: int = 0, grow_skills_domains: str = "",
             batch_size: int = 1):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
     """graph_path=None (default): UNCHANGED behavior, the hand-written 10-atom dict + hand-tuned templated
     tasks (the proven 13-15/16 held-out result) -- zero risk of regression, this path is untouched by Phase
     3. graph_path=<path>: real graph atoms (via membrane's AtomGraph.load/seed_graph + _atoms_from_graph)
@@ -1064,7 +1068,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             print(f"  held WM {held_ok}/{len(held_ex)}  ablated {ablated_ok}/{len(held_ex)}  {inst_str}")
 
     print(f"\n  [dump] final epoch, held-out generations (WM vs ablated) vs the verified target:")
-    for text, target_code, code, wm_ok, code_abl, abl_ok, instability in (last_dump or []):
+    for row in (last_dump or []):
+        text, target_code, code, wm_ok, code_abl, abl_ok, instability = row[:7]
         print(f"     task: {text}")
         print(f"       target : {target_code}")
         print(f"       WM     : def task(n): {code[:90]}{'  <- PASS' if wm_ok else ''}  instab={instability:.3f}")
@@ -1145,6 +1150,10 @@ def probe_real(lm_name: str, quant: str = "4bit", words_n: int = 400, steps: int
 
 
 def main():
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
     ap = argparse.ArgumentParser(description="TRM working memory coupled to a frozen LM (real reasoner, design b)")
     ap.add_argument("--selftest", action="store_true", help="prove the mechanism on distilgpt2 (local, fast)")
     ap.add_argument("--probe", action="store_true", help="copy+bridge mechanism test on the real --lm (the fair bridge test)")
