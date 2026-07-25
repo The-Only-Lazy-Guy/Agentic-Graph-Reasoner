@@ -948,30 +948,15 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     # trains the critic only, after the main loop -- does not touch the reasoner's own loss (that's stage 2,
     # gated on stage 1's critic actually beating base rate first, to avoid training the reasoner against an
     # unreliable judge -- Goodhart's law / reward-hacking risk, not built yet).
-    # Precompute oracle DS targets: first half of T steps target inner(n), second half target full composition
-    inner_expr_set = {f"{a[0]}(n)" for _, _, a, _, _, _ in train_ex + held_ex}
-    final_expr_set = {c.split("return ", 1)[1].strip() for _, _, _, _, _, c in train_ex + held_ex}
-    ds_texts = list(inner_expr_set | final_expr_set)
-    ds_target_embs = native_text_embedding_batch(wb, ds_texts).to(wb.device)  # [N, d_lm]
-    ds_target_map = {t: ds_target_embs[i].detach() for i, t in enumerate(ds_texts)}
-    ds_train_targets = []
-    for _, _, atoms_needed, _, _, target_code in train_ex:
-        inner_expr = f"{atoms_needed[0]}(n)"
-        final_expr = target_code.split("return ", 1)[1].strip()
-        half = R.T // 2
-        tgt = torch.stack([ds_target_map[inner_expr]] * half + [ds_target_map[final_expr]] * (R.T - half), dim=0)
-        ds_train_targets.append(tgt.detach())  # [T, d_lm]
-    print(f"  Oracle DS targets: {len(ds_texts)} unique expressions ({len(ds_train_targets)} examples)")
-
     critic_examples: list = []
     for ep in range(epochs):
         R.train()
         random.shuffle(train_ex)
-        tot_lm, tot_ds, n = 0.0, 0.0, 0
+        tot_lm, n = 0.0, 0
+        tot_gate_reg, tot_conv = 0.0, 0.0
         for b0 in range(0, len(train_ex), batch_size):
             batch = train_ex[b0:b0 + batch_size]
             all_states, pids_list, tids_list = [], [], []
-            ds_batch_targets = []
             for task_emb, gold_idxs, atoms_needed, pids, text, target_code in batch:
                 mini_atom_embs = torch.stack([
                     torch.as_tensor(encode_batch([atom_names[idx]])[0], dtype=torch.float32, device=wb.device)
@@ -986,10 +971,6 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 tids = torch.cat([tids, eos], dim=-1)
                 pids_list.append(pids); tids_list.append(tids)
                 all_states.append(states)
-                # DS target index: find position in train_ex
-                ti = next(j for j, (_, _, an, _, _, tc) in enumerate(train_ex)
-                          if an == atoms_needed and tc == target_code)
-                ds_batch_targets.append(ds_train_targets[ti])
 
             if batch_size > 1 and len(batch) > 1:
                 input_ids, labels, attn_mask = _pad_and_batch(pids_list, tids_list, pad_id, wb.device)
@@ -1000,19 +981,27 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                                 labels=torch.cat([torch.full_like(pids_list[0], -100), tids_list[0]], dim=-1))
                 lm_loss = outs.loss
 
-            ds_loss = R.ds_loss_batch(all_states, targets=torch.stack(ds_batch_targets, dim=0))
-            # DS weight 0.5: previously 0.1 caused the warmup alignment (ds_loss 0.067) to be
-            # obliterated by lm_loss in the very first epoch (ep0 ds_loss jumped back to 3.4).
-            # At 0.5, ds contribution ~1.7 > lm_loss ~0.06-0.12, preserving alignment.
-            loss = lm_loss + 0.5 * ds_loss
+            # Gate regularization: penalize |tanh(g)| — prevents adapter overwriting hidden states
+            gate_reg = sum(torch.tanh(a.g) ** 2 for a in R.adapters) / len(R.adapters)
+
+            # Convergence bonus: penalize late-step changes in y_t trajectory
+            # Quadratic weight: early steps free, late steps must converge toward fixed point
+            states_tensor = torch.stack([torch.stack(s) for s in all_states], dim=0)  # [B, T, d]
+            T = states_tensor.shape[1]
+            step_diffs = states_tensor[:, 1:] - states_tensor[:, :-1]  # [B, T-1, d]
+            w = torch.linspace(0.0, 1.0, T - 1, device=states_tensor.device) ** 2  # quadratic, [0, 1]
+            conv_loss = (w.unsqueeze(0).unsqueeze(-1) * step_diffs.norm(dim=-1, keepdim=True)).mean()
+
+            loss = lm_loss + 0.05 * gate_reg + 0.05 * conv_loss
             opt.zero_grad()
             loss.backward()
             opt.step()
             tot_lm += float(lm_loss.detach())
-            tot_ds += float(ds_loss.detach())
+            tot_gate_reg += float(gate_reg.detach())
+            tot_conv += float(conv_loss.detach())
             n += 1
 
-        print(f"  ep {ep:>3}  lm_loss {tot_lm/max(n,1):.3f}  ds_loss {tot_ds/max(n,1):.3f}  gate {float(R.adapters[0].g):+.2f}", end="")
+        print(f"  ep {ep:>3}  lm {tot_lm/max(n,1):.3f}  gate_reg {tot_gate_reg/max(n,1):.4f}  conv {tot_conv/max(n,1):.4f}  gate {float(R.adapters[0].g):+.2f}", end="")
         if ep % eval_every == 0 or ep == epochs - 1:
             R.eval()
             held_ok, ablated_ok = 0, 0
