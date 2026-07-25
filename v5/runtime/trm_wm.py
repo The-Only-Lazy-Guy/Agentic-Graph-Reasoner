@@ -625,7 +625,8 @@ def _compose_tasks_from_graph(g, atom_names: list[str], n_train: int = 48, n_hel
     def _mk(outer, inner):
         text = outer_template(outer).format(inner=inner_phrase(inner))
         code = f"def task(n): return {outer}({inner}(n))"
-        return (text, [inner, outer], code)
+        # Return code expression to be used by oracle
+        return (text, [inner, outer], code, f"{outer}({inner}(n))")
 
     train = [_mk(o, i) for o, i in pairs[:n_train]]
     held_out = [_mk(o, i) for o, i in pairs[n_train:n_train + n_held]]
@@ -898,39 +899,29 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         expr = after.strip().rstrip(".")
         return expr or None
 
-    def verify(code_str, target_code, test_ns=(2, 5, 7, 10)):
-        # test_ns includes n=2: is_prime(factorial(n)) is CONSTANT False for n=5,7,10 (factorial(n)>=120 is
-        # always composite), so a degenerate 'return False' trivially passed -- factorial(2)=2, which IS
-        # prime, breaks that degeneracy. Caught from a real spurious ablated PASS in a run's output.
-        """Extract the model's first return-expression and check its BEHAVIOR against the target's, both
-        evaluated through the oracle fn_map (via _run_task) -- not by exec'ing the model's raw code and
-        calling it directly (the old approach: task_fn's globals never had the atom functions injected, so
-        even a PERFECT composition would NameError internally and silently report as a failure). A wrong
-        atom name (e.g. 'digit_reverse' instead of 'reverse_digits') correctly still fails here -- fn_map
-        only knows the real atom names, so eval raises NameError on anything else."""
-        expr = _extract_first_return(code_str)
-        if not expr:
-            return False
-        target_expr = target_code.split("return ", 1)[1].strip()
+    def verify(code_str, tests):
+        """Execute the generated code and check against provided test cases."""
         try:
-            for n in test_ns:
-                if _run_task(n, expr) != _run_task(n, target_expr):
-                    return False
+            ns = {}
+            # Strip explanation if the model outputs 'Code:' as a delimiter
+            code = code_str.split("Code:")[-1] if "Code:" in code_str else code_str
+            exec(code, ns)
+            fn = ns.get("task")
+            if not callable(fn): return False
+            for inp, expected in tests:
+                if fn(inp) != expected: return False
             return True
-        except Exception as e:
-            # a wrong atom name (NameError) or truncated/malformed expr (SyntaxError) SHOULD fail here -- that
-            # is correct, not a bug. But swallowing every exception identically makes it impossible to tell
-            # "wrong answer" apart from "extraction/harness broke" while debugging. Opt-in visibility:
-            if os.environ.get("GRAPH_DEBUG_VERIFY"):
-                print(f"    [verify exception] expr={expr!r}  {type(e).__name__}: {e}")
-            return False
+        except Exception: return False
+
+    def make_tests(code_expression):
+        return [(n, _run_task(n, code_expression)) for n in [2, 3, 5, 7, 10, 13]]
 
     train_ex = [(task_embs[text], [atom_names.index(a) for a in atoms_needed], atoms_needed,
-                 prompt_ids[text], text, code)
-                for text, atoms_needed, code in train_tasks]
+                 prompt_ids[text], text, code, make_tests(code_expr))
+                for text, atoms_needed, code, code_expr in train_tasks]
     held_ex = [(task_embs[text], [atom_names.index(a) for a in atoms_needed], atoms_needed,
-                prompt_ids[text], text, code)
-               for text, atoms_needed, code in held_tasks]
+                prompt_ids[text], text, code, make_tests(code_expr))
+               for text, atoms_needed, code, code_expr in held_tasks]
 
     print(f"  Training the adapter + WMReasoner ({epochs} epochs, {len(train_ex)} pairs; "
           f"real-close loop: refine -> LM -> verify)...")
@@ -957,7 +948,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         for b0 in range(0, len(train_ex), batch_size):
             batch = train_ex[b0:b0 + batch_size]
             all_states, pids_list, tids_list = [], [], []
-            for task_emb, gold_idxs, atoms_needed, pids, text, target_code in batch:
+            for task_emb, gold_idxs, atoms_needed, pids, text, target_code, tests in batch:
                 mini_atom_embs = torch.stack([
                     torch.as_tensor(encode_batch([atom_names[idx]])[0], dtype=torch.float32, device=wb.device)
                     for idx in gold_idxs
