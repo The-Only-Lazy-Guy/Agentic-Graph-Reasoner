@@ -370,7 +370,7 @@ def _run_probe(wb, R, pids, train, test, precomputed_states, answer_pool, tid_of
             print("\n".join(out_lines))
         except UnicodeEncodeError:
             pass  # terminal encoding may not support special chars; skip dump
-    return tr, te, te_abl, float(R.adapters[0].g), last
+    return tr, te, te_abl, R.adapters[0].g.detach().item(), last
 
 
 def selftest(wb=None, bs=128, steps_a=120, words_n=120):
@@ -1046,7 +1046,10 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             tot_conv += float(conv_loss.detach())
             n += 1
 
-        print(f"  ep {ep:>3}  lm {tot_lm/max(n,1):.3f}  gate_reg {tot_gate_reg/max(n,1):.4f}  conv {tot_conv/max(n,1):.4f}  gate {float(R.adapters[0].g):+.2f}", end="", flush=True)
+        # NOTE: this used to end="" (continue onto the eval line below) -- but eval only runs every
+        # eval_every epochs, so every OTHER epoch's line never got a newline at all, and they all ran
+        # together into one unreadable wall of text (looked broken; wasn't a logic bug, just missing \n).
+        print(f"  ep {ep:>3}  lm {tot_lm/max(n,1):.3f}  gate_reg {tot_gate_reg/max(n,1):.4f}  conv {tot_conv/max(n,1):.4f}  gate {R.adapters[0].g.detach().item():+.2f}", flush=True)
         if ep % eval_every == 0 or ep == epochs - 1:
             R.eval()
             held_ok, ablated_ok = 0, 0
