@@ -106,6 +106,32 @@ def stream_openthoughts(
             break
 
 
+def stream_raw_rows(limit: int = 0) -> Iterator[Dict[str, Any]]:
+    """Stream RAW OpenThoughts-114k metadata rows -- domain/problem/deepseek_reasoning/deepseek_solution,
+    untransformed (no row_to_doc filtering/concatenation). For consumers that need the fields SEPARATE
+    (e.g. trm_wm.py's _math_cot_tasks_from_graph, which needs problem alone for task_emb and
+    deepseek_solution alone for boxed-answer extraction, not row_to_doc's single concatenated blob) and,
+    critically, that need to pre-fetch in a torch-free process: HF `datasets` streaming's first real fetch
+    in a process segfaults on some environments if torch was already active earlier in that process (see
+    trm_wm.py's _grow_from_cot docstring for the confirmed repro) -- _math_cot_tasks_from_graph's own live
+    load_dataset() call hits this exact risk when called from --run, since torch is already loaded by then.
+    Fetch here (a separate process) first, save, then pass the file to --math-cot-docs-path."""
+    from datasets import load_dataset  # lazy: only needed when actually fetching
+
+    ds = load_dataset(DATASET, CONFIG, split="train", streaming=True)
+    kept = 0
+    for row in ds:
+        yield {
+            "domain": row.get("domain"),
+            "problem": row.get("problem"),
+            "deepseek_reasoning": row.get("deepseek_reasoning"),
+            "deepseek_solution": row.get("deepseek_solution"),
+        }
+        kept += 1
+        if limit and kept >= limit:
+            break
+
+
 def write_docs(docs: Iterable[Mapping[str, Any]], path: str | Path) -> int:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -126,7 +152,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         help="comma-sep keywords; keep only rows mentioning one (e.g. for a science sub-domain)")
     parser.add_argument("--limit", type=int, default=200, help="max kept rows (0 = all)")
     parser.add_argument("--min-reasoning-chars", type=int, default=MIN_REASONING_CHARS)
+    parser.add_argument("--raw", action="store_true",
+                        help="fetch RAW rows (stream_raw_rows) instead of row_to_doc-transformed docs -- "
+                             "for trm_wm.py's --math-cot-docs-path, not the graph-growth --grow-cot path. "
+                             "--domains/--keywords/--min-reasoning-chars are ignored in this mode (the "
+                             "consumer does its own domain filtering).")
     args = parser.parse_args(argv)
+
+    if args.raw:
+        rows = stream_raw_rows(limit=args.limit)
+        n = write_docs(rows, args.out)
+        print("Fetch OpenThoughts-114k CoT (raw rows, for --math-cot-docs-path)")
+        print(f"  limit: {args.limit}")
+        print(f"  wrote {n} raw rows -> {args.out}")
+        return 0
 
     ot_domains = [d.strip() for d in args.domains.split(",") if d.strip()]
     keywords = [k.strip() for k in args.keywords.split(",") if k.strip()]

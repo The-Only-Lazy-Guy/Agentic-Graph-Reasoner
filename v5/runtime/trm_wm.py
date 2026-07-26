@@ -1176,7 +1176,7 @@ def _fmt_gold(gold: float) -> str:
 
 def _math_cot_tasks_from_graph(g, n_train: int = 24, n_held: int = 8, n_raw: int = 150,
                                domains: tuple = ("math",), min_reasoning_chars: int = 200,
-                               k_related: int = 3, seed: int = 0):
+                               k_related: int = 3, seed: int = 0, raw_rows: list | None = None):
     """Real long-horizon task pool: stream OpenThoughts-114k rows directly (bypassing fetch_cot.py's
     row_to_doc, which concatenates problem+reasoning+solution into one blob for the graph-growth use case --
     here we need the fields SEPARATE: the short problem statement for task_emb, and deepseek_solution alone
@@ -1200,13 +1200,23 @@ def _math_cot_tasks_from_graph(g, n_train: int = 24, n_held: int = 8, n_raw: int
         have a clean numeric final answer (measured directly: 4/18 on the locally cached sample; most are
         proofs/inequalities/multiple-choice). Do not silently end up with a tiny pool and call it a held-out
         set without saying so -- this is exactly the discipline every other growth function in this file
-        already follows (_grow_from_cot, _grow_skills_from_corpus)."""
-    from v5.graph_grower.fetch_cot import DATASET, CONFIG
-    from datasets import load_dataset
+        already follows (_grow_from_cot, _grow_skills_from_corpus).
+
+    raw_rows: pass pre-fetched rows (e.g. via v5.graph_grower.fetch_cot.stream_raw_rows or its saved jsonl,
+    `python -m v5.graph_grower.fetch_cot --raw --out <path> --limit N`, from a separate torch-free process)
+    to skip the internal live load_dataset() call. Real reason this matters, not just an option: HF
+    `datasets` streaming's first real fetch in a process segfaults if torch was already active earlier in
+    it, and by the time this function runs from --run (task_domain=math-cot), the LM has already been
+    loaded -- confirmed directly, live-streaming here crashes the same way _grow_from_cot's did."""
     import random as _random
 
     dom_set = {d.lower() for d in domains}
-    ds = load_dataset(DATASET, CONFIG, split="train", streaming=True)
+    if raw_rows is not None:
+        ds = raw_rows
+    else:
+        from v5.graph_grower.fetch_cot import DATASET, CONFIG
+        from datasets import load_dataset
+        ds = load_dataset(DATASET, CONFIG, split="train", streaming=True)
     seen = kept = skipped_domain = skipped_short = skipped_no_numeric_answer = 0
     pool: list[tuple[str, float]] = []
     for row in ds:
@@ -1443,7 +1453,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             batch_size: int = 1, task_domain: str = "synthetic", math_cot_n_raw: int = 150,
             top_trm_t: int = 0, reground_chunk_tokens: int = 16, reground_top_every: int = 4,
             max_new_tokens: int = 0, use_kv_cache: bool = False, evict_window: int | None = None,
-            grow_cot_docs_path: str | None = None):
+            grow_cot_docs_path: str | None = None, math_cot_docs_path: str | None = None):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
@@ -1567,8 +1577,15 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         atom_embs = {n: atom_emb_tensor[i] for i, n in enumerate(atom_names_list)}
 
     if task_domain == "math-cot":
+        pre_raw_rows = None
+        if math_cot_docs_path:
+            import json as _json
+            with open(math_cot_docs_path, encoding="utf-8") as _f:
+                pre_raw_rows = [_json.loads(line) for line in _f if line.strip()]
+            print(f"  math-cot: using {len(pre_raw_rows)} pre-fetched raw rows from {math_cot_docs_path} "
+                  f"(avoids the real datasets/torch ordering crash)")
         train_tasks, held_tasks, related_desc_pool, mc_stats = _math_cot_tasks_from_graph(
-            g, n_train=n_train, n_held=n_held, n_raw=math_cot_n_raw)
+            g, n_train=n_train, n_held=n_held, n_raw=math_cot_n_raw, raw_rows=pre_raw_rows)
         atom_names = related_desc_pool
         print(f"  math-cot: real OpenThoughts math problems, numeric-boxed-answer only -> "
               f"{mc_stats['n_train']} train, {mc_stats['n_held']} held-out (seen={mc_stats['seen']} "
@@ -2125,6 +2142,14 @@ def main():
                          "streaming from inside --run WILL likely crash on an environment with this "
                          "conflict. Produce the file first with a separate, torch-free process: "
                          "`python -m v5.graph_grower.fetch_cot --out <path> --limit N`.")
+    ap.add_argument("--math-cot-docs-path", type=str, default="",
+                    help="--task-domain math-cot: same real crash, different function -- "
+                         "_math_cot_tasks_from_graph does its OWN separate live load_dataset() call, hit "
+                         "by the exact same torch-already-loaded segfault risk as --grow-cot (confirmed: "
+                         "a real --run with --task-domain math-cot crashed here even with --grow-cot-docs-"
+                         "path already set, since this is a second, independent live-streaming call). "
+                         "Pre-fetch RAW rows (not row_to_doc docs) with a separate torch-free process: "
+                         "`python -m v5.graph_grower.fetch_cot --raw --out <path> --limit N`.")
     ap.add_argument("--grow-skills", type=int, default=0,
                     help="--run (requires --graph-path): bank up to this many real oracle-verified EXECUTABLE "
                          "atoms from scripts/build_crossdomain_corpus.py via learn_any before training -- "
@@ -2191,7 +2216,8 @@ def main():
                  top_trm_t=a.top_trm_t, reground_chunk_tokens=a.reground_chunk_tokens,
                  reground_top_every=a.reground_top_every, max_new_tokens=a.max_new_tokens,
                  use_kv_cache=a.use_kv_cache, evict_window=(a.evict_window or None),
-                 grow_cot_docs_path=(a.grow_cot_docs_path or None))
+                 grow_cot_docs_path=(a.grow_cot_docs_path or None),
+                 math_cot_docs_path=(a.math_cot_docs_path or None))
     else:
         selftest()
 
