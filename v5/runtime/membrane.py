@@ -135,6 +135,22 @@ class AtomGraph:
         self._matrix_dirty = True                                          # lazy rebuild on next matrix() call
         return atom
 
+    def _self_organize(self, atom: Atom, dedup: float = 0.90, link_lo: float = 0.50) -> None:
+        """Link an ALREADY-ADDED atom to existing RELATED nodes (link_lo <= cosine < dedup) with typed
+        'related' edges -- the graph connects itself by similarity, not just by literal code dependency.
+        Shared by add_or_merge (concepts) and learn_any's skill-banking path (atoms): code atoms don't go
+        through dedup/merge here (two similarly-DESCRIBED functions can be genuinely different code, unlike
+        paraphrased facts -- merging them would be wrong), but they should still self-organize by
+        similarity. Confirmed a real gap via scripts/graph_connectivity_report.py on a real graph: 29
+        skill-banked atoms were ALL isolated (0 edges) because _find_calls (learn_any's only other linking
+        mechanism there) only catches an atom whose code literally calls another banked atom -- most
+        simple/standalone atoms never do."""
+        M, order = self.matrix()
+        sims = M @ atom.emb
+        for i, o in enumerate(order):
+            if o != atom.name and link_lo <= float(sims[i]) < dedup:
+                self.link(atom.name, o, "related"); self.link(o, atom.name, "related")
+
     def add_or_merge(self, atom: Atom, dedup: float = 0.90, link_lo: float = 0.50) -> tuple:
         """WRITE-TIME GRAPH EDITING (the real thing, not a bare add):
           - DEDUP: if a near-duplicate node exists (cosine >= dedup) MERGE into it (keep the richer
@@ -154,11 +170,7 @@ class AtomGraph:
                     ex.description = atom.description; ex.emb = atom.emb; self._matrix_dirty = True
                 return order[j], "merged"
         self.add(atom)
-        M2, order2 = self.matrix()
-        sims2 = M2 @ atom.emb
-        for i, o in enumerate(order2):                      # SELF-ORGANIZE: connect related nodes
-            if o != atom.name and link_lo <= float(sims2[i]) < dedup:
-                self.link(atom.name, o, "related"); self.link(o, atom.name, "related")
+        self._self_organize(atom, dedup=dedup, link_lo=link_lo)
         return atom.name, "added"
 
     def names(self) -> list[str]:
@@ -1045,6 +1057,11 @@ def learn_any(g: AtomGraph, retr: TRMRetriever, text: str, *, code: str | None =
                               examples=([f"{nm}({x}) == {oracle(x)}" for x in (3, 5, 7)] if oracle else [])))
             for d in _find_calls(code, g):
                 g.link(nm, d, "depend")
+            # SELF-ORGANIZE by similarity too, not just literal code dependency -- _find_calls only catches
+            # an atom whose code directly calls another banked atom; most simple/standalone skills never do,
+            # leaving them fully isolated otherwise (confirmed on a real graph: 29/29 skill-banked atoms had
+            # zero edges before this fix).
+            g._self_organize(atom)
             _adapt(retr, train_examples, text, nm)
             return dict(status="banked-skill", node=nm, kind="atom")
         # WRONG skill -> do NOT bank it; record a TRAP (learned mistake), the anti-poison made visible
