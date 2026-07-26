@@ -389,7 +389,7 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
                            use_kv_cache: bool = False, evict_window: int | None = None,
                            trigger_patterns: list | None = None,
                            instability_trigger: float | None = None,
-                           sink_tokens: int = 0):
+                           sink_tokens: int = 0, reground_bottom: bool = False):
     """Generate, re-grounding WMReasoner's slots every chunk_tokens instead of once up front.
 
     If R.top_trm is set, also runs the slow/top-level TRM every `top_every` CHUNKS (not every chunk) --
@@ -457,6 +457,20 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
     survives the decay. The first chunk has no baseline yet and never fires on this path (the cadence
     covers it). None (default) = off, unchanged behavior. Domain-agnostic, unlike trigger_patterns.
 
+    reground_bottom: feed the generated-so-far embedding into the BOTTOM trm's task input (added to the
+    original task_emb), not just the top trm's context. This fixes a real, confirmed no-op, and it is the
+    reason to use this function at all. Without it, `task_emb` stays the ORIGINAL static embedding on every
+    chunk and the ONLY path for mid-generation information to reach the LM is
+    `top_to_bottom_proj(top_state)` -- which is deliberately zero-initialized. While that projection is at
+    or near zero, the bottom trm receives exactly the static task embedding every chunk, produces identical
+    slots, and the generation is BYTE-IDENTICAL to the one-shot static path. Confirmed across every real run
+    in this codebase's history: `reground` matched `held WM` exactly at every checkpoint (2/2, 10/10, 7/7,
+    12/12, 14/14 on one 40-epoch Qwen3-4B run, and the same in all earlier ones) -- not a coincidence, a
+    mathematical consequence. The approved design called for re-running refine() on an UPDATED embedding;
+    routing the update only to the top trm was the deviation. False (default) preserves the old byte-
+    identical behavior for regression safety; run_real's reground arms pass True so the harness measures
+    something real.
+
     sink_tokens (requires evict_window): keep this many tokens from the very START of the sequence, in
     addition to the recent window -- StreamingLLM-style ATTENTION SINKS. Found necessary by real
     measurement, not assumed: a sliding window drops the OLDEST tokens, which are the PROMPT -- the task
@@ -493,8 +507,13 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
                 # shape-mismatch caught by the offline test.
                 top_ctx = torch.as_tensor(encode_batch([generated_so_far])[0], dtype=torch.float32, device=wb.device)
             want_deltas = instability_trigger is not None
+            bottom_task_emb = task_emb
+            if reground_bottom and generated_so_far:
+                prog = torch.as_tensor(encode_batch([generated_so_far])[0], dtype=torch.float32,
+                                       device=wb.device)
+                bottom_task_emb = task_emb + prog
             refine_out = R.hierarchical_refine(
-                task_emb, atom_embs, top_context_emb=top_ctx, top_state=top_state,
+                bottom_task_emb, atom_embs, top_context_emb=top_ctx, top_state=top_state,
                 top_resume_state=top_resume_state, recompute_top=recompute_top, track_deltas=want_deltas)
             if want_deltas:
                 slots, _states, deltas, _raw, new_top_state, new_top_resume_state = refine_out
@@ -567,8 +586,13 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
         if recompute_top and generated_so_far:
             top_ctx = torch.as_tensor(encode_batch([generated_so_far])[0], dtype=torch.float32, device=wb.device)
         want_deltas = instability_trigger is not None
+        bottom_task_emb = task_emb
+        if reground_bottom and generated_so_far:
+            prog = torch.as_tensor(encode_batch([generated_so_far])[0], dtype=torch.float32,
+                                   device=wb.device)
+            bottom_task_emb = task_emb + prog
         refine_out = R.hierarchical_refine(
-            task_emb, atom_embs, top_context_emb=top_ctx, top_state=top_state,
+            bottom_task_emb, atom_embs, top_context_emb=top_ctx, top_state=top_state,
             top_resume_state=top_resume_state, recompute_top=recompute_top, track_deltas=want_deltas)
         if want_deltas:
             slots, _states, deltas, _raw, new_top_state, new_top_resume_state = refine_out
@@ -2073,7 +2097,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                         wb, R, pids, task_emb, held_mini_embs,
                         chunk_tokens=reground_chunk_tokens, max_new_tokens=eff_max_new_tokens,
                         top_every=reground_top_every, use_kv_cache=use_kv_cache, evict_window=None,
-                        trigger_patterns=trigger_patterns, instability_trigger=instability_trigger)
+                        trigger_patterns=trigger_patterns, instability_trigger=instability_trigger,
+                        reground_bottom=True)
                     reground_ok = verify(reground_text, tests)
                     reground_ok_count += int(reground_ok)
                     dump[-1] = dump[-1] + (reground_text, reground_ok)
@@ -2088,7 +2113,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                             chunk_tokens=reground_chunk_tokens, max_new_tokens=eff_max_new_tokens,
                             top_every=reground_top_every, use_kv_cache=True, evict_window=evict_window,
                             trigger_patterns=trigger_patterns, instability_trigger=instability_trigger,
-                            sink_tokens=sink_tokens)
+                            sink_tokens=sink_tokens, reground_bottom=True)
                         reground_evicted_ok = verify(reground_evicted_text, tests)
                         reground_evicted_ok_count += int(reground_evicted_ok)
                         dump[-1] = dump[-1] + (reground_evicted_text, reground_evicted_ok)
