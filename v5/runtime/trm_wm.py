@@ -829,18 +829,12 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         with torch.no_grad():
             a.g.fill_(0.8)
 
-    # Build raw prompts (no chat template, to avoid special-token issues with teacher-forcing)
     def build_prompt(task_text, inner_name=None, outer_name=None):
-        """Build tokenized prompt. If inner/outer atom names are provided (decoded from registers),
-        prepend them as an explicit CODE hint so the LM knows the exact composition to write.
-        Code form (outer(inner(n))) is unambiguous -- 'inner/outer' role labels are not, because
-        the LM interprets 'inner' as 'first in code left-to-right' (i.e. outer in function call
-        notation), causing systematic order reversal."""
         if inner_name and outer_name:
             hint = f"# return: {outer_name}({inner_name}(n))\n"
         else:
             hint = ""
-        return wb.tok(f"{hint}Write a function task(n):\n# {task_text}\ndef task(n):",
+        return wb.tok(f"{hint}Explain your reasoning. Then write function task(n):\n# {task_text}\nExplanation:\n",
                       return_tensors="pt").input_ids.to(wb.device)
 
     # Precompute static task embeddings and atom embeddings for all examples
@@ -947,14 +941,20 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         tot_gate_reg, tot_conv = 0.0, 0.0
         for b0 in range(0, len(train_ex), batch_size):
             batch = train_ex[b0:b0 + batch_size]
-            all_states, pids_list, tids_list = [], [], []
+            all_states, pids_list, tids_list, slots_list = [], [], [], []
             for task_emb, gold_idxs, atoms_needed, pids, text, target_code, tests in batch:
                 mini_atom_embs = torch.stack([
                     torch.as_tensor(encode_batch([atom_names[idx]])[0], dtype=torch.float32, device=wb.device)
                     for idx in gold_idxs
                 ])
                 slots, states = R.refine(task_emb, mini_atom_embs)
-                R.set_slots_direct(slots)
+                # DEFER injection: with batch_size>1, calling set_slots_direct here would be overwritten by
+                # every subsequent example, so only the LAST example's slots would survive to the single
+                # batched forward pass below -- GatedCrossAttn then broadcasts that one example's slots to
+                # the WHOLE batch (its slots.dim()==2 branch), silently corrupting every other example's
+                # gradient (real/wrong content, right target). Stack per-example slots into [B,T,d_lm] and
+                # inject ONCE, after the loop, so each batch row attends to its OWN slots.
+                slots_list.append(slots)
                 pids = build_prompt(text)
                 return_body = target_code.split(": ", 1)[1] if ": " in target_code else target_code
                 tids = wb.tok(" " + return_body, return_tensors="pt").input_ids.to(wb.device)
@@ -962,6 +962,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 tids = torch.cat([tids, eos], dim=-1)
                 pids_list.append(pids); tids_list.append(tids)
                 all_states.append(states)
+
+            R.set_slots_direct(torch.stack(slots_list, dim=0))   # [B, T, d_lm] -- per-example, always
 
             if batch_size > 1 and len(batch) > 1:
                 input_ids, labels, attn_mask = _pad_and_batch(pids_list, tids_list, pad_id, wb.device)

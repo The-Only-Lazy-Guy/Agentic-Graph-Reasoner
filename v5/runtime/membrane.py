@@ -362,6 +362,15 @@ class TRMRetriever:
         M, order = self.graph.matrix()
         if not order:
             return {"loss": float("nan")}
+        if not self.graph.edges:
+            # GraphAttnEncoder is IDENTITY with zero edges, by design (see its docstring) -- _encode_graph
+            # then returns the raw embedding matrix untouched, never routing through graph_encoder's own
+            # params. Backward-ing a loss built from that tensor has no grad_fn back to graph_encoder at
+            # all (real crash, not hypothetical: RuntimeError, confirmed on a fresh seed_graph()). Nothing
+            # for the GAT to learn from yet anyway -- skip cleanly instead of crashing.
+            if verbose:
+                print("    GAT: graph has 0 edges yet -- nothing to learn from, skipping (identity fallback)")
+            return {"loss": float("nan"), "n": 0, "skipped": "no edges yet"}
         pos = {n: i for i, n in enumerate(order)}
         A = torch.from_numpy(M).to(self.device)
         data = [(self._embed_task(t), pos[g]) for t, g in examples if g in pos]
@@ -869,15 +878,20 @@ def demo(lm_name: str = ""):
 
     train_ex, test_ex = build_examples("train"), build_examples("test")
 
-    # (1) NEURAL RETRIEVAL: cosine baseline vs the TRM BEFORE and AFTER real training (held-out phrasings)
+    # (1) NEURAL RETRIEVAL: cosine (MiniLM) is the live mechanism Membrane.solve() actually calls
+    # (TRMRetriever.rank() -- TRM is NOT a ranker anymore; its job is composition/reasoning via
+    # WMReasoner.refine(), proven separately in trm_wm.py). Reported once, honestly -- top1_accuracy()
+    # also just calls .rank() under the hood, so a "before/after training" delta here would be measuring
+    # the same cosine function twice; it cannot move regardless of GAT training.
     cos_acc = sum(int(g.cosine_rank(t, 1)[0] == gold) for t, gold in test_ex) / len(test_ex)
-    before = retr.top1_accuracy(test_ex)
-    print(f"\n  [retrieval] held-out top-1 accuracy (unseen phrasings):")
-    print(f"     MiniLM cosine baseline   : {cos_acc:.2f}")
-    print(f"     TRM (untrained)          : {before:.2f}")
-    stats = retr.train(train_ex, epochs=80, verbose=True)
-    after = retr.top1_accuracy(test_ex)
-    print(f"     TRM (trained, loss {stats['loss']:.3f}) : {after:.2f}   <- REAL learning: {before:.2f} -> {after:.2f}")
+    print(f"\n  [retrieval] held-out top-1 accuracy (unseen phrasings): {cos_acc:.2f}  "
+          f"(MiniLM cosine -- the actual live retrieval)")
+    gat_stats = retr.train(train_ex, epochs=80, verbose=True)
+    if gat_stats.get("skipped"):
+        print(f"  [GAT]  {gat_stats['skipped']} -- no inter-atom edges yet on a fresh seed graph")
+    else:
+        print(f"  [GAT]  graph-encoder trained, loss {gat_stats['loss']:.3f} (real gradient descent -- "
+              f"not consumed by retrieval today; see [compose] below for what the TRM actually does)")
 
     # (2) REASONING: solve verifiable tasks by EXECUTION (retrieve -> compose -> realize -> verify)
     lm = None
@@ -924,20 +938,23 @@ def demo(lm_name: str = ""):
     print(f"     status={cres['status']} node={cres['node']} cites={cres['cites']} "
           f"verified-by-execution={cres['verified']}")
 
-    # (6) REBUILD FROM GRAPH: a fresh TRM trained only on the graph's evidence recovers retrieval
+    # (6) REBUILD: reset + retrain the GAT encoder purely from the graph's own evidence. NOTE: retrieval
+    # itself stays cosine (fixed by atom embeddings, unaffected by GAT training) -- see (1)'s note; this
+    # step demonstrates the encoder's OWN weights are recoverable from the graph, not a retrieval delta.
     reb = retr.rebuild_from_graph(train_ex, epochs=80)
-    reb_acc = retr.top1_accuracy(test_ex)
-    print(f"\n  [rebuild]  fresh TRM trained ONLY from the graph -> held-out top-1 {reb_acc:.2f} "
-          f"(the graph IS the memory; a reset net recovers the skill)")
+    if reb.get("skipped"):
+        print(f"\n  [rebuild]  {reb['skipped']} -- GAT reset, nothing to retrain yet (0 edges)")
+    else:
+        print(f"\n  [rebuild]  GAT reset + retrained from the graph's own evidence, loss {reb['loss']:.3f} "
+              f"(the graph IS the memory for the encoder's weights)")
 
     print(f"\n  SUMMARY (all measured by execution, not stored):")
-    print(f"     neural retrieval learned : cosine {cos_acc:.2f} | TRM {before:.2f} -> {after:.2f} (trained)")
+    print(f"     neural retrieval (live)  : cosine {cos_acc:.2f}  (TRM's role is composition, not ranking -- see [compose])")
     print(f"     tasks solved by verify   : {solved}/{len(solve_tasks)}   composition: {r['solved']}")
     print(f"     learn(NL+code) + reuse   : banked '{res['node']}', reused = {rr['solved']}")
     print(f"     learn(CoT) schema        : {cres['status']} (verified={cres['verified']})")
     print(f"     graph grew to {len(g)} atoms; frozen LM used for authoring only: {'yes' if lm else 'no (core needs none)'}")
-    return dict(cos=cos_acc, trm_before=before, trm_after=after, solved=solved,
-                composed=r["solved"], reuse=rr["solved"], cot=cres["verified"], rebuild=reb_acc)
+    return dict(cos=cos_acc, solved=solved, composed=r["solved"], reuse=rr["solved"], cot=cres["verified"])
 
 
 # ================================================================================================
