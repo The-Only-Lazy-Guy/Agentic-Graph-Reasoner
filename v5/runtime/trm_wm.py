@@ -348,16 +348,38 @@ def native_text_embedding_batch(wb, texts: list[str]) -> torch.Tensor:
 # grounding in the real partial generation so far each time -- the working memory now tracks what's
 # actually been produced, not just the original task description.
 # ================================================================================================
-def evict_cache(cache, keep_last: int) -> None:
-    """Sliding-window eviction: keep only the last `keep_last` tokens of each layer's KV, in place.
+def evict_cache(cache, keep_last: int, keep_first: int = 0) -> None:
+    """Sliding-window eviction with optional ATTENTION SINKS: keep the first `keep_first` tokens AND the
+    last `keep_last` tokens of each layer's KV, dropping the middle, in place.
+
     Real primitive on transformers' DynamicCache (confirmed on 5.9.0): each layer stores raw
     `.keys`/`.values` tensors ([B, heads, seq, head_dim]) directly -- `.crop()` keeps the FIRST n tokens
-    (built for generation rollback, wrong direction for a sliding window), so this slices the tail
-    directly instead. `get_seq_length()` is derived live from tensor shape, so `model.generate()`'s
-    internal cache-length bookkeeping picks up the shrunk cache automatically on the next call -- no
-    separate counter to keep in sync."""
+    (built for generation rollback, wrong direction for a sliding window), so this slices explicitly
+    instead. `get_seq_length()` is derived live from tensor shape, so `model.generate()`'s internal
+    cache-length bookkeeping picks up the shrunk cache automatically on the next call -- no separate
+    counter to keep in sync.
+
+    keep_first > 0 exists because pure sliding-window eviction (keep_first=0) is the known-broken variant,
+    and this was found by real measurement, not assumed: the OLDEST tokens are the PROMPT -- the task
+    description itself. On this codebase's synthetic composition domain, a real measurement showed prompts
+    of 23-25 tokens against completions of only 8-9, so any window small enough to actually evict was
+    necessarily deleting the question, not stale reasoning. The same holds in long CoT (a sliding window
+    always drops the original problem statement first). This is exactly the failure StreamingLLM's
+    attention sinks address -- keeping a handful of initial tokens recovers most of the quality that naive
+    windowing destroys. keep_first=0 (default) preserves the original pure-window behavior byte-for-byte.
+
+    NOTE for callers: with keep_first > 0 the surviving tokens are NO LONGER a contiguous suffix -- their
+    true absolute positions are [0..keep_first-1] + [much later..], a gap. Any caller passing explicit
+    position_ids (which generate_with_reground must, for RoPE correctness) has to track real per-token
+    positions rather than a single scalar offset. generate_with_reground does exactly that."""
     for layer in cache.layers:
-        if layer.keys.shape[-2] > keep_last:
+        seq = layer.keys.shape[-2]
+        if seq <= keep_first + keep_last:
+            continue
+        if keep_first > 0:
+            layer.keys = torch.cat([layer.keys[..., :keep_first, :], layer.keys[..., -keep_last:, :]], dim=-2)
+            layer.values = torch.cat([layer.values[..., :keep_first, :], layer.values[..., -keep_last:, :]], dim=-2)
+        else:
             layer.keys = layer.keys[..., -keep_last:, :]
             layer.values = layer.values[..., -keep_last:, :]
 
@@ -366,7 +388,8 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
                            max_new_tokens: int = 128, top_every: int = 4,
                            use_kv_cache: bool = False, evict_window: int | None = None,
                            trigger_patterns: list | None = None,
-                           instability_trigger: float | None = None):
+                           instability_trigger: float | None = None,
+                           sink_tokens: int = 0):
     """Generate, re-grounding WMReasoner's slots every chunk_tokens instead of once up front.
 
     If R.top_trm is set, also runs the slow/top-level TRM every `top_every` CHUNKS (not every chunk) --
@@ -425,6 +448,16 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
     the current context is hard or ambiguous, not a guessed keyword. If that ratio exceeds this threshold
     (e.g. 1.0), top recomputes on the next chunk, same OR-with-cadence fallback as trigger_patterns. None
     (default) = off, unchanged behavior. Domain-agnostic (no hand-picked words), unlike trigger_patterns.
+
+    sink_tokens (requires evict_window): keep this many tokens from the very START of the sequence, in
+    addition to the recent window -- StreamingLLM-style ATTENTION SINKS. Found necessary by real
+    measurement, not assumed: a sliding window drops the OLDEST tokens, which are the PROMPT -- the task
+    description itself. Measured on this codebase's synthetic composition domain, prompts run 23-25 tokens
+    against completions of only 8-9, so any window small enough to actually evict was necessarily deleting
+    the question rather than stale reasoning (the same is true of long CoT -- a pure window always drops the
+    original problem first). 0 (default) = pure sliding window, the original behavior, which is the
+    known-broken variant this parameter exists to fix. Try sink_tokens ~= the real prompt length to keep
+    the task statement resident while still bounding total cache growth.
 
     Returns the full generated text (decoded, all chunks concatenated) -- same string shape callers already
     get from a plain wb.model.generate() + decode."""
@@ -489,17 +522,21 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
     # '√' got mangled into a replacement char this way) -- decoding the FULL accumulated id list each
     # time, exactly like the use_kv_cache=False path already does, avoids ever decoding a partial fragment.
     #
-    # true_pos_offset: the TRUE absolute position of cur_ids[0]. Eviction physically removes the oldest
-    # cached tokens -- it does NOT re-rotate the survivors' cached keys (RoPE bakes rotation in at compute
-    # time, permanently). The fix is not touching the cache at all: pass an explicit `position_ids` to
-    # generate() reflecting each surviving/new token's TRUE original position (confirmed by reading
-    # transformers' actual generation/utils.py: prepare_inputs_for_generation forwards an explicit
-    # position_ids through untouched, and _update_model_kwargs_for_generation increments every subsequent
-    # step from `position_ids[..., -1] + 1`, NOT from the cache's current length) -- RoPE's attention score
-    # depends only on the RELATIVE offset between a query and key's true positions, so as long as both are
-    # labeled correctly there is no gap/mismatch, even though the cache itself is shorter than the true
-    # token count. Stays 0 until eviction first fires (cur_ids[0] is the original prompt start until then).
-    true_pos_offset = 0
+    # true_positions: the TRUE absolute position of EVERY token currently in cur_ids, tracked explicitly as
+    # a tensor rather than a single scalar offset. Eviction physically removes cached tokens -- it does NOT
+    # re-rotate the survivors' cached keys (RoPE bakes rotation in at compute time, permanently). The fix is
+    # not touching the cache at all: pass explicit `position_ids` to generate() reflecting each surviving/new
+    # token's TRUE original position (confirmed by reading transformers' actual generation/utils.py:
+    # prepare_inputs_for_generation forwards an explicit position_ids through untouched, and
+    # _update_model_kwargs_for_generation increments every subsequent step from `position_ids[..., -1] + 1`,
+    # NOT from the cache's current length) -- RoPE's attention score depends only on the RELATIVE offset
+    # between a query and key's true positions, so as long as both are labeled correctly there is no
+    # gap/mismatch, even though the cache itself is shorter than the true token count.
+    #
+    # A tensor, not the scalar offset this used to be, specifically because sink_tokens > 0 makes the
+    # survivors NON-CONTIGUOUS ([0..sink-1] then a gap then the recent window). A scalar offset literally
+    # cannot express that; sliced in lockstep with cur_ids, this tensor can.
+    true_positions = torch.arange(pids.shape[-1], device=wb.device)
     cur_ids = pids
     past = None
     top_state = None
@@ -528,12 +565,13 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
         R.set_slots_direct(slots)
         with torch.no_grad():
             attn = torch.ones_like(cur_ids)
-            position_ids = (torch.arange(cur_ids.shape[-1], device=wb.device) + true_pos_offset).unsqueeze(0)
+            position_ids = true_positions.unsqueeze(0)
             out = wb.model.generate(input_ids=cur_ids, attention_mask=attn, past_key_values=past,
                                     position_ids=position_ids,
                                     max_new_tokens=n_new, do_sample=False, pad_token_id=wb.tok.eos_token_id,
                                     use_cache=True, return_dict_in_generate=True)
         seq = out.sequences
+        n_added = seq.shape[-1] - cur_ids.shape[-1]
         new_ids_this_chunk = seq[0, cur_ids.shape[-1]:].tolist()
         all_new_ids.extend(new_ids_this_chunk)
         generated_so_far = wb.tok.decode(all_new_ids, skip_special_tokens=True)
@@ -543,6 +581,14 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
                             and R.trajectory_instability(deltas) > instability_trigger)
         event_fired = pattern_fired or instability_fired
         cur_ids = seq
+        # Newly generated tokens continue from the last TRUE position, matching how generate() itself
+        # incremented them internally for this chunk (position_ids[..., -1] + 1, per transformers' source).
+        if n_added > 0:
+            nxt = true_positions[-1].item() + 1
+            true_positions = torch.cat([
+                true_positions,
+                torch.arange(nxt, nxt + n_added, device=wb.device),
+            ])
         past = getattr(out, "past_key_values", None)
         if evict_window is not None and past is not None and past.get_seq_length() > evict_window:
             # Evict the CACHE to evict_window-1, but keep cur_ids at evict_window (one token longer than
@@ -555,10 +601,21 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
             # cache (the same invariant that was already present, incidentally, in every non-eviction
             # chunk -- which is WHY only eviction chunks broke) makes the "how many new" count correctly
             # come out to 1, not 0.
-            n_dropped = cur_ids.shape[-1] - (evict_window - 1)
-            evict_cache(past, evict_window - 1)
-            cur_ids = cur_ids[:, -evict_window:]
-            true_pos_offset += n_dropped   # cur_ids[0] is now n_dropped positions later than before
+            #
+            # cur_ids/true_positions are sliced in EXACT lockstep with the cache (same keep_first sinks +
+            # same recent window), so every surviving token keeps its real absolute position label even
+            # though the kept set is non-contiguous when sinks are on.
+            keep_last_cache = evict_window - 1 - sink_tokens
+            evict_cache(past, keep_last_cache, keep_first=sink_tokens)
+            if sink_tokens > 0:
+                cur_ids = torch.cat([cur_ids[:, :sink_tokens], cur_ids[:, -(evict_window - sink_tokens):]], dim=-1)
+                true_positions = torch.cat([
+                    true_positions[:sink_tokens],
+                    true_positions[-(evict_window - sink_tokens):],
+                ])
+            else:
+                cur_ids = cur_ids[:, -evict_window:]
+                true_positions = true_positions[-evict_window:]
         chunk_idx += 1
         if seq[0, -1].item() == wb.tok.eos_token_id:
             break
@@ -1522,7 +1579,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             top_trm_t: int = 0, reground_chunk_tokens: int = 16, reground_top_every: int = 4,
             max_new_tokens: int = 0, use_kv_cache: bool = False, evict_window: int | None = None,
             grow_cot_docs_path: str | None = None, math_cot_docs_path: str | None = None,
-            trigger_patterns: list | None = None, instability_trigger: float | None = None):
+            trigger_patterns: list | None = None, instability_trigger: float | None = None,
+            sink_tokens: int = 0):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
@@ -2009,7 +2067,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                             wb, R, pids, task_emb, held_mini_embs,
                             chunk_tokens=reground_chunk_tokens, max_new_tokens=eff_max_new_tokens,
                             top_every=reground_top_every, use_kv_cache=True, evict_window=evict_window,
-                            trigger_patterns=trigger_patterns, instability_trigger=instability_trigger)
+                            trigger_patterns=trigger_patterns, instability_trigger=instability_trigger,
+                            sink_tokens=sink_tokens)
                         reground_evicted_ok = verify(reground_evicted_text, tests)
                         reground_evicted_ok_count += int(reground_evicted_ok)
                         dump[-1] = dump[-1] + (reground_evicted_text, reground_evicted_ok)
@@ -2238,6 +2297,15 @@ def main():
                          "cadence fallback as --trigger-patterns. 0.0 (default, disabled sentinel) = off, "
                          "unchanged behavior -- pass e.g. 1.0 to enable (ratio > 1.0 already means "
                          "'still churning' per trajectory_instability's own convention).")
+    ap.add_argument("--sink-tokens", type=int, default=0,
+                    help="requires --evict-window: keep this many tokens from the very START of the "
+                         "sequence alongside the recent window -- StreamingLLM-style attention sinks. "
+                         "STRONGLY RECOMMENDED whenever --evict-window is used: measured on real "
+                         "Qwen3-4B, pure sliding window (0, the default) scored 7/15 on a "
+                         "list-the-primes-with-a-prefix task and collapsed into a 29x repeated-token "
+                         "loop, while sinks covering the prompt scored 14/15 coherently against a "
+                         "15/15 no-eviction ceiling -- because a pure window's oldest tokens ARE the "
+                         "prompt (the task description). Set it to roughly the real prompt length.")
     ap.add_argument("--grow-skills", type=int, default=0,
                     help="--run (requires --graph-path): bank up to this many real oracle-verified EXECUTABLE "
                          "atoms from scripts/build_crossdomain_corpus.py via learn_any before training -- "
@@ -2307,7 +2375,8 @@ def main():
                  grow_cot_docs_path=(a.grow_cot_docs_path or None),
                  math_cot_docs_path=(a.math_cot_docs_path or None),
                  trigger_patterns=([p for p in a.trigger_patterns.split(",") if p] or None),
-                 instability_trigger=(a.instability_trigger or None))
+                 instability_trigger=(a.instability_trigger or None),
+                 sink_tokens=a.sink_tokens)
     else:
         selftest()
 
