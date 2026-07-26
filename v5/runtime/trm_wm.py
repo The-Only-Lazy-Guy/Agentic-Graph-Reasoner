@@ -39,6 +39,7 @@ _ROOT = str(Path(__file__).resolve().parents[2])
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -890,6 +891,75 @@ def _grow_from_swe_traces(g, n: int, config: str = "openhands", split: str = "mi
     return {"seen": seen, "added": added, "merged": merged}
 
 
+def _grow_swe_step_concepts(g, n_trajectories: int = 60, min_step_chars: int = 30,
+                            config: str = "openhands", split: str = "minimax_m25") -> dict:
+    """Real graph growth for _hindsight_examples_from_swe_traces specifically -- REPLACES
+    _grow_from_swe_traces for that purpose, do not use the whole-trajectory version for hindsight labeling.
+
+    Real bug found and fixed here (not assumed, confirmed via direct inspection of a real grown graph):
+    _grow_from_swe_traces banks each ENTIRE trajectory (problem + all its steps, flattened, up to 4000
+    chars) as ONE concept node. That makes the "graph" a pile of ~150 essentially-unrelated OTHER GitHub
+    issues' full text -- confirmed the actual failure mode directly: generic step text like "let's check
+    the file structure" was cosine-matching against random unrelated issues ('IAM: mock_iam() is keeping
+    state...', 'Error in data transfer due to 1006...') purely because SOME whole-issue blob has to be the
+    argmax, not because of real topical relevance. The hindsight-labeling premise ("will concept X be
+    needed later") only means anything if X is a genuine, reusable fact/action that COULD legitimately
+    recur (e.g. "how to view a file's structure", "how to run pytest") -- not another repo's entire
+    unrelated issue description.
+
+    This banks each STEP's real reasoning text as its OWN concept node instead -- real dedup (cosine>=0.90
+    merge, already in add_or_merge) naturally consolidates recurring generic actions ("viewing file
+    structure" showing up across many different trajectories) into shared, genuinely comparable nodes,
+    instead of one node per trajectory.
+
+    Performance, not just correctness: a real trajectory set (240 trajectories, ~55 steps each) means
+    ~13,000 candidate step texts. Calling learn_any/add_or_merge one text at a time -- as the first version
+    of this function did -- means ~13,000 separate encode_batch([text]) forward passes (batch size 1, the
+    slow way) PLUS a full graph-matrix rebuild after every single insert, with zero progress visibility in
+    between. Fixed: exact-string dedup first (real trajectories repeat the same short actions verbatim
+    often -- "Let me look at the file structure." recurs across many different repos), then ONE batched
+    encode_batch() call over whatever's left, then insert with the embedding already attached (add_or_merge
+    only computes encode_batch itself when atom.emb is None) -- skips learn_any's per-call classification
+    overhead too, safe here since every step text is already known to be a plain-text concept, no code/
+    oracle involved. Heartbeat print every 500 unique texts processed so this is never silently opaque."""
+    from v5.graph_grower.fetch_swe_traces import stream_swe_trajectories
+    trajectories = list(stream_swe_trajectories(config=config, split=split, resolved_only=True,
+                                                limit=n_trajectories))
+    from v5.runtime.membrane import Atom
+    raw_texts = []
+    for traj in trajectories:
+        for s in traj["steps"]:
+            text = (s.get("reasoning") or "").strip()
+            if len(text) >= min_step_chars:
+                raw_texts.append(text)
+    seen = len(raw_texts)
+    unique_texts = list(dict.fromkeys(raw_texts))   # exact-dup removal, order-preserving
+    print(f"    _grow_swe_step_concepts: {seen} step texts, {len(unique_texts)} exact-unique -- "
+          f"batch-embedding + inserting...", flush=True)
+    # encode_batch has NO internal chunking (confirmed by reading embedder.py) -- it runs the WHOLE list
+    # through MiniLM as one forward pass. Passing all ~13k texts at once tried to allocate >10GB of RAM and
+    # OOM'd, a real bug in this function's first version, not a guess. Chunk into reasonable sub-batches.
+    EMBED_CHUNK = 128
+    embs = []
+    for c0 in range(0, len(unique_texts), EMBED_CHUNK):
+        embs.append(encode_batch(unique_texts[c0:c0 + EMBED_CHUNK]))
+        if (c0 // EMBED_CHUNK) % 20 == 0:
+            print(f"      ...embedded {min(c0 + EMBED_CHUNK, len(unique_texts))}/{len(unique_texts)}",
+                  flush=True)
+    embs = np.concatenate(embs, axis=0) if embs else np.zeros((0, EMBED_DIM), dtype=np.float32)
+    added = merged = 0
+    for i, (text, emb) in enumerate(zip(unique_texts, embs)):
+        _, action = g.add_or_merge(Atom(name=f"swe_step_{i}", code="", description=text, kind="concept",
+                                        emb=emb))
+        if action == "added":
+            added += 1
+        else:
+            merged += 1
+        if (i + 1) % 500 == 0:
+            print(f"      ...{i + 1}/{len(unique_texts)} processed, graph now {len(g)} nodes", flush=True)
+    return {"seen": seen, "added": added, "merged": merged}
+
+
 def _hindsight_examples_from_swe_traces(g, n_trajectories: int = 30, lookahead_k: int = 10,
                                         min_relevance: float = 0.35,
                                         config: str = "openhands", split: str = "minimax_m25") -> list:
@@ -899,9 +969,11 @@ def _hindsight_examples_from_swe_traces(g, n_trajectories: int = 30, lookahead_k
     (T, T+lookahead_k] actually turned out to be about? That's real, recoverable ground truth, not a guess,
     same anti-poison shape as record_success/record_failure elsewhere in this codebase.
 
-    Requires g to already have real concept nodes to retrieve against (e.g. via _grow_from_swe_traces or
-    _grow_from_cot on the same/a related corpus) -- with an empty graph there is nothing to predict future
-    need FOR, so trajectories are skipped rather than silently returning meaningless labels.
+    Requires g to already have real, FINE-GRAINED concept nodes to retrieve against -- use
+    _grow_swe_step_concepts (step-level), NOT _grow_from_swe_traces (whole-trajectory-blob nodes; confirmed
+    a real problem for this exact purpose, see _grow_swe_step_concepts's docstring) -- with an empty graph
+    there is nothing to predict future need FOR, so trajectories are skipped rather than silently returning
+    meaningless labels.
 
     Returns a list of (task_emb, progress_emb, candidate_emb, label) tuples, all torch.float32 CPU tensors
     in MiniLM (EMBED_DIM) space -- label=1 if `candidate` is the cosine-nearest graph node to some step
@@ -1350,7 +1422,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             grow_skills: int = 0, grow_skills_domains: str = "",
             batch_size: int = 1, task_domain: str = "synthetic", math_cot_n_raw: int = 150,
             top_trm_t: int = 0, reground_chunk_tokens: int = 16, reground_top_every: int = 4,
-            max_new_tokens: int = 0):
+            max_new_tokens: int = 0, use_kv_cache: bool = False, evict_window: int | None = None):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
@@ -1798,7 +1870,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                     reground_text = generate_with_reground(
                         wb, R, pids, task_emb, held_mini_embs,
                         chunk_tokens=reground_chunk_tokens, max_new_tokens=eff_max_new_tokens,
-                        top_every=reground_top_every)
+                        top_every=reground_top_every, use_kv_cache=use_kv_cache,
+                        evict_window=evict_window)
                     reground_ok = verify(reground_text, tests)
                     reground_ok_count += int(reground_ok)
                     dump[-1] = dump[-1] + (reground_text, reground_ok)
@@ -2024,6 +2097,19 @@ def main():
                          "512 for math-cot (real OpenThoughts reasoning traces routinely run 300-1000+ "
                          "tokens before \\boxed{...} -- 128 would cut them off before the model ever reaches "
                          "the boxed answer, regardless of whether the reasoning was on track).")
+    ap.add_argument("--use-kv-cache", action="store_true",
+                    help="--top-trm-t>0 only: thread a real KV cache between reground chunks instead of "
+                         "recomputing the whole prefix from scratch every chunk. Validated byte-identical "
+                         "to the default (no-cache) path on real Qwen3-4B under greedy decoding -- pure "
+                         "compute win, no output-changing risk. Off by default (matches every prior run's "
+                         "behavior exactly; opt in explicitly).")
+    ap.add_argument("--evict-window", type=int, default=0,
+                    help="requires --use-kv-cache: sliding-window KV eviction, keeps VRAM roughly constant "
+                         "as generation grows instead of O(total tokens). 0 (default) = off. Real, "
+                         "position-compensated fix validated on real Qwen3-4B (no more garbled-token "
+                         "degeneration) -- but NOT yet validated end-to-end through this held-out harness "
+                         "(no reground_evicted A/B column wired here yet), so treat as experimental until "
+                         "that comparison exists.")
     a = ap.parse_args()
     if a.probe:
         probe_real(a.lm, a.quant, a.words, a.steps)
@@ -2032,7 +2118,8 @@ def main():
                  a.grow_cot, a.grow_domains, a.grow_keywords, a.grow_skills, a.grow_skills_domains,
                  batch_size=a.batch_size, task_domain=a.task_domain, math_cot_n_raw=a.math_cot_n_raw,
                  top_trm_t=a.top_trm_t, reground_chunk_tokens=a.reground_chunk_tokens,
-                 reground_top_every=a.reground_top_every, max_new_tokens=a.max_new_tokens)
+                 reground_top_every=a.reground_top_every, max_new_tokens=a.max_new_tokens,
+                 use_kv_cache=a.use_kv_cache, evict_window=(a.evict_window or None))
     else:
         selftest()
 
