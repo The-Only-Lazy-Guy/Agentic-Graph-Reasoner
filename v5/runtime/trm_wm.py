@@ -1811,7 +1811,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         print(f"  ep {ep:>3}  lm {tot_lm/max(n,1):.3f}  gate_reg {tot_gate_reg/max(n,1):.4f}  conv {tot_conv/max(n,1):.4f}  gate {R.adapters[0].g.detach().item():+.2f}", flush=True)
         if ep % eval_every == 0 or ep == epochs - 1:
             R.eval()
-            held_ok, ablated_ok, reground_ok_count = 0, 0, 0
+            held_ok, ablated_ok, reground_ok_count, reground_evicted_ok_count = 0, 0, 0, 0
             dump = []
             if ep == 0:
                 print(f"\n    [ep 0 heartbeat] running held-out eval ({len(held_ex)} tasks x 2 generate() calls)...",
@@ -1867,14 +1867,30 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 # with the existing static-slots result above, never replacing it -- this is a comparison,
                 # not a swap, per the plan.
                 if R.top_trm is not None:
+                    # This IS the clean baseline -- no eviction here even if --evict-window was passed, so
+                    # "reground" always means the same thing across runs. use_kv_cache alone (no eviction)
+                    # is validated byte-identical to the no-cache path on real Qwen3-4B, so this call's
+                    # RESULT is unaffected by use_kv_cache; only its compute cost changes.
                     reground_text = generate_with_reground(
                         wb, R, pids, task_emb, held_mini_embs,
                         chunk_tokens=reground_chunk_tokens, max_new_tokens=eff_max_new_tokens,
-                        top_every=reground_top_every, use_kv_cache=use_kv_cache,
-                        evict_window=evict_window)
+                        top_every=reground_top_every, use_kv_cache=use_kv_cache, evict_window=None)
                     reground_ok = verify(reground_text, tests)
                     reground_ok_count += int(reground_ok)
                     dump[-1] = dump[-1] + (reground_text, reground_ok)
+
+                    # SEPARATE, real side-by-side comparison -- only when --evict-window was actually
+                    # requested. Same task/slots/verify() as reground above; the ONLY difference is
+                    # evict_window, so any pass-rate gap between this and reground isolates the real cost
+                    # (or lack of one) of eviction specifically, not a confound with use_kv_cache itself.
+                    if evict_window is not None:
+                        reground_evicted_text = generate_with_reground(
+                            wb, R, pids, task_emb, held_mini_embs,
+                            chunk_tokens=reground_chunk_tokens, max_new_tokens=eff_max_new_tokens,
+                            top_every=reground_top_every, use_kv_cache=True, evict_window=evict_window)
+                        reground_evicted_ok = verify(reground_evicted_text, tests)
+                        reground_evicted_ok_count += int(reground_evicted_ok)
+                        dump[-1] = dump[-1] + (reground_evicted_text, reground_evicted_ok)
 
             # CO-TRAINING data (stage 1)
             if ep == 0:
@@ -1909,7 +1925,10 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             inst_str = (f"  instab(pass/fail) {sum(inst_pass)/len(inst_pass):.3f}/"
                        f"{sum(inst_fail)/len(inst_fail):.3f}" if inst_pass and inst_fail else "")
             reground_str = f"  reground {reground_ok_count}/{len(held_ex)}" if R.top_trm is not None else ""
-            print(f"  held WM {held_ok}/{len(held_ex)}  ablated {ablated_ok}/{len(held_ex)}{reground_str}  {inst_str}", flush=True)
+            evicted_str = (f"  reground_evicted {reground_evicted_ok_count}/{len(held_ex)}"
+                          if evict_window is not None else "")
+            print(f"  held WM {held_ok}/{len(held_ex)}  ablated {ablated_ok}/{len(held_ex)}{reground_str}"
+                  f"{evicted_str}  {inst_str}", flush=True)
             if len(held_ex) <= 8:
                 for d in dump:
                     t, tc, wm_code, wm_ok, abl_code, abl_ok, instab = d[:7]
@@ -1919,6 +1938,9 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                     if len(d) > 7:
                         rg_text, rg_ok = d[7], d[8]
                         print(f"       rgnd:   {rg_text[:80]}  {'PASS' if rg_ok else 'FAIL'}")
+                    if len(d) > 9:
+                        rge_text, rge_ok = d[9], d[10]
+                        print(f"       rgnd_evicted: {rge_text[:80]}  {'PASS' if rge_ok else 'FAIL'}")
 
     print(f"\n  [dump] final epoch, held-out generations (WM vs ablated) vs the verified target:")
     code_prefix = "" if task_domain == "math-cot" else "def task(n): "
@@ -1931,6 +1953,9 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         if len(row) > 7:
             rg_text, rg_ok = row[7], row[8]
             print(f"       reground: {code_prefix}{rg_text[:90]}{'  <- PASS' if rg_ok else ''}")
+        if len(row) > 9:
+            rge_text, rge_ok = row[9], row[10]
+            print(f"       reground_evicted: {code_prefix}{rge_text[:90]}{'  <- PASS' if rge_ok else ''}")
 
     print(f"\n  Best held-out: {best_held}/{len(held_ex)}  (gate ablated = {ablated_ok} baseline)")
     verdict = "PROVEN" if best_held > ablated_ok else "PARTIAL"
@@ -2104,12 +2129,15 @@ def main():
                          "compute win, no output-changing risk. Off by default (matches every prior run's "
                          "behavior exactly; opt in explicitly).")
     ap.add_argument("--evict-window", type=int, default=0,
-                    help="requires --use-kv-cache: sliding-window KV eviction, keeps VRAM roughly constant "
-                         "as generation grows instead of O(total tokens). 0 (default) = off. Real, "
-                         "position-compensated fix validated on real Qwen3-4B (no more garbled-token "
-                         "degeneration) -- but NOT yet validated end-to-end through this held-out harness "
-                         "(no reground_evicted A/B column wired here yet), so treat as experimental until "
-                         "that comparison exists.")
+                    help="sliding-window KV eviction, keeps VRAM roughly constant as generation grows "
+                         "instead of O(total tokens) -- ~144 KiB/token for Qwen3-4B (36 layers, 8 KV heads, "
+                         "head_dim 128, fp16 cache), so a real long SWE-trace-length generation (~8k "
+                         "tokens) would otherwise cost ~1.1GB of cache alone; capped at evict_window tokens "
+                         "instead. 0 (default) = off. Position-compensated fix validated on real Qwen3-4B "
+                         "(no more garbled-token degeneration). Adds a real reground_evicted A/B column "
+                         "alongside held/ablated/reground in the eval output -- same task/slots/verify(), "
+                         "only evict_window differs, so the pass-rate gap (if any) isolates eviction's real "
+                         "cost, not a confound with use_kv_cache itself.")
     a = ap.parse_args()
     if a.probe:
         probe_real(a.lm, a.quant, a.words, a.steps)
