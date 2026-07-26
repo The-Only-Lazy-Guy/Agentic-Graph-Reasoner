@@ -491,13 +491,19 @@ def _atoms_from_graph(g) -> tuple[dict, dict]:
     Excludes trap nodes (wrong code that failed verify, saved as anti-poison) -- these have a.code but
     their implementations are incorrect, so using them in composition would always fail verify().
 
-    Also excludes atoms that don't actually RUN on a plain int: _compose_tasks_from_graph below does an
-    unconditional all-pairs cross product assuming every atom is f(n: int) -> ..., and _dynamic_oracle's
-    eval() (unlike membrane.verify(), which is exception-safe) is NOT wrapped in try/except -- a real, str-
-    or list-domain atom (e.g. _grow_skills_from_corpus's nucleotide_freq(dna): dna.upper()) crashes the
-    whole run the instant it's cross-producted as inner/outer against an int. Real, cheap execution check
-    (call fn(3), catch failure) instead of trusting metadata -- protects against a bad atom from ANY source,
-    not just one growth path, including whatever's already sitting in a persisted graph file on disk."""
+    Also excludes atoms that aren't a genuine int -> int function: _compose_tasks_from_graph below does an
+    unconditional all-pairs cross product, composing EVERY pair as outer(inner(n)) -- so an atom's output
+    must be a valid int input for whatever OTHER atom it gets composed with, not just able to accept one
+    itself. _dynamic_oracle's eval() (unlike membrane.verify(), which is exception-safe) is NOT wrapped in
+    try/except, so either failure mode crashes the whole run. Two real failure modes caught by this, not
+    just one:
+      (1) doesn't run on an int at all (e.g. _grow_skills_from_corpus's nucleotide_freq(dna): dna.upper())
+      (2) runs fine alone but returns a NON-int (e.g. celsius_to_fahrenheit(c): c*9.0/5.0+32.0 -- returns a
+          float; composing reverse_digits(celsius_to_fahrenheit(n)) then does int('4.73') and crashes --
+          the exact crash this line was added to fix; a single fn(3)-no-exception check missed it entirely
+          since celsius_to_fahrenheit raises nothing on its own, it just hands the NEXT atom a bad type).
+    Real, cheap execution check across a few sample ints (not metadata/type-hints) -- protects against a bad
+    atom from ANY source, not just one growth path, including whatever's already in a persisted graph file."""
     from v5.runtime.membrane import _closure
     descs, codes = {}, {}
     for name, a in g.atoms.items():
@@ -506,7 +512,9 @@ def _atoms_from_graph(g) -> tuple[dict, dict]:
         try:
             ns: dict = {}
             exec(compile(_closure(g, [name]), "<int-domain-check>", "exec"), ns)
-            ns[name](3)
+            fn = ns[name]
+            if not all(isinstance(fn(x), int) for x in (2, 3, 5, 7)):   # bool counts (is_prime etc.) -- IS an int subtype
+                continue
         except Exception:
             continue
         descs[name] = a.description
