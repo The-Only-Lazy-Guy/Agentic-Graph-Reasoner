@@ -593,6 +593,182 @@ def _grow_skills_from_corpus(g, n: int | None = None, domains: str = "") -> dict
             "skipped_multiarg": skipped_multiarg, "skipped_notype": skipped_notype}
 
 
+# ================================================================================================
+# Real long-horizon task domain: OpenThoughts math CoT, verified against the dataset's own boxed final
+# answer (never the model's own guess -- same anti-poison principle as every other verifier in this
+# codebase). See _math_cot_tasks_from_graph below for the task-pool builder and honest small-N caveats.
+# ================================================================================================
+def _extract_boxed_answer(text: str) -> str | None:
+    """Extract the content of the LAST \\boxed{...} in text, brace-depth aware (LaTeX content routinely
+    nests braces, e.g. \\boxed{\\dfrac{5}{2}} -- a naive non-greedy regex truncates at the first inner '}',
+    confirmed against real cached data before this was written, not assumed).
+
+    Returns None if no \\boxed{ is found, OR if the last two \\boxed{} occurrences are separated only by
+    trivial punctuation (comma/whitespace/'and') -- a REAL pattern found in real cached data (a problem
+    whose true final answer was the 5-value set \\boxed{2}, \\boxed{3}, \\boxed{5}, \\boxed{7}, \\boxed{13}
+    -- naively taking the last occurrence would have silently kept just '13' as if it were the whole
+    answer). Filtered honestly rather than mis-extracted."""
+    marker = "\\boxed{"
+    spans = []
+    i = 0
+    while True:
+        idx = text.find(marker, i)
+        if idx == -1:
+            break
+        start = idx + len(marker)
+        depth = 1
+        j = start
+        while j < len(text) and depth > 0:
+            if text[j] == "{":
+                depth += 1
+            elif text[j] == "}":
+                depth -= 1
+            j += 1
+        if depth == 0:
+            spans.append((idx, j, text[start:j - 1]))
+        i = idx + len(marker)
+    if not spans:
+        return None
+    if len(spans) >= 2:
+        import re as _re
+        prev_end = spans[-2][1]
+        last_start = spans[-1][0]
+        between = text[prev_end:last_start]
+        if _re.fullmatch(r"[,\s]*(and)?[,\s]*", between):
+            return None
+    return spans[-1][2]
+
+
+def _parse_numeric(s: str) -> float | None:
+    """Parse a boxed answer as a real number, or None if it isn't cleanly numeric -- proof statements,
+    multiple-choice letters ('E'), geometric descriptions ('the midpoints form a hexagon'), and equations
+    (survived a real check: 13/18 of real cached math CoT rows are exactly this non-numeric kind) all
+    correctly return None here. This IS the filter (applied once, at task-pool-build time), not a coercion
+    -- a wrong parse would poison the gold target, which nothing in this codebase's verifiers ever does."""
+    import re as _re
+    t = s.strip().replace("\\!", "").replace(",", "").replace("$", "").strip()
+    m = _re.fullmatch(r"\\d?frac\{(-?\d+(?:\.\d+)?)\}\{(-?\d+(?:\.\d+)?)\}", t)
+    if m:
+        num, den = float(m.group(1)), float(m.group(2))
+        return num / den if den != 0 else None
+    try:
+        return float(t)
+    except ValueError:
+        return None
+
+
+def _answers_match(generated: str, gold: float, tol: float = 1e-4) -> bool:
+    """Extract the boxed answer from a real LM generation, parse numeric, compare to the dataset's own
+    gold answer with RELATIVE tolerance (real answers range from small integers to the thousands -- a fixed
+    absolute tolerance would be too strict for large values and too loose for small ones)."""
+    boxed = _extract_boxed_answer(generated)
+    if boxed is None:
+        return False
+    val = _parse_numeric(boxed)
+    if val is None:
+        return False
+    return abs(val - gold) <= tol * max(1.0, abs(gold))
+
+
+def _fmt_gold(gold: float) -> str:
+    """Render a gold float as the teacher-forcing target text -- \\boxed{72} not \\boxed{72.0} for integer
+    answers, matching how a real solution actually writes it (checked against real cached examples)."""
+    return str(int(gold)) if float(gold).is_integer() else str(gold)
+
+
+def _math_cot_tasks_from_graph(g, n_train: int = 24, n_held: int = 8, n_raw: int = 150,
+                               domains: tuple = ("math",), min_reasoning_chars: int = 200,
+                               k_related: int = 3, seed: int = 0):
+    """Real long-horizon task pool: stream OpenThoughts-114k rows directly (bypassing fetch_cot.py's
+    row_to_doc, which concatenates problem+reasoning+solution into one blob for the graph-growth use case --
+    here we need the fields SEPARATE: the short problem statement for task_emb, and deepseek_solution alone
+    for boxed-answer extraction), keep only rows with a genuinely NUMERIC final boxed answer (see
+    _extract_boxed_answer/_parse_numeric -- symbolic/proof/multiple-choice/multi-value answers are filtered
+    out, not force-fit into a numeric comparator), and ground each in K related CONCEPT nodes already banked
+    in the graph (via g.cosine_rank, real per-problem retrieval, reusing the concept nodes _grow_from_cot
+    already banks -- no new retrieval infra) since a free-text problem has no discrete inner/outer atom pair
+    the way synthetic composition does.
+
+    Returns (train_tasks, held_tasks, related_desc_pool, stats):
+      - train_tasks/held_tasks: (text, atoms_needed, code, code_expr) 4-tuples, SAME shape
+        _compose_tasks_from_graph produces. atoms_needed here = the K related concept nodes' DESCRIPTION
+        TEXT (not their real graph names, which are meaningless hashes like 'fact_59378' -- embedding a
+        hash string via encode_batch would carry no semantic signal; the description IS the meaningful
+        content, so it doubles as both the grounding text and its own lookup key here). code = the teacher-
+        forcing target string (e.g. '\\boxed{72}'); code_expr = the raw gold float.
+      - related_desc_pool: deduped list of every concept description actually used -- plays the same role
+        atom_names plays for composition tasks (the caller sets atom_names = this for math-cot mode).
+      - stats: real seen/kept/skipped counts, reported honestly -- only a FRACTION of real CoT problems
+        have a clean numeric final answer (measured directly: 4/18 on the locally cached sample; most are
+        proofs/inequalities/multiple-choice). Do not silently end up with a tiny pool and call it a held-out
+        set without saying so -- this is exactly the discipline every other growth function in this file
+        already follows (_grow_from_cot, _grow_skills_from_corpus)."""
+    from v5.graph_grower.fetch_cot import DATASET, CONFIG
+    from datasets import load_dataset
+    import random as _random
+
+    dom_set = {d.lower() for d in domains}
+    ds = load_dataset(DATASET, CONFIG, split="train", streaming=True)
+    seen = kept = skipped_domain = skipped_short = skipped_no_numeric_answer = 0
+    pool: list[tuple[str, float]] = []
+    for row in ds:
+        if seen >= n_raw:
+            break
+        ot_domain = str(row.get("domain") or "").strip().lower()
+        if ot_domain not in dom_set:
+            skipped_domain += 1
+            continue
+        problem = str(row.get("problem") or "").strip()
+        reasoning = str(row.get("deepseek_reasoning") or "").strip()
+        solution = str(row.get("deepseek_solution") or "").strip()
+        seen += 1
+        if len(reasoning) < min_reasoning_chars or not problem or not solution:
+            skipped_short += 1
+            continue
+        boxed = _extract_boxed_answer(solution)
+        gold = _parse_numeric(boxed) if boxed is not None else None
+        if gold is None:
+            skipped_no_numeric_answer += 1
+            continue
+        pool.append((problem, gold))
+        kept += 1
+
+    rng = _random.Random(seed)
+    rng.shuffle(pool)
+    n_train_actual = min(n_train, max(0, len(pool) - 1)) if len(pool) > 1 else 0
+    n_held_actual = min(n_held, len(pool) - n_train_actual)
+
+    related_desc_pool: list[str] = []
+    seen_desc: set[str] = set()
+
+    def _related_descs(problem_text: str) -> list[str]:
+        ranked = g.cosine_rank(problem_text, k=k_related * 4)
+        out = []
+        for name in ranked:
+            a = g.get(name)
+            if a and a.kind == "concept" and a.description:
+                out.append(a.description)
+                if a.description not in seen_desc:
+                    seen_desc.add(a.description)
+                    related_desc_pool.append(a.description)
+                if len(out) >= k_related:
+                    break
+        return out
+
+    def _mk(problem_text: str, gold: float):
+        related = _related_descs(problem_text)
+        if not related:
+            return None  # no concept-node context available -- skip rather than ground in nothing
+        return (problem_text, related, f"\\boxed{{{_fmt_gold(gold)}}}", gold)
+
+    train_tasks = [t for p, gd in pool[:n_train_actual] if (t := _mk(p, gd)) is not None]
+    held_tasks = [t for p, gd in pool[n_train_actual:n_train_actual + n_held_actual] if (t := _mk(p, gd)) is not None]
+    stats = dict(seen=seen, kept=kept, skipped_domain=skipped_domain, skipped_short=skipped_short,
+                 skipped_no_numeric_answer=skipped_no_numeric_answer,
+                 n_train=len(train_tasks), n_held=len(held_tasks))
+    return train_tasks, held_tasks, related_desc_pool, stats
+
+
 def _dynamic_oracle(g, atom_names: list[str]):
     """Build ONE shared exec namespace from the graph's OWN atom code, via membrane._closure (already
     resolves transitive .depends -- critical: a naive per-atom exec breaks the moment a real banked atom
@@ -766,7 +942,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             graph_path: str | None = None, save_path: str | None = None, grow_cot: int = 0,
             grow_domains: str = "math,code,science,puzzle", grow_keywords: str = "",
             grow_skills: int = 0, grow_skills_domains: str = "",
-            batch_size: int = 1):
+            batch_size: int = 1, task_domain: str = "synthetic", math_cot_n_raw: int = 150):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
@@ -779,7 +955,15 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     CoT docs into the graph via learn_any BEFORE training -- concept nodes only (see _grow_from_cot). grow_
     skills>0 (requires graph_path): bank up to that many real oracle-verified EXECUTABLE atoms from
     scripts/build_crossdomain_corpus.py (see _grow_skills_from_corpus) -- these DO enter the composable pool
-    (_atoms_from_graph filters on real .code), unlike grow_cot's concept nodes."""
+    (_atoms_from_graph filters on real .code), unlike grow_cot's concept nodes.
+
+    task_domain='synthetic' (default): UNCHANGED, byte-identical behavior. task_domain='math-cot' (requires
+    graph_path; run --grow-cot at least once first so concept nodes exist to ground in): real, long-horizon
+    OpenThoughts math CoT problems instead of synthetic composition -- see _math_cot_tasks_from_graph.
+    Verified against the dataset's own boxed final answer (_answers_match), never the model's own guess --
+    same anti-poison principle, different verifier shape (no execution oracle exists for free-text math).
+    Honest small-N caveat: only a fraction of real problems have a clean numeric final answer -- real counts
+    are printed, not hidden."""
     from v5.runtime.dcpd_latent import WhiteBox
     from v5.runtime.algo_trm import _build as _build_trm
     import random
@@ -814,11 +998,18 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                   f"nodes (+{sstats['banked']} new EXECUTABLE atoms, {sstats['trap']} failed verify->trap, "
                   f"{sstats['skipped_multiarg']} skipped multi-arg, {sstats['skipped_notype']} skipped "
                   f"no-expected-value, {sstats['seen']} tasks considered)")
-        descs, codes = _atoms_from_graph(g)
-        atom_names = list(descs.keys())
-        print(f"  graph: {len(atom_names)} REAL atoms from {graph_path if _Path(graph_path).exists() else '(fresh seed_graph)'} "
-              f"(NATIVE LM-embedding-table injection)")
+        if task_domain == "math-cot":
+            descs, codes = {}, {}
+            atom_names = []  # set below from related_desc_pool -- concept-node descriptions, not code atoms
+        else:
+            descs, codes = _atoms_from_graph(g)
+            atom_names = list(descs.keys())
+            print(f"  graph: {len(atom_names)} REAL atoms from {graph_path if _Path(graph_path).exists() else '(fresh seed_graph)'} "
+                  f"(NATIVE LM-embedding-table injection)")
     else:
+        if task_domain == "math-cot":
+            raise ValueError("--task-domain math-cot requires --graph-path (needs real concept nodes to "
+                             "ground in -- run with --grow-cot at least once first)")
         descs, codes = _seed_atoms()
         atom_names = list(descs.keys())
         # NATIVE-SPACE injection (probe-C-validated): embed each atom's description via the LM's OWN embedding
@@ -826,21 +1017,41 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         # collapses on held-out (train fits, held-out ~0). This was very likely why composition scored 0/4 even
         # after deep supervision was fixed: the atoms fed to refine() were never in a space the LM could read.
         print(f"  graph: {len(atom_names)} atoms (NATIVE LM-embedding-table injection, MiniLM dropped for this path)")
-    # BATCHED native-text embedding: one tokenizer + embedding-table pass instead of N separate calls.
-    # For large graphs (100+ atoms) this is ~10x faster; identical output (same LM embedding table).
-    atom_names_list = list(atom_names)
-    descs_list = [descs[n] for n in atom_names_list]
-    atom_emb_tensor = native_text_embedding_batch(wb, descs_list)
-    atom_embs = {n: atom_emb_tensor[i] for i, n in enumerate(atom_names_list)}
 
-    if graph_path:
+    if task_domain == "math-cot":
+        # skip the native-embedding-table precompute below -- dead weight for this domain: WMReasoner.
+        # refine() takes MiniLM-space embeddings post-V3-rewrite, this dict is never consulted downstream
+        # (confirmed by reading the training/eval loops -- they recompute MiniLM embeddings on the fly).
+        atom_embs = {}
+    else:
+        # BATCHED native-text embedding: one tokenizer + embedding-table pass instead of N separate calls.
+        # For large graphs (100+ atoms) this is ~10x faster; identical output (same LM embedding table).
+        atom_names_list = list(atom_names)
+        descs_list = [descs[n] for n in atom_names_list]
+        atom_emb_tensor = native_text_embedding_batch(wb, descs_list)
+        atom_embs = {n: atom_emb_tensor[i] for i, n in enumerate(atom_names_list)}
+
+    if task_domain == "math-cot":
+        train_tasks, held_tasks, related_desc_pool, mc_stats = _math_cot_tasks_from_graph(
+            g, n_train=n_train, n_held=n_held, n_raw=math_cot_n_raw)
+        atom_names = related_desc_pool
+        print(f"  math-cot: real OpenThoughts math problems, numeric-boxed-answer only -> "
+              f"{mc_stats['n_train']} train, {mc_stats['n_held']} held-out (seen={mc_stats['seen']} "
+              f"skipped_domain={mc_stats['skipped_domain']} skipped_short={mc_stats['skipped_short']} "
+              f"skipped_non_numeric={mc_stats['skipped_no_numeric_answer']} -- most real CoT problems are "
+              f"proofs/inequalities/multiple-choice, not clean numeric answers, filtered honestly not "
+              f"force-fit)")
+    elif graph_path:
         train_tasks, held_tasks = _compose_tasks_from_graph(g, atom_names, n_train=n_train, n_held=n_held)
     else:
         train_tasks, held_tasks = _compose_tasks_real(n_train=n_train, n_held=n_held)
     all_tasks = train_tasks + held_tasks
     split = len(train_tasks)
-    print(f"  tasks: {split} train, {len(all_tasks) - split} held-out (2-atom composition, auto-generated, "
-          f"no train/held PAIR overlap)\n")
+    if task_domain == "math-cot":
+        print(f"  tasks: {split} train, {len(all_tasks) - split} held-out (real math CoT, no train/held overlap)\n")
+    else:
+        print(f"  tasks: {split} train, {len(all_tasks) - split} held-out (2-atom composition, auto-generated, "
+              f"no train/held PAIR overlap)\n")
 
     gate_params = [a.g for a in R.adapters]
     gate_ids = {id(p) for p in gate_params}
@@ -854,6 +1065,11 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             a.g.fill_(0.8)
 
     def build_prompt(task_text, inner_name=None, outer_name=None):
+        if task_domain == "math-cot":
+            # no inner/outer atoms, no "write function task(n)" -- this is a real free-text problem
+            return wb.tok(f"Solve the following problem. Show your reasoning, then give the final answer "
+                         f"as \\boxed{{answer}}.\n\nProblem: {task_text}\n\nSolution:\n",
+                         return_tensors="pt").input_ids.to(wb.device)
         if inner_name and outer_name:
             hint = f"# return: {outer_name}({inner_name}(n))\n"
         else:
@@ -876,7 +1092,10 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             a, b = b, a + b
         return a
 
-    if graph_path:
+    if task_domain == "math-cot":
+        # no execution oracle for free-text math -- verify() is rebound to _answers_match below instead.
+        _run_task, _oracle_ns = None, {}
+    elif graph_path:
         # DYNAMIC oracle, sourced from the graph's OWN atom code (Phase 3) -- scales to whatever atoms
         # actually exist, instead of the fixed 10-lambda dict below.
         _run_task, _oracle_ns = _dynamic_oracle(g, atom_names)
@@ -951,6 +1170,13 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             return True
         except Exception: return False
 
+    if task_domain == "math-cot":
+        # No execution oracle exists for free-text math -- verify against the dataset's own boxed final
+        # answer instead (_answers_match, same anti-poison principle: gold is the dataset's stated answer,
+        # extracted once at task-build time, never the model's own guess).
+        def verify(code_str, tests):
+            return _answers_match(code_str, tests[0][1]) if tests else False
+
     _MAX_SAFE_MAGNITUDE = 100_000
 
     def make_tests(code_expression, atoms_needed):
@@ -973,6 +1199,12 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                     continue
             tests.append((n, _run_task(n, code_expression)))
         return tests
+
+    if task_domain == "math-cot":
+        # code_expr IS the gold float already (set by _math_cot_tasks_from_graph) -- no oracle to re-derive
+        # it from, no n-sweep (there's no 'n', just one real problem with one real gold answer).
+        def make_tests(code_expression, atoms_needed):
+            return [(None, code_expression)]
 
     train_ex = [(task_embs[text], [atom_names.index(a) for a in atoms_needed], atoms_needed,
                  prompt_ids[text], text, code, make_tests(code_expr, atoms_needed))
@@ -1136,12 +1368,13 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                     print(f"       ablt:   {abl_code[:80]}  {'PASS' if abl_ok else 'FAIL'}")
 
     print(f"\n  [dump] final epoch, held-out generations (WM vs ablated) vs the verified target:")
+    code_prefix = "" if task_domain == "math-cot" else "def task(n): "
     for row in (last_dump or []):
         text, target_code, code, wm_ok, code_abl, abl_ok, instability = row[:7]
         print(f"     task: {text}")
         print(f"       target : {target_code}")
-        print(f"       WM     : def task(n): {code[:90]}{'  <- PASS' if wm_ok else ''}  instab={instability:.3f}")
-        print(f"       ablated: def task(n): {code_abl[:90]}{'  <- PASS' if abl_ok else ''}")
+        print(f"       WM     : {code_prefix}{code[:90]}{'  <- PASS' if wm_ok else ''}  instab={instability:.3f}")
+        print(f"       ablated: {code_prefix}{code_abl[:90]}{'  <- PASS' if abl_ok else ''}")
 
     print(f"\n  Best held-out: {best_held}/{len(held_ex)}  (gate ablated = {ablated_ok} baseline)")
     verdict = "PROVEN" if best_held > ablated_ok else "PARTIAL"
@@ -1256,13 +1489,23 @@ def main():
     ap.add_argument("--batch-size", type=int, default=1,
                     help="--run: batch size for training (pads variable-length sequences). "
                          ">1 uses batched LM forward. With 90GB VRAM, 4-8 works on a 4B 4-bit model.")
+    ap.add_argument("--task-domain", type=str, default="synthetic", choices=["synthetic", "math-cot"],
+                    help="--run: 'synthetic' (default, unchanged) = 2-atom math composition. 'math-cot' = "
+                         "real OpenThoughts math CoT problems, verified against the dataset's own boxed "
+                         "final answer (requires --graph-path; run --grow-cot at least once first so "
+                         "concept nodes exist to ground in). Honest small-N caveat: only a fraction of real "
+                         "problems have a clean numeric final answer.")
+    ap.add_argument("--math-cot-n-raw", type=int, default=150,
+                    help="--task-domain math-cot: how many raw OpenThoughts rows to stream before filtering "
+                         "to numeric-boxed-answer ones (yield rate measured ~22%% on a real sample -- request "
+                         "more raw rows than you want kept)")
     a = ap.parse_args()
     if a.probe:
         probe_real(a.lm, a.quant, a.words, a.steps)
     elif a.run:
         run_real(a.lm, a.quant, a.epochs, a.n_train, a.n_held, a.graph_path, a.save_path,
                  a.grow_cot, a.grow_domains, a.grow_keywords, a.grow_skills, a.grow_skills_domains,
-                 batch_size=a.batch_size)
+                 batch_size=a.batch_size, task_domain=a.task_domain, math_cot_n_raw=a.math_cot_n_raw)
     else:
         selftest()
 
