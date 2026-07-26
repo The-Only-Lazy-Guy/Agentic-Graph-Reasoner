@@ -1129,9 +1129,12 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     R = WMReasoner(d_lm, couple_layers=couple, trm=trm, n_heads=4, top_trm=top_trm).to(wb.device)
     if top_trm is not None:
         print(f"  hierarchical: top_trm T={top_trm_t} (bottom T=4), reground every {reground_chunk_tokens} "
-              f"tokens, top refreshed every {reground_top_every} chunks. top_to_bottom_proj is zero-init -- "
-              f"a no-op until it trains; this run reports (static) vs (reground) at eval side-by-side, not "
-              f"a replacement.")
+              f"tokens, top refreshed every {reground_top_every} chunks. Training now calls "
+              f"hierarchical_refine (not plain refine) so top_to_bottom_proj/top_trm get a real gradient "
+              f"from the same verified-target lm_loss as everything else -- zero-init means it starts as "
+              f"a no-op, but it CAN move now. 'held WM' below is the one-shot hierarchical injection; "
+              f"'reground' additionally re-grounds it mid-generation -- the gap between them isolates the "
+              f"value of periodic re-grounding specifically, not just of having a top_trm at all.")
     for p in wb.model.parameters():
         p.requires_grad_(False)
     handles = R.couple(wb)
@@ -1405,7 +1408,14 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                     torch.as_tensor(encode_batch([atom_names[idx]])[0], dtype=torch.float32, device=wb.device)
                     for idx in gold_idxs
                 ])
-                slots, states = R.refine(task_emb, mini_atom_embs)
+                # hierarchical_refine (not plain refine): when R.top_trm is None this is byte-identical to
+                # refine() (confirmed by the zero-init no-op test); when top_trm is set, this is the ONLY
+                # call site in the whole training loop that exercises top_trm/top_to_bottom_proj, so it's
+                # also the only place they can ever receive a gradient. Previously only generate_with_reground
+                # (eval-time, no .backward() anywhere near it) touched hierarchical_refine -- top_to_bottom_proj
+                # was mathematically guaranteed to sit at zero-init forever, regardless of epoch count (a real,
+                # confirmed-by-reading-the-code gap, not a "needs more epochs" issue).
+                slots, states, _top_state = R.hierarchical_refine(task_emb, mini_atom_embs)
                 # DEFER injection: with batch_size>1, calling set_slots_direct here would be overwritten by
                 # every subsequent example, so only the LAST example's slots would survive to the single
                 # batched forward pass below -- GatedCrossAttn then broadcasts that one example's slots to
@@ -1469,7 +1479,11 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                     torch.as_tensor(encode_batch([atom_names[idx]])[0], dtype=torch.float32, device=wb.device)
                     for idx in gold_idxs
                 ])
-                slots, wm_states, wm_deltas, wm_raw = R.refine(task_emb, held_mini_embs, track_deltas=True)
+                # hierarchical_refine here too (was plain refine()) -- "held WM" is now the one-shot
+                # hierarchical injection (identical to before when top_trm is None), so its gap against
+                # "reground" below isolates the value of PERIODIC re-grounding specifically.
+                slots, wm_states, wm_deltas, wm_raw, _top_state = R.hierarchical_refine(
+                    task_emb, held_mini_embs, track_deltas=True)
                 with torch.no_grad():
                     R.set_slots_direct(slots)
                     out = wb.model.generate(pids, max_new_tokens=128,
@@ -1527,7 +1541,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                     torch.as_tensor(encode_batch([atom_names[idx]])[0], dtype=torch.float32, device=wb.device)
                     for idx in gold_idx
                 ])
-                slots, tr_states, tr_deltas, tr_raw = R.refine(task_emb, K_atom_embs, track_deltas=True)
+                slots, tr_states, tr_deltas, tr_raw, _top_state = R.hierarchical_refine(
+                    task_emb, K_atom_embs, track_deltas=True)
                 with torch.no_grad():
                     R.set_slots_direct(slots)
                     out = wb.model.generate(pids, max_new_tokens=128,
