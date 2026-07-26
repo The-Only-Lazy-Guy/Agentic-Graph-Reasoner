@@ -919,12 +919,31 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         return expr or None
 
     def verify(code_str, tests):
-        """Execute the generated code and check against provided test cases."""
+        """Execute the generated code and check against provided test cases.
+
+        BUG FOUND while investigating "held WM stuck at 0" (real, decisive, not a guess): this used to
+        exec() the raw generated text directly, requiring it to already be a complete `def task(n): ...`
+        statement. But the training target (return_body, above) only ever teaches the model to produce a
+        bare ` return {expr}` fragment -- no `def`, no wrapper -- because build_prompt's prompt no longer
+        ends in `...def task(n):` (it ends in `Explanation:\n`) the way the OLD, proven prompt did. Verified
+        directly: exec'ing the LITERAL, VERBATIM training target (' return num_divisors(square(n))') raised
+        IndentationError, 100% of the time, regardless of composition correctness -- verify() could
+        structurally never return True no matter how well the reasoner trained. _extract_first_return
+        (below) was clearly written to bridge exactly this gap and already handles messy raw output
+        (explanation prose before it, decode-loops after it) -- it was just never wired back in after the
+        V3 rewrite. Reconnected: extract the expression, reconstruct a real `def task(n): return {expr}`,
+        THEN exec that."""
+        expr = _extract_first_return(code_str)
+        if expr is None:
+            return False
         try:
-            ns = {}
-            # Strip explanation if the model outputs 'Code:' as a delimiter
-            code = code_str.split("Code:")[-1] if "Code:" in code_str else code_str
-            exec(code, ns)
+            # SECOND bug, compounding the first: an empty ns means num_divisors/square/etc. (the atoms the
+            # composition actually calls) are undefined -- task(n) would raise NameError the instant it's
+            # called, for EVERY composition, correct or not. _oracle_ns (built once above, from the graph's
+            # own atom code via _dynamic_oracle/_closure, or the hardcoded fn_map) already has every atom
+            # callable -- seed the exec namespace from it instead of starting empty.
+            ns = dict(_oracle_ns)
+            exec(f"def task(n):\n    return {expr}\n", ns)
             fn = ns.get("task")
             if not callable(fn): return False
             for inp, expected in tests:
