@@ -137,6 +137,14 @@ class WMReasoner(nn.Module):
             self.top_to_bottom_proj = nn.Linear(top_trm.d, trm.d_in)
             nn.init.zeros_(self.top_to_bottom_proj.weight)
             nn.init.zeros_(self.top_to_bottom_proj.bias)
+            # EVENT SIGNALS the top trm actually RECEIVES, rather than events merely acting as a clock that
+            # decides WHEN it recomputes. A learned vector per event cause is added to the top trm's context
+            # input, so it can react differently to "routine cadence tick" vs "the bottom trm was still
+            # churning" vs "a real reasoning boundary appeared in the text". Zero-init => a strict no-op
+            # until trained, matching top_to_bottom_proj's and GatedCrossAttn's own safe-by-init convention.
+            #   0 = cadence (routine), 1 = trigger_patterns fired, 2 = instability fired, 3 = both fired
+            self.top_event_emb = nn.Embedding(4, top_trm.d_in)
+            nn.init.zeros_(self.top_event_emb.weight)
 
     def critique(self, raw_states: list[torch.Tensor]) -> torch.Tensor:
         """raw_states: [T per-step projected y_t values in d_lm space] from refine(track_deltas=True)."""
@@ -184,7 +192,9 @@ class WMReasoner(nn.Module):
     def hierarchical_refine(self, task_emb: torch.Tensor, atom_embs: torch.Tensor,
                             top_context_emb: torch.Tensor | None = None,
                             top_state: torch.Tensor | None = None, recompute_top: bool = True,
-                            track_deltas: bool = False, top_resume_state: tuple | None = None):
+                            track_deltas: bool = False, top_resume_state: tuple | None = None,
+                            top_memory: torch.Tensor | None = None, top_no_graph: bool = False,
+                            event_signal: int = 0):
         """Top TRM (slow timescale, its own T -- can be much larger than the bottom trm's, e.g. 24, matching
         the real TRM paper's own recipe for hard tasks) manipulates the bottom trm (fast timescale, the one
         that actually reaches the LM via GatedCrossAttn) by injecting its own deeply-reasoned output
@@ -220,8 +230,22 @@ class WMReasoner(nn.Module):
 
         if recompute_top or top_state is None:
             top_ctx = task_emb if top_context_emb is None else top_context_emb
+            # feed the event CAUSE in as real input, not just as the reason we're running now
+            if event_signal:
+                top_ctx = top_ctx + self.top_event_emb(
+                    torch.tensor(int(event_signal), device=top_ctx.device))
             z_init, y_init = top_resume_state if top_resume_state is not None else (None, None)
-            top_y, (new_z, new_y) = self.top_trm(top_ctx, atom_embs, z_init=z_init, y_init=y_init,
+            # top_no_graph: the top trm is RECURRENT MEMORY, not a second retriever. It cross-attends over
+            # its OWN accumulated history (top_memory -- the sequence of progress contexts it has seen this
+            # generation), NOT over the graph atoms the bottom trm uses. Without this the two levels receive
+            # IDENTICAL input (same K atoms) and the "hierarchy" is only a cadence split -- largely the same
+            # computation run twice, which is what a real 40-epoch Qwen3-4B A/B measured (14/16 vs ~13/16
+            # baseline, i.e. noise). The division of labour: top = evolving memory over its own experience,
+            # bottom = controller/communicator that holds the graph atoms and actually reaches the LM.
+            top_context = atom_embs
+            if top_no_graph:
+                top_context = top_memory if (top_memory is not None and top_memory.numel())                     else top_ctx.unsqueeze(0)
+            top_y, (new_z, new_y) = self.top_trm(top_ctx, top_context, z_init=z_init, y_init=y_init,
                                                   return_state=True)
             top_state = top_y[-1]                                # final cycle's answer, the "meta-plan"
             top_resume_state = (new_z, new_y)                    # carried to the NEXT recompute
@@ -389,7 +413,8 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
                            use_kv_cache: bool = False, evict_window: int | None = None,
                            trigger_patterns: list | None = None,
                            instability_trigger: float | None = None,
-                           sink_tokens: int = 0, reground_bottom: bool = False):
+                           sink_tokens: int = 0, reground_bottom: bool = False,
+                           top_no_graph: bool = False, top_memory_max: int = 16):
     """Generate, re-grounding WMReasoner's slots every chunk_tokens instead of once up front.
 
     If R.top_trm is set, also runs the slow/top-level TRM every `top_every` CHUNKS (not every chunk) --
@@ -491,7 +516,9 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
         chunk_idx = 0
         generated_so_far = ""
         event_fired = False
+        pending_event = 0
         instab_history: list[float] = []
+        top_memory_list: list[torch.Tensor] = []
         while (running_ids.shape[-1] - prompt_len) < max_new_tokens:
             remaining = max_new_tokens - (running_ids.shape[-1] - prompt_len)
             n_new = min(chunk_tokens, remaining)
@@ -512,9 +539,16 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
                 prog = torch.as_tensor(encode_batch([generated_so_far])[0], dtype=torch.float32,
                                        device=wb.device)
                 bottom_task_emb = task_emb + prog
+            if top_no_graph and recompute_top:
+                mem_add = top_ctx if top_ctx is not None else task_emb
+                top_memory_list.append(mem_add)
+                if len(top_memory_list) > top_memory_max:
+                    top_memory_list = top_memory_list[-top_memory_max:]
+            top_mem = torch.stack(top_memory_list) if top_memory_list else None
             refine_out = R.hierarchical_refine(
                 bottom_task_emb, atom_embs, top_context_emb=top_ctx, top_state=top_state,
-                top_resume_state=top_resume_state, recompute_top=recompute_top, track_deltas=want_deltas)
+                top_resume_state=top_resume_state, recompute_top=recompute_top, track_deltas=want_deltas,
+                top_memory=top_mem, top_no_graph=top_no_graph, event_signal=pending_event)
             if want_deltas:
                 slots, _states, deltas, _raw, new_top_state, new_top_resume_state = refine_out
             else:
@@ -539,6 +573,7 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
                     instability_fired = instab_now > baseline * instability_trigger
                 instab_history.append(instab_now)
             event_fired = pattern_fired or instability_fired
+            pending_event = (1 if pattern_fired else 0) | (2 if instability_fired else 0)
             chunk_idx += 1
             if running_ids[0, -1].item() == wb.tok.eos_token_id:
                 break
@@ -578,7 +613,9 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
     all_new_ids: list[int] = []
     generated_so_far = ""
     event_fired = False
+    pending_event = 0
     instab_history: list[float] = []
+    top_memory_list: list[torch.Tensor] = []
     while len(all_new_ids) < max_new_tokens:
         n_new = min(chunk_tokens, max_new_tokens - len(all_new_ids))
         recompute_top = (R.top_trm is not None) and ((chunk_idx % top_every == 0) or event_fired)
@@ -591,9 +628,16 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
             prog = torch.as_tensor(encode_batch([generated_so_far])[0], dtype=torch.float32,
                                    device=wb.device)
             bottom_task_emb = task_emb + prog
+        if top_no_graph and recompute_top:
+            mem_add = top_ctx if top_ctx is not None else task_emb
+            top_memory_list.append(mem_add)
+            if len(top_memory_list) > top_memory_max:
+                top_memory_list = top_memory_list[-top_memory_max:]
+        top_mem = torch.stack(top_memory_list) if top_memory_list else None
         refine_out = R.hierarchical_refine(
             bottom_task_emb, atom_embs, top_context_emb=top_ctx, top_state=top_state,
-            top_resume_state=top_resume_state, recompute_top=recompute_top, track_deltas=want_deltas)
+            top_resume_state=top_resume_state, recompute_top=recompute_top, track_deltas=want_deltas,
+            top_memory=top_mem, top_no_graph=top_no_graph, event_signal=pending_event)
         if want_deltas:
             slots, _states, deltas, _raw, new_top_state, new_top_resume_state = refine_out
         else:
@@ -624,6 +668,7 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
                 instability_fired = instab_now > baseline * instability_trigger
             instab_history.append(instab_now)
         event_fired = pattern_fired or instability_fired
+        pending_event = (1 if pattern_fired else 0) | (2 if instability_fired else 0)
         cur_ids = seq
         # Newly generated tokens continue from the last TRUE position, matching how generate() itself
         # incremented them internally for this chunk (position_ids[..., -1] + 1, per transformers' source).
@@ -1624,7 +1669,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             max_new_tokens: int = 0, use_kv_cache: bool = False, evict_window: int | None = None,
             grow_cot_docs_path: str | None = None, math_cot_docs_path: str | None = None,
             trigger_patterns: list | None = None, instability_trigger: float | None = None,
-            sink_tokens: int = 0, cotrain_samples: int = -1):
+            sink_tokens: int = 0, cotrain_samples: int = -1,
+            top_no_graph: bool = False, top_memory_max: int = 16):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
@@ -2098,7 +2144,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                         chunk_tokens=reground_chunk_tokens, max_new_tokens=eff_max_new_tokens,
                         top_every=reground_top_every, use_kv_cache=use_kv_cache, evict_window=None,
                         trigger_patterns=trigger_patterns, instability_trigger=instability_trigger,
-                        reground_bottom=True)
+                        reground_bottom=True, top_no_graph=top_no_graph, top_memory_max=top_memory_max)
                     reground_ok = verify(reground_text, tests)
                     reground_ok_count += int(reground_ok)
                     dump[-1] = dump[-1] + (reground_text, reground_ok)
@@ -2113,7 +2159,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                             chunk_tokens=reground_chunk_tokens, max_new_tokens=eff_max_new_tokens,
                             top_every=reground_top_every, use_kv_cache=True, evict_window=evict_window,
                             trigger_patterns=trigger_patterns, instability_trigger=instability_trigger,
-                            sink_tokens=sink_tokens, reground_bottom=True)
+                            sink_tokens=sink_tokens, reground_bottom=True,
+                            top_no_graph=top_no_graph, top_memory_max=top_memory_max)
                         reground_evicted_ok = verify(reground_evicted_text, tests)
                         reground_evicted_ok_count += int(reground_evicted_ok)
                         dump[-1] = dump[-1] + (reground_evicted_text, reground_evicted_ok)
@@ -2363,6 +2410,17 @@ def main():
                          "loop, while sinks covering the prompt scored 14/15 coherently against a "
                          "15/15 no-eviction ceiling -- because a pure window's oldest tokens ARE the "
                          "prompt (the task description). Set it to roughly the real prompt length.")
+    ap.add_argument("--top-no-graph", action="store_true",
+                    help="--top-trm-t>0: make the top trm REAL RECURRENT MEMORY instead of a second "
+                         "retriever -- it cross-attends over its OWN accumulated history of progress "
+                         "contexts, NOT the graph atoms the bottom trm uses. Without this both levels get "
+                         "IDENTICAL input (the same K atoms) so the 'hierarchy' is only a cadence split, "
+                         "which a real 40-epoch Qwen3-4B A/B measured as noise (14/16 vs ~13/16 baseline). "
+                         "Division of labour: top = evolving memory over its own experience, bottom = "
+                         "controller/communicator holding the graph atoms and reaching the LM.")
+    ap.add_argument("--top-memory-max", type=int, default=16,
+                    help="--top-no-graph: cap on how many past progress contexts the top trm keeps in its "
+                         "own memory bank (rolling window, keeps the most recent).")
     ap.add_argument("--cotrain-samples", type=int, default=-1,
                     help="cap how many train tasks get a real generate() in the co-training data pass at "
                          "each eval checkpoint. Measured at ~43%% of total eval cost (a full generate() over "
@@ -2440,7 +2498,8 @@ def main():
                  math_cot_docs_path=(a.math_cot_docs_path or None),
                  trigger_patterns=([p for p in a.trigger_patterns.split(",") if p] or None),
                  instability_trigger=(a.instability_trigger or None),
-                 sink_tokens=a.sink_tokens, cotrain_samples=a.cotrain_samples)
+                 sink_tokens=a.sink_tokens, cotrain_samples=a.cotrain_samples,
+                 top_no_graph=a.top_no_graph, top_memory_max=a.top_memory_max)
     else:
         selftest()
 
