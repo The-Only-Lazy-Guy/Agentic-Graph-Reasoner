@@ -1085,6 +1085,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     are printed, not hidden."""
     from v5.runtime.dcpd_latent import WhiteBox
     from v5.runtime.algo_trm import _build as _build_trm
+    from v5.runtime.membrane_edits import record_success, record_failure
     import random
     print(f"run_real: WMReasoner + TRMReasoner V3 coupled to {lm_name} ({quant}) — real composition tasks\n")
 
@@ -1449,6 +1450,22 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 held_ok += int(wm_ok)
                 critic_examples.append(([s.detach() for s in wm_raw], wm_ok))
                 instability = R.trajectory_instability(wm_deltas)
+                # REAL graph editing on the REAL verified outcome -- previously this was computed and
+                # thrown away every epoch (confirmed by grep: no record_success/record_failure/learn_any
+                # anywhere in this function's training/eval loop, only at grow_cot/grow_skills setup and
+                # the final g.save()). The graph sat static as a read-only embedding source for the whole
+                # run instead of being the long-term memory it's supposed to be. Wired for graph_path runs
+                # on domains where atoms_needed holds REAL graph names (synthetic composition) -- math-cot's
+                # atoms_needed holds CONCEPT DESCRIPTIONS instead (real names are meaningless hashes, see
+                # _math_cot_tasks_from_graph's docstring), so record_success/record_failure would silently
+                # no-op there (g.get(description) finds nothing) -- skipped for that domain rather than
+                # doing something quietly wrong; needs a real name<->description mapping to wire correctly,
+                # not built yet.
+                if graph_path and task_domain != "math-cot":
+                    if wm_ok:
+                        record_success(g, atoms_needed, text)
+                    else:
+                        record_failure(g, text)
                 R.clear()
                 with torch.no_grad():
                     out = wb.model.generate(pids, max_new_tokens=128,
@@ -1489,6 +1506,11 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                     tr_code = wb.tok.decode(out[0][pids.shape[-1]:], skip_special_tokens=True).strip()
                 tr_ok = verify(tr_code, tests)
                 critic_examples.append(([s.detach() for s in tr_raw], tr_ok))   # PRE-norm content + REAL label
+                if graph_path and task_domain != "math-cot":
+                    if tr_ok:
+                        record_success(g, atoms_needed, text)
+                    else:
+                        record_failure(g, text)
                 R.clear()
             R.train()
 
