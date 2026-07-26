@@ -1484,7 +1484,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             batch_size: int = 1, task_domain: str = "synthetic", math_cot_n_raw: int = 150,
             top_trm_t: int = 0, reground_chunk_tokens: int = 16, reground_top_every: int = 4,
             max_new_tokens: int = 0, use_kv_cache: bool = False, evict_window: int | None = None,
-            grow_cot_docs_path: str | None = None, math_cot_docs_path: str | None = None):
+            grow_cot_docs_path: str | None = None, math_cot_docs_path: str | None = None,
+            trigger_patterns: list | None = None):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
@@ -1956,7 +1957,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                     reground_text = generate_with_reground(
                         wb, R, pids, task_emb, held_mini_embs,
                         chunk_tokens=reground_chunk_tokens, max_new_tokens=eff_max_new_tokens,
-                        top_every=reground_top_every, use_kv_cache=use_kv_cache, evict_window=None)
+                        top_every=reground_top_every, use_kv_cache=use_kv_cache, evict_window=None,
+                        trigger_patterns=trigger_patterns)
                     reground_ok = verify(reground_text, tests)
                     reground_ok_count += int(reground_ok)
                     dump[-1] = dump[-1] + (reground_text, reground_ok)
@@ -1969,7 +1971,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                         reground_evicted_text = generate_with_reground(
                             wb, R, pids, task_emb, held_mini_embs,
                             chunk_tokens=reground_chunk_tokens, max_new_tokens=eff_max_new_tokens,
-                            top_every=reground_top_every, use_kv_cache=True, evict_window=evict_window)
+                            top_every=reground_top_every, use_kv_cache=True, evict_window=evict_window,
+                            trigger_patterns=trigger_patterns)
                         reground_evicted_ok = verify(reground_evicted_text, tests)
                         reground_evicted_ok_count += int(reground_evicted_ok)
                         dump[-1] = dump[-1] + (reground_evicted_text, reground_evicted_ok)
@@ -2181,6 +2184,13 @@ def main():
                          "path already set, since this is a second, independent live-streaming call). "
                          "Pre-fetch RAW rows (not row_to_doc docs) with a separate torch-free process: "
                          "`python -m v5.graph_grower.fetch_cot --raw --out <path> --limit N`.")
+    ap.add_argument("--trigger-patterns", type=str, default="",
+                    help="--top-trm-t>0: comma-sep substrings (e.g. '\\n,Therefore,Step'). If any appear in "
+                         "a chunk's newly generated text during reground/reground_evicted, top recomputes "
+                         "on the very next chunk regardless of --reground-top-every's cadence -- an event "
+                         "(a real reasoning/sentence boundary) triggers recompute early; the cadence still "
+                         "fires as a fallback so top is never starved if no trigger appears. Empty "
+                         "(default) = pure cadence, unchanged behavior.")
     ap.add_argument("--grow-skills", type=int, default=0,
                     help="--run (requires --graph-path): bank up to this many real oracle-verified EXECUTABLE "
                          "atoms from scripts/build_crossdomain_corpus.py via learn_any before training -- "
@@ -2248,7 +2258,8 @@ def main():
                  reground_top_every=a.reground_top_every, max_new_tokens=a.max_new_tokens,
                  use_kv_cache=a.use_kv_cache, evict_window=(a.evict_window or None),
                  grow_cot_docs_path=(a.grow_cot_docs_path or None),
-                 math_cot_docs_path=(a.math_cot_docs_path or None))
+                 math_cot_docs_path=(a.math_cot_docs_path or None),
+                 trigger_patterns=([p for p in a.trigger_patterns.split(",") if p] or None))
     else:
         selftest()
 
