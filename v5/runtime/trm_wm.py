@@ -862,7 +862,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                       return_tensors="pt").input_ids.to(wb.device)
 
     # Precompute static task embeddings and atom embeddings for all examples
-    print("  Precomputing task + atom embeddings...")
+    print("  Precomputing task + atom embeddings...", flush=True)
     task_embs = {}
     for text, atoms_needed, _, _ in all_tasks:
         if text not in task_embs:
@@ -958,12 +958,19 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     # gated on stage 1's critic actually beating base rate first, to avoid training the reasoner against an
     # unreliable judge -- Goodhart's law / reward-hacking risk, not built yet).
     critic_examples: list = []
+    heartbeat_every = max(1, (len(train_ex) // batch_size) // 5)   # ~5 pings per epoch, regardless of size
     for ep in range(epochs):
         R.train()
         random.shuffle(train_ex)
         tot_lm, n = 0.0, 0
         tot_gate_reg, tot_conv = 0.0, 0.0
         for b0 in range(0, len(train_ex), batch_size):
+            if ep == 0 and n % heartbeat_every == 0:
+                # epoch 0 alone can run for many minutes on a real 4B model with batch_size=1 (100 forward+
+                # backward passes, unbatched) with ZERO prints anywhere below -- looked hung on a real cloud
+                # run (20 min, no output). This is the only signal that anything is happening before the
+                # first per-epoch summary line even exists.
+                print(f"    [ep 0 heartbeat] training example {n}/{len(train_ex)}...", flush=True)
             batch = train_ex[b0:b0 + batch_size]
             all_states, pids_list, tids_list, slots_list = [], [], [], []
             for task_emb, gold_idxs, atoms_needed, pids, text, target_code, tests in batch:
@@ -1018,11 +1025,14 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             tot_conv += float(conv_loss.detach())
             n += 1
 
-        print(f"  ep {ep:>3}  lm {tot_lm/max(n,1):.3f}  gate_reg {tot_gate_reg/max(n,1):.4f}  conv {tot_conv/max(n,1):.4f}  gate {float(R.adapters[0].g):+.2f}", end="")
+        print(f"  ep {ep:>3}  lm {tot_lm/max(n,1):.3f}  gate_reg {tot_gate_reg/max(n,1):.4f}  conv {tot_conv/max(n,1):.4f}  gate {float(R.adapters[0].g):+.2f}", end="", flush=True)
         if ep % eval_every == 0 or ep == epochs - 1:
             R.eval()
             held_ok, ablated_ok = 0, 0
             dump = []
+            if ep == 0:
+                print(f"\n    [ep 0 heartbeat] running held-out eval ({len(held_ex)} tasks x 2 generate() calls)...",
+                      flush=True)
             for task_emb, gold_idxs, atoms_needed, pids, text, target_code, tests in held_ex:
                 # Use MiniLM atoms for TRM
                 held_mini_embs = torch.stack([
@@ -1049,6 +1059,9 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 dump.append((text, target_code, code, wm_ok, code_abl, abl_ok, instability))
 
             # CO-TRAINING data (stage 1)
+            if ep == 0:
+                print(f"    [ep 0 heartbeat] running co-training generate() over {len(train_ex)} train tasks...",
+                      flush=True)
             for task_emb, gold_idx, atoms_needed, pids, text, target_code, tests in train_ex:
                 K_atom_embs = torch.stack([
                     torch.as_tensor(encode_batch([atom_names[idx]])[0], dtype=torch.float32, device=wb.device)
@@ -1071,7 +1084,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             inst_fail = [d[6] for d in dump if not d[3]]
             inst_str = (f"  instab(pass/fail) {sum(inst_pass)/len(inst_pass):.3f}/"
                        f"{sum(inst_fail)/len(inst_fail):.3f}" if inst_pass and inst_fail else "")
-            print(f"  held WM {held_ok}/{len(held_ex)}  ablated {ablated_ok}/{len(held_ex)}  {inst_str}")
+            print(f"  held WM {held_ok}/{len(held_ex)}  ablated {ablated_ok}/{len(held_ex)}  {inst_str}", flush=True)
             if len(held_ex) <= 8:
                 for d in dump:
                     t, tc, wm_code, wm_ok, abl_code, abl_ok, instab = d[:7]
