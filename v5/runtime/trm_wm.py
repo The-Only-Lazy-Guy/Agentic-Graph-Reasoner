@@ -526,7 +526,13 @@ def explain_what_happened(wb, g, session, query: str, k: int = 3) -> dict:
     else:
         names = g.cosine_rank(query, k=k)
         tier = "long-term (full graph)"
-    facts = [g.get(n).description for n in names if g.get(n)]
+    # Real bug found and fixed here (not assumed): a graph node's description can be up to 4000 chars
+    # (_grow_from_cot's own real-OpenThoughts cap) -- k=3 of those, uncapped, overflowed distilgpt2's
+    # 1024-token position-embedding table (confirmed: real CUDA "srcIndex < srcSelectDimSize" assertion,
+    # generate_plain's own tok() call has no max_length/truncation either). Cap each fact so the fact block
+    # stays a small, bounded prompt regardless of how long a real banked node's description is.
+    MAX_FACT_CHARS = 300
+    facts = [g.get(n).description[:MAX_FACT_CHARS] for n in names if g.get(n)]
     if not facts:
         return {"tier": "none", "nodes": [], "answer": "(nothing relevant found in memory)"}
     fact_block = "\n".join(f"- {f}" for f in facts)
@@ -794,22 +800,36 @@ def _atoms_from_graph(g) -> tuple[dict, dict]:
 
 
 def _grow_from_cot(g, n: int, domains: str = "math,code,science,puzzle", keywords: str = "",
-                   min_reasoning_chars: int = 200) -> dict:
+                   min_reasoning_chars: int = 200, docs: list | None = None) -> dict:
     """Real graph growth from open data: stream N real OpenThoughts-114k CoT traces (v5.graph_grower.
     fetch_cot -- HF-streamed, no full-dataset download) and bank each through membrane's OWN learn_any --
     the same write-time graph editor demo()/interactive_trace() already use (dedup via cosine >=0.90,
     self-organizing 'related' edges below that). Plain text with no code/oracle -> concept nodes (Tier C:
     trusted-source text, no independent recompute) -- separate from the code atoms composition trains on
     below; this step's job is only to make the LONG-TERM graph itself grow from real external data, honestly
-    (some fraction will dedup-merge into existing nodes rather than add new ones -- reported, not hidden)."""
-    from v5.graph_grower.fetch_cot import stream_openthoughts
-    from v5.runtime.membrane import learn_any, TRMRetriever
-    retr = TRMRetriever(g)
+    (some fraction will dedup-merge into existing nodes rather than add new ones -- reported, not hidden).
+
+    RESIDUAL CRASH RISK when called from --run, stated plainly (found while validating the KV-eviction A/B,
+    a real pre-existing bug, not introduced this session): HF `datasets` streaming's first real fetch in a
+    process segfaults if torch was already imported/active earlier in that same process. Materializing docs
+    before constructing TRMRetriever (below) is NOT sufficient by itself here, because `trm_wm.py` imports
+    torch at MODULE level -- torch is already loaded the instant this file is imported, before `run_real`'s
+    body (let alone this function) ever executes. Confirmed directly: --grow-cot via `--run` still
+    segfaults on this machine even with this reordering. The only real fix is fetching in a genuinely
+    separate process. Pass pre-fetched `docs` (e.g. via v5.graph_grower.fetch_cot.stream_openthoughts or its
+    saved jsonl, produced by a torch-free process) to skip the internal live-stream entirely and avoid the
+    risk. Without `docs`, this falls back to live-streaming -- fine when called before torch is touched
+    anywhere in the process, NOT safe from inside a real --run invocation on this environment."""
     ot_domains = [d.strip() for d in domains.split(",") if d.strip()]
     kw = [k.strip() for k in keywords.split(",") if k.strip()] or None
+    if docs is None:
+        from v5.graph_grower.fetch_cot import stream_openthoughts
+        docs = list(stream_openthoughts(ot_domains=ot_domains, keywords=kw, limit=n,
+                                        min_reasoning_chars=min_reasoning_chars))
+    from v5.runtime.membrane import learn_any, TRMRetriever
+    retr = TRMRetriever(g)
     added = merged = seen = 0
-    for doc in stream_openthoughts(ot_domains=ot_domains, keywords=kw, limit=n,
-                                   min_reasoning_chars=min_reasoning_chars):
+    for doc in docs:
         seen += 1
         res = learn_any(g, retr, doc["text"][:4000])   # cap -- MiniLM truncates anyway, keep banking cheap
         if res["status"] == "banked-fact":
@@ -1422,7 +1442,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             grow_skills: int = 0, grow_skills_domains: str = "",
             batch_size: int = 1, task_domain: str = "synthetic", math_cot_n_raw: int = 150,
             top_trm_t: int = 0, reground_chunk_tokens: int = 16, reground_top_every: int = 4,
-            max_new_tokens: int = 0, use_kv_cache: bool = False, evict_window: int | None = None):
+            max_new_tokens: int = 0, use_kv_cache: bool = False, evict_window: int | None = None,
+            grow_cot_docs_path: str | None = None):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
@@ -1488,7 +1509,20 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         g = AtomGraph.load(graph_path) if _Path(graph_path).exists() else seed_graph()
         if grow_cot > 0:
             n0 = len(g)
-            stats = _grow_from_cot(g, grow_cot, domains=grow_domains, keywords=grow_keywords)
+            # grow_cot_docs_path: real, safe path around a real crash -- HF `datasets` streaming's first
+            # real fetch in a process segfaults if torch was already active earlier in it (confirmed; see
+            # _grow_from_cot's docstring), and by the time this line runs, torch has been loaded since
+            # trm_wm.py's own module import -- there is no in-process ordering fix for --run specifically.
+            # Pre-fetch with `python -m v5.graph_grower.fetch_cot --out <path> --limit N` (a separate,
+            # torch-free process) first, then pass that file here instead of live-streaming.
+            pre_docs = None
+            if grow_cot_docs_path:
+                import json as _json
+                with open(grow_cot_docs_path, encoding="utf-8") as _f:
+                    pre_docs = [_json.loads(line) for line in _f if line.strip()]
+                print(f"  grow-cot: using {len(pre_docs)} pre-fetched docs from {grow_cot_docs_path} "
+                      f"(avoids the real datasets/torch ordering crash -- see _grow_from_cot's docstring)")
+            stats = _grow_from_cot(g, grow_cot, domains=grow_domains, keywords=grow_keywords, docs=pre_docs)
             print(f"  grow: real OpenThoughts-114k CoT ingested via learn_any -> graph {n0} -> {len(g)} nodes "
                   f"(+{stats['added']} new concepts, {stats['merged']} deduped into existing, "
                   f"{stats['seen']} docs seen)")
@@ -2082,6 +2116,15 @@ def main():
                     help="--grow-cot: OpenThoughts domains to keep (comma-sep)")
     ap.add_argument("--grow-keywords", type=str, default="",
                     help="--grow-cot: comma-sep keywords, keep only docs mentioning one (optional filter)")
+    ap.add_argument("--grow-cot-docs-path", type=str, default="",
+                    help="--grow-cot: read pre-fetched docs from this jsonl instead of live-streaming "
+                         "OpenThoughts inside this process. Real, confirmed reason this matters, not just "
+                         "an option: HF `datasets` streaming's first real fetch in a process segfaults if "
+                         "torch was already active earlier in it, and torch is already loaded here (trm_wm.py "
+                         "imports it at module level) by the time --grow-cot would otherwise run -- live "
+                         "streaming from inside --run WILL likely crash on an environment with this "
+                         "conflict. Produce the file first with a separate, torch-free process: "
+                         "`python -m v5.graph_grower.fetch_cot --out <path> --limit N`.")
     ap.add_argument("--grow-skills", type=int, default=0,
                     help="--run (requires --graph-path): bank up to this many real oracle-verified EXECUTABLE "
                          "atoms from scripts/build_crossdomain_corpus.py via learn_any before training -- "
@@ -2147,7 +2190,8 @@ def main():
                  batch_size=a.batch_size, task_domain=a.task_domain, math_cot_n_raw=a.math_cot_n_raw,
                  top_trm_t=a.top_trm_t, reground_chunk_tokens=a.reground_chunk_tokens,
                  reground_top_every=a.reground_top_every, max_new_tokens=a.max_new_tokens,
-                 use_kv_cache=a.use_kv_cache, evict_window=(a.evict_window or None))
+                 use_kv_cache=a.use_kv_cache, evict_window=(a.evict_window or None),
+                 grow_cot_docs_path=(a.grow_cot_docs_path or None))
     else:
         selftest()
 
