@@ -135,7 +135,7 @@ class AtomGraph:
         self._matrix_dirty = True                                          # lazy rebuild on next matrix() call
         return atom
 
-    def _self_organize(self, atom: Atom, dedup: float = 0.90, link_lo: float = 0.50) -> None:
+    def _self_organize(self, atom: Atom, dedup: float = 0.90, link_lo: float = 0.50, min_k_connect: int = 2) -> None:
         """Link an ALREADY-ADDED atom to existing RELATED nodes (link_lo <= cosine < dedup) with typed
         'related' edges -- the graph connects itself by similarity, not just by literal code dependency.
         Shared by add_or_merge (concepts) and learn_any's skill-banking path (atoms): code atoms don't go
@@ -144,12 +144,48 @@ class AtomGraph:
         similarity. Confirmed a real gap via scripts/graph_connectivity_report.py on a real graph: 29
         skill-banked atoms were ALL isolated (0 edges) because _find_calls (learn_any's only other linking
         mechanism there) only catches an atom whose code literally calls another banked atom -- most
-        simple/standalone atoms never do."""
+        simple/standalone atoms never do.
+
+        GUARANTEED CONNECTIVITY (root cause #2): the same real graph also showed 84% of nodes isolated
+        overall, including CONCEPT nodes that already go through this threshold pass. Real cause: many
+        genuinely-related pairs score BELOW link_lo -- e.g. 'compute n squared' vs 'square a number' cosine
+        ~0.73, plenty of real CoT-concept pairs score lower still, since link_lo is a hard cutoff on a
+        continuous signal. If the threshold pass links NOTHING, force-connect to the top min_k_connect
+        nearest existing nodes anyway, labeled 'nearest' (not 'related') so the graph stays honest about
+        confidence -- a forced fallback link is a weaker claim than "crossed the real similarity bar", and
+        callers (spreading-activation edge-strength weighting) can treat the two differently.
+
+        NLI WAS TRIED AND REJECTED for turning this into richer relation labels (entailment/contradiction/
+        neutral instead of a flat string). Real test, not a guess: cross-encoder/nli-deberta-v3-small
+        (loaded via raw transformers.AutoModelForSequenceClassification -- sentence_transformers segfaults
+        on this env, see embedder.py's own header comment) MISSED textbook entailment on this project's own
+        short technical phrasing ('compute the square of a number' vs 'compute n squared' -> neutral 1.00,
+        0.00 entailment; "Newton's second law: F=ma" vs "F=ma relates force, mass, and acceleration" ->
+        neutral 0.82, entailment only 0.14) and FALSELY flagged a merely-different concept as contradiction
+        ('square of a number' vs 'cube of a number' -> contradiction 0.97). This checkpoint, on short/
+        technical/math phrasing far outside its SNLI/MNLI training distribution, is unreliable in both
+        directions -- shipping it would add FALSE 'contradicts' edges between genuinely related concepts.
+        Not worth it over the honest generic label."""
         M, order = self.matrix()
+        if not order:
+            return
         sims = M @ atom.emb
+        linked_any = False
         for i, o in enumerate(order):
             if o != atom.name and link_lo <= float(sims[i]) < dedup:
                 self.link(atom.name, o, "related"); self.link(o, atom.name, "related")
+                linked_any = True
+        if not linked_any:
+            ranked = sorted(range(len(order)), key=lambda i: -float(sims[i]))
+            connected = 0
+            for i in ranked:
+                o = order[i]
+                if o == atom.name or float(sims[i]) >= dedup:
+                    continue
+                self.link(atom.name, o, "nearest"); self.link(o, atom.name, "nearest")
+                connected += 1
+                if connected >= min_k_connect:
+                    break
 
     def add_or_merge(self, atom: Atom, dedup: float = 0.90, link_lo: float = 0.50) -> tuple:
         """WRITE-TIME GRAPH EDITING (the real thing, not a bare add):
