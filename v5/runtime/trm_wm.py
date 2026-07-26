@@ -335,8 +335,23 @@ def native_text_embedding_batch(wb, texts: list[str]) -> torch.Tensor:
 # grounding in the real partial generation so far each time -- the working memory now tracks what's
 # actually been produced, not just the original task description.
 # ================================================================================================
+def evict_cache(cache, keep_last: int) -> None:
+    """Sliding-window eviction: keep only the last `keep_last` tokens of each layer's KV, in place.
+    Real primitive on transformers' DynamicCache (confirmed on 5.9.0): each layer stores raw
+    `.keys`/`.values` tensors ([B, heads, seq, head_dim]) directly -- `.crop()` keeps the FIRST n tokens
+    (built for generation rollback, wrong direction for a sliding window), so this slices the tail
+    directly instead. `get_seq_length()` is derived live from tensor shape, so `model.generate()`'s
+    internal cache-length bookkeeping picks up the shrunk cache automatically on the next call -- no
+    separate counter to keep in sync."""
+    for layer in cache.layers:
+        if layer.keys.shape[-2] > keep_last:
+            layer.keys = layer.keys[..., -keep_last:, :]
+            layer.values = layer.values[..., -keep_last:, :]
+
+
 def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int = 16,
-                           max_new_tokens: int = 128, top_every: int = 4):
+                           max_new_tokens: int = 128, top_every: int = 4,
+                           use_kv_cache: bool = False, evict_window: int | None = None):
     """Generate, re-grounding WMReasoner's slots every chunk_tokens instead of once up front.
 
     If R.top_trm is set, also runs the slow/top-level TRM every `top_every` CHUNKS (not every chunk) --
@@ -346,25 +361,96 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
     top updates, the bottom trm reuses the last computed top_state (recompute_top=False) -- cheap, and the
     slow/fast split is exactly "top updates less often than bottom," matching the actual ask.
 
+    use_kv_cache=False (default): UNCHANGED behavior -- every chunk calls wb.model.generate() fresh on the
+    whole running sequence (no past_key_values), i.e. it recomputes the entire growing prefix from scratch
+    each time. Kept as the zero-risk default; every existing caller is unaffected.
+
+    use_kv_cache=True: threads a real KV cache between chunks (PrefixSession's proven pattern, see
+    prefix_session.py) instead of recomputing the prefix every chunk -- for greedy decoding this must
+    produce byte-identical output to the use_kv_cache=False path (regression-tested offline, not assumed).
+
+    evict_window (requires use_kv_cache=True): CONFIRMED BROKEN on real Qwen3-4B-Instruct-2507 -- DO NOT
+    USE, kept in the code only as the honest, documented starting point for a real fix, not a working
+    feature. Naive tensor-slicing eviction (evict_cache()) produces genuine output degeneration (tested:
+    "is is is greater task task task task task... 1111111...2222222222222"), not just a minor quality
+    dip. Root cause, confirmed empirically not just theorized: RoPE bakes rotation into cached keys AT THE
+    POSITION THEY WERE COMPUTED, permanently -- slicing off old cache entries does not renumber the
+    survivors' baked-in rotation. But model.generate() assigns newly generated queries position ids
+    starting from the cache's POST-EVICTION (shorter) length, so new queries get rotated for positions
+    0..window while surviving old keys still carry rotation for their true original (larger) positions --
+    the resulting query/key rotation mismatch is what produces the incoherent attention -> degenerate
+    output. A real fix needs either (a) explicit position-compensated eviction (re-deriving/re-rotating
+    the surviving keys for their new relative position, the actual StreamingLLM/attention-sink approach,
+    nontrivial) or (b) discarding the cache entirely at eviction points and re-priming a fresh cache from
+    [TRM-compressed summary text + recent raw window] as a new prompt at position 0, trading some recompute
+    for correctness. Neither is implemented yet -- this parameter exists so the failure mode is documented
+    in the one place someone would look, not silently absent.
+
     Returns the full generated text (decoded, all chunks concatenated) -- same string shape callers already
     get from a plain wb.model.generate() + decode."""
-    running_ids = pids
-    prompt_len = pids.shape[-1]
+    if not use_kv_cache:
+        running_ids = pids
+        prompt_len = pids.shape[-1]
+        top_state = None
+        chunk_idx = 0
+        generated_so_far = ""
+        while (running_ids.shape[-1] - prompt_len) < max_new_tokens:
+            remaining = max_new_tokens - (running_ids.shape[-1] - prompt_len)
+            n_new = min(chunk_tokens, remaining)
+            recompute_top = (R.top_trm is not None) and (chunk_idx % top_every == 0)
+            top_ctx = None
+            if recompute_top and generated_so_far:
+                # bottom-to-top flow: top TRM reasons over what's ACTUALLY been generated so far, not just
+                # the static original task description -- grounds the slow/meta level in real, current
+                # progress. MiniLM space (encode_batch), NOT native_text_embedding -- TRMReasoner.task_proj/
+                # atom_proj both expect d_in (MiniLM 384) space, matching task_emb/atom_embs;
+                # native_text_embedding is d_lm (LM hidden) space, only used for the actual LM-injection
+                # path (GatedCrossAttn), a different tensor entirely. Mixing these raised a real
+                # shape-mismatch caught by the offline test.
+                top_ctx = torch.as_tensor(encode_batch([generated_so_far])[0], dtype=torch.float32, device=wb.device)
+            slots, _states, new_top_state = R.hierarchical_refine(
+                task_emb, atom_embs, top_context_emb=top_ctx, top_state=top_state,
+                recompute_top=recompute_top)
+            top_state = new_top_state
+            R.set_slots_direct(slots)
+            with torch.no_grad():
+                out = wb.model.generate(running_ids, max_new_tokens=n_new, do_sample=False,
+                                        pad_token_id=wb.tok.eos_token_id)
+            running_ids = out
+            generated_so_far = wb.tok.decode(running_ids[0][prompt_len:], skip_special_tokens=True)
+            chunk_idx += 1
+            if running_ids[0, -1].item() == wb.tok.eos_token_id:
+                break
+        R.clear()
+        return generated_so_far
+
+    # use_kv_cache=True path: thread a real cache between chunks (PrefixSession's proven pattern) instead
+    # of recomputing the whole prefix every chunk. generated_so_far is decoded from an independently
+    # accumulated list of every real generated token id (all_new_ids), NOT by slicing cur_ids against a
+    # fixed prompt_len and NOT by decoding+concatenating each chunk's tokens in isolation -- two real bugs
+    # ruled out this way: (1) evict_window trims the FRONT of cur_ids, so a fixed prompt_len offset would
+    # silently corrupt the decode once that happens; (2) decoding a chunk's raw token slice by itself can
+    # split a multi-token Unicode character across the chunk boundary (confirmed on real Qwen output: a
+    # '√' got mangled into a replacement char this way) -- decoding the FULL accumulated id list each
+    # time, exactly like the use_kv_cache=False path already does, avoids ever decoding a partial fragment.
+    if evict_window is not None:
+        import warnings
+        warnings.warn(
+            "generate_with_reground(evict_window=...) is CONFIRMED BROKEN (real degenerate output on "
+            "Qwen3-4B-Instruct-2507, root cause: RoPE position mismatch between evicted-and-renumbered "
+            "queries and surviving old-rotation keys -- see this function's docstring). Proceeding anyway, "
+            "but do not trust the output.", RuntimeWarning, stacklevel=2)
+    cur_ids = pids
+    past = None
     top_state = None
     chunk_idx = 0
+    all_new_ids: list[int] = []
     generated_so_far = ""
-    while (running_ids.shape[-1] - prompt_len) < max_new_tokens:
-        remaining = max_new_tokens - (running_ids.shape[-1] - prompt_len)
-        n_new = min(chunk_tokens, remaining)
+    while len(all_new_ids) < max_new_tokens:
+        n_new = min(chunk_tokens, max_new_tokens - len(all_new_ids))
         recompute_top = (R.top_trm is not None) and (chunk_idx % top_every == 0)
         top_ctx = None
         if recompute_top and generated_so_far:
-            # bottom-to-top flow: top TRM reasons over what's ACTUALLY been generated so far, not just
-            # the static original task description -- grounds the slow/meta level in real, current progress.
-            # MiniLM space (encode_batch), NOT native_text_embedding -- TRMReasoner.task_proj/atom_proj
-            # both expect d_in (MiniLM 384) space, matching task_emb/atom_embs; native_text_embedding is
-            # d_lm (LM hidden) space, only used for the actual LM-injection path (GatedCrossAttn), a
-            # different tensor entirely. Mixing these raised a real shape-mismatch caught by the offline test.
             top_ctx = torch.as_tensor(encode_batch([generated_so_far])[0], dtype=torch.float32, device=wb.device)
         slots, _states, new_top_state = R.hierarchical_refine(
             task_emb, atom_embs, top_context_emb=top_ctx, top_state=top_state,
@@ -372,12 +458,20 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
         top_state = new_top_state
         R.set_slots_direct(slots)
         with torch.no_grad():
-            out = wb.model.generate(running_ids, max_new_tokens=n_new, do_sample=False,
-                                    pad_token_id=wb.tok.eos_token_id)
-        running_ids = out
-        generated_so_far = wb.tok.decode(running_ids[0][prompt_len:], skip_special_tokens=True)
+            attn = torch.ones_like(cur_ids)
+            out = wb.model.generate(input_ids=cur_ids, attention_mask=attn, past_key_values=past,
+                                    max_new_tokens=n_new, do_sample=False, pad_token_id=wb.tok.eos_token_id,
+                                    use_cache=True, return_dict_in_generate=True)
+        seq = out.sequences
+        all_new_ids.extend(seq[0, cur_ids.shape[-1]:].tolist())
+        generated_so_far = wb.tok.decode(all_new_ids, skip_special_tokens=True)
+        cur_ids = seq
+        past = getattr(out, "past_key_values", None)
+        if evict_window is not None and past is not None and past.get_seq_length() > evict_window:
+            evict_cache(past, evict_window)
+            cur_ids = cur_ids[:, -evict_window:]
         chunk_idx += 1
-        if running_ids[0, -1].item() == wb.tok.eos_token_id:
+        if seq[0, -1].item() == wb.tok.eos_token_id:
             break
     R.clear()
     return generated_so_far
