@@ -863,6 +863,142 @@ def _grow_skills_from_corpus(g, n: int | None = None, domains: str = "") -> dict
             "skipped_multiarg": skipped_multiarg, "skipped_notype": skipped_notype}
 
 
+def _grow_from_swe_traces(g, n: int, config: str = "openhands", split: str = "minimax_m25") -> dict:
+    """Real graph growth from nvidia/Open-SWE-Traces, mirroring _grow_from_cot's growth logic (stream real
+    docs -> bank each through membrane's own learn_any, same dedup/self-organize rules) -- gives a real
+    graph concept nodes to retrieve against for _hindsight_examples_from_swe_traces below, self-contained
+    (doesn't require an existing grown graph).
+
+    Docs are materialized into a list BEFORE importing membrane/constructing TRMRetriever -- a real,
+    confirmed environment fragility, not a style choice: on this machine, HF `datasets` streaming's first
+    real fetch segfaults if torch/membrane (TRMRetriever) was already imported/constructed earlier in the
+    same process (confirmed by direct reproduction: crashes torch-first, works datasets-first, same crash
+    either way otherwise). Same class of native-library conflict as the sentence_transformers segfault
+    embedder.py already documents -- not something introduced here, just a second real instance of it."""
+    from v5.graph_grower.fetch_swe_traces import stream_swe_traces
+    docs = list(stream_swe_traces(config=config, split=split, resolved_only=True, limit=n))
+    from v5.runtime.membrane import learn_any, TRMRetriever
+    retr = TRMRetriever(g)
+    added = merged = seen = 0
+    for doc in docs:
+        seen += 1
+        res = learn_any(g, retr, doc["text"][:4000])
+        if res["status"] == "banked-fact":
+            added += 1
+        elif res["status"] == "merged-fact":
+            merged += 1
+    return {"seen": seen, "added": added, "merged": merged}
+
+
+def _hindsight_examples_from_swe_traces(g, n_trajectories: int = 30, lookahead_k: int = 10,
+                                        min_relevance: float = 0.35,
+                                        config: str = "openhands", split: str = "minimax_m25") -> list:
+    """Real, verifiable hindsight-supervised examples for FutureNeedScorer: speculative memory needs a real
+    target for "will this be needed later," and the real, non-guessed signal is recovered AFTER THE FACT
+    from real completed trajectories -- at step T, was some candidate atom/concept the thing a LATER step
+    (T, T+lookahead_k] actually turned out to be about? That's real, recoverable ground truth, not a guess,
+    same anti-poison shape as record_success/record_failure elsewhere in this codebase.
+
+    Requires g to already have real concept nodes to retrieve against (e.g. via _grow_from_swe_traces or
+    _grow_from_cot on the same/a related corpus) -- with an empty graph there is nothing to predict future
+    need FOR, so trajectories are skipped rather than silently returning meaningless labels.
+
+    Returns a list of (task_emb, progress_emb, candidate_emb, label) tuples, all torch.float32 CPU tensors
+    in MiniLM (EMBED_DIM) space -- label=1 if `candidate` is the cosine-nearest graph node to some step
+    strictly after T within the lookahead window AND that match clears min_relevance, else 0.
+
+    min_relevance matters, confirmed by a real offline test not assumed: bare cosine_rank(k=1) always
+    returns SOME node, even for filler text with no real connection to anything in the graph ("let's look
+    at the file structure" spuriously matched an unrelated concept purely on embedding-space noise) --
+    without a floor, that noise gets treated as a real "this step used concept X" fact. 0.35 matches the
+    RELEVANCE threshold already used for the same purpose in membrane.py's interactive_trace.
+
+    Trajectories are materialized into a list BEFORE any encode_batch/g.matrix() call in this function --
+    same real, confirmed environment fragility as _grow_from_swe_traces (HF datasets streaming's first
+    real fetch in a process can segfault if interleaved with torch calls; g itself already having real
+    embeddings, per the precondition above, means torch is already active by the time this runs)."""
+    from v5.graph_grower.fetch_swe_traces import stream_swe_trajectories
+    examples = []
+    if len(g) == 0:
+        return examples
+    trajectories = list(stream_swe_trajectories(config=config, split=split, resolved_only=True,
+                                                limit=n_trajectories))
+
+    def _nearest_or_none(text: str):
+        if not text:
+            return None
+        M, order = g.matrix()
+        if not order:
+            return None
+        q = encode_batch([text])[0]
+        sims = M @ q
+        j = int(sims.argmax())
+        return order[j] if float(sims[j]) >= min_relevance else None
+
+    for traj in trajectories:
+        steps = traj["steps"]
+        step_texts = [(s.get("reasoning") or s.get("tool") or "").strip() for s in steps]
+        if not any(step_texts):
+            continue
+        nearest_per_step = [_nearest_or_none(t) for t in step_texts]
+        candidate_names = sorted({n for n in nearest_per_step if n})
+        if not candidate_names:
+            continue
+        task_emb = torch.as_tensor(encode_batch([traj["problem_text"]])[0], dtype=torch.float32)
+        candidate_embs = {n: torch.as_tensor(g.get(n).emb, dtype=torch.float32) for n in candidate_names}
+        for t in range(len(steps)):
+            progress_text = " ".join(x for x in step_texts[:t + 1] if x) or traj["problem_text"]
+            progress_emb = torch.as_tensor(encode_batch([progress_text])[0], dtype=torch.float32)
+            future_used = set(n for n in nearest_per_step[t + 1:t + 1 + lookahead_k] if n)
+            for name in candidate_names:
+                label = 1 if name in future_used else 0
+                examples.append((task_emb, progress_emb, candidate_embs[name], label))
+    return examples
+
+
+class FutureNeedScorer(nn.Module):
+    """Predicts P(candidate atom will be needed within a future lookahead window), given the current task
+    + progress-so-far -- the speculative/proactive complement to generate_with_reground's existing
+    backward-looking re-grounding (which only ever looks at generated_so_far, never ahead). Modeled
+    directly on WMReasoner's own critic (critique/critic_loss, this same file) -- concat -> small MLP ->
+    sigmoid, real supervised BCE against real hindsight labels (_hindsight_examples_from_swe_traces), same
+    "train -> report real held-out accuracy vs base rate -> only trust if it beats base rate" discipline
+    already used for the critic elsewhere in run_real.
+
+    REAL GATE RESULT (not yet beating base rate -- reported honestly, not hidden): first real run showed
+    0.78 held-out accuracy vs 0.65 base rate (looked like a real signal), but that split was at the EXAMPLE
+    level -- different steps of the SAME trajectory (same task_emb, overlapping candidate pool) landed in
+    both train and held-out, letting the model memorize per-trajectory patterns rather than generalize.
+    Re-run with a proper TRAJECTORY-level split (32 train / 8 held-out trajectories, held-out trajectories
+    never contributing a single training example): 0.56 accuracy vs 0.63 base rate -- WORSE than guessing
+    the majority class, on 40 real Open-SWE-Traces trajectories (13k+ real hindsight-labeled examples).
+    Honest read: this is a small sample (8 held-out trajectories is a small effective N even though it
+    yields ~2400 individual examples, since examples from one trajectory are highly correlated) -- not
+    proof the idea can't work, but no real signal found yet at this scale. Scaling to more real
+    trajectories (207K available, only 100 fetched so far) is the natural next real test before concluding
+    either way. Not wired into generate_with_reground -- gated behind this test passing, per the plan."""
+    def __init__(self, d_in: int = EMBED_DIM, d_hidden: int = 128):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(d_in * 3, d_hidden), nn.GELU(),
+            nn.Linear(d_hidden, d_hidden // 2), nn.GELU(),
+            nn.Linear(d_hidden // 2, 1),
+        )
+
+    def forward(self, task_emb: torch.Tensor, progress_emb: torch.Tensor,
+               candidate_emb: torch.Tensor) -> torch.Tensor:
+        x = torch.cat([task_emb, progress_emb, candidate_emb], dim=-1)
+        return torch.sigmoid(self.net(x)).squeeze(-1)
+
+    def loss(self, examples: list) -> torch.Tensor:
+        task = torch.stack([e[0] for e in examples])
+        prog = torch.stack([e[1] for e in examples])
+        cand = torch.stack([e[2] for e in examples])
+        y = torch.tensor([float(e[3]) for e in examples])
+        preds = self.forward(task, prog, cand)
+        return nn.functional.binary_cross_entropy(preds, y)
+
+
 # ================================================================================================
 # Real long-horizon task domain: OpenThoughts math CoT, verified against the dataset's own boxed final
 # answer (never the model's own guess -- same anti-poison principle as every other verifier in this

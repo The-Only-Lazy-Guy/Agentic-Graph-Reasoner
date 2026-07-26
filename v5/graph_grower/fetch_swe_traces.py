@@ -164,6 +164,48 @@ def stream_swe_traces(
             break
 
 
+def stream_swe_trajectories(
+    *,
+    config: str = "openhands",
+    split: str = "minimax_m25",
+    resolved_only: bool = True,
+    min_steps: int = MIN_STEPS,
+    limit: int = 0,
+) -> Iterator[Dict[str, Any]]:
+    """Like stream_swe_traces, but yields the UNFLATTENED per-step structure -- {instance_id, repo,
+    problem_text, steps, resolved, reference_patch} -- instead of row_to_doc's single flattened `text`
+    string. For consumers that need real step-by-step granularity (e.g. hindsight-labeled prediction: "was
+    concept X used at some step AFTER position T" needs each step addressable, not concatenated prose).
+    Reuses the same real extraction helpers row_to_doc calls (_extract_problem_text/_extract_steps) --
+    no parsing logic duplicated, same static-boilerplate-stripping and resolved_only filtering."""
+    from datasets import load_dataset  # lazy: only needed when actually fetching
+
+    ds = load_dataset(DATASET, config, split=split, streaming=True)
+    kept = 0
+    for row in ds:
+        if resolved_only and row.get("resolved") != 1:
+            continue
+        trajectory = row.get("trajectory") or []
+        problem_text = _extract_problem_text(trajectory)
+        if not problem_text:
+            continue
+        steps = _extract_steps(trajectory)
+        if len(steps) < min_steps:
+            continue
+        meta = row.get("metadata") or {}
+        yield {
+            "instance_id": row.get("instance_id"),
+            "repo": row.get("repo"),
+            "problem_text": problem_text,
+            "steps": steps,
+            "resolved": row.get("resolved"),
+            "reference_patch": meta.get("reference_patch"),
+        }
+        kept += 1
+        if limit and kept >= limit:
+            break
+
+
 def write_docs(docs: Iterable[Mapping[str, Any]], path: str | Path) -> int:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
