@@ -1090,7 +1090,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             grow_domains: str = "math,code,science,puzzle", grow_keywords: str = "",
             grow_skills: int = 0, grow_skills_domains: str = "",
             batch_size: int = 1, task_domain: str = "synthetic", math_cot_n_raw: int = 150,
-            top_trm_t: int = 0, reground_chunk_tokens: int = 16, reground_top_every: int = 4):
+            top_trm_t: int = 0, reground_chunk_tokens: int = 16, reground_top_every: int = 4,
+            max_new_tokens: int = 0):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
@@ -1138,6 +1139,17 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     for p in wb.model.parameters():
         p.requires_grad_(False)
     handles = R.couple(wb)
+
+    # max_new_tokens=0 -> domain-aware default. 128 was hardcoded everywhere before this, fine for
+    # synthetic's ~13-token compose-two-atoms completions but far too small for real math-cot CoT
+    # (OpenThoughts reasoning traces routinely run 300-1000+ tokens before reaching \boxed{...}) -- at 128
+    # the model gets cut off mid-reasoning and never emits \boxed{}, so verify() reads as wrong regardless
+    # of whether the reasoning was on track. 512 is a real budget for that, not a guess: still cheaper than
+    # letting it run unbounded, generous enough that most real single-numeric-answer CoT problems can
+    # actually reach a boxed conclusion.
+    eff_max_new_tokens = max_new_tokens if max_new_tokens > 0 else (512 if task_domain == "math-cot" else 128)
+    print(f"  max_new_tokens={eff_max_new_tokens}"
+          f"{' (auto, domain-aware)' if max_new_tokens == 0 else ' (explicit)'}")
 
     if graph_path:
         from pathlib import Path as _Path
@@ -1486,7 +1498,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                     task_emb, held_mini_embs, track_deltas=True)
                 with torch.no_grad():
                     R.set_slots_direct(slots)
-                    out = wb.model.generate(pids, max_new_tokens=128,
+                    out = wb.model.generate(pids, max_new_tokens=eff_max_new_tokens,
                                             do_sample=False, pad_token_id=wb.tok.eos_token_id)
                     code = wb.tok.decode(out[0][pids.shape[-1]:], skip_special_tokens=True).strip()
                 wm_ok = verify(code, tests)
@@ -1511,7 +1523,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                         record_failure(g, text)
                 R.clear()
                 with torch.no_grad():
-                    out = wb.model.generate(pids, max_new_tokens=128,
+                    out = wb.model.generate(pids, max_new_tokens=eff_max_new_tokens,
                                             do_sample=False, pad_token_id=wb.tok.eos_token_id)
                     code_abl = wb.tok.decode(out[0][pids.shape[-1]:], skip_special_tokens=True).strip()
                 abl_ok = verify(code_abl, tests)
@@ -1526,7 +1538,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 if R.top_trm is not None:
                     reground_text = generate_with_reground(
                         wb, R, pids, task_emb, held_mini_embs,
-                        chunk_tokens=reground_chunk_tokens, max_new_tokens=128,
+                        chunk_tokens=reground_chunk_tokens, max_new_tokens=eff_max_new_tokens,
                         top_every=reground_top_every)
                     reground_ok = verify(reground_text, tests)
                     reground_ok_count += int(reground_ok)
@@ -1545,7 +1557,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                     task_emb, K_atom_embs, track_deltas=True)
                 with torch.no_grad():
                     R.set_slots_direct(slots)
-                    out = wb.model.generate(pids, max_new_tokens=128,
+                    out = wb.model.generate(pids, max_new_tokens=eff_max_new_tokens,
                                             do_sample=False, pad_token_id=wb.tok.eos_token_id)
                     tr_code = wb.tok.decode(out[0][pids.shape[-1]:], skip_special_tokens=True).strip()
                 tr_ok = verify(tr_code, tests)
@@ -1747,6 +1759,12 @@ def main():
                     help="--top-trm-t>0: top TRM recomputes every this many bottom re-ground ticks (the "
                          "actual fast/slow cadence split -- top runs less often than bottom, not on a "
                          "separate OS thread, which wouldn't give real concurrency here anyway).")
+    ap.add_argument("--max-new-tokens", type=int, default=0,
+                    help="generation budget for all held/ablated/reground/co-training generate() calls. "
+                         "0 (default) = domain-aware: 128 for synthetic (real completions are ~13 tokens), "
+                         "512 for math-cot (real OpenThoughts reasoning traces routinely run 300-1000+ "
+                         "tokens before \\boxed{...} -- 128 would cut them off before the model ever reaches "
+                         "the boxed answer, regardless of whether the reasoning was on track).")
     a = ap.parse_args()
     if a.probe:
         probe_real(a.lm, a.quant, a.words, a.steps)
@@ -1755,7 +1773,7 @@ def main():
                  a.grow_cot, a.grow_domains, a.grow_keywords, a.grow_skills, a.grow_skills_domains,
                  batch_size=a.batch_size, task_domain=a.task_domain, math_cot_n_raw=a.math_cot_n_raw,
                  top_trm_t=a.top_trm_t, reground_chunk_tokens=a.reground_chunk_tokens,
-                 reground_top_every=a.reground_top_every)
+                 reground_top_every=a.reground_top_every, max_new_tokens=a.max_new_tokens)
     else:
         selftest()
 
