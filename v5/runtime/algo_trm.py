@@ -73,16 +73,29 @@ def _build():
             """Single shared network: Layernorm → MLP."""
             return self.f_mlp(self.f_norm(v))
 
-        def forward(self, x_vec: torch.Tensor, atom_vecs: torch.Tensor) -> torch.Tensor:
+        def forward(self, x_vec: torch.Tensor, atom_vecs: torch.Tensor,
+                   z_init: torch.Tensor | None = None, y_init: torch.Tensor | None = None,
+                   return_state: bool = False):
             """x_vec: [d_in] task embedding.
             atom_vecs: [N, d_in] atom embeddings (retrieved context R).
-            Returns: [T, d] per-cycle y_t solution embeddings.
-            """
+            Returns: [T, d] per-cycle y_t solution embeddings (unchanged default shape/behavior).
+
+            z_init/y_init: optional resume state from a PREVIOUS forward() call (its raw final z/y, from
+            return_state=True below) -- lets a caller carry real recurrent memory ACROSS separate calls
+            instead of always starting fresh from the fixed learned z0/y0. None (default) = exactly the
+            original behavior (start from z0/y0), so every existing caller is byte-identical unless it
+            opts in. This is genuine cross-call recurrence, distinct from the T inner think/act cycles
+            already run within one call -- those were always recurrent; state never survived BETWEEN calls
+            before this.
+
+            return_state=False (default): returns just the [T,d] ys tensor, same shape every caller already
+            expects. return_state=True: returns (ys, (z, y)) -- the raw final latents (pre-y_head), meant to
+            be passed back in as z_init/y_init on the next call, not for any other use."""
             x = self.task_proj(x_vec)
             R = self.atom_proj(atom_vecs)
 
-            z = self.z0
-            y = self.y0
+            z = self.z0 if z_init is None else z_init
+            y = self.y0 if y_init is None else y_init
 
             ys = []
             for _ in range(self.T):
@@ -102,7 +115,10 @@ def _build():
 
                 ys.append(self.y_head(y))
 
-            return torch.stack(ys)  # [T, d]
+            out = torch.stack(ys)  # [T, d]
+            if return_state:
+                return out, (z, y)
+            return out
 
     return torch, nn, TRMReasoner
 

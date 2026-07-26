@@ -184,7 +184,7 @@ class WMReasoner(nn.Module):
     def hierarchical_refine(self, task_emb: torch.Tensor, atom_embs: torch.Tensor,
                             top_context_emb: torch.Tensor | None = None,
                             top_state: torch.Tensor | None = None, recompute_top: bool = True,
-                            track_deltas: bool = False):
+                            track_deltas: bool = False, top_resume_state: tuple | None = None):
         """Top TRM (slow timescale, its own T -- can be much larger than the bottom trm's, e.g. 24, matching
         the real TRM paper's own recipe for hard tasks) manipulates the bottom trm (fast timescale, the one
         that actually reaches the LM via GatedCrossAttn) by injecting its own deeply-reasoned output
@@ -203,20 +203,32 @@ class WMReasoner(nn.Module):
         literal thread wouldn't buy real wall-clock parallelism here. Running top less often (every K bottom
         ticks) is what actually gives the fast/slow timescale split, and it's simple and correct.
 
-        If self.top_trm is None, behaves EXACTLY like refine() (no top_state ever produced) -- this method
-        is purely additive, never required."""
+        top_resume_state: the top TRM's REAL cross-call recurrent memory -- its raw (z, y) latents from the
+        end of the PREVIOUS recompute, fed back in as this call's z_init/y_init (see TRMReasoner.forward).
+        Without this, every recompute started over from the fixed learned z0/y0 -- recomputed periodically,
+        never actually remembering anything about earlier recomputes. That's genuinely different from the
+        top TRM's OWN T inner think/act cycles (always recurrent, within one call); this is recurrence
+        ACROSS separate calls, the thing that makes top a real evolving memory instead of a periodic
+        stateless recompute. None (default) = starts top_trm fresh from z0/y0, matching the original
+        behavior for any caller that doesn't thread this through.
+
+        If self.top_trm is None, behaves EXACTLY like refine() (no top_state/resume state ever produced) --
+        this method is purely additive, never required."""
         if self.top_trm is None:
             out = self.refine(task_emb, atom_embs, track_deltas=track_deltas)
-            return (*out, None)
+            return (*out, None, None)
 
         if recompute_top or top_state is None:
             top_ctx = task_emb if top_context_emb is None else top_context_emb
-            top_y = self.top_trm(top_ctx, atom_embs)             # [top_T, top_trm.d] -- own (larger) T
+            z_init, y_init = top_resume_state if top_resume_state is not None else (None, None)
+            top_y, (new_z, new_y) = self.top_trm(top_ctx, atom_embs, z_init=z_init, y_init=y_init,
+                                                  return_state=True)
             top_state = top_y[-1]                                # final cycle's answer, the "meta-plan"
+            top_resume_state = (new_z, new_y)                    # carried to the NEXT recompute
         top_signal = self.top_to_bottom_proj(top_state)          # zero-init -> no-op until trained
         effective_task_emb = task_emb + top_signal
         out = self.refine(effective_task_emb, atom_embs, track_deltas=track_deltas)
-        return (*out, top_state)
+        return (*out, top_state, top_resume_state)
 
     def ds_loss_batch(self, all_states: list[list[torch.Tensor]], targets: torch.Tensor | None = None,
                       _unused=None) -> torch.Tensor:
@@ -352,7 +364,8 @@ def evict_cache(cache, keep_last: int) -> None:
 
 def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int = 16,
                            max_new_tokens: int = 128, top_every: int = 4,
-                           use_kv_cache: bool = False, evict_window: int | None = None):
+                           use_kv_cache: bool = False, evict_window: int | None = None,
+                           trigger_patterns: list | None = None):
     """Generate, re-grounding WMReasoner's slots every chunk_tokens instead of once up front.
 
     If R.top_trm is set, also runs the slow/top-level TRM every `top_every` CHUNKS (not every chunk) --
@@ -397,18 +410,26 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
     would have looped here anyway." The `run_real` held-out harness (held/ablated/reground) is the next
     real test for that distinction, not yet wired for evict_window.
 
+    trigger_patterns: optional list of substrings (e.g. ["\n", ". ", "Therefore", "Step"]) checked against
+    each chunk's newly-generated text. If any appear, top recomputes on the VERY NEXT chunk regardless of
+    `top_every`'s cadence -- an event (a real reasoning/sentence boundary just happened) can trigger a
+    recompute early; the cadence still fires as the fallback, so top is never starved if no trigger ever
+    appears. None (default) = pure cadence, unchanged behavior for every existing caller.
+
     Returns the full generated text (decoded, all chunks concatenated) -- same string shape callers already
     get from a plain wb.model.generate() + decode."""
     if not use_kv_cache:
         running_ids = pids
         prompt_len = pids.shape[-1]
         top_state = None
+        top_resume_state = None
         chunk_idx = 0
         generated_so_far = ""
+        event_fired = False
         while (running_ids.shape[-1] - prompt_len) < max_new_tokens:
             remaining = max_new_tokens - (running_ids.shape[-1] - prompt_len)
             n_new = min(chunk_tokens, remaining)
-            recompute_top = (R.top_trm is not None) and (chunk_idx % top_every == 0)
+            recompute_top = (R.top_trm is not None) and ((chunk_idx % top_every == 0) or event_fired)
             top_ctx = None
             if recompute_top and generated_so_far:
                 # bottom-to-top flow: top TRM reasons over what's ACTUALLY been generated so far, not just
@@ -419,16 +440,20 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
                 # path (GatedCrossAttn), a different tensor entirely. Mixing these raised a real
                 # shape-mismatch caught by the offline test.
                 top_ctx = torch.as_tensor(encode_batch([generated_so_far])[0], dtype=torch.float32, device=wb.device)
-            slots, _states, new_top_state = R.hierarchical_refine(
+            slots, _states, new_top_state, new_top_resume_state = R.hierarchical_refine(
                 task_emb, atom_embs, top_context_emb=top_ctx, top_state=top_state,
-                recompute_top=recompute_top)
+                top_resume_state=top_resume_state, recompute_top=recompute_top)
             top_state = new_top_state
+            top_resume_state = new_top_resume_state
             R.set_slots_direct(slots)
             with torch.no_grad():
                 out = wb.model.generate(running_ids, max_new_tokens=n_new, do_sample=False,
                                         pad_token_id=wb.tok.eos_token_id)
             running_ids = out
+            prev_len = len(generated_so_far)
             generated_so_far = wb.tok.decode(running_ids[0][prompt_len:], skip_special_tokens=True)
+            new_text = generated_so_far[prev_len:]
+            event_fired = bool(trigger_patterns) and any(p in new_text for p in trigger_patterns)
             chunk_idx += 1
             if running_ids[0, -1].item() == wb.tok.eos_token_id:
                 break
@@ -459,19 +484,22 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
     cur_ids = pids
     past = None
     top_state = None
+    top_resume_state = None
     chunk_idx = 0
     all_new_ids: list[int] = []
     generated_so_far = ""
+    event_fired = False
     while len(all_new_ids) < max_new_tokens:
         n_new = min(chunk_tokens, max_new_tokens - len(all_new_ids))
-        recompute_top = (R.top_trm is not None) and (chunk_idx % top_every == 0)
+        recompute_top = (R.top_trm is not None) and ((chunk_idx % top_every == 0) or event_fired)
         top_ctx = None
         if recompute_top and generated_so_far:
             top_ctx = torch.as_tensor(encode_batch([generated_so_far])[0], dtype=torch.float32, device=wb.device)
-        slots, _states, new_top_state = R.hierarchical_refine(
+        slots, _states, new_top_state, new_top_resume_state = R.hierarchical_refine(
             task_emb, atom_embs, top_context_emb=top_ctx, top_state=top_state,
-            recompute_top=recompute_top)
+            top_resume_state=top_resume_state, recompute_top=recompute_top)
         top_state = new_top_state
+        top_resume_state = new_top_resume_state
         R.set_slots_direct(slots)
         with torch.no_grad():
             attn = torch.ones_like(cur_ids)
@@ -481,8 +509,11 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
                                     max_new_tokens=n_new, do_sample=False, pad_token_id=wb.tok.eos_token_id,
                                     use_cache=True, return_dict_in_generate=True)
         seq = out.sequences
-        all_new_ids.extend(seq[0, cur_ids.shape[-1]:].tolist())
+        new_ids_this_chunk = seq[0, cur_ids.shape[-1]:].tolist()
+        all_new_ids.extend(new_ids_this_chunk)
         generated_so_far = wb.tok.decode(all_new_ids, skip_special_tokens=True)
+        new_text = wb.tok.decode(new_ids_this_chunk, skip_special_tokens=True)
+        event_fired = bool(trigger_patterns) and any(p in new_text for p in trigger_patterns)
         cur_ids = seq
         past = getattr(out, "past_key_values", None)
         if evict_window is not None and past is not None and past.get_seq_length() > evict_window:
@@ -1809,7 +1840,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 # (eval-time, no .backward() anywhere near it) touched hierarchical_refine -- top_to_bottom_proj
                 # was mathematically guaranteed to sit at zero-init forever, regardless of epoch count (a real,
                 # confirmed-by-reading-the-code gap, not a "needs more epochs" issue).
-                slots, states, _top_state = R.hierarchical_refine(task_emb, mini_atom_embs)
+                slots, states, _top_state, _top_resume = R.hierarchical_refine(task_emb, mini_atom_embs)
                 # DEFER injection: with batch_size>1, calling set_slots_direct here would be overwritten by
                 # every subsequent example, so only the LAST example's slots would survive to the single
                 # batched forward pass below -- GatedCrossAttn then broadcasts that one example's slots to
@@ -1876,7 +1907,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 # hierarchical_refine here too (was plain refine()) -- "held WM" is now the one-shot
                 # hierarchical injection (identical to before when top_trm is None), so its gap against
                 # "reground" below isolates the value of PERIODIC re-grounding specifically.
-                slots, wm_states, wm_deltas, wm_raw, _top_state = R.hierarchical_refine(
+                slots, wm_states, wm_deltas, wm_raw, _top_state, _top_resume = R.hierarchical_refine(
                     task_emb, held_mini_embs, track_deltas=True)
                 with torch.no_grad():
                     R.set_slots_direct(slots)
@@ -1952,7 +1983,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                     torch.as_tensor(encode_batch([atom_names[idx]])[0], dtype=torch.float32, device=wb.device)
                     for idx in gold_idx
                 ])
-                slots, tr_states, tr_deltas, tr_raw, _top_state = R.hierarchical_refine(
+                slots, tr_states, tr_deltas, tr_raw, _top_state, _top_resume = R.hierarchical_refine(
                     task_emb, K_atom_embs, track_deltas=True)
                 with torch.no_grad():
                     R.set_slots_direct(slots)
