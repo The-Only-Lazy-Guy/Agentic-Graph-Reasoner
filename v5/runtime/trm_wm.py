@@ -443,11 +443,19 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
     instability_trigger: a real, learned alternative to trigger_patterns' hand-picked strings -- the BOTTOM
     trm triggers the top trm itself, off its OWN computed state, not off surface text. Each chunk's bottom
     refine() already tracks per-cycle deltas (track_deltas=True, the same mechanism the held-out eval loop
-    already uses to print `instab`); trajectory_instability(deltas) is late/early ratio of ||y_{t+1}-y_t||
-    -- >1 means the bottom trm is STILL CHURNING on this chunk (hasn't settled/converged), a genuine signal
-    the current context is hard or ambiguous, not a guessed keyword. If that ratio exceeds this threshold
-    (e.g. 1.0), top recomputes on the next chunk, same OR-with-cadence fallback as trigger_patterns. None
-    (default) = off, unchanged behavior. Domain-agnostic (no hand-picked words), unlike trigger_patterns.
+    already uses to print `instab`); trajectory_instability(deltas) is the late/early ratio of
+    ||y_{t+1}-y_t||, i.e. "is the bottom trm still churning on this chunk."
+
+    RELATIVE, not absolute -- this is a fix for a real bug found in a real run, not a preference.
+    trajectory_instability's own docstring says ">1 = still churning", so an absolute threshold of 1.0 was
+    recommended first; a real 20-epoch run on Qwen3-4B then showed measured instability of 0.062 at epoch 0
+    decaying to 0.001 by epoch 10 -- THREE orders of magnitude below 1.0, so the trigger never fired once
+    and the whole run silently tested nothing. Worse, no fixed value can work: the signal itself decays
+    ~30x as training converges, so any constant either fires on every chunk early or never fires late.
+    This value is therefore a MULTIPLIER against the running mean of previous chunks' instability within
+    the current generation (e.g. 1.5 = "50% above this generation's own recent average"). Scale-free, so it
+    survives the decay. The first chunk has no baseline yet and never fires on this path (the cadence
+    covers it). None (default) = off, unchanged behavior. Domain-agnostic, unlike trigger_patterns.
 
     sink_tokens (requires evict_window): keep this many tokens from the very START of the sequence, in
     addition to the recent window -- StreamingLLM-style ATTENTION SINKS. Found necessary by real
@@ -469,6 +477,7 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
         chunk_idx = 0
         generated_so_far = ""
         event_fired = False
+        instab_history: list[float] = []
         while (running_ids.shape[-1] - prompt_len) < max_new_tokens:
             remaining = max_new_tokens - (running_ids.shape[-1] - prompt_len)
             n_new = min(chunk_tokens, remaining)
@@ -503,8 +512,13 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
             generated_so_far = wb.tok.decode(running_ids[0][prompt_len:], skip_special_tokens=True)
             new_text = generated_so_far[prev_len:]
             pattern_fired = bool(trigger_patterns) and any(p in new_text for p in trigger_patterns)
-            instability_fired = (deltas is not None and instability_trigger is not None
-                                and R.trajectory_instability(deltas) > instability_trigger)
+            instability_fired = False
+            if deltas is not None and instability_trigger is not None:
+                instab_now = R.trajectory_instability(deltas)
+                if instab_history:
+                    baseline = sum(instab_history) / len(instab_history)
+                    instability_fired = instab_now > baseline * instability_trigger
+                instab_history.append(instab_now)
             event_fired = pattern_fired or instability_fired
             chunk_idx += 1
             if running_ids[0, -1].item() == wb.tok.eos_token_id:
@@ -545,6 +559,7 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
     all_new_ids: list[int] = []
     generated_so_far = ""
     event_fired = False
+    instab_history: list[float] = []
     while len(all_new_ids) < max_new_tokens:
         n_new = min(chunk_tokens, max_new_tokens - len(all_new_ids))
         recompute_top = (R.top_trm is not None) and ((chunk_idx % top_every == 0) or event_fired)
@@ -577,8 +592,13 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
         generated_so_far = wb.tok.decode(all_new_ids, skip_special_tokens=True)
         new_text = wb.tok.decode(new_ids_this_chunk, skip_special_tokens=True)
         pattern_fired = bool(trigger_patterns) and any(p in new_text for p in trigger_patterns)
-        instability_fired = (deltas is not None and instability_trigger is not None
-                            and R.trajectory_instability(deltas) > instability_trigger)
+        instability_fired = False
+        if deltas is not None and instability_trigger is not None:
+            instab_now = R.trajectory_instability(deltas)
+            if instab_history:
+                baseline = sum(instab_history) / len(instab_history)
+                instability_fired = instab_now > baseline * instability_trigger
+            instab_history.append(instab_now)
         event_fired = pattern_fired or instability_fired
         cur_ids = seq
         # Newly generated tokens continue from the last TRUE position, matching how generate() itself
@@ -2291,12 +2311,13 @@ def main():
                     help="--top-trm-t>0: a real, learned alternative to --trigger-patterns -- the BOTTOM "
                          "trm triggers top itself, off its own computed state (trajectory_instability, the "
                          "same late/early y_t convergence ratio already printed as `instab` in every "
-                         "held-out eval), not off hand-picked strings. If the bottom trm's instability on a "
-                         "chunk exceeds this threshold (still churning, hasn't settled -- a genuine sign "
-                         "this part is hard/ambiguous), top recomputes on the next chunk, same OR-with-"
-                         "cadence fallback as --trigger-patterns. 0.0 (default, disabled sentinel) = off, "
-                         "unchanged behavior -- pass e.g. 1.0 to enable (ratio > 1.0 already means "
-                         "'still churning' per trajectory_instability's own convention).")
+                         "held-out eval), not off hand-picked strings. RELATIVE MULTIPLIER against the "
+                         "running mean of earlier chunks in the same generation -- e.g. 1.5 means '50%% "
+                         "above this generation's own recent average'. NOT an absolute threshold: a real "
+                         "20-epoch Qwen3-4B run measured instability at 0.062 (epoch 0) decaying to 0.001 "
+                         "(epoch 10), so the absolute 1.0 originally suggested here never fired once and "
+                         "silently tested nothing -- and since the signal itself decays ~30x during "
+                         "training, no fixed value can work. 0.0 (default) = off, unchanged behavior.")
     ap.add_argument("--sink-tokens", type=int, default=0,
                     help="requires --evict-window: keep this many tokens from the very START of the "
                          "sequence alongside the recent window -- StreamingLLM-style attention sinks. "
