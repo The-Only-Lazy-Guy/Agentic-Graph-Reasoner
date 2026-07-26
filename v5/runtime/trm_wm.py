@@ -606,7 +606,7 @@ def _dynamic_oracle(g, atom_names: list[str]):
 
     def _run_task(n, code_line):
         return eval(code_line, {"__builtins__": __builtins__}, {**ns, "n": n})
-    return _run_task
+    return _run_task, ns
 
 
 # the ORIGINAL hand-tuned phrasings (from _compose_tasks_real) -- reused byte-identical for the 10 seed
@@ -879,8 +879,21 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     if graph_path:
         # DYNAMIC oracle, sourced from the graph's OWN atom code (Phase 3) -- scales to whatever atoms
         # actually exist, instead of the fixed 10-lambda dict below.
-        _run_task = _dynamic_oracle(g, atom_names)
+        _run_task, _oracle_ns = _dynamic_oracle(g, atom_names)
     else:
+        _oracle_ns = {
+            "is_prime": lambda n: n>=2 and all(n%i for i in range(2,int(n**0.5)+1)),
+            "digit_sum": lambda n: sum(int(c) for c in str(abs(n))),
+            "num_divisors": lambda n: sum(1 for i in range(1,abs(n)+1) if n%i==0),
+            "factorial": lambda n: __import__('math').factorial(n),
+            "fibonacci": _fib,
+            "reverse_digits": lambda n: int(str(abs(n))[::-1]),
+            "count_bits": lambda n: bin(abs(n)).count('1'),
+            "sum_to_n": lambda n: n*(n+1)//2,
+            "square": lambda n: n*n,
+            "is_even": lambda n: int(n%2==0),
+        }
+
         def _run_task(n, code_line):
             """Execute the composition code_line (e.g. 'digit_sum(fibonacci(n))') at n.
 
@@ -889,19 +902,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             except-> False. This meant verify() could never return True for ANY input, correct or not,
             since _run_task was written -- the true root cause under the 0/4 and 0/16 results, deeper than
             the decoding-loop issue."""
-            fn_map = {
-                "is_prime": lambda n: n>=2 and all(n%i for i in range(2,int(n**0.5)+1)),
-                "digit_sum": lambda n: sum(int(c) for c in str(abs(n))),
-                "num_divisors": lambda n: sum(1 for i in range(1,abs(n)+1) if n%i==0),
-                "factorial": lambda n: __import__('math').factorial(n),
-                "fibonacci": _fib,
-                "reverse_digits": lambda n: int(str(abs(n))[::-1]),
-                "count_bits": lambda n: bin(abs(n)).count('1'),
-                "sum_to_n": lambda n: n*(n+1)//2,
-                "square": lambda n: n*n,
-                "is_even": lambda n: int(n%2==0),
-            }
-            return eval(code_line, {"__builtins__": __builtins__}, {**fn_map, "n": n})
+            return eval(code_line, {"__builtins__": __builtins__}, {**_oracle_ns, "n": n})
 
     def _extract_first_return(raw: str) -> str | None:
         """Pull the FIRST return-expression out of raw generated text. Safety net: the model is now trained
@@ -931,14 +932,34 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             return True
         except Exception: return False
 
-    def make_tests(code_expression):
-        return [(n, _run_task(n, code_expression)) for n in [2, 3, 5, 7, 10, 13]]
+    _MAX_SAFE_MAGNITUDE = 100_000
+
+    def make_tests(code_expression, atoms_needed):
+        """A composed outer(inner(n)) can blow up combinatorially even though every atom involved is
+        individually fast and correctly int-typed: factorial(13) = 6,227,020,800, and num_divisors' naive
+        trial division (sum(1 for i in range(1,abs(n)+1) if n%i==0), one of the ORIGINAL 10 seed atoms) is
+        O(n) -- num_divisors(factorial(13)) alone measured ~9 minutes on this machine. Not a hang, just a
+        combinatorially expensive eval with zero visible progress. Cheap pre-check: evaluate the INNER
+        atom alone first (already verified fast/int-typed by _atoms_from_graph) and skip this n if its
+        result is too large for a single-pass counting atom to handle quickly -- avoids ever running the
+        catastrophic outer(inner(n)) eval. Direct (single-atom) tasks have no inner stage, so no risk."""
+        tests = []
+        for n in [2, 3, 5, 7, 10, 13]:
+            if len(atoms_needed) == 2:
+                try:
+                    inner_val = _oracle_ns[atoms_needed[0]](n)
+                except Exception:
+                    continue
+                if isinstance(inner_val, int) and abs(inner_val) > _MAX_SAFE_MAGNITUDE:
+                    continue
+            tests.append((n, _run_task(n, code_expression)))
+        return tests
 
     train_ex = [(task_embs[text], [atom_names.index(a) for a in atoms_needed], atoms_needed,
-                 prompt_ids[text], text, code, make_tests(code_expr))
+                 prompt_ids[text], text, code, make_tests(code_expr, atoms_needed))
                 for text, atoms_needed, code, code_expr in train_tasks]
     held_ex = [(task_embs[text], [atom_names.index(a) for a in atoms_needed], atoms_needed,
-                prompt_ids[text], text, code, make_tests(code_expr))
+                prompt_ids[text], text, code, make_tests(code_expr, atoms_needed))
                for text, atoms_needed, code, code_expr in held_tasks]
 
     print(f"  Training the adapter + WMReasoner ({epochs} epochs, {len(train_ex)} pairs; "
