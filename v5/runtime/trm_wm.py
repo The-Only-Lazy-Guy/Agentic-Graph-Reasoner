@@ -489,12 +489,28 @@ def _atoms_from_graph(g) -> tuple[dict, dict]:
     executable code -- NOT kind=='atom' (kind is a free natural-language label in membrane.py, not a closed
     enum; whether a node is usable for composition is a fact about its code, not what string labels it).
     Excludes trap nodes (wrong code that failed verify, saved as anti-poison) -- these have a.code but
-    their implementations are incorrect, so using them in composition would always fail verify()."""
+    their implementations are incorrect, so using them in composition would always fail verify().
+
+    Also excludes atoms that don't actually RUN on a plain int: _compose_tasks_from_graph below does an
+    unconditional all-pairs cross product assuming every atom is f(n: int) -> ..., and _dynamic_oracle's
+    eval() (unlike membrane.verify(), which is exception-safe) is NOT wrapped in try/except -- a real, str-
+    or list-domain atom (e.g. _grow_skills_from_corpus's nucleotide_freq(dna): dna.upper()) crashes the
+    whole run the instant it's cross-producted as inner/outer against an int. Real, cheap execution check
+    (call fn(3), catch failure) instead of trusting metadata -- protects against a bad atom from ANY source,
+    not just one growth path, including whatever's already sitting in a persisted graph file on disk."""
+    from v5.runtime.membrane import _closure
     descs, codes = {}, {}
     for name, a in g.atoms.items():
-        if a.code and a.kind != "trap":
-            descs[name] = a.description
-            codes[name] = a.code
+        if not a.code or a.kind == "trap":
+            continue
+        try:
+            ns: dict = {}
+            exec(compile(_closure(g, [name]), "<int-domain-check>", "exec"), ns)
+            ns[name](3)
+        except Exception:
+            continue
+        descs[name] = a.description
+        codes[name] = a.code
     return descs, codes
 
 
