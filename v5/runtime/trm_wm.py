@@ -1458,7 +1458,16 @@ def _compose_tasks_real(n_train: int = 48, n_held: int = 16, seed: int = 0):
     }
     pairs = [(o, i) for o in outer_template for i in inner_phrase]
     _random.Random(seed).shuffle(pairs)
-    n_train, n_held = min(n_train, len(pairs) - 4), min(n_held, len(pairs) - n_train)
+    # Real bug, confirmed by direct execution not assumed: this used to be a single tuple assignment
+    # `n_train, n_held = min(n_train, len(pairs)-4), min(n_held, len(pairs)-n_train)` -- Python evaluates
+    # the WHOLE right-hand side using the ORIGINAL n_train before either name is rebound, so whenever the
+    # requested n_train exceeded the pool, `len(pairs) - n_train` went NEGATIVE (confirmed:
+    # n_train=100 request -> len(pairs)-100 = 64-100 = -36 -> min(16,-36) = -36 -> pairs[60:60-36] =
+    # pairs[60:24], an empty slice -- 0 held-out tasks, silently, for every epoch, no matter how long
+    # training ran). Fixed by computing the capped n_train FIRST, then using THAT (not the stale original)
+    # to cap n_held.
+    n_train = min(n_train, len(pairs) - 4)
+    n_held = min(n_held, len(pairs) - n_train)
 
     def _mk(outer, inner):
         text = outer_template[outer].format(inner=inner_phrase[inner])
