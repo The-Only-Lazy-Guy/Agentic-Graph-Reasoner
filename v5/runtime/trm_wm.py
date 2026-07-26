@@ -369,22 +369,32 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
     prefix_session.py) instead of recomputing the prefix every chunk -- for greedy decoding this must
     produce byte-identical output to the use_kv_cache=False path (regression-tested offline, not assumed).
 
-    evict_window (requires use_kv_cache=True): CONFIRMED BROKEN on real Qwen3-4B-Instruct-2507 -- DO NOT
-    USE, kept in the code only as the honest, documented starting point for a real fix, not a working
-    feature. Naive tensor-slicing eviction (evict_cache()) produces genuine output degeneration (tested:
-    "is is is greater task task task task task... 1111111...2222222222222"), not just a minor quality
-    dip. Root cause, confirmed empirically not just theorized: RoPE bakes rotation into cached keys AT THE
-    POSITION THEY WERE COMPUTED, permanently -- slicing off old cache entries does not renumber the
-    survivors' baked-in rotation. But model.generate() assigns newly generated queries position ids
-    starting from the cache's POST-EVICTION (shorter) length, so new queries get rotated for positions
-    0..window while surviving old keys still carry rotation for their true original (larger) positions --
-    the resulting query/key rotation mismatch is what produces the incoherent attention -> degenerate
-    output. A real fix needs either (a) explicit position-compensated eviction (re-deriving/re-rotating
-    the surviving keys for their new relative position, the actual StreamingLLM/attention-sink approach,
-    nontrivial) or (b) discarding the cache entirely at eviction points and re-priming a fresh cache from
-    [TRM-compressed summary text + recent raw window] as a new prompt at position 0, trading some recompute
-    for correctness. Neither is implemented yet -- this parameter exists so the failure mode is documented
-    in the one place someone would look, not silently absent.
+    evict_window (requires use_kv_cache=True): position-compensated sliding-window eviction. Two REAL bugs
+    were found and fixed here via direct testing on Qwen3-4B-Instruct-2507 (not assumed correct):
+      1. RoPE bakes rotation into cached keys at the position they were computed, permanently -- naive
+         eviction (slice the cache, let generate() derive position_ids from the new shorter cache length)
+         gave new queries rotation for positions 0..window while surviving keys kept rotation for their
+         true original (larger) positions -- confirmed via real garbled output ("is is is... task task
+         task... 1111111...2222222222222"). Fixed by tracking each surviving/new token's TRUE absolute
+         position ourselves (`true_pos_offset`) and passing it explicitly as `position_ids=` to generate()
+         -- confirmed (by reading transformers' generation/utils.py) that an explicit position_ids is
+         forwarded untouched on the first step and correctly incremented from its own last value on
+         subsequent steps, not re-derived from cache length.
+      2. Separately, found via direct instrumentation (cache length jumped 48->103 instead of the expected
+         48->56): when `cur_ids.shape[-1]` exactly equals `past.get_seq_length()`, generate()'s internal
+         "how many tokens are new beyond the cache" count comes out to 0, and `arr[:, -0:]` is a Python
+         slicing quirk (`-0 == 0`) meaning "the whole array," not "nothing" -- so it silently re-prefills
+         the entire already-cached cur_ids, duplicating every surviving token's KV entry. Fixed by evicting
+         the cache to `evict_window - 1` while keeping cur_ids at `evict_window` tokens, restoring the
+         same "cur_ids is one token ahead of the cache" invariant that was already incidentally present in
+         every normal (non-eviction) chunk -- which is why only eviction chunks hit this.
+    Verified on real Qwen3-4B: no more garbled/repeated-digit degeneration; cache length stays bounded
+    (measured, not assumed). A separate, milder concern remains: the model can fall into ordinary
+    greedy-decoding content repetition (e.g. re-stating "we check if a number is prime" several times) on
+    long evicted generations -- ordinary LLM greedy-decoding behavior, not the garbled-token failure mode
+    above, and not yet distinguished from "eviction lost something the model needed" vs "greedy decoding
+    would have looped here anyway." The `run_real` held-out harness (held/ablated/reground) is the next
+    real test for that distinction, not yet wired for evict_window.
 
     Returns the full generated text (decoded, all chunks concatenated) -- same string shape callers already
     get from a plain wb.model.generate() + decode."""
@@ -433,13 +443,18 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
     # split a multi-token Unicode character across the chunk boundary (confirmed on real Qwen output: a
     # '√' got mangled into a replacement char this way) -- decoding the FULL accumulated id list each
     # time, exactly like the use_kv_cache=False path already does, avoids ever decoding a partial fragment.
-    if evict_window is not None:
-        import warnings
-        warnings.warn(
-            "generate_with_reground(evict_window=...) is CONFIRMED BROKEN (real degenerate output on "
-            "Qwen3-4B-Instruct-2507, root cause: RoPE position mismatch between evicted-and-renumbered "
-            "queries and surviving old-rotation keys -- see this function's docstring). Proceeding anyway, "
-            "but do not trust the output.", RuntimeWarning, stacklevel=2)
+    #
+    # true_pos_offset: the TRUE absolute position of cur_ids[0]. Eviction physically removes the oldest
+    # cached tokens -- it does NOT re-rotate the survivors' cached keys (RoPE bakes rotation in at compute
+    # time, permanently). The fix is not touching the cache at all: pass an explicit `position_ids` to
+    # generate() reflecting each surviving/new token's TRUE original position (confirmed by reading
+    # transformers' actual generation/utils.py: prepare_inputs_for_generation forwards an explicit
+    # position_ids through untouched, and _update_model_kwargs_for_generation increments every subsequent
+    # step from `position_ids[..., -1] + 1`, NOT from the cache's current length) -- RoPE's attention score
+    # depends only on the RELATIVE offset between a query and key's true positions, so as long as both are
+    # labeled correctly there is no gap/mismatch, even though the cache itself is shorter than the true
+    # token count. Stays 0 until eviction first fires (cur_ids[0] is the original prompt start until then).
+    true_pos_offset = 0
     cur_ids = pids
     past = None
     top_state = None
@@ -459,7 +474,9 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
         R.set_slots_direct(slots)
         with torch.no_grad():
             attn = torch.ones_like(cur_ids)
+            position_ids = (torch.arange(cur_ids.shape[-1], device=wb.device) + true_pos_offset).unsqueeze(0)
             out = wb.model.generate(input_ids=cur_ids, attention_mask=attn, past_key_values=past,
+                                    position_ids=position_ids,
                                     max_new_tokens=n_new, do_sample=False, pad_token_id=wb.tok.eos_token_id,
                                     use_cache=True, return_dict_in_generate=True)
         seq = out.sequences
@@ -468,8 +485,20 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
         cur_ids = seq
         past = getattr(out, "past_key_values", None)
         if evict_window is not None and past is not None and past.get_seq_length() > evict_window:
-            evict_cache(past, evict_window)
+            # Evict the CACHE to evict_window-1, but keep cur_ids at evict_window (one token longer than
+            # the cache). Real bug found by direct instrumentation, not guessed: when cur_ids.shape[-1]
+            # exactly equals past.get_seq_length(), generate()'s internal "how many tokens are new beyond
+            # the cache" calculation comes out to 0, and `arr[:, -0:]` is a Python slicing quirk that means
+            # "the whole array" (-0 == 0), not "nothing" -- so it silently RE-PREFILLS the entire (already
+            # cached) cur_ids on the next call, duplicating every surviving token's KV entry (confirmed:
+            # cache jumped 48->103 instead of the expected 48->56). Keeping cur_ids one token ahead of the
+            # cache (the same invariant that was already present, incidentally, in every non-eviction
+            # chunk -- which is WHY only eviction chunks broke) makes the "how many new" count correctly
+            # come out to 1, not 0.
+            n_dropped = cur_ids.shape[-1] - (evict_window - 1)
+            evict_cache(past, evict_window - 1)
             cur_ids = cur_ids[:, -evict_window:]
+            true_pos_offset += n_dropped   # cur_ids[0] is now n_dropped positions later than before
         chunk_idx += 1
         if seq[0, -1].item() == wb.tok.eos_token_id:
             break
