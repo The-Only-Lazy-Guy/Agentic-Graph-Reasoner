@@ -1624,7 +1624,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             max_new_tokens: int = 0, use_kv_cache: bool = False, evict_window: int | None = None,
             grow_cot_docs_path: str | None = None, math_cot_docs_path: str | None = None,
             trigger_patterns: list | None = None, instability_trigger: float | None = None,
-            sink_tokens: int = 0):
+            sink_tokens: int = 0, cotrain_samples: int = -1):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
@@ -2119,10 +2119,21 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                         dump[-1] = dump[-1] + (reground_evicted_text, reground_evicted_ok)
 
             # CO-TRAINING data (stage 1)
+            # cotrain_samples caps how many train tasks get a real generate() here. This loop was measured
+            # as ~43% of total eval-checkpoint cost (a full generate() over EVERY train task, at EVERY
+            # checkpoint) and its ONLY consumer is the tier-4 critic -- which has not once beaten its base
+            # rate in any real run recorded in this codebase. -1 (default) = all, unchanged behavior;
+            # 0 = skip entirely (the critic still gets the held_ex trajectories collected above);
+            # N = a random sample of N, re-drawn each checkpoint so it still sees varied tasks over a run.
+            cotrain_ex = train_ex
+            if cotrain_samples == 0:
+                cotrain_ex = []
+            elif cotrain_samples > 0 and cotrain_samples < len(train_ex):
+                cotrain_ex = random.sample(train_ex, cotrain_samples)
             if ep == 0:
-                print(f"    [ep 0 heartbeat] running co-training generate() over {len(train_ex)} train tasks...",
-                      flush=True)
-            for task_emb, gold_idx, atoms_needed, pids, text, target_code, tests in train_ex:
+                print(f"    [ep 0 heartbeat] running co-training generate() over {len(cotrain_ex)} train tasks"
+                      f"{' (skipped: --cotrain-samples 0)' if not cotrain_ex else ''}...", flush=True)
+            for task_emb, gold_idx, atoms_needed, pids, text, target_code, tests in cotrain_ex:
                 K_atom_embs = torch.stack([
                     torch.as_tensor(encode_batch([atom_names[idx]])[0], dtype=torch.float32, device=wb.device)
                     for idx in gold_idx
@@ -2352,6 +2363,13 @@ def main():
                          "loop, while sinks covering the prompt scored 14/15 coherently against a "
                          "15/15 no-eviction ceiling -- because a pure window's oldest tokens ARE the "
                          "prompt (the task description). Set it to roughly the real prompt length.")
+    ap.add_argument("--cotrain-samples", type=int, default=-1,
+                    help="cap how many train tasks get a real generate() in the co-training data pass at "
+                         "each eval checkpoint. Measured at ~43%% of total eval cost (a full generate() over "
+                         "EVERY train task, EVERY checkpoint), feeding only the tier-4 critic -- which has "
+                         "never beaten its base rate in any real run here. -1 (default) = all, unchanged; "
+                         "0 = skip entirely (critic still gets the held-out trajectories); N = random "
+                         "sample of N per checkpoint. Use 0 for the fastest real held-out A/B.")
     ap.add_argument("--grow-skills", type=int, default=0,
                     help="--run (requires --graph-path): bank up to this many real oracle-verified EXECUTABLE "
                          "atoms from scripts/build_crossdomain_corpus.py via learn_any before training -- "
@@ -2422,7 +2440,7 @@ def main():
                  math_cot_docs_path=(a.math_cot_docs_path or None),
                  trigger_patterns=([p for p in a.trigger_patterns.split(",") if p] or None),
                  instability_trigger=(a.instability_trigger or None),
-                 sink_tokens=a.sink_tokens)
+                 sink_tokens=a.sink_tokens, cotrain_samples=a.cotrain_samples)
     else:
         selftest()
 
