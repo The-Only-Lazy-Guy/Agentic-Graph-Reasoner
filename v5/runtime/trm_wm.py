@@ -100,11 +100,11 @@ class WMReasoner(nn.Module):
     DEEP SUPERVISION: intermediate y_t values from each TRM cycle are regressed against
     oracle-computed intermediate targets (native_text_embedding of true intermediate results).
     Loss is MSE in d_lm space — NOT CE against atom pools (TRM is not a ranker)."""
-    def __init__(self, d_lm: int, couple_layers, trm, n_heads: int = 4, M: int = 4):
+    def __init__(self, d_lm: int, couple_layers, trm, n_heads: int = 4, M: int = 4, top_trm=None):
         super().__init__()
         self.T = trm.T
         self.M = M
-        self.trm = trm                                         # shared TRMReasoner (two-latent)
+        self.trm = trm                                         # BOTTOM/fast TRM (two-latent), reaches the LM
 
         # Project TRM's y_t [T, d] → [T, d_lm] for LM adapters
         self.proj_y = nn.Linear(trm.d, d_lm)
@@ -120,6 +120,22 @@ class WMReasoner(nn.Module):
         # Self-critique (unchanged)
         self.critic_pool = nn.Linear(d_lm, d_lm)
         self.critic = nn.Sequential(nn.Linear(d_lm, d_lm // 2), nn.GELU(), nn.Linear(d_lm // 2, 1))
+
+        # HIERARCHICAL (optional): a second, slower-timescale TRM (top_trm, same TRMReasoner class, its
+        # own T -- the real TRM paper's own recipe runs many recursion steps for hard tasks, e.g. ~24; this
+        # is exactly why TRMReasoner already takes T as a free parameter, not hardcoded). top_trm "manipulates"
+        # the bottom trm (which is the one that reaches the LM) by injecting its own deeply-reasoned output
+        # additively into the bottom trm's task input every time the bottom trm runs -- see
+        # hierarchical_refine(). top_to_bottom_proj is ZERO-INIT (weight AND bias) so that a freshly-added,
+        # untrained top_trm is a strict no-op at first: hierarchical_refine(...) == refine(...) bit-for-bit
+        # until top_to_bottom_proj actually learns something -- an EXISTING trained checkpoint's behavior is
+        # preserved exactly if you attach a fresh top_trm to it, matching the same safe-by-init-zero
+        # convention GatedCrossAttn's gate already uses.
+        self.top_trm = top_trm
+        if top_trm is not None:
+            self.top_to_bottom_proj = nn.Linear(top_trm.d, trm.d_in)
+            nn.init.zeros_(self.top_to_bottom_proj.weight)
+            nn.init.zeros_(self.top_to_bottom_proj.bias)
 
     def critique(self, raw_states: list[torch.Tensor]) -> torch.Tensor:
         """raw_states: [T per-step projected y_t values in d_lm space] from refine(track_deltas=True)."""
@@ -164,6 +180,43 @@ class WMReasoner(nn.Module):
             return slots, states, deltas, raw_states
         return slots, states
 
+    def hierarchical_refine(self, task_emb: torch.Tensor, atom_embs: torch.Tensor,
+                            top_context_emb: torch.Tensor | None = None,
+                            top_state: torch.Tensor | None = None, recompute_top: bool = True,
+                            track_deltas: bool = False):
+        """Top TRM (slow timescale, its own T -- can be much larger than the bottom trm's, e.g. 24, matching
+        the real TRM paper's own recipe for hard tasks) manipulates the bottom trm (fast timescale, the one
+        that actually reaches the LM via GatedCrossAttn) by injecting its own deeply-reasoned output
+        additively into the bottom trm's task input every time the bottom trm runs.
+
+        Two-way information flow, as asked for: top_context_emb defaults to the SAME task_emb the bottom
+        trm sees when nothing else is passed, but the caller (generate_with_reground) feeds it the embedding
+        of the partial generation-so-far on each call -- so the top TRM's own reasoning is grounded in what
+        the LM has actually written, not just the original static task description. That is the bottom-to-
+        top flow; the top-to-bottom flow is top_signal added into the bottom trm's task input below.
+
+        recompute_top=False lets the caller reuse a previously-computed top_state instead of re-running the
+        top trm's full (possibly large-T, expensive) recursion on every single bottom tick -- this is the
+        actual cadence mechanism ("top runs slower than bottom"), not real OS threads: two forward passes
+        sharing one CUDA context under Python's GIL don't run concurrently in any meaningful sense, so a
+        literal thread wouldn't buy real wall-clock parallelism here. Running top less often (every K bottom
+        ticks) is what actually gives the fast/slow timescale split, and it's simple and correct.
+
+        If self.top_trm is None, behaves EXACTLY like refine() (no top_state ever produced) -- this method
+        is purely additive, never required."""
+        if self.top_trm is None:
+            out = self.refine(task_emb, atom_embs, track_deltas=track_deltas)
+            return (*out, None)
+
+        if recompute_top or top_state is None:
+            top_ctx = task_emb if top_context_emb is None else top_context_emb
+            top_y = self.top_trm(top_ctx, atom_embs)             # [top_T, top_trm.d] -- own (larger) T
+            top_state = top_y[-1]                                # final cycle's answer, the "meta-plan"
+        top_signal = self.top_to_bottom_proj(top_state)          # zero-init -> no-op until trained
+        effective_task_emb = task_emb + top_signal
+        out = self.refine(effective_task_emb, atom_embs, track_deltas=track_deltas)
+        return (*out, top_state)
+
     def ds_loss_batch(self, all_states: list[list[torch.Tensor]], targets: torch.Tensor | None = None,
                       _unused=None) -> torch.Tensor:
         """Deep supervision on intermediate y_t values. MSE between ds_proj(y_t[t]) and target[t]
@@ -194,8 +247,8 @@ class WMReasoner(nn.Module):
         self._slots = None
 
     def save(self, path: str):
-        """Persist the trained adapter + TRMReasoner."""
-        torch.save({
+        """Persist the trained adapter + TRMReasoner (+ top_trm, if this is a hierarchical WMReasoner)."""
+        blob = {
             "state_dict": self.state_dict(),
             "d_lm": self.proj_y.out_features,
             "couple_layers": self.couple_layers,
@@ -203,15 +256,24 @@ class WMReasoner(nn.Module):
             "trm_d": self.trm.d,
             "trm_d_in": self.trm.d_in,
             "n_heads": self.adapters[0].h if len(self.adapters) else 4,
-        }, path)
+        }
+        if self.top_trm is not None:
+            blob["top_trm_d"] = self.top_trm.d
+            blob["top_trm_d_in"] = self.top_trm.d_in
+            blob["top_trm_T"] = self.top_trm.T
+        torch.save(blob, path)
 
     @classmethod
-    def load(cls, path: str, trm, map_location=None) -> "WMReasoner":
+    def load(cls, path: str, trm, map_location=None, top_trm=None) -> "WMReasoner":
         """Reconstruct a WMReasoner from a save()'d checkpoint.
-        Requires an already-constructed TRMReasoner instance (passed as `trm`)."""
+        Requires an already-constructed TRMReasoner instance (passed as `trm`). Pass top_trm to attach a
+        hierarchical top-level TRM -- if the checkpoint was saved WITHOUT one, top_trm here is treated as a
+        freshly-added (untrained, zero-init-projection) addition, safe by construction (see __init__'s
+        docstring on top_to_bottom_proj); if the checkpoint WAS saved with one, its state_dict entries load
+        via strict=False below."""
         blob = torch.load(path, map_location=map_location, weights_only=False)
         R = cls(blob["d_lm"], blob["couple_layers"], trm,
-                n_heads=blob["n_heads"], M=blob.get("M", 4))
+                n_heads=blob["n_heads"], M=blob.get("M", 4), top_trm=top_trm)
         R.load_state_dict(blob["state_dict"], strict=False)
         return R
 
@@ -263,6 +325,62 @@ def native_text_embedding_batch(wb, texts: list[str]) -> torch.Tensor:
     embs = lm_emb[ids]
     embs = (embs * mask.unsqueeze(-1).float()).sum(1) / mask.sum(1, keepdim=True).float().clamp(min=1)
     return embs.detach()
+
+
+# ================================================================================================
+# Hierarchical working memory: periodic re-grounding during generation. The EXISTING WMReasoner.refine()
+# runs ONCE per task, before generate() starts -- GatedCrossAttn then attends to that SAME fixed content
+# for the entire generation. That's a persistent hint, not memory that evolves with what's actually been
+# written. generate_with_reground re-invokes refine()/hierarchical_refine() every `chunk_tokens`, re-
+# grounding in the real partial generation so far each time -- the working memory now tracks what's
+# actually been produced, not just the original task description.
+# ================================================================================================
+def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int = 16,
+                           max_new_tokens: int = 128, top_every: int = 4):
+    """Generate, re-grounding WMReasoner's slots every chunk_tokens instead of once up front.
+
+    If R.top_trm is set, also runs the slow/top-level TRM every `top_every` CHUNKS (not every chunk) --
+    the actual cadence-based fast/slow split (see hierarchical_refine's docstring for why this is a cadence,
+    not real OS threads: two forward passes sharing one CUDA context under the GIL don't run concurrently
+    in any meaningful sense; running top less often is what gives the real timescale separation). Between
+    top updates, the bottom trm reuses the last computed top_state (recompute_top=False) -- cheap, and the
+    slow/fast split is exactly "top updates less often than bottom," matching the actual ask.
+
+    Returns the full generated text (decoded, all chunks concatenated) -- same string shape callers already
+    get from a plain wb.model.generate() + decode."""
+    running_ids = pids
+    prompt_len = pids.shape[-1]
+    top_state = None
+    chunk_idx = 0
+    generated_so_far = ""
+    while (running_ids.shape[-1] - prompt_len) < max_new_tokens:
+        remaining = max_new_tokens - (running_ids.shape[-1] - prompt_len)
+        n_new = min(chunk_tokens, remaining)
+        recompute_top = (R.top_trm is not None) and (chunk_idx % top_every == 0)
+        top_ctx = None
+        if recompute_top and generated_so_far:
+            # bottom-to-top flow: top TRM reasons over what's ACTUALLY been generated so far, not just
+            # the static original task description -- grounds the slow/meta level in real, current progress.
+            # MiniLM space (encode_batch), NOT native_text_embedding -- TRMReasoner.task_proj/atom_proj
+            # both expect d_in (MiniLM 384) space, matching task_emb/atom_embs; native_text_embedding is
+            # d_lm (LM hidden) space, only used for the actual LM-injection path (GatedCrossAttn), a
+            # different tensor entirely. Mixing these raised a real shape-mismatch caught by the offline test.
+            top_ctx = torch.as_tensor(encode_batch([generated_so_far])[0], dtype=torch.float32, device=wb.device)
+        slots, _states, new_top_state = R.hierarchical_refine(
+            task_emb, atom_embs, top_context_emb=top_ctx, top_state=top_state,
+            recompute_top=recompute_top)
+        top_state = new_top_state
+        R.set_slots_direct(slots)
+        with torch.no_grad():
+            out = wb.model.generate(running_ids, max_new_tokens=n_new, do_sample=False,
+                                    pad_token_id=wb.tok.eos_token_id)
+        running_ids = out
+        generated_so_far = wb.tok.decode(running_ids[0][prompt_len:], skip_special_tokens=True)
+        chunk_idx += 1
+        if running_ids[0, -1].item() == wb.tok.eos_token_id:
+            break
+    R.clear()
+    return generated_so_far
 
 
 # ================================================================================================
@@ -942,7 +1060,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             graph_path: str | None = None, save_path: str | None = None, grow_cot: int = 0,
             grow_domains: str = "math,code,science,puzzle", grow_keywords: str = "",
             grow_skills: int = 0, grow_skills_domains: str = "",
-            batch_size: int = 1, task_domain: str = "synthetic", math_cot_n_raw: int = 150):
+            batch_size: int = 1, task_domain: str = "synthetic", math_cot_n_raw: int = 150,
+            top_trm_t: int = 0, reground_chunk_tokens: int = 16, reground_top_every: int = 4):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
@@ -976,7 +1095,13 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     print(f"  LM: {lm_name}  d={d_lm}  layers={wb.n_layers}  gate layers={couple}  device={wb.device}")
 
     trm = TRMReasoner(d_in=EMBED_DIM, d=256, T=4, n_heads=4)
-    R = WMReasoner(d_lm, couple_layers=couple, trm=trm, n_heads=4).to(wb.device)
+    top_trm = TRMReasoner(d_in=EMBED_DIM, d=256, T=top_trm_t, n_heads=4) if top_trm_t > 0 else None
+    R = WMReasoner(d_lm, couple_layers=couple, trm=trm, n_heads=4, top_trm=top_trm).to(wb.device)
+    if top_trm is not None:
+        print(f"  hierarchical: top_trm T={top_trm_t} (bottom T=4), reground every {reground_chunk_tokens} "
+              f"tokens, top refreshed every {reground_top_every} chunks. top_to_bottom_proj is zero-init -- "
+              f"a no-op until it trains; this run reports (static) vs (reground) at eval side-by-side, not "
+              f"a replacement.")
     for p in wb.model.parameters():
         p.requires_grad_(False)
     handles = R.couple(wb)
@@ -1303,7 +1428,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         print(f"  ep {ep:>3}  lm {tot_lm/max(n,1):.3f}  gate_reg {tot_gate_reg/max(n,1):.4f}  conv {tot_conv/max(n,1):.4f}  gate {R.adapters[0].g.detach().item():+.2f}", flush=True)
         if ep % eval_every == 0 or ep == epochs - 1:
             R.eval()
-            held_ok, ablated_ok = 0, 0
+            held_ok, ablated_ok, reground_ok_count = 0, 0, 0
             dump = []
             if ep == 0:
                 print(f"\n    [ep 0 heartbeat] running held-out eval ({len(held_ex)} tasks x 2 generate() calls)...",
@@ -1333,6 +1458,20 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 ablated_ok += int(abl_ok)
                 dump.append((text, target_code, code, wm_ok, code_abl, abl_ok, instability))
 
+                # HIERARCHICAL A/B: only when --top-trm-t > 0 was actually requested (R.top_trm is not
+                # None) -- opt-in, zero cost/behavior change to every run that doesn't ask for it. Reports
+                # a SECOND real generation (periodic re-grounding, see generate_with_reground) side-by-side
+                # with the existing static-slots result above, never replacing it -- this is a comparison,
+                # not a swap, per the plan.
+                if R.top_trm is not None:
+                    reground_text = generate_with_reground(
+                        wb, R, pids, task_emb, held_mini_embs,
+                        chunk_tokens=reground_chunk_tokens, max_new_tokens=128,
+                        top_every=reground_top_every)
+                    reground_ok = verify(reground_text, tests)
+                    reground_ok_count += int(reground_ok)
+                    dump[-1] = dump[-1] + (reground_text, reground_ok)
+
             # CO-TRAINING data (stage 1)
             if ep == 0:
                 print(f"    [ep 0 heartbeat] running co-training generate() over {len(train_ex)} train tasks...",
@@ -1359,13 +1498,17 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             inst_fail = [d[6] for d in dump if not d[3]]
             inst_str = (f"  instab(pass/fail) {sum(inst_pass)/len(inst_pass):.3f}/"
                        f"{sum(inst_fail)/len(inst_fail):.3f}" if inst_pass and inst_fail else "")
-            print(f"  held WM {held_ok}/{len(held_ex)}  ablated {ablated_ok}/{len(held_ex)}  {inst_str}", flush=True)
+            reground_str = f"  reground {reground_ok_count}/{len(held_ex)}" if R.top_trm is not None else ""
+            print(f"  held WM {held_ok}/{len(held_ex)}  ablated {ablated_ok}/{len(held_ex)}{reground_str}  {inst_str}", flush=True)
             if len(held_ex) <= 8:
                 for d in dump:
                     t, tc, wm_code, wm_ok, abl_code, abl_ok, instab = d[:7]
                     print(f"       target: {tc}")
                     print(f"       WM:     {wm_code[:80]}  {'PASS' if wm_ok else 'FAIL'}  instab {instab:.3f}")
                     print(f"       ablt:   {abl_code[:80]}  {'PASS' if abl_ok else 'FAIL'}")
+                    if len(d) > 7:
+                        rg_text, rg_ok = d[7], d[8]
+                        print(f"       rgnd:   {rg_text[:80]}  {'PASS' if rg_ok else 'FAIL'}")
 
     print(f"\n  [dump] final epoch, held-out generations (WM vs ablated) vs the verified target:")
     code_prefix = "" if task_domain == "math-cot" else "def task(n): "
@@ -1375,6 +1518,9 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         print(f"       target : {target_code}")
         print(f"       WM     : {code_prefix}{code[:90]}{'  <- PASS' if wm_ok else ''}  instab={instability:.3f}")
         print(f"       ablated: {code_prefix}{code_abl[:90]}{'  <- PASS' if abl_ok else ''}")
+        if len(row) > 7:
+            rg_text, rg_ok = row[7], row[8]
+            print(f"       reground: {code_prefix}{rg_text[:90]}{'  <- PASS' if rg_ok else ''}")
 
     print(f"\n  Best held-out: {best_held}/{len(held_ex)}  (gate ablated = {ablated_ok} baseline)")
     verdict = "PROVEN" if best_held > ablated_ok else "PARTIAL"
@@ -1499,13 +1645,29 @@ def main():
                     help="--task-domain math-cot: how many raw OpenThoughts rows to stream before filtering "
                          "to numeric-boxed-answer ones (yield rate measured ~22%% on a real sample -- request "
                          "more raw rows than you want kept)")
+    ap.add_argument("--top-trm-t", type=int, default=0,
+                    help="--run: attach a hierarchical top-level TRM with this many recursion steps (e.g. "
+                         "8-24, matching the real TRM paper's own recipe for hard tasks) manipulating the "
+                         "bottom TRM (T=4, the one that reaches the LM) via a zero-init additive projection "
+                         "-- a strict no-op until it trains. 0 (default) = no top TRM, byte-identical to "
+                         "before this flag existed. When >0, held-out eval reports an extra (reground) "
+                         "column alongside the existing (static)/(ablated) ones -- an A/B, not a swap.")
+    ap.add_argument("--reground-chunk-tokens", type=int, default=16,
+                    help="--top-trm-t>0: bottom TRM re-grounds (re-runs refine() on the partial generation "
+                         "so far) every this many generated tokens, instead of once before generation starts.")
+    ap.add_argument("--reground-top-every", type=int, default=4,
+                    help="--top-trm-t>0: top TRM recomputes every this many bottom re-ground ticks (the "
+                         "actual fast/slow cadence split -- top runs less often than bottom, not on a "
+                         "separate OS thread, which wouldn't give real concurrency here anyway).")
     a = ap.parse_args()
     if a.probe:
         probe_real(a.lm, a.quant, a.words, a.steps)
     elif a.run:
         run_real(a.lm, a.quant, a.epochs, a.n_train, a.n_held, a.graph_path, a.save_path,
                  a.grow_cot, a.grow_domains, a.grow_keywords, a.grow_skills, a.grow_skills_domains,
-                 batch_size=a.batch_size, task_domain=a.task_domain, math_cot_n_raw=a.math_cot_n_raw)
+                 batch_size=a.batch_size, task_domain=a.task_domain, math_cot_n_raw=a.math_cot_n_raw,
+                 top_trm_t=a.top_trm_t, reground_chunk_tokens=a.reground_chunk_tokens,
+                 reground_top_every=a.reground_top_every)
     else:
         selftest()
 
