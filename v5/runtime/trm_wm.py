@@ -365,7 +365,8 @@ def evict_cache(cache, keep_last: int) -> None:
 def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int = 16,
                            max_new_tokens: int = 128, top_every: int = 4,
                            use_kv_cache: bool = False, evict_window: int | None = None,
-                           trigger_patterns: list | None = None):
+                           trigger_patterns: list | None = None,
+                           instability_trigger: float | None = None):
     """Generate, re-grounding WMReasoner's slots every chunk_tokens instead of once up front.
 
     If R.top_trm is set, also runs the slow/top-level TRM every `top_every` CHUNKS (not every chunk) --
@@ -416,6 +417,15 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
     recompute early; the cadence still fires as the fallback, so top is never starved if no trigger ever
     appears. None (default) = pure cadence, unchanged behavior for every existing caller.
 
+    instability_trigger: a real, learned alternative to trigger_patterns' hand-picked strings -- the BOTTOM
+    trm triggers the top trm itself, off its OWN computed state, not off surface text. Each chunk's bottom
+    refine() already tracks per-cycle deltas (track_deltas=True, the same mechanism the held-out eval loop
+    already uses to print `instab`); trajectory_instability(deltas) is late/early ratio of ||y_{t+1}-y_t||
+    -- >1 means the bottom trm is STILL CHURNING on this chunk (hasn't settled/converged), a genuine signal
+    the current context is hard or ambiguous, not a guessed keyword. If that ratio exceeds this threshold
+    (e.g. 1.0), top recomputes on the next chunk, same OR-with-cadence fallback as trigger_patterns. None
+    (default) = off, unchanged behavior. Domain-agnostic (no hand-picked words), unlike trigger_patterns.
+
     Returns the full generated text (decoded, all chunks concatenated) -- same string shape callers already
     get from a plain wb.model.generate() + decode."""
     if not use_kv_cache:
@@ -440,9 +450,15 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
                 # path (GatedCrossAttn), a different tensor entirely. Mixing these raised a real
                 # shape-mismatch caught by the offline test.
                 top_ctx = torch.as_tensor(encode_batch([generated_so_far])[0], dtype=torch.float32, device=wb.device)
-            slots, _states, new_top_state, new_top_resume_state = R.hierarchical_refine(
+            want_deltas = instability_trigger is not None
+            refine_out = R.hierarchical_refine(
                 task_emb, atom_embs, top_context_emb=top_ctx, top_state=top_state,
-                top_resume_state=top_resume_state, recompute_top=recompute_top)
+                top_resume_state=top_resume_state, recompute_top=recompute_top, track_deltas=want_deltas)
+            if want_deltas:
+                slots, _states, deltas, _raw, new_top_state, new_top_resume_state = refine_out
+            else:
+                slots, _states, new_top_state, new_top_resume_state = refine_out
+                deltas = None
             top_state = new_top_state
             top_resume_state = new_top_resume_state
             R.set_slots_direct(slots)
@@ -453,7 +469,10 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
             prev_len = len(generated_so_far)
             generated_so_far = wb.tok.decode(running_ids[0][prompt_len:], skip_special_tokens=True)
             new_text = generated_so_far[prev_len:]
-            event_fired = bool(trigger_patterns) and any(p in new_text for p in trigger_patterns)
+            pattern_fired = bool(trigger_patterns) and any(p in new_text for p in trigger_patterns)
+            instability_fired = (deltas is not None and instability_trigger is not None
+                                and R.trajectory_instability(deltas) > instability_trigger)
+            event_fired = pattern_fired or instability_fired
             chunk_idx += 1
             if running_ids[0, -1].item() == wb.tok.eos_token_id:
                 break
@@ -495,9 +514,15 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
         top_ctx = None
         if recompute_top and generated_so_far:
             top_ctx = torch.as_tensor(encode_batch([generated_so_far])[0], dtype=torch.float32, device=wb.device)
-        slots, _states, new_top_state, new_top_resume_state = R.hierarchical_refine(
+        want_deltas = instability_trigger is not None
+        refine_out = R.hierarchical_refine(
             task_emb, atom_embs, top_context_emb=top_ctx, top_state=top_state,
-            top_resume_state=top_resume_state, recompute_top=recompute_top)
+            top_resume_state=top_resume_state, recompute_top=recompute_top, track_deltas=want_deltas)
+        if want_deltas:
+            slots, _states, deltas, _raw, new_top_state, new_top_resume_state = refine_out
+        else:
+            slots, _states, new_top_state, new_top_resume_state = refine_out
+            deltas = None
         top_state = new_top_state
         top_resume_state = new_top_resume_state
         R.set_slots_direct(slots)
@@ -513,7 +538,10 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
         all_new_ids.extend(new_ids_this_chunk)
         generated_so_far = wb.tok.decode(all_new_ids, skip_special_tokens=True)
         new_text = wb.tok.decode(new_ids_this_chunk, skip_special_tokens=True)
-        event_fired = bool(trigger_patterns) and any(p in new_text for p in trigger_patterns)
+        pattern_fired = bool(trigger_patterns) and any(p in new_text for p in trigger_patterns)
+        instability_fired = (deltas is not None and instability_trigger is not None
+                            and R.trajectory_instability(deltas) > instability_trigger)
+        event_fired = pattern_fired or instability_fired
         cur_ids = seq
         past = getattr(out, "past_key_values", None)
         if evict_window is not None and past is not None and past.get_seq_length() > evict_window:
@@ -1485,7 +1513,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             top_trm_t: int = 0, reground_chunk_tokens: int = 16, reground_top_every: int = 4,
             max_new_tokens: int = 0, use_kv_cache: bool = False, evict_window: int | None = None,
             grow_cot_docs_path: str | None = None, math_cot_docs_path: str | None = None,
-            trigger_patterns: list | None = None):
+            trigger_patterns: list | None = None, instability_trigger: float | None = None):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
@@ -1958,7 +1986,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                         wb, R, pids, task_emb, held_mini_embs,
                         chunk_tokens=reground_chunk_tokens, max_new_tokens=eff_max_new_tokens,
                         top_every=reground_top_every, use_kv_cache=use_kv_cache, evict_window=None,
-                        trigger_patterns=trigger_patterns)
+                        trigger_patterns=trigger_patterns, instability_trigger=instability_trigger)
                     reground_ok = verify(reground_text, tests)
                     reground_ok_count += int(reground_ok)
                     dump[-1] = dump[-1] + (reground_text, reground_ok)
@@ -1972,7 +2000,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                             wb, R, pids, task_emb, held_mini_embs,
                             chunk_tokens=reground_chunk_tokens, max_new_tokens=eff_max_new_tokens,
                             top_every=reground_top_every, use_kv_cache=True, evict_window=evict_window,
-                            trigger_patterns=trigger_patterns)
+                            trigger_patterns=trigger_patterns, instability_trigger=instability_trigger)
                         reground_evicted_ok = verify(reground_evicted_text, tests)
                         reground_evicted_ok_count += int(reground_evicted_ok)
                         dump[-1] = dump[-1] + (reground_evicted_text, reground_evicted_ok)
@@ -2191,6 +2219,16 @@ def main():
                          "(a real reasoning/sentence boundary) triggers recompute early; the cadence still "
                          "fires as a fallback so top is never starved if no trigger appears. Empty "
                          "(default) = pure cadence, unchanged behavior.")
+    ap.add_argument("--instability-trigger", type=float, default=0.0,
+                    help="--top-trm-t>0: a real, learned alternative to --trigger-patterns -- the BOTTOM "
+                         "trm triggers top itself, off its own computed state (trajectory_instability, the "
+                         "same late/early y_t convergence ratio already printed as `instab` in every "
+                         "held-out eval), not off hand-picked strings. If the bottom trm's instability on a "
+                         "chunk exceeds this threshold (still churning, hasn't settled -- a genuine sign "
+                         "this part is hard/ambiguous), top recomputes on the next chunk, same OR-with-"
+                         "cadence fallback as --trigger-patterns. 0.0 (default, disabled sentinel) = off, "
+                         "unchanged behavior -- pass e.g. 1.0 to enable (ratio > 1.0 already means "
+                         "'still churning' per trajectory_instability's own convention).")
     ap.add_argument("--grow-skills", type=int, default=0,
                     help="--run (requires --graph-path): bank up to this many real oracle-verified EXECUTABLE "
                          "atoms from scripts/build_crossdomain_corpus.py via learn_any before training -- "
@@ -2259,7 +2297,8 @@ def main():
                  use_kv_cache=a.use_kv_cache, evict_window=(a.evict_window or None),
                  grow_cot_docs_path=(a.grow_cot_docs_path or None),
                  math_cot_docs_path=(a.math_cot_docs_path or None),
-                 trigger_patterns=([p for p in a.trigger_patterns.split(",") if p] or None))
+                 trigger_patterns=([p for p in a.trigger_patterns.split(",") if p] or None),
+                 instability_trigger=(a.instability_trigger or None))
     else:
         selftest()
 
