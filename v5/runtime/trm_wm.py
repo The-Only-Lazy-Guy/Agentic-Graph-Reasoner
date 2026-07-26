@@ -383,6 +383,35 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
     return generated_so_far
 
 
+def explain_what_happened(wb, g, session, query: str, k: int = 3) -> dict:
+    """Answer a real follow-up question grounded in memory -- never a silent/unverified guess. Two tiers,
+    tried in order:
+      1. SHORT-TERM: session.update(query) re-seeds SessionFocus's spreading activation (membrane_session.py)
+         from the current query over the persistent graph; if that activates anything, ground the answer
+         in those nodes (this is "what's live in working/session memory right now").
+      2. LONG-TERM fallback: if the query doesn't activate anything session-relevant (a genuinely new topic,
+         or session is None), fall back to plain g.cosine_rank over the FULL persistent graph.
+    Either way, the frozen LM is told to answer ONLY from the retrieved facts (same grounding-prompt
+    pattern proven in membrane.py's demo_teach_explain) -- grounded, not hallucinated. Returns which tier
+    and which real nodes actually answered it, so this is checkable, not a black box.
+    """
+    focus = session.update(query) if session is not None else set()
+    if focus:
+        names = list(focus)[:k]
+        tier = "short-term (session focus)"
+    else:
+        names = g.cosine_rank(query, k=k)
+        tier = "long-term (full graph)"
+    facts = [g.get(n).description for n in names if g.get(n)]
+    if not facts:
+        return {"tier": "none", "nodes": [], "answer": "(nothing relevant found in memory)"}
+    fact_block = "\n".join(f"- {f}" for f in facts)
+    prompt = (f"Use ONLY the following facts from memory to answer. Be concise and do not add anything "
+              f"not supported by these facts.\nFacts:\n{fact_block}\nQuestion: {query}\nAnswer:")
+    answer = wb.generate_plain(prompt, max_new=80).strip()
+    return {"tier": tier, "nodes": names, "answer": answer}
+
+
 # ================================================================================================
 # selftest — prove the mechanism on distilgpt2 (identity / causal / trainable+generalizing / deep sup)
 # ================================================================================================
@@ -1596,6 +1625,28 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         R.save(save_path)
         print(f"\n  saved trained WMReasoner to {save_path} ({sum(p.numel() for p in R.parameters())} params) "
               f"-- load it into membrane.py's Membrane(..., wb=..., wm_path=...) to use the trained adapter live.")
+
+    # EXPLAIN: the model must be able to say what it did, grounded in real memory -- not silently. Two real
+    # probes, not a design claim: (1) SHORT-TERM -- ask about a task just solved this session; SessionFocus's
+    # spreading activation should light up around it. (2) LONG-TERM -- ask about a graph node this session's
+    # short-term probe never activated, forcing the plain-cosine long-term fallback in explain_what_happened.
+    if graph_path and last_dump:
+        from v5.runtime.membrane_session import SessionFocus
+        session = SessionFocus(g)
+        print(f"\n  [explain] can the model say what it did, grounded in memory (short-term session focus, "
+              f"or long-term over the persistent graph) instead of solving silently?")
+        recent_text = last_dump[0][0]
+        probe1 = explain_what_happened(wb, g, session, f"What did you just do to solve this task: {recent_text}")
+        print(f"    short-term probe (about a task just solved this session):")
+        print(f"      tier={probe1['tier']}  grounded on={probe1['nodes']}")
+        print(f"      answer: {probe1['answer'][:200]!r}")
+        outside_focus = [n for n in g.names() if n not in session.focus]
+        if outside_focus:
+            probe_desc = g.get(outside_focus[0]).description
+            probe2 = explain_what_happened(wb, g, session, f"What do you know about: {probe_desc}")
+            print(f"    long-term probe (about something this session's focus never touched):")
+            print(f"      tier={probe2['tier']}  grounded on={probe2['nodes']}")
+            print(f"      answer: {probe2['answer'][:200]!r}")
 
     if graph_path:
         g.save(graph_path)

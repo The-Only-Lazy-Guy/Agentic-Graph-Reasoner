@@ -1,7 +1,9 @@
 """Retroactively apply AtomGraph._self_organize's guaranteed-connectivity fix to an EXISTING saved graph.
-Loading a graph does NOT re-run self-organize on nodes that were already isolated when saved -- this
-backfills them without a full retrain (no GPU, no training loop, just re-linking by embedding similarity
-already computed at load time).
+
+NOTE: AtomGraph.load() now calls repair_connectivity() automatically (auto_repair=True by default) -- any
+future run_real invocation with --graph-path already self-heals on load, no manual step needed. This script
+still exists to (a) report an honest before/after on a graph you haven't loaded through the fixed code yet,
+and (b) persist the repair to disk immediately without waiting for a full training run's final g.save().
 
     python -m scripts.backfill_connectivity --graph-path graphs/long_term.json
 """
@@ -19,24 +21,18 @@ if _ROOT not in sys.path:
 def backfill(graph_path: str) -> None:
     from v5.runtime.membrane import AtomGraph
 
-    g = AtomGraph.load(graph_path)
+    g = AtomGraph.load(graph_path, auto_repair=False)     # raw, so "before" is the true saved-on-disk state
+    edges_before = len(g.edges)
+    print(f"graph: {graph_path}  nodes: {len(g)}  edges: {edges_before}")
+
+    n_isolated = g.repair_connectivity()
+    print(f"isolated before backfill: {n_isolated}/{len(g)}")
+
     degree: dict = {n: 0 for n in g.atoms}
     for s, d, _ in g.edges:
         degree[s] += 1
         degree[d] += 1
-    isolated_before = [n for n in g.atoms if degree[n] == 0]
-    print(f"graph: {graph_path}  nodes: {len(g)}  edges: {len(g.edges)}")
-    print(f"isolated before backfill: {len(isolated_before)}/{len(g)}")
-
-    edges_before = len(g.edges)
-    for name in isolated_before:
-        g._self_organize(g.atoms[name])
-
-    degree2: dict = {n: 0 for n in g.atoms}
-    for s, d, _ in g.edges:
-        degree2[s] += 1
-        degree2[d] += 1
-    isolated_after = [n for n in g.atoms if degree2[n] == 0]
+    isolated_after = [n for n in g.atoms if degree[n] == 0]
     print(f"isolated after backfill:  {len(isolated_after)}/{len(g)}")
     print(f"edges added: {len(g.edges) - edges_before}  (total now: {len(g.edges)})")
 
