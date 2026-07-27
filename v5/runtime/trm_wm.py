@@ -2311,6 +2311,11 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
               f"({sw_stats['n_held_traj']} trajectories; split by TRAJECTORY not step, so issue text "
               f"cannot leak across the split). skipped: short={sw_stats['skipped_short']} "
               f"no_tool={sw_stats['skipped_no_tool']} no_related={sw_stats['skipped_no_related']}")
+        print(f"  swe-action: drawn from {sw_stats.get('train_trajectories_used', 0)} distinct TRAIN "
+              f"trajectories and {sw_stats.get('held_trajectories_used', 0)} distinct HELD trajectories. "
+              f"A depth-first sampler once drained one issue at a time, giving 2 train / 1 held -- with a "
+              f"single held trajectory the held tool distribution is one issue's habits and can invert the "
+              f"train majority, which made a correct model score below a constant. Watch these numbers.")
         print(f"  swe-action: prompt size p50 {sw_stats.get('prompt_chars_p50', 0)} chars, "
               f"max {sw_stats.get('prompt_chars_max', 0)} (~{sw_stats.get('approx_tokens_max', 0)} tokens). "
               f"Training attention memory is QUADRATIC in this -- an uncapped issue body once drove a real "
