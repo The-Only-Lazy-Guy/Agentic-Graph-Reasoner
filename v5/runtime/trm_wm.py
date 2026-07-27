@@ -1518,6 +1518,222 @@ def _math_cot_tasks_from_graph(g, n_train: int = 24, n_held: int = 8, n_raw: int
     return train_tasks, held_tasks, related_desc_pool, stats
 
 
+def _swe_action_tasks_from_graph(g, n_train: int = 24, n_held: int = 8, n_trajectories: int = 60,
+                                 k_related: int = 3, min_prior_steps: int = 3, max_ctx_steps: int = 12,
+                                 seed: int = 0, trajectories: list | None = None):
+    """Real long-horizon task pool: NEXT-ACTION PREDICTION on nvidia/Open-SWE-Traces.
+
+    Given a real GitHub issue plus the agent's real prior steps 1..T, predict step T+1's tool call. This is
+    the domain the hierarchical/top-TRM work actually needs and composition could never provide: real
+    trajectories average ~55 steps, so generations are long enough that KV eviction genuinely fires, and
+    which knowledge matters changes across the trajectory (explore the repo -> locate the defect -> edit ->
+    test), which is the entire premise of a slow memory level.
+
+    Returns (train_tasks, held_tasks, related_desc_pool, stats) -- the SAME 4-value shape
+    _math_cot_tasks_from_graph returns, and each task is the SAME 4-tuple every builder here produces:
+    (text, atoms_needed, code, code_expr).
+      - text        = issue + compressed prior steps (the prompt content)
+      - atoms_needed= K related step-concept DESCRIPTIONS from the graph (descriptions, not names --
+                      exactly math-cot's convention, and required because run_real does
+                      atom_names.index(a) and the caller sets atom_names = related_desc_pool)
+      - code        = teacher-forcing target, the real next tool call rendered as text
+      - code_expr   = the gold tool NAME alone (what verify() compares against)
+
+    trajectories: pass pre-fetched rows to skip the internal live stream. Not optional in practice when
+    called from run_real -- HF `datasets` streaming's first fetch segfaults once torch is active, a
+    confirmed environment bug this codebase already works around for --grow-cot and --task-domain math-cot.
+
+    SPLIT DISCIPLINE: train/held are split by TRAJECTORY, never by step. Two steps of the same trajectory
+    share the issue text and most of their context, so a step-level split would leak badly -- the same
+    mistake already made and caught once in this codebase's FutureNeedScorer work (0.78 accuracy collapsed
+    to 0.56 once the split was done properly)."""
+    import random as _random
+    if trajectories is None:
+        from v5.graph_grower.fetch_swe_traces import stream_swe_trajectories
+        trajectories = list(stream_swe_trajectories(resolved_only=True, limit=n_trajectories))
+
+    rng = _random.Random(seed)
+    trajs = list(trajectories)
+    rng.shuffle(trajs)
+    n_train_traj = max(1, int(0.8 * len(trajs))) if len(trajs) > 1 else 1
+    split_trajs = {"train": trajs[:n_train_traj], "held": trajs[n_train_traj:]}
+
+    related_desc_pool: list[str] = []
+    seen_desc: set[str] = set()
+
+    def _related_descs(query_text: str) -> list[str]:
+        ranked = g.cosine_rank(query_text, k=k_related * 4)
+        out = []
+        for name in ranked:
+            a = g.get(name)
+            if a and a.description:
+                out.append(a.description)
+                if a.description not in seen_desc:
+                    seen_desc.add(a.description)
+                    related_desc_pool.append(a.description)
+                if len(out) >= k_related:
+                    break
+        return out
+
+    stats = dict(trajectories=len(trajs), skipped_short=0, skipped_no_tool=0, skipped_no_related=0)
+
+    def _tasks_from(traj_list, want):
+        out = []
+        for traj in traj_list:
+            steps = traj.get("steps") or []
+            if len(steps) < min_prior_steps + 1:
+                stats["skipped_short"] += 1
+                continue
+            issue = (traj.get("problem_text") or "").strip()
+            for t in range(min_prior_steps, len(steps)):
+                if len(out) >= want:
+                    break
+                nxt = steps[t]
+                gold_tool = (nxt.get("tool") or "").strip()
+                if not gold_tool:
+                    stats["skipped_no_tool"] += 1
+                    continue
+                prior = steps[max(0, t - max_ctx_steps):t]
+                ctx = "\n".join(
+                    f"Step {i + 1}: {(sp.get('reasoning') or '').strip()[:200]}"
+                    + (f" [action: {sp.get('tool')}]" if sp.get("tool") else "")
+                    for i, sp in enumerate(prior))
+                text = f"{issue}\n\nProgress so far:\n{ctx}"
+                related = _related_descs(text)
+                if not related:
+                    stats["skipped_no_related"] += 1
+                    continue
+                args = (nxt.get("args") or "").strip()
+                target = f"{gold_tool}({args})" if args else f"{gold_tool}()"
+                out.append((text, related, target, gold_tool))
+            if len(out) >= want:
+                break
+        return out
+
+    train_tasks = _tasks_from(split_trajs["train"], n_train)
+    held_tasks = _tasks_from(split_trajs["held"], n_held)
+    stats.update(n_train=len(train_tasks), n_held=len(held_tasks),
+                 n_train_traj=len(split_trajs["train"]), n_held_traj=len(split_trajs["held"]))
+    # Gold-tool distribution: exact-match accuracy against a dominant tool is a base-rate artifact, so the
+    # majority share is reported alongside the score rather than left for the reader to assume.
+    from collections import Counter as _Counter
+    gold_counts = _Counter(t[3] for t in held_tasks)
+    stats["held_gold_tools"] = dict(gold_counts)
+    stats["held_majority_rate"] = (max(gold_counts.values()) / len(held_tasks)) if held_tasks else 0.0
+    return train_tasks, held_tasks, related_desc_pool, stats
+
+
+class _PassiveGrowth:
+    """Graph growth DURING training, driven only by real verified outcomes.
+
+    Two things were missing before this. (1) `record_success`/`record_failure` only ever adjusted
+    confidence and edge strength -- no new node was ever created mid-run; `learn_any` ran once at setup and
+    the graph was then a frozen embedding source for the whole run. (2) On the description-based domains
+    (math-cot, swe-action) even those updates SILENTLY NO-OPPED: `atoms_needed` there holds concept
+    DESCRIPTIONS, while `record_success` looks nodes up by NAME, so `g.get(description)` found nothing and
+    the call did nothing at all. That was documented in the eval loop as "needs a real name<->description
+    mapping, not built yet" -- this class is that mapping.
+
+    Anti-poison rule is unchanged and is the whole point: a node is banked ONLY from an outcome the
+    verifier actually confirmed. Failures become explicit trap nodes (record_failure's existing behaviour),
+    giving the graph a signed memory of what did not work.
+
+    Trap budget: an earlier real graph in this codebase had to be repaired after failure bookkeeping
+    crowded out useful structure (scripts/graph_connectivity_report.py still warns above trap_frac 0.3), so
+    traps are capped per epoch rather than allowed to grow without bound."""
+
+    def __init__(self, g, enabled: bool, trap_budget_per_epoch: int = 8):
+        self.g = g
+        self.enabled = enabled
+        self.trap_budget = trap_budget_per_epoch
+        self.traps_this_epoch = 0
+        self.banked = 0
+        self.trapped = 0
+        self.trap_skipped = 0
+        self._retr = None
+        # description -> real node name, so record_success/record_failure work on the text domains too
+        self.desc2name = {a.description: n for n, a in g.atoms.items() if a.description}
+
+    def _retriever(self):
+        if self._retr is None:
+            from v5.runtime.membrane import TRMRetriever
+            self._retr = TRMRetriever(self.g)
+        return self._retr
+
+    def epoch_reset(self):
+        self.traps_this_epoch = 0
+
+    def resolve(self, atoms_needed):
+        """Map whatever the domain put in atoms_needed (real names OR descriptions) to real node names,
+        dropping anything that resolves to nothing rather than passing a phantom name downstream."""
+        out = []
+        for a in atoms_needed:
+            if a in self.g.atoms:
+                out.append(a)
+            elif a in self.desc2name:
+                out.append(self.desc2name[a])
+        return out
+
+    def update(self, atoms_needed, text: str, ok: bool, learn_text: str | None = None):
+        from v5.runtime.membrane_edits import record_success, record_failure
+        names = self.resolve(atoms_needed)
+        if ok:
+            if names:
+                record_success(self.g, names, text)
+            if self.enabled and learn_text and len(learn_text.strip()) >= 30:
+                from v5.runtime.membrane import learn_any
+                res = learn_any(self.g, self._retriever(), learn_text.strip()[:2000])
+                if res.get("status") in ("banked-fact", "banked-skill"):
+                    self.banked += 1
+                    nm = res.get("node")
+                    if nm and (a := self.g.get(nm)) is not None and a.description:
+                        self.desc2name.setdefault(a.description, nm)
+        else:
+            if self.traps_this_epoch < self.trap_budget:
+                record_failure(self.g, text)
+                self.traps_this_epoch += 1
+                self.trapped += 1
+            else:
+                self.trap_skipped += 1
+
+    def summary(self) -> str:
+        census = self.g.census()
+        n = max(1, len(self.g))
+        trap_frac = census.get("trap", 0) / n
+        return (f"passive growth: banked {self.banked} verified nodes, {self.trapped} traps "
+                f"({self.trap_skipped} suppressed by budget) -- graph now {len(self.g)} nodes, "
+                f"trap_frac {trap_frac:.2f}"
+                + ("  [WARN >0.30: failure bookkeeping is crowding out real structure]"
+                   if trap_frac > 0.30 else ""))
+
+
+def _swe_action_match(generated: str, gold_tool: str) -> bool:
+    """Did the model name the right next tool? Exact tool-name match against the real trajectory's recorded
+    action -- a real, recorded fact, never a model judgement (same anti-poison rule as every other verifier
+    here). Tolerant of the model's surrounding prose/formatting: the gold tool name must appear as a
+    whole-word token in the generation, and no OTHER known tool may appear before it (so 'I should not use
+    execute_bash, instead str_replace_editor' does not silently count as execute_bash)."""
+    import re as _re
+    if not gold_tool:
+        return False
+    text = generated.strip()
+    hits = [(m.start(), m.group(0)) for m in _re.finditer(r"[A-Za-z_][A-Za-z0-9_]*", text)]
+    for _pos, tok in hits:
+        if tok == gold_tool:
+            return True
+        if tok in _SWE_KNOWN_TOOLS and tok != gold_tool:
+            return False          # named a different real tool first -> wrong action
+    return False
+
+
+# Real tool names observed in nvidia/Open-SWE-Traces (openhands config). Used only to detect "the model
+# named a DIFFERENT tool first"; an unknown identifier never counts as a competing tool.
+_SWE_KNOWN_TOOLS = {
+    "str_replace_editor", "execute_bash", "execute_ipython_cell", "browser", "finish",
+    "think", "web_read", "str_replace", "create", "edit_file",
+}
+
+
 def _dynamic_oracle(g, atom_names: list[str]):
     """Build ONE shared exec namespace from the graph's OWN atom code, via membrane._closure (already
     resolves transitive .depends -- critical: a naive per-atom exec breaks the moment a real banked atom
@@ -1707,7 +1923,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             trigger_patterns: list | None = None, instability_trigger: float | None = None,
             sink_tokens: int = 0, cotrain_samples: int = -1,
             top_no_graph: bool = False, top_memory_max: int = 16,
-            evict_to_memory: bool = False):
+            evict_to_memory: bool = False, swe_docs_path: str | None = None,
+            passive_growth: bool = False):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
@@ -1763,7 +1980,10 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     # of whether the reasoning was on track. 512 is a real budget for that, not a guess: still cheaper than
     # letting it run unbounded, generous enough that most real single-numeric-answer CoT problems can
     # actually reach a boxed conclusion.
-    eff_max_new_tokens = max_new_tokens if max_new_tokens > 0 else (512 if task_domain == "math-cot" else 128)
+    # Domain-aware generation budget. swe-action's target is a single tool call, so it needs far less
+    # than math-cot's long CoT; keeping it small also keeps the many-chunk reground path cheap.
+    _dom_default = {"math-cot": 512, "swe-action": 64}.get(task_domain, 128)
+    eff_max_new_tokens = max_new_tokens if max_new_tokens > 0 else _dom_default
     print(f"  max_new_tokens={eff_max_new_tokens}"
           f"{' (auto, domain-aware)' if max_new_tokens == 0 else ' (explicit)'}")
 
@@ -1797,7 +2017,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                   f"nodes (+{sstats['banked']} new EXECUTABLE atoms, {sstats['trap']} failed verify->trap, "
                   f"{sstats['skipped_multiarg']} skipped multi-arg, {sstats['skipped_notype']} skipped "
                   f"no-expected-value, {sstats['seen']} tasks considered)")
-        if task_domain == "math-cot":
+        if task_domain in ("math-cot", "swe-action"):
             descs, codes = {}, {}
             atom_names = []  # set below from related_desc_pool -- concept-node descriptions, not code atoms
         else:
@@ -1806,9 +2026,10 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             print(f"  graph: {len(atom_names)} REAL atoms from {graph_path if _Path(graph_path).exists() else '(fresh seed_graph)'} "
                   f"(NATIVE LM-embedding-table injection)")
     else:
-        if task_domain == "math-cot":
-            raise ValueError("--task-domain math-cot requires --graph-path (needs real concept nodes to "
-                             "ground in -- run with --grow-cot at least once first)")
+        if task_domain in ("math-cot", "swe-action"):
+            raise ValueError(f"--task-domain {task_domain} requires --graph-path (needs real concept nodes "
+                             f"to ground in -- run --grow-cot (math-cot) or --swe-docs-path (swe-action) "
+                             f"at least once first)")
         descs, codes = _seed_atoms()
         atom_names = list(descs.keys())
         # NATIVE-SPACE injection (probe-C-validated): embed each atom's description via the LM's OWN embedding
@@ -1817,7 +2038,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         # after deep supervision was fixed: the atoms fed to refine() were never in a space the LM could read.
         print(f"  graph: {len(atom_names)} atoms (NATIVE LM-embedding-table injection, MiniLM dropped for this path)")
 
-    if task_domain == "math-cot":
+    if task_domain in ("math-cot", "swe-action"):
         # skip the native-embedding-table precompute below -- dead weight for this domain: WMReasoner.
         # refine() takes MiniLM-space embeddings post-V3-rewrite, this dict is never consulted downstream
         # (confirmed by reading the training/eval loops -- they recompute MiniLM embeddings on the fly).
@@ -1830,7 +2051,26 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         atom_emb_tensor = native_text_embedding_batch(wb, descs_list)
         atom_embs = {n: atom_emb_tensor[i] for i, n in enumerate(atom_names_list)}
 
-    if task_domain == "math-cot":
+    if task_domain == "swe-action":
+        pre_trajs = None
+        if swe_docs_path:
+            import json as _json
+            with open(swe_docs_path, encoding="utf-8") as _f:
+                pre_trajs = [_json.loads(line) for line in _f if line.strip()]
+            print(f"  swe-action: using {len(pre_trajs)} pre-fetched trajectories from {swe_docs_path} "
+                  f"(avoids the real datasets/torch ordering crash)")
+        train_tasks, held_tasks, related_desc_pool, sw_stats = _swe_action_tasks_from_graph(
+            g, n_train=n_train, n_held=n_held, trajectories=pre_trajs)
+        atom_names = related_desc_pool
+        print(f"  swe-action: real Open-SWE-Traces next-action prediction -> {sw_stats['n_train']} train "
+              f"({sw_stats['n_train_traj']} trajectories), {sw_stats['n_held']} held-out "
+              f"({sw_stats['n_held_traj']} trajectories; split by TRAJECTORY not step, so issue text "
+              f"cannot leak across the split). skipped: short={sw_stats['skipped_short']} "
+              f"no_tool={sw_stats['skipped_no_tool']} no_related={sw_stats['skipped_no_related']}")
+        print(f"  swe-action: held-out gold tools {sw_stats['held_gold_tools']} -- MAJORITY-CLASS RATE "
+              f"{sw_stats['held_majority_rate']:.2f}. An exact-match score at or below this is a base-rate "
+              f"artifact, NOT evidence the model predicts actions.")
+    elif task_domain == "math-cot":
         pre_raw_rows = None
         if math_cot_docs_path:
             import json as _json
@@ -1853,7 +2093,10 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         train_tasks, held_tasks = _compose_tasks_real(n_train=n_train, n_held=n_held)
     all_tasks = train_tasks + held_tasks
     split = len(train_tasks)
-    if task_domain == "math-cot":
+    if task_domain == "swe-action":
+        print(f"  tasks: {split} train, {len(all_tasks) - split} held-out (real SWE next-action, "
+              f"trajectory-level split)\n")
+    elif task_domain == "math-cot":
         print(f"  tasks: {split} train, {len(all_tasks) - split} held-out (real math CoT, no train/held overlap)\n")
     else:
         print(f"  tasks: {split} train, {len(all_tasks) - split} held-out (2-atom composition, auto-generated, "
@@ -1871,6 +2114,10 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             a.g.fill_(0.8)
 
     def build_prompt(task_text, inner_name=None, outer_name=None):
+        if task_domain == "swe-action":
+            return wb.tok(f"You are fixing a software issue. Given the issue and the work done so far, "
+                          f"name the single next tool to call.\n\n{task_text}\n\nNext tool:",
+                          return_tensors="pt").input_ids.to(wb.device)
         if task_domain == "math-cot":
             # no inner/outer atoms, no "write function task(n)" -- this is a real free-text problem
             return wb.tok(f"Solve the following problem. Show your reasoning, then give the final answer "
@@ -1898,8 +2145,9 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             a, b = b, a + b
         return a
 
-    if task_domain == "math-cot":
-        # no execution oracle for free-text math -- verify() is rebound to _answers_match below instead.
+    if task_domain in ("math-cot", "swe-action"):
+        # no execution oracle for free text -- verify() is rebound below (math-cot -> _answers_match,
+        # swe-action -> _swe_action_match against the trajectory's real recorded next tool).
         _run_task, _oracle_ns = None, {}
     elif graph_path:
         # DYNAMIC oracle, sourced from the graph's OWN atom code (Phase 3) -- scales to whatever atoms
@@ -1983,6 +2231,13 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         def verify(code_str, tests):
             return _answers_match(code_str, tests[0][1]) if tests else False
 
+    if task_domain == "swe-action":
+        # Gold is the tool the real trajectory ACTUALLY called next -- a recorded historical fact read out
+        # of the dataset at task-build time, never a model judgement. Same anti-poison rule as every other
+        # verifier in this file; see _swe_action_match for why a bare substring test is not enough.
+        def verify(code_str, tests):
+            return _swe_action_match(code_str, tests[0][1]) if tests else False
+
     _MAX_SAFE_MAGNITUDE = 100_000
 
     def make_tests(code_expression, atoms_needed):
@@ -2006,9 +2261,9 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             tests.append((n, _run_task(n, code_expression)))
         return tests
 
-    if task_domain == "math-cot":
-        # code_expr IS the gold float already (set by _math_cot_tasks_from_graph) -- no oracle to re-derive
-        # it from, no n-sweep (there's no 'n', just one real problem with one real gold answer).
+    if task_domain in ("math-cot", "swe-action"):
+        # code_expr IS the gold already (math-cot: the gold float; swe-action: the gold tool name) -- no
+        # oracle to re-derive it from and no n-sweep, just one real task with one real recorded answer.
         def make_tests(code_expression, atoms_needed):
             return [(None, code_expression)]
 
@@ -2036,8 +2291,17 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     # gated on stage 1's critic actually beating base rate first, to avoid training the reasoner against an
     # unreliable judge -- Goodhart's law / reward-hacking risk, not built yet).
     critic_examples: list = []
+    # Real graph writes on real verified outcomes. Also supplies the description<->name mapping the text
+    # domains need for record_success/record_failure to do anything at all (previously a silent no-op).
+    growth = _PassiveGrowth(g, enabled=passive_growth) if graph_path else None
+    if growth is not None and passive_growth:
+        print(f"  passive growth ON: verified generations are banked as REAL graph nodes mid-training "
+              f"(failures -> trap nodes, capped at {growth.trap_budget}/epoch to avoid the trap-flooding "
+              f"that required a graph repair here before).")
     heartbeat_every = max(1, (len(train_ex) // batch_size) // 5)   # ~5 pings per epoch, regardless of size
     for ep in range(epochs):
+        if growth is not None:
+            growth.epoch_reset()
         R.train()
         random.shuffle(train_ex)
         tot_lm, n = 0.0, 0
@@ -2145,18 +2409,13 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 # thrown away every epoch (confirmed by grep: no record_success/record_failure/learn_any
                 # anywhere in this function's training/eval loop, only at grow_cot/grow_skills setup and
                 # the final g.save()). The graph sat static as a read-only embedding source for the whole
-                # run instead of being the long-term memory it's supposed to be. Wired for graph_path runs
-                # on domains where atoms_needed holds REAL graph names (synthetic composition) -- math-cot's
-                # atoms_needed holds CONCEPT DESCRIPTIONS instead (real names are meaningless hashes, see
-                # _math_cot_tasks_from_graph's docstring), so record_success/record_failure would silently
-                # no-op there (g.get(description) finds nothing) -- skipped for that domain rather than
-                # doing something quietly wrong; needs a real name<->description mapping to wire correctly,
-                # not built yet.
-                if graph_path and task_domain != "math-cot":
-                    if wm_ok:
-                        record_success(g, atoms_needed, text)
-                    else:
-                        record_failure(g, text)
+                # run instead of being the long-term memory it's supposed to be. _PassiveGrowth now also
+                # supplies the description<->name mapping this used to lack, so the text domains
+                # (math-cot, swe-action) get real graph updates instead of the silent no-op that the
+                # previous version had to skip around; with --passive-growth it additionally BANKS the
+                # verified generation as a new node.
+                if graph_path and growth is not None:
+                    growth.update(atoms_needed, text, wm_ok, learn_text=code if wm_ok else None)
                 R.clear()
                 with torch.no_grad():
                     out = wb.model.generate(pids, max_new_tokens=eff_max_new_tokens,
@@ -2232,11 +2491,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                     tr_code = wb.tok.decode(out[0][pids.shape[-1]:], skip_special_tokens=True).strip()
                 tr_ok = verify(tr_code, tests)
                 critic_examples.append(([s.detach() for s in tr_raw], tr_ok))   # PRE-norm content + REAL label
-                if graph_path and task_domain != "math-cot":
-                    if tr_ok:
-                        record_success(g, atoms_needed, text)
-                    else:
-                        record_failure(g, text)
+                if graph_path and growth is not None:
+                    growth.update(atoms_needed, text, tr_ok, learn_text=tr_code if tr_ok else None)
                 R.clear()
             R.train()
 
@@ -2265,7 +2521,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                         print(f"       rgnd_evicted: {rge_text[:80]}  {'PASS' if rge_ok else 'FAIL'}")
 
     print(f"\n  [dump] final epoch, held-out generations (WM vs ablated) vs the verified target:")
-    code_prefix = "" if task_domain == "math-cot" else "def task(n): "
+    code_prefix = "" if task_domain in ("math-cot", "swe-action") else "def task(n): "
     for row in (last_dump or []):
         text, target_code, code, wm_ok, code_abl, abl_ok, instability = row[:7]
         print(f"     task: {text}")
@@ -2354,6 +2610,9 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             print(f"    long-term probe (about something this session's focus never touched):")
             print(f"      tier={probe2['tier']}  grounded on={probe2['nodes']}")
             print(f"      answer: {probe2['answer'][:200]!r}")
+
+    if growth is not None:
+        print(f"\n  {growth.summary()}")
 
     if graph_path:
         g.save(graph_path)
@@ -2460,6 +2719,22 @@ def main():
     ap.add_argument("--top-memory-max", type=int, default=16,
                     help="--top-no-graph: cap on how many past progress contexts the top trm keeps in its "
                          "own memory bank (rolling window, keeps the most recent).")
+    ap.add_argument("--passive-growth", action="store_true",
+                    help="requires --graph-path: the graph GROWS during training, not just at setup. Every "
+                         "verified-correct generation is banked as a real node via learn_any and every "
+                         "failure becomes a trap node (capped per epoch -- unbounded failure bookkeeping "
+                         "previously crowded out real structure and needed a repair pass). Only "
+                         "verifier-confirmed outcomes are ever written, so the anti-poison rule holds. "
+                         "Off by default. NOTE this flag also repairs a silent no-op: on math-cot and "
+                         "swe-action, atoms_needed holds concept DESCRIPTIONS while record_success looks up "
+                         "by NAME, so those graph updates previously did nothing at all -- the "
+                         "description->name mapping now runs whenever --graph-path is set, flag or not.")
+    ap.add_argument("--swe-docs-path", type=str, default="",
+                    help="--task-domain swe-action: pre-fetched Open-SWE-Traces trajectories (jsonl, one "
+                         "object per line with problem_text + steps). REQUIRED in practice -- HF datasets "
+                         "streaming segfaults once torch is loaded, the same confirmed conflict that forces "
+                         "--grow-cot-docs-path and --math-cot-docs-path. Produce it from a separate "
+                         "torch-free process using v5.graph_grower.fetch_swe_traces.stream_swe_trajectories.")
     ap.add_argument("--evict-to-memory", action="store_true",
                     help="requires --evict-window (and pairs with --top-no-graph): tokens leaving the KV "
                          "cache are decoded, embedded, and appended to the TOP trm's memory bank instead "
@@ -2487,7 +2762,8 @@ def main():
     ap.add_argument("--batch-size", type=int, default=1,
                     help="--run: batch size for training (pads variable-length sequences). "
                          ">1 uses batched LM forward. With 90GB VRAM, 4-8 works on a 4B 4-bit model.")
-    ap.add_argument("--task-domain", type=str, default="synthetic", choices=["synthetic", "math-cot"],
+    ap.add_argument("--task-domain", type=str, default="synthetic",
+                    choices=["synthetic", "math-cot", "swe-action"],
                     help="--run: 'synthetic' (default, unchanged) = 2-atom math composition. 'math-cot' = "
                          "real OpenThoughts math CoT problems, verified against the dataset's own boxed "
                          "final answer (requires --graph-path; run --grow-cot at least once first so "
@@ -2549,7 +2825,8 @@ def main():
                  instability_trigger=(a.instability_trigger or None),
                  sink_tokens=a.sink_tokens, cotrain_samples=a.cotrain_samples,
                  top_no_graph=a.top_no_graph, top_memory_max=a.top_memory_max,
-                 evict_to_memory=a.evict_to_memory)
+                 evict_to_memory=a.evict_to_memory, swe_docs_path=(a.swe_docs_path or None),
+                 passive_growth=a.passive_growth)
     else:
         selftest()
 
