@@ -131,6 +131,11 @@ class WMReasoner(nn.Module):
         # training or class balancing could have helped.
         self.critic_norm = nn.LayerNorm(d_lm)
         self.critic_pool = nn.Linear(d_lm, d_lm)
+        # Projects concat(task_emb, generated_text_emb) into the critic's space -- see critique()'s ctx
+        # argument. This is what turns the critic from "inspect my own hidden trajectory" into "compare
+        # what I was asked for against what I actually produced," which is the only version that has a
+        # chance of generalizing to domains where no verifier exists.
+        self.critic_ctx = nn.Linear(EMBED_DIM * 2, d_lm)
         self.critic = nn.Sequential(nn.Linear(d_lm, d_lm // 2), nn.GELU(), nn.Linear(d_lm // 2, 1))
 
         # HIERARCHICAL (optional): a second, slower-timescale TRM (top_trm, same TRMReasoner class, its
@@ -157,15 +162,29 @@ class WMReasoner(nn.Module):
             self.top_event_emb = nn.Embedding(4, top_trm.d_in)
             nn.init.zeros_(self.top_event_emb.weight)
 
-    def critique(self, raw_states: list[torch.Tensor]) -> torch.Tensor:
-        """raw_states: [T per-step projected y_t values in d_lm space] from refine(track_deltas=True)."""
+    def critique(self, raw_states: list[torch.Tensor], ctx: torch.Tensor | None = None) -> torch.Tensor:
+        """raw_states: [T per-step projected y_t values in d_lm space] from refine(track_deltas=True).
+
+        ctx (optional): [2*EMBED_DIM] = concat(task_emb, generated_text_emb), both MiniLM-space. This is
+        the "sense of mistake" input. Without it the critic only ever saw the TRM's internal trajectory --
+        never the task it was solving, and never WHAT IT ACTUALLY PRODUCED. Judging your own answer without
+        looking at the answer is close to hopeless, and the trajectory is additionally squeezed toward a
+        fixed point by the conv_loss regularizer during training, so it carries little task-specific
+        variance by design. Passing ctx lets the critic compare intent against output, which is the signal
+        a verifier-free mistake detector actually needs."""
         state = torch.stack(raw_states, dim=0)  # [T, d_lm]
         state = self.critic_norm(state)               # keeps tanh out of saturation -- see __init__
-        pooled = torch.tanh(self.critic_pool(state))  # [T, d_lm]
-        return torch.sigmoid(self.critic(pooled.mean(0, keepdim=True))).squeeze()  # [1, d_lm] → scalar
+        pooled = torch.tanh(self.critic_pool(state)).mean(0, keepdim=True)   # [1, d_lm]
+        if ctx is not None:
+            pooled = pooled + torch.tanh(self.critic_ctx(ctx.unsqueeze(0).to(pooled.dtype)))
+        return torch.sigmoid(self.critic(pooled)).squeeze()
 
-    def critic_loss(self, raw_states_batch: list[list[torch.Tensor]], labels: list) -> torch.Tensor:
-        preds = torch.stack([self.critique(s) for s in raw_states_batch])
+    def critic_loss(self, raw_states_batch: list[list[torch.Tensor]], labels: list,
+                    ctxs: list | None = None) -> torch.Tensor:
+        if ctxs is None:
+            preds = torch.stack([self.critique(s) for s in raw_states_batch])
+        else:
+            preds = torch.stack([self.critique(s, c) for s, c in zip(raw_states_batch, ctxs)])
         y = torch.tensor([float(l) for l in labels], device=preds.device)
         return nn.functional.binary_cross_entropy(preds, y)
 
@@ -1623,6 +1642,44 @@ def _swe_action_tasks_from_graph(g, n_train: int = 24, n_held: int = 8, n_trajec
     return train_tasks, held_tasks, related_desc_pool, stats
 
 
+def _critic_ctx(wb, task_emb: torch.Tensor, generated: str) -> torch.Tensor:
+    """concat(task_emb, generated_text_emb) -- the critic's "what was I asked for vs what did I produce"
+    input. Both MiniLM-space so they are directly comparable; task_emb already is, and the generation is
+    embedded here. Detached: the critic is an AMORTIZER trained post-hoc on real verified labels, and must
+    never push gradients back into the reasoner it is judging (that would let the reasoner learn to fool
+    its own judge -- the reward-hacking failure this codebase has deliberately avoided all along)."""
+    gen = (generated or "").strip()[:1000]
+    gen_emb = torch.as_tensor(encode_batch([gen if gen else "(empty)"])[0],
+                              dtype=torch.float32, device=task_emb.device)
+    return torch.cat([task_emb.detach().float(), gen_emb]).detach()
+
+
+def _roc_auc(scores: list, labels: list) -> float:
+    """Threshold-free ranking quality: P(random positive scored above random negative). Reported alongside
+    accuracy because accuracy alone was actively misleading here -- with a skewed test set a constant
+    predictor lands exactly on the base rate (or its complement), which is precisely how a saturated,
+    literally-constant critic was mistaken for "no signal found" across many runs. AUC is 0.5 for ANY
+    constant predictor regardless of class balance, so it cannot be faked that way."""
+    pairs = sorted(zip(scores, labels))
+    pos = sum(1 for _, l in pairs if l)
+    neg = len(pairs) - pos
+    if pos == 0 or neg == 0:
+        return float("nan")
+    # rank-sum (Mann-Whitney U), average ranks for ties
+    ranks, i = {}, 0
+    vals = [s for s, _ in pairs]
+    while i < len(vals):
+        j = i
+        while j + 1 < len(vals) and vals[j + 1] == vals[i]:
+            j += 1
+        avg = (i + j) / 2.0 + 1.0
+        for k in range(i, j + 1):
+            ranks[k] = avg
+        i = j + 1
+    rank_sum_pos = sum(ranks[idx] for idx, (_, l) in enumerate(pairs) if l)
+    return (rank_sum_pos - pos * (pos + 1) / 2.0) / (pos * neg)
+
+
 class _PassiveGrowth:
     """Graph growth DURING training, driven only by real verified outcomes.
 
@@ -2403,7 +2460,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                     code = wb.tok.decode(out[0][pids.shape[-1]:], skip_special_tokens=True).strip()
                 wm_ok = verify(code, tests)
                 held_ok += int(wm_ok)
-                critic_examples.append(([s.detach() for s in wm_raw], wm_ok))
+                critic_examples.append(([s.detach() for s in wm_raw], wm_ok,
+                                        _critic_ctx(wb, task_emb, code)))
                 instability = R.trajectory_instability(wm_deltas)
                 # REAL graph editing on the REAL verified outcome -- previously this was computed and
                 # thrown away every epoch (confirmed by grep: no record_success/record_failure/learn_any
@@ -2490,7 +2548,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                                             do_sample=False, pad_token_id=wb.tok.eos_token_id)
                     tr_code = wb.tok.decode(out[0][pids.shape[-1]:], skip_special_tokens=True).strip()
                 tr_ok = verify(tr_code, tests)
-                critic_examples.append(([s.detach() for s in tr_raw], tr_ok))   # PRE-norm content + REAL label
+                critic_examples.append(([s.detach() for s in tr_raw], tr_ok,
+                                        _critic_ctx(wb, task_emb, tr_code)))   # PRE-norm + REAL label + ctx
                 if graph_path and growth is not None:
                     growth.update(atoms_needed, text, tr_ok, learn_text=tr_code if tr_ok else None)
                 R.clear()
@@ -2564,22 +2623,53 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         print(f"  class balance: train {len(pos)} pass / {len(neg)} fail -> balanced to "
               f"{len(c_train_balanced)} examples for training")
 
+        # lr 1e-3, not 1e-2: Adam moves weights by ~lr per step regardless of gradient magnitude, so the
+        # old 1e-2 x 200 steps inflated critic weights even while gradients were ~0 under saturation --
+        # which is why loading an old checkpoint still shows ~91% saturation after the LayerNorm fix.
         c_opt = torch.optim.Adam(list(R.critic.parameters()) + list(R.critic_pool.parameters())
-                                 + list(R.critic_norm.parameters()), lr=1e-2)
+                                 + list(R.critic_norm.parameters()) + list(R.critic_ctx.parameters()),
+                                 lr=1e-3)
         for _ in range(200):
             random.shuffle(c_train_balanced)
             c_opt.zero_grad()
-            loss = R.critic_loss([s for s, _ in c_train_balanced], [y for _, y in c_train_balanced])
+            loss = R.critic_loss([s for s, _, _ in c_train_balanced],
+                                 [y for _, y, _ in c_train_balanced],
+                                 ctxs=[c for _, _, c in c_train_balanced])
             loss.backward(); c_opt.step()
         with torch.no_grad():
-            preds = [float(R.critique(s)) >= 0.5 for s, _ in c_test]
-            labels = [bool(y) for _, y in c_test]
+            scores = [float(R.critique(s, c)) for s, _, c in c_test]
+            labels = [bool(y) for _, y, _ in c_test]
+            preds = [sc >= 0.5 for sc in scores]
             acc = sum(int(p == y) for p, y in zip(preds, labels)) / max(1, len(c_test))
             base_rate = sum(labels) / max(1, len(labels))
+            auc = _roc_auc(scores, labels)
+            n_distinct = len(set(round(s, 6) for s in scores))
+        base_acc = max(base_rate, 1 - base_rate)
         print(f"  critic held-out accuracy: {acc:.2f}  (base rate / always-predict-majority: "
-              f"{max(base_rate, 1-base_rate):.2f})  n_test={len(c_test)}")
-        print(f"  => critic {'beats' if acc > max(base_rate, 1-base_rate) else 'does NOT beat'} the base rate "
-              f"-- {'the trajectory carries a real self-assessment signal' if acc > max(base_rate, 1-base_rate) else 'no signal found yet, report honest'}")
+              f"{base_acc:.2f})  n_test={len(c_test)}")
+        # AUC is the honest headline: it is 0.5 for ANY constant predictor regardless of class balance,
+        # so unlike accuracy it cannot be faked by collapsing to one class. A saturated critic that always
+        # emitted 1.0 previously scored exactly 1-base_rate on accuracy and was repeatedly misread as
+        # "no signal in the data" rather than "the model is constant".
+        print(f"  critic held-out AUC: {auc:.2f}  (0.50 = no ranking ability / constant predictor; "
+              f"distinct scores {n_distinct}/{len(scores)})")
+        if not pos or not neg:
+            # Degenerate DATA, not a broken critic: with one class only, BCE's optimum IS a constant, and
+            # AUC is undefined. Distinguishing this from a genuinely stuck critic matters -- conflating
+            # them is how a saturated constant predictor got read as "no signal" for many runs.
+            print(f"  => UNINFORMATIVE: the critic's training set had only one class "
+                  f"({len(pos)} pass / {len(neg)} fail), so a constant output is the correct solution and "
+                  f"AUC is undefined. This says nothing about whether a real sense of mistake is learnable "
+                  f"-- it needs runs where the model both succeeds and fails.")
+        elif n_distinct <= 1:
+            print(f"  => CRITIC IS CONSTANT despite seeing both classes -- it is not judging anything. "
+                  f"Ignore the accuracy number entirely; this is a mechanism failure, not a statement "
+                  f"about the data.")
+        elif auc == auc and auc > 0.5:      # auc==auc filters NaN (single-class test set)
+            print(f"  => critic ranks correct above incorrect (AUC {auc:.2f} > 0.50) -- a real, if partial, "
+                  f"sense of mistake. Accuracy vs base rate: {'beats' if acc > base_acc else 'does not beat'}.")
+        else:
+            print(f"  => no ranking signal found (AUC {auc:.2f}) -- report honest.")
     else:
         print(f"\n  (only {len(critic_examples)} labeled trajectories collected -- too few to train/report the "
               f"critic meaningfully; needs more epochs or a bigger held-out set)")
