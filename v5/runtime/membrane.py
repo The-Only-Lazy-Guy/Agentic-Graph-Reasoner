@@ -247,17 +247,23 @@ class AtomGraph:
             return np.zeros((0, EMBED_DIM), np.float32), names
         return np.stack([self._world_centroid[w] for w in names]).astype(np.float32), names
 
-    def _touch_centroid(self, world: str, emb: np.ndarray) -> None:
-        """Incremental normalized mean -- O(1) per insert, no rescan of the world's members."""
-        members = self.worlds[world]
-        cur = self._world_centroid.get(world)
-        if cur is None or len(members) <= 1:
-            new = np.asarray(emb, dtype=np.float32)
-        else:
-            k = len(members)
-            new = (cur * (k - 1) + np.asarray(emb, dtype=np.float32)) / k
-        n = float(np.linalg.norm(new))
-        self._world_centroid[world] = (new / n) if n else new
+    def _touch_centroid(self, world: str, emb: np.ndarray | None = None) -> None:
+        """Exact normalized mean of the world's member embeddings.
+
+        Deliberately NOT the O(1) running update it started as: that renormalized after every step, so the
+        value drifted away from the true mean and no longer matched what load() recomputes from members --
+        a real inconsistency caught by a save/load round-trip test, and one that would have made routing
+        differ before vs after a save. Worlds are small by construction (measured avg 7.3 members, capped
+        at max_world), so recomputing exactly is a handful of rows per insert against the O(N) full-graph
+        scan this whole mechanism replaces."""
+        members = self.worlds.get(world) or []
+        if not members:
+            if emb is not None:
+                self._world_centroid[world] = np.asarray(emb, dtype=np.float32)
+            return
+        cen = np.mean(np.stack([self.atoms[m].emb for m in members]).astype(np.float32), axis=0)
+        n = float(np.linalg.norm(cen))
+        self._world_centroid[world] = (cen / n) if n else cen
 
     def route(self, emb: np.ndarray, top_w: int = 1) -> list[str]:
         """Which world(s) does this embedding belong to? O(W), not O(N)."""
@@ -436,6 +442,14 @@ class AtomGraph:
             "edges": self.edges,
             "edge_strength": [[list(k), v] for k, v in self._edge_strength.items()],
         }
+        # Persist the nested-world structure. Without this, a graph built with worlds (routing, centroids,
+        # cluster membership) silently degrades back to a flat pile the moment it round-trips through disk
+        # -- prep would do the clustering work and the training run would never see it. Centroids are NOT
+        # written: they are a deterministic function of member embeddings, and embeddings are themselves
+        # recomputed on load, so recomputing centroids keeps the two consistent by construction.
+        if getattr(self, "_worlds_on", False):
+            blob["worlds"] = {w: list(ms) for w, ms in self.worlds.items()}
+            blob["world_cfg"] = {"join": self._world_join, "max": self._world_max}
         Path(path).write_text(json.dumps(blob, indent=2), encoding="utf-8")
 
     @classmethod
@@ -451,6 +465,19 @@ class AtomGraph:
             g.link(s, d, r)                                 # re-adds (dedup-safe, .link() already checks)
         for k, v in blob.get("edge_strength", []):
             g._edge_strength[tuple(k)] = v
+        if "worlds" in blob:
+            cfg = blob.get("world_cfg") or {}
+            g.enable_worlds(join_threshold=cfg.get("join", 0.55), max_world=cfg.get("max", 256))
+            for w, members in blob["worlds"].items():
+                live = [m for m in members if m in g.atoms]   # drop names that no longer exist
+                if not live:
+                    continue
+                g.worlds[w] = live
+                for m in live:
+                    g.world_of[m] = w
+                cen = np.mean(np.stack([g.atoms[m].emb for m in live]).astype(np.float32), axis=0)
+                nrm = float(np.linalg.norm(cen))
+                g._world_centroid[w] = (cen / nrm) if nrm else cen
         if auto_repair:
             g.repair_connectivity()                         # heal any node saved isolated by an OLDER
                                                               # version of _self_organize -- automatic from

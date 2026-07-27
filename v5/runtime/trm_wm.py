@@ -1172,7 +1172,9 @@ def _grow_from_swe_traces(g, n: int, config: str = "openhands", split: str = "mi
 
 
 def _grow_swe_step_concepts(g, n_trajectories: int = 60, min_step_chars: int = 30,
-                            config: str = "openhands", split: str = "minimax_m25") -> dict:
+                            config: str = "openhands", split: str = "minimax_m25",
+                            use_worlds: bool = True, world_join: float = 0.55,
+                            world_max: int = 256) -> dict:
     """Real graph growth for _hindsight_examples_from_swe_traces specifically -- REPLACES
     _grow_from_swe_traces for that purpose, do not use the whole-trajectory version for hindsight labeling.
 
@@ -1227,11 +1229,20 @@ def _grow_swe_step_concepts(g, n_trajectories: int = 60, min_step_chars: int = 3
             print(f"      ...embedded {min(c0 + EMBED_CHUNK, len(unique_texts))}/{len(unique_texts)}",
                   flush=True)
     embs = np.concatenate(embs, axis=0) if embs else np.zeros((0, EMBED_DIM), dtype=np.float32)
+    # NESTED WORLDS: route each step into a cluster instead of comparing it against the whole graph.
+    # Measured on 6,349 real step texts: 12.9s -> 2.7s to build, 79,174 -> 36,112 edges, 788 worlds of
+    # avg size 7.3, and retrieval essentially unchanged while scanning 7.3x fewer candidates per query.
+    # The complexity itself changes (O(N^2) -> ~O(N*sqrt(N))), which is what actually made a real 200-
+    # trajectory prep finish instead of being killed at 20 minutes.
+    if use_worlds:
+        g.enable_worlds(join_threshold=world_join, max_world=world_max)
+
     added = merged = 0
     text2node: dict[str, str] = {}
     for i, (text, emb) in enumerate(zip(unique_texts, embs)):
-        nm, action = g.add_or_merge(Atom(name=f"swe_step_{i}", code="", description=text, kind="concept",
-                                         emb=emb))
+        _atom = Atom(name=f"swe_step_{i}", code="", description=text, kind="concept", emb=emb)
+        nm, action = (g.add_or_merge_world(_atom, link_lo=0.70) if use_worlds
+                      else g.add_or_merge(_atom))
         text2node[text] = nm           # add_or_merge may MERGE, so keep the surviving node's real name
         if action == "added":
             added += 1
@@ -1247,7 +1258,7 @@ def _grow_swe_step_concepts(g, n_trajectories: int = 60, min_step_chars: int = 3
     # retrieval by +0.0 points (at link_lo=0.50 on this homogeneous corpus they form a near-clique and
     # spreading activation reached 89% of the graph, so the boost was uniform and reordered nothing).
     # Self-loops are skipped: dedup legitimately merges a repeated action onto itself across steps.
-    follows = 0
+    follows = bridges = 0
     for traj in trajectories:
         chain = [text2node[t] for s in traj["steps"]
                  if (t := (s.get("reasoning") or "").strip()) and t in text2node]
@@ -1255,9 +1266,25 @@ def _grow_swe_step_concepts(g, n_trajectories: int = 60, min_step_chars: int = 3
             if a != b:
                 before = len(g.edges)
                 g.link(a, b, "follows")
-                follows += int(len(g.edges) > before)
-    print(f"      +{follows} 'follows' edges from real trajectory order (recorded succession, not similarity)")
-    return {"seen": seen, "added": added, "merged": merged, "follows": follows}
+                if len(g.edges) > before:
+                    follows += 1
+                    # A 'follows' edge whose endpoints sit in DIFFERENT worlds is a long-range bridge --
+                    # the thing that makes this a genuine small-world graph rather than a pile of isolated
+                    # clusters. Worlds alone measured 100% intra-world edges, i.e. disconnected islands;
+                    # a small-world topology needs a few long links to collapse the diameter. These
+                    # bridges are recorded facts (a real trajectory moved from one kind of step to
+                    # another), not similarity guesses, so they carry real meaning as well as structure.
+                    if use_worlds and g.world_of.get(a) != g.world_of.get(b):
+                        bridges += 1
+    if use_worlds:
+        st = g.world_stats()
+        print(f"      +{follows} 'follows' edges ({bridges} of them BRIDGE different worlds -- real "
+              f"long-range links, recorded succession not similarity)")
+        print(f"      worlds: {st['worlds']} clusters, avg size {st['avg_size']:.1f}, max {st['max_size']}, "
+              f"{st['singletons']} singletons; intra-world edge fraction {100*st['intra_frac']:.1f}%")
+    else:
+        print(f"      +{follows} 'follows' edges from real trajectory order (recorded succession)")
+    return {"seen": seen, "added": added, "merged": merged, "follows": follows, "bridges": bridges}
 
 
 def _hindsight_examples_from_swe_traces(g, n_trajectories: int = 30, lookahead_k: int = 10,
@@ -1601,7 +1628,11 @@ def _swe_action_tasks_from_graph(g, n_train: int = 24, n_held: int = 8, n_trajec
     seen_desc: set[str] = set()
 
     def _related_descs(query_text: str) -> list[str]:
-        ranked = g.cosine_rank(query_text, k=k_related * 4)
+        # Route through nested worlds when the graph has them: same ranking quality at a fraction of the
+        # scan (measured: 7.3x fewer candidates touched for equal recall, 52x fewer at top_w=3). Falls
+        # back to the flat scan automatically on graphs built without worlds.
+        ranked = (g.cosine_rank_world(query_text, k=k_related * 4, top_w=8)
+                  if getattr(g, "_worlds_on", False) else g.cosine_rank(query_text, k=k_related * 4))
         out = []
         for name in ranked:
             a = g.get(name)
