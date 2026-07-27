@@ -2032,7 +2032,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             sink_tokens: int = 0, cotrain_samples: int = -1,
             top_no_graph: bool = False, top_memory_max: int = 16,
             evict_to_memory: bool = False, swe_docs_path: str | None = None,
-            passive_growth: bool = False):
+            passive_growth: bool = False, gate_init: float = 0.8):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
@@ -2217,9 +2217,20 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         {"params": other_params, "weight_decay": 1e-4},
         {"params": gate_params, "weight_decay": 5e-2},
     ], lr=1e-3)
+    # GATE WARM-START. 0.8 (tanh~0.66) means the adapter injects strongly from step 0, through projections
+    # that are still RANDOMLY initialized. That was harmless on synthetic composition, where the ablated
+    # baseline is 0/16 by construction (the base LM cannot name graph atoms it was never shown), so noise
+    # could only ever be upside. It is actively destructive on any domain where the base model ALREADY has
+    # real ability: measured on swe-action, held WM 0/16 against ablated 3/16 -- working memory strictly
+    # WORSE than no working memory, at every checkpoint, while the gate climbed 0.79 -> 0.99 and lm loss
+    # fell 2.43 -> 0.76 (the adapter channel fitting the teacher-forced target without generalizing).
+    # It also contradicts the zero-init discipline every other added component here follows
+    # (top_to_bottom_proj, critic_ctx, top_event_emb all start as exact no-ops and must EARN their
+    # contribution). Default stays 0.8 so existing results reproduce; pass a small value (e.g. 0.05) on
+    # domains with a non-zero ablated baseline so the adapter has to earn its way in.
     for a in R.adapters:
         with torch.no_grad():
-            a.g.fill_(0.8)
+            a.g.fill_(gate_init)
 
     def build_prompt(task_text, inner_name=None, outer_name=None):
         if task_domain == "swe-action":
@@ -2860,6 +2871,14 @@ def main():
     ap.add_argument("--top-memory-max", type=int, default=16,
                     help="--top-no-graph: cap on how many past progress contexts the top trm keeps in its "
                          "own memory bank (rolling window, keeps the most recent).")
+    ap.add_argument("--gate-init", type=float, default=0.8,
+                    help="warm-start value for the GatedCrossAttn gate (effective strength is tanh of "
+                         "this). 0.8 (default) injects hard from step 0 through still-random projections; "
+                         "that is fine only where the ablated baseline is 0 by construction (synthetic "
+                         "composition). On a domain where the base LM ALREADY has ability it destroys it -- "
+                         "measured on swe-action: held WM 0/16 vs ablated 3/16, i.e. working memory strictly "
+                         "WORSE than none. Use a small value (e.g. 0.05) there so the adapter must earn its "
+                         "contribution, matching the zero-init discipline of every other component here.")
     ap.add_argument("--passive-growth", action="store_true",
                     help="requires --graph-path: the graph GROWS during training, not just at setup. Every "
                          "verified-correct generation is banked as a real node via learn_any and every "
@@ -2967,7 +2986,7 @@ def main():
                  sink_tokens=a.sink_tokens, cotrain_samples=a.cotrain_samples,
                  top_no_graph=a.top_no_graph, top_memory_max=a.top_memory_max,
                  evict_to_memory=a.evict_to_memory, swe_docs_path=(a.swe_docs_path or None),
-                 passive_growth=a.passive_growth)
+                 passive_growth=a.passive_growth, gate_init=a.gate_init)
     else:
         selftest()
 
