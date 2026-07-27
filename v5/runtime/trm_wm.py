@@ -414,7 +414,8 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
                            trigger_patterns: list | None = None,
                            instability_trigger: float | None = None,
                            sink_tokens: int = 0, reground_bottom: bool = False,
-                           top_no_graph: bool = False, top_memory_max: int = 16):
+                           top_no_graph: bool = False, top_memory_max: int = 16,
+                           evict_to_memory: bool = False):
     """Generate, re-grounding WMReasoner's slots every chunk_tokens instead of once up front.
 
     If R.top_trm is set, also runs the slow/top-level TRM every `top_every` CHUNKS (not every chunk) --
@@ -695,6 +696,29 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
             # same recent window), so every surviving token keeps its real absolute position label even
             # though the kept set is non-contiguous when sinks are on.
             keep_last_cache = evict_window - 1 - sink_tokens
+            # EVICTION FEEDS THE TOP TRM'S MEMORY instead of the dropped span being lost outright. The
+            # tokens about to leave the KV cache are decoded, embedded once, and appended to the top trm's
+            # own memory bank -- so on a long-horizon task the top level accumulates a compressed record of
+            # everything the cache had to discard, and can still surface it to the bottom trm (and thus the
+            # LM) via top_to_bottom_proj. Without this, eviction is pure forgetting: the sinks keep the
+            # prompt and the window keeps recent tokens, but the entire middle of a long generation is gone.
+            #
+            # This also sidesteps a real truncation bug in the other memory path: top_ctx is
+            # encode_batch([generated_so_far]) and encode_batch truncates at max_length=128 tokens, so on
+            # exactly the long generations this is meant for, that context is the FIRST ~128 tokens
+            # re-embedded over and over while later content is silently dropped. An evicted span is bounded
+            # and small, so embedding it is faithful, and successive spans tile the real history.
+            if evict_to_memory:
+                n_now = cur_ids.shape[-1]
+                drop_end = n_now - (evict_window - sink_tokens)
+                dropped = cur_ids[0, sink_tokens:drop_end] if sink_tokens > 0 else cur_ids[0, :n_now - evict_window]
+                if dropped.numel() > 0:
+                    dropped_text = wb.tok.decode(dropped.tolist(), skip_special_tokens=True).strip()
+                    if dropped_text:
+                        top_memory_list.append(torch.as_tensor(
+                            encode_batch([dropped_text])[0], dtype=torch.float32, device=wb.device))
+                        if len(top_memory_list) > top_memory_max:
+                            top_memory_list = top_memory_list[-top_memory_max:]
             evict_cache(past, keep_last_cache, keep_first=sink_tokens)
             if sink_tokens > 0:
                 cur_ids = torch.cat([cur_ids[:, :sink_tokens], cur_ids[:, -(evict_window - sink_tokens):]], dim=-1)
@@ -1670,7 +1694,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             grow_cot_docs_path: str | None = None, math_cot_docs_path: str | None = None,
             trigger_patterns: list | None = None, instability_trigger: float | None = None,
             sink_tokens: int = 0, cotrain_samples: int = -1,
-            top_no_graph: bool = False, top_memory_max: int = 16):
+            top_no_graph: bool = False, top_memory_max: int = 16,
+            evict_to_memory: bool = False):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
@@ -2160,7 +2185,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                             top_every=reground_top_every, use_kv_cache=True, evict_window=evict_window,
                             trigger_patterns=trigger_patterns, instability_trigger=instability_trigger,
                             sink_tokens=sink_tokens, reground_bottom=True,
-                            top_no_graph=top_no_graph, top_memory_max=top_memory_max)
+                            top_no_graph=top_no_graph, top_memory_max=top_memory_max,
+                            evict_to_memory=evict_to_memory)
                         reground_evicted_ok = verify(reground_evicted_text, tests)
                         reground_evicted_ok_count += int(reground_evicted_ok)
                         dump[-1] = dump[-1] + (reground_evicted_text, reground_evicted_ok)
@@ -2421,6 +2447,16 @@ def main():
     ap.add_argument("--top-memory-max", type=int, default=16,
                     help="--top-no-graph: cap on how many past progress contexts the top trm keeps in its "
                          "own memory bank (rolling window, keeps the most recent).")
+    ap.add_argument("--evict-to-memory", action="store_true",
+                    help="requires --evict-window (and pairs with --top-no-graph): tokens leaving the KV "
+                         "cache are decoded, embedded, and appended to the TOP trm's memory bank instead "
+                         "of being lost. Makes eviction compress-into-long-term-memory rather than pure "
+                         "forgetting, so a long-horizon run keeps a usable record of the middle of the "
+                         "generation (sinks hold the prompt, the window holds recent tokens, and without "
+                         "this everything between them is simply gone). Also avoids a real truncation "
+                         "issue in the other memory path: encode_batch truncates at 128 tokens, so "
+                         "embedding the whole generated-so-far repeatedly only ever captures its first "
+                         "~128 tokens; an evicted span is small enough to embed faithfully.")
     ap.add_argument("--cotrain-samples", type=int, default=-1,
                     help="cap how many train tasks get a real generate() in the co-training data pass at "
                          "each eval checkpoint. Measured at ~43%% of total eval cost (a full generate() over "
@@ -2499,7 +2535,8 @@ def main():
                  trigger_patterns=([p for p in a.trigger_patterns.split(",") if p] or None),
                  instability_trigger=(a.instability_trigger or None),
                  sink_tokens=a.sink_tokens, cotrain_samples=a.cotrain_samples,
-                 top_no_graph=a.top_no_graph, top_memory_max=a.top_memory_max)
+                 top_no_graph=a.top_no_graph, top_memory_max=a.top_memory_max,
+                 evict_to_memory=a.evict_to_memory)
     else:
         selftest()
 
