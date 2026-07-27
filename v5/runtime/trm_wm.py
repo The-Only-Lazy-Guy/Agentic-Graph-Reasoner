@@ -1658,7 +1658,7 @@ def _swe_action_tasks_from_graph(g, n_train: int = 24, n_held: int = 8, n_trajec
                                  k_related: int = 3, min_prior_steps: int = 3, max_ctx_steps: int = 12,
                                  seed: int = 0, trajectories: list | None = None,
                                  max_issue_chars: int = 1500, max_step_chars: int = 200,
-                                 target_args_chars: int = 0):
+                                 target_args_chars: int = 0, max_per_traj: int = 2):
     """Real long-horizon task pool: NEXT-ACTION PREDICTION on nvidia/Open-SWE-Traces.
 
     Given a real GitHub issue plus the agent's real prior steps 1..T, predict step T+1's tool call. This is
@@ -1720,11 +1720,36 @@ def _swe_action_tasks_from_graph(g, n_train: int = 24, n_held: int = 8, n_trajec
     stats = dict(trajectories=len(trajs), skipped_short=0, skipped_no_tool=0, skipped_no_related=0)
 
     def _tasks_from(traj_list, want):
+        # ROUND-ROBIN across trajectories, capped at max_per_traj each. The first version was depth-first:
+        # it drained one trajectory (~52 usable steps out of ~55) before touching the next, then stopped as
+        # soon as it had enough. Measured consequence on a real 120-trajectory set -- all 48 TRAIN tasks
+        # came from 2 GitHub issues and all 16 HELD tasks from a SINGLE issue, leaving 117 of 120
+        # trajectories entirely unused.
+        #
+        # That is not a diversity nicety, it silently broke the benchmark. With one held trajectory the
+        # held tool distribution is whatever that one issue happened to do, and it came out OPPOSITE to
+        # train: train majority str_replace_editor 56%, held majority execute_bash 75%. A model that
+        # correctly learns the training majority therefore scores 4/16 on held BY CONSTRUCTION -- which is
+        # exactly the observed behaviour (WM emitted str_replace_editor nearly always and landed on 6/16,
+        # below the 10/16 a constant execute_bash would score). The apparent "model is worse than a
+        # constant predictor" result was this sampling bug, not the model.
+        per_traj = max(1, max_per_traj)
         out = []
-        for traj in traj_list:
+        for depth in range(0, per_traj):
+            if len(out) >= want:
+                break
+            for traj in traj_list:
+                if len(out) >= want:
+                    break
+                _tasks_from_one(traj, out, want, depth)
+        return out
+
+    def _tasks_from_one(traj, out, want, depth):
+        for _ in (0,):
             steps = traj.get("steps") or []
             if len(steps) < min_prior_steps + 1:
-                stats["skipped_short"] += 1
+                if depth == 0:
+                    stats["skipped_short"] += 1
                 continue
             # CAP THE ISSUE TEXT. Leaving this uncapped was a real bug: step reasoning was truncated to
             # 200 chars but the issue body was not, and real problem_text runs to 18,841 chars (p50 1,928
@@ -1734,14 +1759,18 @@ def _swe_action_tasks_from_graph(g, n_train: int = 24, n_held: int = 8, n_trajec
             # weights are only ~2.5GB. The head of an issue carries the actual problem statement; the tail
             # is typically stack traces, version tables and reproduction logs.
             issue = (traj.get("problem_text") or "").strip()[:max_issue_chars]
-            for t in range(min_prior_steps, len(steps)):
+            # `depth`-th usable step of THIS trajectory only -- the round-robin caller advances depth, so
+            # every trajectory contributes its 1st step before any contributes its 2nd. Spread evenly
+            # rather than draining one issue at a time.
+            usable = [t for t in range(min_prior_steps, len(steps))
+                      if (steps[t].get("tool") or "").strip()]
+            if depth >= len(usable):
+                continue
+            for t in usable[depth:depth + 1]:
                 if len(out) >= want:
                     break
                 nxt = steps[t]
                 gold_tool = (nxt.get("tool") or "").strip()
-                if not gold_tool:
-                    stats["skipped_no_tool"] += 1
-                    continue
                 prior = steps[max(0, t - max_ctx_steps):t]
                 ctx = "\n".join(
                     f"Step {i + 1}: {(sp.get('reasoning') or '').strip()[:max_step_chars]}"
@@ -1784,6 +1813,8 @@ def _swe_action_tasks_from_graph(g, n_train: int = 24, n_held: int = 8, n_trajec
     _all = train_tasks + held_tasks
     if _all:
         _lens = sorted(len(t[0]) for t in _all)
+        stats["train_trajectories_used"] = len({t[0][:120] for t in train_tasks})
+        stats["held_trajectories_used"] = len({t[0][:120] for t in held_tasks})
         stats["prompt_chars_p50"] = _lens[len(_lens) // 2]
         stats["prompt_chars_max"] = _lens[-1]
         stats["approx_tokens_max"] = _lens[-1] // 4
