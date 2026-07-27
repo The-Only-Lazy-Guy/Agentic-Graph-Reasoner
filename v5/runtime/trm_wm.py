@@ -1586,7 +1586,8 @@ def _math_cot_tasks_from_graph(g, n_train: int = 24, n_held: int = 8, n_raw: int
 
 def _swe_action_tasks_from_graph(g, n_train: int = 24, n_held: int = 8, n_trajectories: int = 60,
                                  k_related: int = 3, min_prior_steps: int = 3, max_ctx_steps: int = 12,
-                                 seed: int = 0, trajectories: list | None = None):
+                                 seed: int = 0, trajectories: list | None = None,
+                                 max_issue_chars: int = 1500, max_step_chars: int = 200):
     """Real long-horizon task pool: NEXT-ACTION PREDICTION on nvidia/Open-SWE-Traces.
 
     Given a real GitHub issue plus the agent's real prior steps 1..T, predict step T+1's tool call. This is
@@ -1654,7 +1655,14 @@ def _swe_action_tasks_from_graph(g, n_train: int = 24, n_held: int = 8, n_trajec
             if len(steps) < min_prior_steps + 1:
                 stats["skipped_short"] += 1
                 continue
-            issue = (traj.get("problem_text") or "").strip()
+            # CAP THE ISSUE TEXT. Leaving this uncapped was a real bug: step reasoning was truncated to
+            # 200 chars but the issue body was not, and real problem_text runs to 18,841 chars (p50 1,928
+            # / p90 4,454 / p99 6,491 over 120 real trajectories). Combined with 12 steps of context that
+            # produced ~5,300-token prompts, and since attention memory in the training backward pass is
+            # QUADRATIC in sequence length, a real run reached ~60GB of VRAM on a 4-bit 4B model whose
+            # weights are only ~2.5GB. The head of an issue carries the actual problem statement; the tail
+            # is typically stack traces, version tables and reproduction logs.
+            issue = (traj.get("problem_text") or "").strip()[:max_issue_chars]
             for t in range(min_prior_steps, len(steps)):
                 if len(out) >= want:
                     break
@@ -1665,7 +1673,7 @@ def _swe_action_tasks_from_graph(g, n_train: int = 24, n_held: int = 8, n_trajec
                     continue
                 prior = steps[max(0, t - max_ctx_steps):t]
                 ctx = "\n".join(
-                    f"Step {i + 1}: {(sp.get('reasoning') or '').strip()[:200]}"
+                    f"Step {i + 1}: {(sp.get('reasoning') or '').strip()[:max_step_chars]}"
                     + (f" [action: {sp.get('tool')}]" if sp.get("tool") else "")
                     for i, sp in enumerate(prior))
                 text = f"{issue}\n\nProgress so far:\n{ctx}"
@@ -1686,6 +1694,14 @@ def _swe_action_tasks_from_graph(g, n_train: int = 24, n_held: int = 8, n_trajec
                  n_train_traj=len(split_trajs["train"]), n_held_traj=len(split_trajs["held"]))
     # Gold-tool distribution: exact-match accuracy against a dominant tool is a base-rate artifact, so the
     # majority share is reported alongside the score rather than left for the reader to assume.
+    # Real prompt-size stats. The uncapped-issue bug above was invisible until a run hit ~60GB of VRAM;
+    # printing the actual character budget makes any regression here immediately obvious instead.
+    _all = train_tasks + held_tasks
+    if _all:
+        _lens = sorted(len(t[0]) for t in _all)
+        stats["prompt_chars_p50"] = _lens[len(_lens) // 2]
+        stats["prompt_chars_max"] = _lens[-1]
+        stats["approx_tokens_max"] = _lens[-1] // 4
     from collections import Counter as _Counter
     gold_counts = _Counter(t[3] for t in held_tasks)
     stats["held_gold_tools"] = dict(gold_counts)
@@ -2032,7 +2048,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             sink_tokens: int = 0, cotrain_samples: int = -1,
             top_no_graph: bool = False, top_memory_max: int = 16,
             evict_to_memory: bool = False, swe_docs_path: str | None = None,
-            passive_growth: bool = False, gate_init: float = 0.8):
+            passive_growth: bool = False, gate_init: float = 0.8,
+            swe_max_issue_chars: int = 1500, swe_max_ctx_steps: int = 12):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
@@ -2168,13 +2185,18 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             print(f"  swe-action: using {len(pre_trajs)} pre-fetched trajectories from {swe_docs_path} "
                   f"(avoids the real datasets/torch ordering crash)")
         train_tasks, held_tasks, related_desc_pool, sw_stats = _swe_action_tasks_from_graph(
-            g, n_train=n_train, n_held=n_held, trajectories=pre_trajs)
+            g, n_train=n_train, n_held=n_held, trajectories=pre_trajs,
+            max_issue_chars=swe_max_issue_chars, max_ctx_steps=swe_max_ctx_steps)
         atom_names = related_desc_pool
         print(f"  swe-action: real Open-SWE-Traces next-action prediction -> {sw_stats['n_train']} train "
               f"({sw_stats['n_train_traj']} trajectories), {sw_stats['n_held']} held-out "
               f"({sw_stats['n_held_traj']} trajectories; split by TRAJECTORY not step, so issue text "
               f"cannot leak across the split). skipped: short={sw_stats['skipped_short']} "
               f"no_tool={sw_stats['skipped_no_tool']} no_related={sw_stats['skipped_no_related']}")
+        print(f"  swe-action: prompt size p50 {sw_stats.get('prompt_chars_p50', 0)} chars, "
+              f"max {sw_stats.get('prompt_chars_max', 0)} (~{sw_stats.get('approx_tokens_max', 0)} tokens). "
+              f"Training attention memory is QUADRATIC in this -- an uncapped issue body once drove a real "
+              f"run to ~60GB VRAM, so --swe-max-issue-chars caps it.")
         print(f"  swe-action: held-out gold tools {sw_stats['held_gold_tools']} -- MAJORITY-CLASS RATE "
               f"{sw_stats['held_majority_rate']:.2f}. An exact-match score at or below this is a base-rate "
               f"artifact, NOT evidence the model predicts actions.")
@@ -2871,6 +2893,19 @@ def main():
     ap.add_argument("--top-memory-max", type=int, default=16,
                     help="--top-no-graph: cap on how many past progress contexts the top trm keeps in its "
                          "own memory bank (rolling window, keeps the most recent).")
+    ap.add_argument("--swe-max-ctx-steps", type=int, default=12,
+                    help="--task-domain swe-action: how many prior trajectory steps go into the prompt. "
+                         "At the default 12 (x200 chars) the step context is the LARGEST part of the "
+                         "prompt, bigger than a capped issue body. Total prompt length is what drives "
+                         "memory -- swe-action prompts run ~1,250 tokens against synthetic's ~25, a 50x "
+                         "increase, and training attention activations scale with seq^2 (~7GB of attention "
+                         "scores alone across 36 layers). Lower this FIRST if a run OOMs.")
+    ap.add_argument("--swe-max-issue-chars", type=int, default=1500,
+                    help="--task-domain swe-action: cap the GitHub issue body fed into the prompt. Real "
+                         "problem_text reaches 18,841 chars (p90 4,454), and leaving it uncapped produced "
+                         "~5,300-token prompts; since training attention memory is quadratic in sequence "
+                         "length, a real run hit ~60GB VRAM on a 4-bit 4B model. The head of an issue holds "
+                         "the actual problem statement; the tail is usually traces and version tables.")
     ap.add_argument("--gate-init", type=float, default=0.8,
                     help="warm-start value for the GatedCrossAttn gate (effective strength is tanh of "
                          "this). 0.8 (default) injects hard from step 0 through still-random projections; "
@@ -2986,7 +3021,9 @@ def main():
                  sink_tokens=a.sink_tokens, cotrain_samples=a.cotrain_samples,
                  top_no_graph=a.top_no_graph, top_memory_max=a.top_memory_max,
                  evict_to_memory=a.evict_to_memory, swe_docs_path=(a.swe_docs_path or None),
-                 passive_growth=a.passive_growth, gate_init=a.gate_init)
+                 passive_growth=a.passive_growth, gate_init=a.gate_init,
+                 swe_max_issue_chars=a.swe_max_issue_chars,
+                 swe_max_ctx_steps=a.swe_max_ctx_steps)
     else:
         selftest()
 
