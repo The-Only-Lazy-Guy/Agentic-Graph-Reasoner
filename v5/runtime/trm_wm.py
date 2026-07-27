@@ -119,6 +119,17 @@ class WMReasoner(nn.Module):
         self.ds_proj = nn.Linear(trm.d, d_lm)
 
         # Self-critique (unchanged)
+        # LayerNorm BEFORE the critic's tanh -- without it the critic is a literal constant predictor.
+        # Measured on a real trained checkpoint (artifacts/wm_baseline_notop.pt): raw_states (the projected
+        # y_t the critic is fed) have a pooled-vector norm of ~312,000, giving pre-tanh activations of
+        # ~145,410 against a tanh that saturates by |x|~3. Result: 100% of units saturated, an IDENTICAL
+        # +/-1 pattern for every task (pairwise cosine between different tasks = 1.000000), and
+        # critique() returning exactly 1.000000 regardless of input. That fully explains why the critic
+        # "never beat base rate" in any run here -- its accuracy came out at exactly 1 - base_rate (0.38 vs
+        # 0.62, 0.22 vs 0.78, 0.48 vs 0.52), the signature of always predicting one class. It was not a
+        # weak signal; the input was constant and the saturated tanh passed ~zero gradient, so no amount of
+        # training or class balancing could have helped.
+        self.critic_norm = nn.LayerNorm(d_lm)
         self.critic_pool = nn.Linear(d_lm, d_lm)
         self.critic = nn.Sequential(nn.Linear(d_lm, d_lm // 2), nn.GELU(), nn.Linear(d_lm // 2, 1))
 
@@ -149,6 +160,7 @@ class WMReasoner(nn.Module):
     def critique(self, raw_states: list[torch.Tensor]) -> torch.Tensor:
         """raw_states: [T per-step projected y_t values in d_lm space] from refine(track_deltas=True)."""
         state = torch.stack(raw_states, dim=0)  # [T, d_lm]
+        state = self.critic_norm(state)               # keeps tanh out of saturation -- see __init__
         pooled = torch.tanh(self.critic_pool(state))  # [T, d_lm]
         return torch.sigmoid(self.critic(pooled.mean(0, keepdim=True))).squeeze()  # [1, d_lm] → scalar
 
@@ -2296,7 +2308,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         print(f"  class balance: train {len(pos)} pass / {len(neg)} fail -> balanced to "
               f"{len(c_train_balanced)} examples for training")
 
-        c_opt = torch.optim.Adam(list(R.critic.parameters()) + list(R.critic_pool.parameters()), lr=1e-2)
+        c_opt = torch.optim.Adam(list(R.critic.parameters()) + list(R.critic_pool.parameters())
+                                 + list(R.critic_norm.parameters()), lr=1e-2)
         for _ in range(200):
             random.shuffle(c_train_balanced)
             c_opt.zero_grad()
