@@ -345,7 +345,13 @@ class AtomGraph:
 # 2a. Graph Attention Encoder — produces graph-aware atom embeddings using edge structure
 # ================================================================================================
 # Edge type mapping: typed edges encode different relationships
-_EDGE_TYPES = {"depend": 0, "related": 1, "relates": 2, "uses": 3, "nearest": 4}
+# Edge relations, ordered by how much they actually MEAN. depend/uses/follows are RECORDED FACTS -- one
+# atom's code literally calls another's, or one step literally came after another in a real trajectory.
+# related/nearest are only thresholded cosine similarity, i.e. "these texts look alike", which is a much
+# weaker claim: a real measurement on a SWE step graph found 806,604 similarity edges changed retrieval by
+# +0.0 points, because at link_lo=0.50 on a topically homogeneous corpus they form a near-clique and
+# spreading activation lit up 89% of the graph (a uniform boost reorders nothing).
+_EDGE_TYPES = {"depend": 0, "related": 1, "relates": 2, "uses": 3, "nearest": 4, "follows": 5}
 
 
 class GraphAttnEncoder(nn.Module):
@@ -356,7 +362,7 @@ class GraphAttnEncoder(nn.Module):
 
     Zero edges = identity (graph-unaware fallback, no degradation)."""
 
-    def __init__(self, d_in: int, d_hidden: int = 64, n_edge_types: int = 5):
+    def __init__(self, d_in: int, d_hidden: int = 64, n_edge_types: int = 6):
         super().__init__()
         self.edge_type_emb = nn.Embedding(n_edge_types, 16)
         self.W_msg = nn.Linear(d_in + 16, d_hidden)
