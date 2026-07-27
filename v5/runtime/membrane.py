@@ -209,6 +209,142 @@ class AtomGraph:
                 if connected >= min_k_connect:
                     break
 
+    # ============================================================================================
+    # NESTED WORLDS -- a node can contain a small graph of its own, making the whole structure a real
+    # small-world network: dense INSIDE a world, sparse BETWEEN worlds.
+    #
+    # Why this exists (all measured on a real SWE step graph, not hypothesised):
+    #   * Flat insertion compares every new atom against ALL N atoms, so growth is O(N^2). Real prep on
+    #     6.3k step texts had to be killed at 20 minutes before the constants were cut.
+    #   * link_lo=0.50 on a topically homogeneous corpus admitted ~2% of ALL pairs -> 806,604 edges at
+    #     143/node, a near-clique. Spreading activation then reached 89% of the graph, so its boost was
+    #     uniform and changed retrieval by +0.0 points.
+    #   * 5,636 nodes from 6,349 step texts: ~89% of nodes are single-use, so the graph was not acting as
+    #     reusable memory at all.
+    # Worlds address all three at once: routing is O(W + |world|) rather than O(N), edges stay inside
+    # small dense neighbourhoods instead of forming one clique, and recurring content accumulates into
+    # the same world as training proceeds instead of scattering across near-duplicate singletons.
+    #
+    # Opt-in: nothing changes unless enable_worlds() is called, so every existing caller is unaffected.
+    # ============================================================================================
+    def enable_worlds(self, join_threshold: float = 0.55, max_world: int = 256) -> None:
+        """Turn on two-level routing. join_threshold: cosine to a world's centroid required to join it
+        rather than found a new world. max_world: split guard so one world cannot swallow the graph and
+        silently restore O(N) behaviour."""
+        self.worlds: dict[str, list[str]] = getattr(self, "worlds", {})
+        self.world_of: dict[str, str] = getattr(self, "world_of", {})
+        self._world_centroid: dict[str, np.ndarray] = getattr(self, "_world_centroid", {})
+        self._worlds_on = True
+        self._world_join = join_threshold
+        self._world_max = max_world
+
+    def _worlds_enabled(self) -> bool:
+        return getattr(self, "_worlds_on", False)
+
+    def _world_matrix(self):
+        names = list(self.worlds)
+        if not names:
+            return np.zeros((0, EMBED_DIM), np.float32), names
+        return np.stack([self._world_centroid[w] for w in names]).astype(np.float32), names
+
+    def _touch_centroid(self, world: str, emb: np.ndarray) -> None:
+        """Incremental normalized mean -- O(1) per insert, no rescan of the world's members."""
+        members = self.worlds[world]
+        cur = self._world_centroid.get(world)
+        if cur is None or len(members) <= 1:
+            new = np.asarray(emb, dtype=np.float32)
+        else:
+            k = len(members)
+            new = (cur * (k - 1) + np.asarray(emb, dtype=np.float32)) / k
+        n = float(np.linalg.norm(new))
+        self._world_centroid[world] = (new / n) if n else new
+
+    def route(self, emb: np.ndarray, top_w: int = 1) -> list[str]:
+        """Which world(s) does this embedding belong to? O(W), not O(N)."""
+        WM, names = self._world_matrix()
+        if not names:
+            return []
+        sims = WM @ np.asarray(emb, dtype=np.float32)
+        idx = np.argsort(-sims)[:max(1, top_w)]
+        return [names[i] for i in idx]
+
+    def add_or_merge_world(self, atom: Atom, dedup: float = 0.90, link_lo: float = 0.70) -> tuple:
+        """Two-level insert. Compares against world CENTROIDS (W of them), then only against the members
+        of the chosen world -- so dedup and self-organizing edges stay local. Returns
+        (node_name, action) with action in {'merged','added'}, same contract as add_or_merge."""
+        if not self._worlds_enabled():
+            return self.add_or_merge(atom, dedup=dedup, link_lo=link_lo)
+        if atom.emb is None:
+            atom.emb = encode_batch([atom.description or atom.name])[0]
+        emb = np.asarray(atom.emb, dtype=np.float32)
+
+        best = None
+        WM, wnames = self._world_matrix()
+        if wnames:
+            wsims = WM @ emb
+            j = int(np.argmax(wsims))
+            if float(wsims[j]) >= self._world_join and len(self.worlds[wnames[j]]) < self._world_max:
+                best = wnames[j]
+
+        if best is not None:
+            members = self.worlds[best]
+            if members:
+                MM = np.stack([self.atoms[m].emb for m in members]).astype(np.float32)
+                sims = MM @ emb
+                jj = int(np.argmax(sims))
+                if float(sims[jj]) >= dedup:                  # near-duplicate INSIDE this world -> merge
+                    ex = self.atoms[members[jj]]
+                    if len(atom.description) > len(ex.description):
+                        ex.description = atom.description; ex.emb = atom.emb
+                        self._matrix_dirty = True; self._dirty_names.add(ex.name)
+                    return ex.name, "merged"
+            self.add(atom)
+            self.worlds[best].append(atom.name)
+            self.world_of[atom.name] = best
+            self._touch_centroid(best, emb)
+            # self-organize ONLY within the world: dense locally, sparse globally = small-world topology
+            for m in self.worlds[best]:
+                if m == atom.name:
+                    continue
+                c = float(np.dot(self.atoms[m].emb, emb))
+                if link_lo <= c < dedup:
+                    self.link(atom.name, m, "related"); self.link(m, atom.name, "related")
+            return atom.name, "added"
+
+        # no world close enough -> this atom founds a new one
+        w = f"world_{len(self.worlds)}"
+        self.add(atom)
+        self.worlds[w] = [atom.name]
+        self.world_of[atom.name] = w
+        self._touch_centroid(w, emb)
+        return atom.name, "added"
+
+    def cosine_rank_world(self, task_text: str, k: int | None = None, top_w: int = 3) -> list[str]:
+        """Two-level search: route to the top_w worlds, then rank only their members. O(W + members)."""
+        if not self._worlds_enabled() or not self.worlds:
+            return self.cosine_rank(task_text, k)
+        q = encode_batch([task_text])[0]
+        cands: list[str] = []
+        for w in self.route(q, top_w=top_w):
+            cands.extend(self.worlds[w])
+        if not cands:
+            return self.cosine_rank(task_text, k)
+        MM = np.stack([self.atoms[c].emb for c in cands]).astype(np.float32)
+        sims = MM @ q
+        ranked = [cands[i] for i in np.argsort(-sims)]
+        return ranked[:k] if k else ranked
+
+    def world_stats(self) -> dict:
+        if not self._worlds_enabled():
+            return {}
+        sizes = [len(v) for v in self.worlds.values()]
+        intra = sum(1 for s, d, _ in self.edges
+                    if self.world_of.get(s) is not None and self.world_of.get(s) == self.world_of.get(d))
+        return {"worlds": len(self.worlds), "avg_size": (sum(sizes) / len(sizes)) if sizes else 0,
+                "max_size": max(sizes) if sizes else 0, "singletons": sum(1 for s in sizes if s == 1),
+                "edges": len(self.edges), "intra_world_edges": intra,
+                "intra_frac": intra / max(1, len(self.edges))}
+
     def add_or_merge(self, atom: Atom, dedup: float = 0.90, link_lo: float = 0.50) -> tuple:
         """WRITE-TIME GRAPH EDITING (the real thing, not a bare add):
           - DEDUP: if a near-duplicate node exists (cosine >= dedup) MERGE into it (keep the richer
