@@ -220,6 +220,50 @@ class WMReasoner(nn.Module):
             return slots, states, deltas, raw_states
         return slots, states
 
+    def recurrent_refine(self, task_emb: torch.Tensor, atom_embs: torch.Tensor,
+                         memory: torch.Tensor | None = None, resume_state: tuple | None = None,
+                         track_deltas: bool = False):
+        """MERGED architecture: the bottom TRM does the top TRM's job itself, and there is no top TRM.
+
+        The top level's only real responsibilities were (a) carrying latent state across chunks,
+        (b) attending its own accumulated memory rather than the graph, (c) absorbing evicted KV spans and
+        (d) receiving event signals. None of those need a SECOND network -- the bottom trm already has the
+        same two-latent z/y machinery, and TRMReasoner already accepts z_init/y_init/return_state (added
+        for the top, reused here).
+
+        The decisive argument for merging is not simplicity, it is the removal of a bottleneck that
+        provably broke things. In the hierarchical version, memory could only reach the LM through
+        top_to_bottom_proj -- a ZERO-INITIALIZED linear. While that projection sat near zero the bottom trm
+        received the unchanged task embedding, produced identical slots, and re-grounding was a
+        mathematical no-op; that is why `reground` came back byte-identical to `held WM` in every run this
+        codebase ever recorded. Here memory is concatenated straight into the cross-attention context the
+        bottom trm already reads, so it reaches the LM through the same trained path the graph atoms do,
+        with no zero-init gate in between.
+
+        Supporting evidence that the second network was not paying for itself: a controlled 3-arm A/B at
+        identical settings gave bottom-only 15/16, hierarchical-on-graph-atoms 14/16, and
+        top-as-memory 15/16 -- the extra level never won.
+
+        memory: [M, d_in] accumulated context (progress embeddings, evicted spans) -- concatenated with
+        atom_embs so the trm attends graph knowledge and its own history in one place.
+        resume_state: (z, y) from this method's previous call, giving real cross-call recurrence.
+        Returns the same shapes refine() does, plus the new (z, y) state appended."""
+        ctx = atom_embs
+        if memory is not None and memory.numel():
+            mem = memory if memory.dim() == 2 else memory.unsqueeze(0)
+            ctx = torch.cat([atom_embs, mem.to(atom_embs.dtype)], dim=0)
+        z_init, y_init = resume_state if resume_state is not None else (None, None)
+        y_t, new_state = self.trm(task_emb, ctx, z_init=z_init, y_init=y_init, return_state=True)
+        slots = self.proj_y(y_t)
+        self._slots = slots
+        states = [y_t[i] for i in range(self.T)]
+        if track_deltas:
+            deltas = ([(y_t[i + 1] - y_t[i]).norm().item() for i in range(self.T - 1)]
+                      if self.T > 1 else [0.0])
+            raw_states = [s.detach() for s in slots]
+            return slots, states, deltas, raw_states, new_state
+        return slots, states, new_state
+
     def hierarchical_refine(self, task_emb: torch.Tensor, atom_embs: torch.Tensor,
                             top_context_emb: torch.Tensor | None = None,
                             top_state: torch.Tensor | None = None, recompute_top: bool = True,
@@ -446,7 +490,7 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
                            instability_trigger: float | None = None,
                            sink_tokens: int = 0, reground_bottom: bool = False,
                            top_no_graph: bool = False, top_memory_max: int = 16,
-                           evict_to_memory: bool = False):
+                           evict_to_memory: bool = False, merged: bool = False):
     """Generate, re-grounding WMReasoner's slots every chunk_tokens instead of once up front.
 
     If R.top_trm is set, also runs the slow/top-level TRM every `top_every` CHUNKS (not every chunk) --
@@ -549,6 +593,7 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
         generated_so_far = ""
         event_fired = False
         pending_event = 0
+        bottom_state = None
         instab_history: list[float] = []
         top_memory_list: list[torch.Tensor] = []
         while (running_ids.shape[-1] - prompt_len) < max_new_tokens:
@@ -577,10 +622,23 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
                 if len(top_memory_list) > top_memory_max:
                     top_memory_list = top_memory_list[-top_memory_max:]
             top_mem = torch.stack(top_memory_list) if top_memory_list else None
-            refine_out = R.hierarchical_refine(
-                bottom_task_emb, atom_embs, top_context_emb=top_ctx, top_state=top_state,
-                top_resume_state=top_resume_state, recompute_top=recompute_top, track_deltas=want_deltas,
-                top_memory=top_mem, top_no_graph=top_no_graph, event_signal=pending_event)
+            if merged:
+                # MERGED: no top trm at all -- the bottom trm carries its own state and attends its own
+                # memory alongside the graph atoms, with no zero-init projection in between.
+                if generated_so_far and (top_mem is None or len(top_memory_list) < top_memory_max):
+                    top_memory_list.append(torch.as_tensor(
+                        encode_batch([generated_so_far])[0], dtype=torch.float32, device=wb.device))
+                    top_mem = torch.stack(top_memory_list)
+                out_m = R.recurrent_refine(bottom_task_emb, atom_embs, memory=top_mem,
+                                           resume_state=bottom_state, track_deltas=want_deltas)
+                bottom_state = out_m[-1]
+                refine_out = (*out_m[:-1], None, None)
+            else:
+                refine_out = R.hierarchical_refine(
+                    bottom_task_emb, atom_embs, top_context_emb=top_ctx, top_state=top_state,
+                    top_resume_state=top_resume_state, recompute_top=recompute_top,
+                    track_deltas=want_deltas, top_memory=top_mem, top_no_graph=top_no_graph,
+                    event_signal=pending_event)
             if want_deltas:
                 slots, _states, deltas, _raw, new_top_state, new_top_resume_state = refine_out
             else:
@@ -646,6 +704,7 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
     generated_so_far = ""
     event_fired = False
     pending_event = 0
+    bottom_state = None
     instab_history: list[float] = []
     top_memory_list: list[torch.Tensor] = []
     while len(all_new_ids) < max_new_tokens:
@@ -666,10 +725,21 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
             if len(top_memory_list) > top_memory_max:
                 top_memory_list = top_memory_list[-top_memory_max:]
         top_mem = torch.stack(top_memory_list) if top_memory_list else None
-        refine_out = R.hierarchical_refine(
-            bottom_task_emb, atom_embs, top_context_emb=top_ctx, top_state=top_state,
-            top_resume_state=top_resume_state, recompute_top=recompute_top, track_deltas=want_deltas,
-            top_memory=top_mem, top_no_graph=top_no_graph, event_signal=pending_event)
+        if merged:
+            if generated_so_far and len(top_memory_list) < top_memory_max:
+                top_memory_list.append(torch.as_tensor(
+                    encode_batch([generated_so_far])[0], dtype=torch.float32, device=wb.device))
+                top_mem = torch.stack(top_memory_list)
+            out_m = R.recurrent_refine(bottom_task_emb, atom_embs, memory=top_mem,
+                                       resume_state=bottom_state, track_deltas=want_deltas)
+            bottom_state = out_m[-1]
+            refine_out = (*out_m[:-1], None, None)
+        else:
+            refine_out = R.hierarchical_refine(
+                bottom_task_emb, atom_embs, top_context_emb=top_ctx, top_state=top_state,
+                top_resume_state=top_resume_state, recompute_top=recompute_top,
+                track_deltas=want_deltas, top_memory=top_mem, top_no_graph=top_no_graph,
+                event_signal=pending_event)
         if want_deltas:
             slots, _states, deltas, _raw, new_top_state, new_top_resume_state = refine_out
         else:
@@ -2050,7 +2120,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             evict_to_memory: bool = False, swe_docs_path: str | None = None,
             passive_growth: bool = False, gate_init: float = 0.8,
             swe_max_issue_chars: int = 1500, swe_max_ctx_steps: int = 12,
-            gate_max: float = 0.0):
+            gate_max: float = 0.0, merged: bool = False):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
@@ -2598,7 +2668,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                         chunk_tokens=reground_chunk_tokens, max_new_tokens=eff_max_new_tokens,
                         top_every=reground_top_every, use_kv_cache=use_kv_cache, evict_window=None,
                         trigger_patterns=trigger_patterns, instability_trigger=instability_trigger,
-                        reground_bottom=True, top_no_graph=top_no_graph, top_memory_max=top_memory_max)
+                        reground_bottom=True, top_no_graph=top_no_graph, top_memory_max=top_memory_max,
+                        merged=merged)
                     reground_ok = verify(reground_text, tests)
                     reground_ok_count += int(reground_ok)
                     dump[-1] = dump[-1] + (reground_text, reground_ok)
@@ -2615,7 +2686,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                             trigger_patterns=trigger_patterns, instability_trigger=instability_trigger,
                             sink_tokens=sink_tokens, reground_bottom=True,
                             top_no_graph=top_no_graph, top_memory_max=top_memory_max,
-                            evict_to_memory=evict_to_memory)
+                            evict_to_memory=evict_to_memory, merged=merged)
                         reground_evicted_ok = verify(reground_evicted_text, tests)
                         reground_evicted_ok_count += int(reground_evicted_ok)
                         dump[-1] = dump[-1] + (reground_evicted_text, reground_evicted_ok)
@@ -2922,6 +2993,16 @@ def main():
                          "~5,300-token prompts; since training attention memory is quadratic in sequence "
                          "length, a real run hit ~60GB VRAM on a 4-bit 4B model. The head of an issue holds "
                          "the actual problem statement; the tail is usually traces and version tables.")
+    ap.add_argument("--merged", action="store_true",
+                    help="MERGE the top trm's job into the bottom trm and drop the second network. The "
+                         "bottom trm carries its own latent state across chunks and attends its own "
+                         "accumulated memory concatenated with the graph atoms. Main reason is not "
+                         "simplicity: in the hierarchical design memory could only reach the LM through "
+                         "the ZERO-INIT top_to_bottom_proj, and a direct measurement shows memory changes "
+                         "the slots by exactly 0.00e+00 there versus 1.25e-02 merged -- the two-level "
+                         "version literally cannot deliver memory to the LM at init, the same failure that "
+                         "made reground a no-op. Also 30%% fewer parameters, and a 3-arm A/B never showed "
+                         "the extra level winning (bottom-only 15/16, hierarchical 14/16, top-memory 15/16).")
     ap.add_argument("--gate-max", type=float, default=0.0,
                     help="hard ceiling on |gate| after every optimizer step. The gate is a LEARNED "
                          "parameter and lm_loss pushes it UP (harder injection fits the teacher-forced "
@@ -3048,7 +3129,7 @@ def main():
                  evict_to_memory=a.evict_to_memory, swe_docs_path=(a.swe_docs_path or None),
                  passive_growth=a.passive_growth, gate_init=a.gate_init,
                  swe_max_issue_chars=a.swe_max_issue_chars,
-                 swe_max_ctx_steps=a.swe_max_ctx_steps, gate_max=a.gate_max)
+                 swe_max_ctx_steps=a.swe_max_ctx_steps, gate_max=a.gate_max, merged=a.merged)
     else:
         selftest()
 
