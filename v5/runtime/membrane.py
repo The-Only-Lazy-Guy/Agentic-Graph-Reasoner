@@ -325,13 +325,26 @@ class AtomGraph:
         self._touch_centroid(w, emb)
         return atom.name, "added"
 
-    def cosine_rank_world(self, task_text: str, k: int | None = None, top_w: int = 3) -> list[str]:
-        """Two-level search: route to the top_w worlds, then rank only their members. O(W + members)."""
+    def cosine_rank_world(self, task_text: str, k: int | None = None, top_w: int = 3,
+                          min_candidates: int = 512) -> list[str]:
+        """Two-level search: route to worlds, then rank only their members. O(W + members).
+
+        min_candidates keeps widening the routed set until at least this many member atoms are in scope.
+        A FIXED top_w does not survive a change in graph size, and shipping one caused a real regression:
+        top_w=8 was measured at 223 candidates (~4% of a 5,636-node graph) while tuning, but on a
+        9,264-node graph with 1,236 worlds the same setting scans only ~60 nodes -- 0.65% -- so the atoms
+        handed to the caller were close to random. Retrieval quality against a full flat scan was measured
+        as a clean function of candidate count, not of world count: ~110 candidates gave R@5 17.5%, ~782
+        gave 18.5%/R@20 38.0% versus flat 19.0%/38.0%. Budgeting candidates directly therefore holds
+        quality steady as the graph grows, which a fixed top_w cannot."""
         if not self._worlds_enabled() or not self.worlds:
             return self.cosine_rank(task_text, k)
         q = encode_batch([task_text])[0]
+        ranked_worlds = self.route(q, top_w=len(self.worlds))
         cands: list[str] = []
-        for w in self.route(q, top_w=top_w):
+        for i, w in enumerate(ranked_worlds):
+            if i >= top_w and len(cands) >= min_candidates:
+                break
             cands.extend(self.worlds[w])
         if not cands:
             return self.cosine_rank(task_text, k)
