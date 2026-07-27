@@ -422,6 +422,39 @@ def native_text_embedding(wb, text: str) -> torch.Tensor:
     return lm_emb[ids[0]].float().mean(0).detach()
 
 
+def _ds_targets_for_task(wb, code_expr: str, atoms_needed, T: int, cache: dict) -> "torch.Tensor | None":
+    """Deep-supervision targets: [T, d_lm], the PARTIAL RESULT the recursion should hold at each step.
+
+    Targets are the PROJECTED INTERMEDIATE EXPRESSION, never the retrieved atom nodes. Supervising against
+    atom-description embeddings is a real mistake this project already made: it teaches the trm to echo
+    what retrieval just handed it, which is information it is already given, instead of teaching it to
+    COMPOSE those atoms into a result. The composition is the entire job -- for
+    `outer(inner(n))` the trm must learn that after the inner step it holds `inner(n)`, a value that
+    appears nowhere in its inputs.
+
+    Schedule over the T recursion steps: the first half target the inner partial expression `inner(n)`,
+    the second half target the full composition `outer(inner(n))` -- a real curriculum through the
+    recursion rather than one flat target repeated T times.
+
+    Returns None when no oracle intermediate can be derived (math-cot, swe-action), in which case the
+    caller skips DS for that example instead of inventing a target.
+    """
+    if not code_expr or len(atoms_needed) < 2:
+        return None
+    inner = atoms_needed[0]
+    inner_expr = f"{inner}(n)"
+    if inner_expr not in code_expr:                 # not the 2-atom composition shape -> no oracle
+        return None
+    key = (inner_expr, code_expr, T)
+    if key in cache:
+        return cache[key]
+    half = max(1, T // 2)
+    texts = [inner_expr] * half + [code_expr] * (T - half)
+    tgt = native_text_embedding_batch(wb, texts)    # [T, d_lm] -- projected results, not atom nodes
+    cache[key] = tgt
+    return tgt
+
+
 def native_text_embedding_batch(wb, texts: list[str]) -> torch.Tensor:
     """Batched version of native_text_embedding. Returns [N, d_lm] tensor.
     Much faster than per-atom calls when embedding many atom descriptions because
@@ -2166,7 +2199,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             evict_to_memory: bool = False, swe_docs_path: str | None = None,
             passive_growth: bool = False, gate_init: float = 0.8,
             swe_max_issue_chars: int = 1500, swe_max_ctx_steps: int = 12,
-            gate_max: float = 0.0, merged: bool = False, swe_target_args_chars: int = 0):
+            gate_max: float = 0.0, merged: bool = False, swe_target_args_chars: int = 0,
+            ds_weight: float = 0.0, conv_weight: float = 0.05, gate_reg_weight: float = 0.05):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
@@ -2531,6 +2565,12 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         def make_tests(code_expression, atoms_needed):
             return [(None, code_expression)]
 
+    # text -> oracle expression, so deep supervision can build the intermediate-result targets. The
+    # 7-tuple in train_ex intentionally does not carry code_expr, and `tests` holds numeric (input,
+    # expected) pairs rather than the expression, so the mapping is kept here rather than reconstructed.
+    code_expr_of = {t[0]: t[3] for t in (train_tasks + held_tasks)}
+    _ds_cache: dict = {}
+
     train_ex = [(task_embs[text], [atom_names.index(a) for a in atoms_needed], atoms_needed,
                  prompt_ids[text], text, code, make_tests(code_expr, atoms_needed))
                 for text, atoms_needed, code, code_expr in train_tasks]
@@ -2569,7 +2609,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         R.train()
         random.shuffle(train_ex)
         tot_lm, n = 0.0, 0
-        tot_gate_reg, tot_conv = 0.0, 0.0
+        tot_gate_reg, tot_conv, tot_ds = 0.0, 0.0, 0.0
         for b0 in range(0, len(train_ex), batch_size):
             if ep == 0 and n % heartbeat_every == 0:
                 # epoch 0 alone can run for many minutes on a real 4B model with batch_size=1 (100 forward+
@@ -2579,6 +2619,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 print(f"    [ep 0 heartbeat] training example {n}/{len(train_ex)}...", flush=True)
             batch = train_ex[b0:b0 + batch_size]
             all_states, pids_list, tids_list, slots_list = [], [], [], []
+            ds_tgt_list = []
             for task_emb, gold_idxs, atoms_needed, pids, text, target_code, tests in batch:
                 mini_atom_embs = torch.stack([
                     torch.as_tensor(encode_batch([atom_names[idx]])[0], dtype=torch.float32, device=wb.device)
@@ -2606,6 +2647,9 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 tids = torch.cat([tids, eos], dim=-1)
                 pids_list.append(pids); tids_list.append(tids)
                 all_states.append(states)
+                if ds_weight > 0:
+                    ds_tgt_list.append(_ds_targets_for_task(
+                        wb, code_expr_of.get(text), atoms_needed, R.T, _ds_cache))
 
             R.set_slots_direct(torch.stack(slots_list, dim=0))   # [B, T, d_lm] -- per-example, always
 
@@ -2629,7 +2673,18 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             w = torch.linspace(0.0, 1.0, T - 1, device=states_tensor.device) ** 2  # quadratic, [0, 1]
             conv_loss = (w.unsqueeze(0).unsqueeze(-1) * step_diffs.norm(dim=-1, keepdim=True)).mean()
 
-            loss = lm_loss + 0.05 * gate_reg + 0.05 * conv_loss
+            # DEEP SUPERVISION -- the only term that gives the trm a DIRECT, task-specific gradient on
+            # its own latents. Without it the loss touching y_t was conv_loss alone, which penalizes
+            # ||y_t+1 - y_t|| and therefore literally rewards NOT CHANGING; measured consequence on a real
+            # trained checkpoint: slots had across-task cosine 1.000000 (min 0.999999) while their task_emb
+            # INPUTS sat at 0.4510, i.e. the working memory was a constant and a slot-swap between
+            # different tasks changed the generation on only 1 of 16 held tasks. ds_loss_batch and ds_proj
+            # already existed; nothing ever called them from this loop, and ds_loss_batch returns exactly
+            # 0.0 when targets is None, so even a stray call was a silent no-op.
+            ds_loss = torch.tensor(0.0, device=wb.device)
+            if ds_weight > 0 and ds_tgt_list and all(t is not None for t in ds_tgt_list):
+                ds_loss = R.ds_loss_batch(all_states, targets=torch.stack(ds_tgt_list).to(wb.device))
+            loss = lm_loss + gate_reg_weight * gate_reg + conv_weight * conv_loss + ds_weight * ds_loss
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -2651,15 +2706,19 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             tot_lm += float(lm_loss.detach())
             tot_gate_reg += float(gate_reg.detach())
             tot_conv += float(conv_loss.detach())
+            tot_ds += float(ds_loss.detach()) if torch.is_tensor(ds_loss) else 0.0
             n += 1
 
         # NOTE: this used to end="" (continue onto the eval line below) -- but eval only runs every
         # eval_every epochs, so every OTHER epoch's line never got a newline at all, and they all ran
         # together into one unreadable wall of text (looked broken; wasn't a logic bug, just missing \n).
-        print(f"  ep {ep:>3}  lm {tot_lm/max(n,1):.3f}  gate_reg {tot_gate_reg/max(n,1):.4f}  conv {tot_conv/max(n,1):.4f}  gate {R.adapters[0].g.detach().item():+.2f}", flush=True)
+        print(f"  ep {ep:>3}  lm {tot_lm/max(n,1):.3f}  gate_reg {tot_gate_reg/max(n,1):.4f}  "
+              f"conv {tot_conv/max(n,1):.4f}  ds {tot_ds/max(n,1):.4f}  "
+              f"gate {R.adapters[0].g.detach().item():+.2f}", flush=True)
         if ep % eval_every == 0 or ep == epochs - 1:
             R.eval()
             held_ok, ablated_ok, reground_ok_count, reground_evicted_ok_count = 0, 0, 0, 0
+            held_slots = []
             dump = []
             if ep == 0:
                 print(f"\n    [ep 0 heartbeat] running held-out eval ({len(held_ex)} tasks x 2 generate() calls)...",
@@ -2675,6 +2734,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 # "reground" below isolates the value of PERIODIC re-grounding specifically.
                 slots, wm_states, wm_deltas, wm_raw, _top_state, _top_resume = R.hierarchical_refine(
                     task_emb, held_mini_embs, track_deltas=True)
+                held_slots.append(slots.detach())
                 with torch.no_grad():
                     R.set_slots_direct(slots)
                     out = wb.model.generate(pids, max_new_tokens=eff_max_new_tokens,
@@ -2784,11 +2844,22 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             inst_fail = [d[6] for d in dump if not d[3]]
             inst_str = (f"  instab(pass/fail) {sum(inst_pass)/len(inst_pass):.3f}/"
                        f"{sum(inst_fail)/len(inst_fail):.3f}" if inst_pass and inst_fail else "")
+            # ACROSS-TASK SLOT COSINE -- the single number that exposes a constant working memory. If this
+            # reads ~1.000 the trm is emitting the same vector for every task and any held-out gain is a
+            # constant format/mode effect, not retrieved memory. It went unmeasured for this codebase's
+            # whole history; a checkpoint scoring 15/16 turned out to sit at 1.000000.
+            slot_cos_str = ""
+            if held_slots:
+                _S = torch.stack([s_.flatten().float() for s_ in held_slots])
+                _S = _S / _S.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+                _C = _S @ _S.T
+                _off = _C[~torch.eye(len(_S), dtype=torch.bool, device=_C.device)]
+                slot_cos_str = f"  slot_cos {_off.mean():.4f}"
             reground_str = f"  reground {reground_ok_count}/{len(held_ex)}" if R.top_trm is not None else ""
             evicted_str = (f"  reground_evicted {reground_evicted_ok_count}/{len(held_ex)}"
                           if evict_window is not None else "")
             print(f"  held WM {held_ok}/{len(held_ex)}  ablated {ablated_ok}/{len(held_ex)}{reground_str}"
-                  f"{evicted_str}  {inst_str}", flush=True)
+                  f"{evicted_str}{slot_cos_str}  {inst_str}", flush=True)
             if len(held_ex) <= 8:
                 for d in dump:
                     t, tc, wm_code, wm_ok, abl_code, abl_ok, instab = d[:7]
@@ -3063,6 +3134,24 @@ def main():
                          "version literally cannot deliver memory to the LM at init, the same failure that "
                          "made reground a no-op. Also 30%% fewer parameters, and a 3-arm A/B never showed "
                          "the extra level winning (bottom-only 15/16, hierarchical 14/16, top-memory 15/16).")
+    ap.add_argument("--ds-weight", type=float, default=0.0,
+                    help="weight on DEEP SUPERVISION -- MSE between ds_proj(y_t) and the projected "
+                         "INTERMEDIATE RESULT the recursion should hold at step t (for outer(inner(n)): "
+                         "inner(n) early, the full composition late). Targets are partial RESULTS, never "
+                         "the retrieved atom-node embeddings -- supervising on atoms teaches the trm to "
+                         "echo what retrieval already gave it instead of composing. Without this the only "
+                         "loss touching y_t is conv_loss, which rewards NOT changing: a real trained "
+                         "checkpoint had across-task slot cosine 1.000000 while its inputs sat at 0.4510, "
+                         "and swapping a different task's slots changed generation on 1 of 16 tasks. "
+                         "0 (default) = off, reproducing prior runs. Try 0.1. Synthetic composition only; "
+                         "domains with no oracle intermediate skip it per-example.")
+    ap.add_argument("--conv-weight", type=float, default=0.05,
+                    help="weight on the convergence regularizer (penalizes ||y_t+1 - y_t||). Was hardcoded "
+                         "0.05. It pulls directly AGAINST task-conditioning -- a strongly contractive "
+                         "recursion has one fixed point reached from any input -- so lower it (or 0) when "
+                         "testing whether the trm can be made task-specific.")
+    ap.add_argument("--gate-reg-weight", type=float, default=0.05,
+                    help="weight on the gate magnitude penalty (was hardcoded 0.05).")
     ap.add_argument("--gate-max", type=float, default=0.0,
                     help="hard ceiling on |gate| after every optimizer step. The gate is a LEARNED "
                          "parameter and lm_loss pushes it UP (harder injection fits the teacher-forced "
@@ -3190,7 +3279,8 @@ def main():
                  passive_growth=a.passive_growth, gate_init=a.gate_init,
                  swe_max_issue_chars=a.swe_max_issue_chars,
                  swe_max_ctx_steps=a.swe_max_ctx_steps, gate_max=a.gate_max, merged=a.merged,
-                 swe_target_args_chars=a.swe_target_args_chars)
+                 swe_target_args_chars=a.swe_target_args_chars,
+                 ds_weight=a.ds_weight, conv_weight=a.conv_weight, gate_reg_weight=a.gate_reg_weight)
     else:
         selftest()
 
