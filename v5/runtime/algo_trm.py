@@ -38,11 +38,13 @@ def _build():
             T:       number of thinking cycles
             n_heads: cross-attention heads
         """
-        def __init__(self, d_in: int = 384, d: int = 256, T: int = 5, n_heads: int = 4):
+        def __init__(self, d_in: int = 384, d: int = 256, T: int = 5, n_heads: int = 4,
+                     adaptive: bool = False):
             super().__init__()
             self.T = T
             self.d = d
             self.d_in = d_in
+            self.adaptive = adaptive
 
             self.task_proj = nn.Linear(d_in, d)
             self.atom_proj = nn.Linear(d_in, d)
@@ -69,6 +71,12 @@ def _build():
                 nn.Linear(d, d),
             )
 
+            # ACT halt head: y_t → scalar halting probability per step. Bias init -3 so sigmoid starts
+            # near 0.05 — the model must LEARN to halt early, defaulting to using all T steps.
+            if adaptive:
+                self.halt_head = nn.Linear(d, 1)
+                nn.init.constant_(self.halt_head.bias, -3.0)
+
         def _f(self, v: torch.Tensor) -> torch.Tensor:
             """Single shared network: Layernorm → MLP."""
             return self.f_mlp(self.f_norm(v))
@@ -90,7 +98,13 @@ def _build():
 
             return_state=False (default): returns just the [T,d] ys tensor, same shape every caller already
             expects. return_state=True: returns (ys, (z, y)) -- the raw final latents (pre-y_head), meant to
-            be passed back in as z_init/y_init on the next call, not for any other use."""
+            be passed back in as z_init/y_init on the next call, not for any other use.
+
+            ADAPTIVE (ACT): when self.adaptive=True, also returns:
+              halt_weights: [T] per-step halting weights (sum to 1, differentiable)
+              n_steps:      effective steps used (float, differentiable pondering cost)
+            Output ys tensor is still [T, d] — always runs T_max steps for shape stability.
+            The CONSUMER decides how to use halt_weights (weighted sum for slots, truncation, etc)."""
             x = self.task_proj(x_vec)
             R = self.atom_proj(atom_vecs)
 
@@ -98,7 +112,8 @@ def _build():
             y = self.y0 if y_init is None else y_init
 
             ys = []
-            for _ in range(self.T):
+            halt_probs = [] if self.adaptive else None
+            for t in range(self.T):
                 # Cross-attend z to R
                 ctx, _ = self.cross_attn(
                     z.unsqueeze(0).unsqueeze(0),     # [1, 1, d]
@@ -114,11 +129,43 @@ def _build():
                 y = self._f(y + z)
 
                 ys.append(self.y_head(y))
+                if self.adaptive:
+                    halt_probs.append(torch.sigmoid(self.halt_head(y)).squeeze(-1))
 
             out = torch.stack(ys)  # [T, d]
+
+            if self.adaptive:
+                halt_weights, n_steps = self._act_weights(halt_probs)
+                if return_state:
+                    return out, (z, y), halt_weights, n_steps
+                return out, halt_weights, n_steps
+
             if return_state:
                 return out, (z, y)
             return out
+
+        def _act_weights(self, halt_probs: list) -> tuple:
+            """Adaptive Computation Time (Graves 2016): convert per-step halt probabilities into
+            a proper distribution over steps + a differentiable step count.
+
+            halt_probs: [p_1, ..., p_T], each scalar in (0,1) from sigmoid.
+            Returns (weights [T], n_steps scalar).
+
+            The weight for step t is: p_t * prod(1-p_j for j<t), except the last step gets all
+            remaining probability (forced halt). This is identical to the discrete hazard function /
+            geometric distribution parameterization from ACT."""
+            T = len(halt_probs)
+            weights = []
+            cumul = halt_probs[0].new_tensor(0.0)
+            for t in range(T - 1):
+                w_t = halt_probs[t] * (1.0 - cumul)
+                weights.append(w_t)
+                cumul = cumul + w_t
+            weights.append(1.0 - cumul)  # remainder on last step
+            weights = torch.stack(weights)  # [T]
+            n_steps = (weights * torch.arange(1, T + 1, dtype=weights.dtype,
+                                              device=weights.device)).sum()
+            return weights, n_steps
 
     return torch, nn, TRMReasoner
 
@@ -166,7 +213,30 @@ def _selftest() -> bool:
     assert slots.shape == (T, 64), f"slots shape {slots.shape}"
     print(f"  [7] y_t -> LM slots via proj: {list(slots.shape)} -> PASS")
 
-    print("\n  ALGO_TRM SELFTEST -> PASS  (V3 TRMReasoner)")
+    # --- adaptive (ACT) mode ---
+    trm_a = TRMReasoner(d_in=d_in, d=d, T=T, n_heads=4, adaptive=True)
+    y_ts_a, halt_w, n_s = trm_a(x_vec, atom_vecs)
+    assert y_ts_a.shape == (T, d), f"adaptive y_ts shape {y_ts_a.shape}"
+    assert halt_w.shape == (T,), f"halt_weights shape {halt_w.shape}"
+    assert abs(halt_w.sum().item() - 1.0) < 1e-5, f"halt_weights sum {halt_w.sum().item()}"
+    assert 1.0 <= n_s.item() <= T, f"n_steps {n_s.item()} outside [1, {T}]"
+    weighted_out = (halt_w.unsqueeze(-1) * y_ts_a).sum(dim=0)
+    assert weighted_out.shape == (d,), f"weighted output {weighted_out.shape}"
+    print(f"  [8] adaptive ACT: halt_w sum={halt_w.sum():.4f}, n_steps={n_s:.2f}, "
+          f"weighted_out [{d}] -> PASS")
+
+    # adaptive + return_state
+    y_ts_a2, (z_a, y_a), halt_w2, n_s2 = trm_a(x_vec, atom_vecs, return_state=True)
+    assert z_a.shape == (d,) and y_a.shape == (d,), "return_state shapes"
+    print(f"  [9] adaptive + return_state -> PASS")
+
+    # pondering cost is differentiable
+    loss = n_s2 * 0.01
+    loss.backward()
+    grad_ok = trm_a.halt_head.weight.grad is not None and trm_a.halt_head.weight.grad.abs().sum() > 0
+    print(f"  [10] pondering cost gradient flows to halt_head -> {'PASS' if grad_ok else 'FAIL'}")
+
+    print("\n  ALGO_TRM SELFTEST -> PASS  (V3 TRMReasoner + ACT adaptive)")
     return True
 
 

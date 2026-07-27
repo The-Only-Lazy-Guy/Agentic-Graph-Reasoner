@@ -209,7 +209,14 @@ class WMReasoner(nn.Module):
 
         native=True is ACCEPTED for backward compat but no longer needed — TRMReasoner handles
         its own internal projections regardless of input space."""
-        y_t = self.trm(task_emb, atom_embs)                    # [T, trm.d]
+        if self.trm.adaptive:
+            y_t, halt_w, n_steps = self.trm(task_emb, atom_embs)  # y_t [T, d], halt_w [T]
+            self._halt_weights = halt_w
+            self._n_steps = n_steps
+        else:
+            y_t = self.trm(task_emb, atom_embs)                    # [T, trm.d]
+            self._halt_weights = None
+            self._n_steps = None
         slots = self.proj_y(y_t)                               # [T, d_lm] — working memory
         self._slots = slots
         states = [y_t[i] for i in range(self.T)]                # per-step y_t for DS
@@ -2200,7 +2207,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             passive_growth: bool = False, gate_init: float = 0.8,
             swe_max_issue_chars: int = 1500, swe_max_ctx_steps: int = 12,
             gate_max: float = 0.0, merged: bool = False, swe_target_args_chars: int = 0,
-            ds_weight: float = 0.0, conv_weight: float = 0.05, gate_reg_weight: float = 0.05):
+            ds_weight: float = 0.0, conv_weight: float = 0.05, gate_reg_weight: float = 0.05,
+            adaptive_t: bool = False, ponder_weight: float = 0.0):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
@@ -2234,7 +2242,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     couple = [wb.n_layers - 2, wb.n_layers - 1]
     print(f"  LM: {lm_name}  d={d_lm}  layers={wb.n_layers}  gate layers={couple}  device={wb.device}")
 
-    trm = TRMReasoner(d_in=EMBED_DIM, d=256, T=4, n_heads=4)
+    trm = TRMReasoner(d_in=EMBED_DIM, d=256, T=4, n_heads=4, adaptive=adaptive_t)
     top_trm = TRMReasoner(d_in=EMBED_DIM, d=256, T=top_trm_t, n_heads=4) if top_trm_t > 0 else None
     R = WMReasoner(d_lm, couple_layers=couple, trm=trm, n_heads=4, top_trm=top_trm).to(wb.device)
     if top_trm is not None:
@@ -2609,7 +2617,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         R.train()
         random.shuffle(train_ex)
         tot_lm, n = 0.0, 0
-        tot_gate_reg, tot_conv, tot_ds = 0.0, 0.0, 0.0
+        tot_gate_reg, tot_conv, tot_ds, tot_ponder = 0.0, 0.0, 0.0, 0.0
         for b0 in range(0, len(train_ex), batch_size):
             if ep == 0 and n % heartbeat_every == 0:
                 # epoch 0 alone can run for many minutes on a real 4B model with batch_size=1 (100 forward+
@@ -2620,6 +2628,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             batch = train_ex[b0:b0 + batch_size]
             all_states, pids_list, tids_list, slots_list = [], [], [], []
             ds_tgt_list = []
+            n_steps_list = []
             for task_emb, gold_idxs, atoms_needed, pids, text, target_code, tests in batch:
                 mini_atom_embs = torch.stack([
                     torch.as_tensor(encode_batch([atom_names[idx]])[0], dtype=torch.float32, device=wb.device)
@@ -2633,6 +2642,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 # was mathematically guaranteed to sit at zero-init forever, regardless of epoch count (a real,
                 # confirmed-by-reading-the-code gap, not a "needs more epochs" issue).
                 slots, states, _top_state, _top_resume = R.hierarchical_refine(task_emb, mini_atom_embs)
+                if R._n_steps is not None:
+                    n_steps_list.append(R._n_steps)
                 # DEFER injection: with batch_size>1, calling set_slots_direct here would be overwritten by
                 # every subsequent example, so only the LAST example's slots would survive to the single
                 # batched forward pass below -- GatedCrossAttn then broadcasts that one example's slots to
@@ -2684,7 +2695,11 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             ds_loss = torch.tensor(0.0, device=wb.device)
             if ds_weight > 0 and ds_tgt_list and all(t is not None for t in ds_tgt_list):
                 ds_loss = R.ds_loss_batch(all_states, targets=torch.stack(ds_tgt_list).to(wb.device))
-            loss = lm_loss + gate_reg_weight * gate_reg + conv_weight * conv_loss + ds_weight * ds_loss
+            ponder_loss = torch.tensor(0.0, device=wb.device)
+            if ponder_weight > 0 and n_steps_list:
+                ponder_loss = torch.stack(n_steps_list).mean()
+            loss = (lm_loss + gate_reg_weight * gate_reg + conv_weight * conv_loss
+                    + ds_weight * ds_loss + ponder_weight * ponder_loss)
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -2707,14 +2722,13 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             tot_gate_reg += float(gate_reg.detach())
             tot_conv += float(conv_loss.detach())
             tot_ds += float(ds_loss.detach()) if torch.is_tensor(ds_loss) else 0.0
+            tot_ponder += float(ponder_loss.detach()) if torch.is_tensor(ponder_loss) else 0.0
             n += 1
 
-        # NOTE: this used to end="" (continue onto the eval line below) -- but eval only runs every
-        # eval_every epochs, so every OTHER epoch's line never got a newline at all, and they all ran
-        # together into one unreadable wall of text (looked broken; wasn't a logic bug, just missing \n).
+        ponder_str = f"  ponder {tot_ponder/max(n,1):.2f}" if ponder_weight > 0 else ""
         print(f"  ep {ep:>3}  lm {tot_lm/max(n,1):.3f}  gate_reg {tot_gate_reg/max(n,1):.4f}  "
               f"conv {tot_conv/max(n,1):.4f}  ds {tot_ds/max(n,1):.4f}  "
-              f"gate {R.adapters[0].g.detach().item():+.2f}", flush=True)
+              f"gate {R.adapters[0].g.detach().item():+.2f}{ponder_str}", flush=True)
         if ep % eval_every == 0 or ep == epochs - 1:
             R.eval()
             held_ok, ablated_ok, reground_ok_count, reground_evicted_ok_count = 0, 0, 0, 0
@@ -2735,6 +2749,10 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 slots, wm_states, wm_deltas, wm_raw, _top_state, _top_resume = R.hierarchical_refine(
                     task_emb, held_mini_embs, track_deltas=True)
                 held_slots.append(slots.detach())
+                if R._n_steps is not None:
+                    held_slots_nsteps = getattr(R, '_eval_nsteps', [])
+                    held_slots_nsteps.append(float(R._n_steps.detach()))
+                    R._eval_nsteps = held_slots_nsteps
                 with torch.no_grad():
                     R.set_slots_direct(slots)
                     out = wb.model.generate(pids, max_new_tokens=eff_max_new_tokens,
@@ -2855,11 +2873,16 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 _C = _S @ _S.T
                 _off = _C[~torch.eye(len(_S), dtype=torch.bool, device=_C.device)]
                 slot_cos_str = f"  slot_cos {_off.mean():.4f}"
+            nsteps_str = ""
+            _enst = getattr(R, '_eval_nsteps', [])
+            if _enst:
+                nsteps_str = f"  mean_steps {sum(_enst)/len(_enst):.2f}"
+                R._eval_nsteps = []
             reground_str = f"  reground {reground_ok_count}/{len(held_ex)}" if R.top_trm is not None else ""
             evicted_str = (f"  reground_evicted {reground_evicted_ok_count}/{len(held_ex)}"
                           if evict_window is not None else "")
             print(f"  held WM {held_ok}/{len(held_ex)}  ablated {ablated_ok}/{len(held_ex)}{reground_str}"
-                  f"{evicted_str}{slot_cos_str}  {inst_str}", flush=True)
+                  f"{evicted_str}{slot_cos_str}{nsteps_str}  {inst_str}", flush=True)
             if len(held_ex) <= 8:
                 for d in dump:
                     t, tc, wm_code, wm_ok, abl_code, abl_ok, instab = d[:7]
@@ -3152,6 +3175,19 @@ def main():
                          "testing whether the trm can be made task-specific.")
     ap.add_argument("--gate-reg-weight", type=float, default=0.05,
                     help="weight on the gate magnitude penalty (was hardcoded 0.05).")
+    ap.add_argument("--adaptive-t", action="store_true",
+                    help="ACT (Adaptive Computation Time, Graves 2016) for the TRM. Adds a learned halt "
+                         "head that predicts per-step halting probability; the model decides how many "
+                         "recursion steps each task needs instead of always using all T. Easy tasks (1-atom "
+                         "lookup) should learn to halt early, hard tasks (nested composition) use more. "
+                         "Always runs T_max steps internally (shapes stay fixed), but halt_weights give a "
+                         "differentiable soft allocation. Pair with --ponder-weight to penalize unnecessary "
+                         "computation. Off by default = fixed T, reproducing prior runs.")
+    ap.add_argument("--ponder-weight", type=float, default=0.0,
+                    help="weight on the pondering penalty (mean steps used across the batch). Only active "
+                         "when --adaptive-t is set. Encourages the model to halt early when it can. "
+                         "Too high -> always halts at step 1 (underthinking). Too low -> always uses all T "
+                         "(no benefit from adaptive). Try 0.01. 0 (default) = no penalty.")
     ap.add_argument("--gate-max", type=float, default=0.0,
                     help="hard ceiling on |gate| after every optimizer step. The gate is a LEARNED "
                          "parameter and lm_loss pushes it UP (harder injection fits the teacher-forced "
@@ -3280,7 +3316,8 @@ def main():
                  swe_max_issue_chars=a.swe_max_issue_chars,
                  swe_max_ctx_steps=a.swe_max_ctx_steps, gate_max=a.gate_max, merged=a.merged,
                  swe_target_args_chars=a.swe_target_args_chars,
-                 ds_weight=a.ds_weight, conv_weight=a.conv_weight, gate_reg_weight=a.gate_reg_weight)
+                 ds_weight=a.ds_weight, conv_weight=a.conv_weight, gate_reg_weight=a.gate_reg_weight,
+                 adaptive_t=a.adaptive_t, ponder_weight=a.ponder_weight)
     else:
         selftest()
 
