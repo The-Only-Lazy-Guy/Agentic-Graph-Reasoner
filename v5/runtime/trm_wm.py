@@ -2049,7 +2049,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             top_no_graph: bool = False, top_memory_max: int = 16,
             evict_to_memory: bool = False, swe_docs_path: str | None = None,
             passive_growth: bool = False, gate_init: float = 0.8,
-            swe_max_issue_chars: int = 1500, swe_max_ctx_steps: int = 12):
+            swe_max_issue_chars: int = 1500, swe_max_ctx_steps: int = 12,
+            gate_max: float = 0.0):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
@@ -2510,6 +2511,21 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             opt.zero_grad()
             loss.backward()
             opt.step()
+            # HARD CEILING on the gate. The warm-start alone is not enough: the gate is a LEARNED
+            # parameter and lm_loss actively pushes it UP, because injecting harder fits the teacher-forced
+            # target better even when it destroys held-out behaviour. The 0.05 * gate_reg penalty loses
+            # that tug-of-war. Measured on a real 40-epoch swe-action run started at gate_init 0.05:
+            #     ep 0  gate +0.09 -> held WM 3/16 (== ablated 3/16, the no-op baseline)
+            #     ep 5  gate +0.24 -> held WM 4/16 (BEATS ablated)
+            #     ep 10 gate +0.35 -> held WM 0/16 (collapsed)
+            #     ep 39 gate +0.80 -> held WM 0/16
+            # So the usable band is roughly gate 0.1-0.25, and training walks straight out of it. Clamping
+            # keeps the adapter inside the regime where it actually helps instead of letting the training
+            # objective optimize held-out performance away. 0 disables the clamp.
+            if gate_max > 0:
+                with torch.no_grad():
+                    for a in R.adapters:
+                        a.g.clamp_(-gate_max, gate_max)
             tot_lm += float(lm_loss.detach())
             tot_gate_reg += float(gate_reg.detach())
             tot_conv += float(conv_loss.detach())
@@ -2906,6 +2922,15 @@ def main():
                          "~5,300-token prompts; since training attention memory is quadratic in sequence "
                          "length, a real run hit ~60GB VRAM on a 4-bit 4B model. The head of an issue holds "
                          "the actual problem statement; the tail is usually traces and version tables.")
+    ap.add_argument("--gate-max", type=float, default=0.0,
+                    help="hard ceiling on |gate| after every optimizer step. The gate is a LEARNED "
+                         "parameter and lm_loss pushes it UP (harder injection fits the teacher-forced "
+                         "target even while destroying held-out behaviour); the 0.05*gate_reg penalty "
+                         "loses that fight. Measured on a real swe-action run starting at --gate-init "
+                         "0.05: ep0 gate 0.09 -> WM 3/16 (== ablated), ep5 gate 0.24 -> WM 4/16 (beats "
+                         "ablated), ep10 gate 0.35 -> WM 0/16, ep39 gate 0.80 -> WM 0/16. The usable band "
+                         "is roughly 0.1-0.25 and training walks out of it. Try 0.25. 0 (default) = "
+                         "no clamp, unchanged behaviour.")
     ap.add_argument("--gate-init", type=float, default=0.8,
                     help="warm-start value for the GatedCrossAttn gate (effective strength is tanh of "
                          "this). 0.8 (default) injects hard from step 0 through still-random projections; "
@@ -3023,7 +3048,7 @@ def main():
                  evict_to_memory=a.evict_to_memory, swe_docs_path=(a.swe_docs_path or None),
                  passive_growth=a.passive_growth, gate_init=a.gate_init,
                  swe_max_issue_chars=a.swe_max_issue_chars,
-                 swe_max_ctx_steps=a.swe_max_ctx_steps)
+                 swe_max_ctx_steps=a.swe_max_ctx_steps, gate_max=a.gate_max)
     else:
         selftest()
 
