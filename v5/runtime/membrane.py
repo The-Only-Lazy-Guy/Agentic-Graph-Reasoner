@@ -79,12 +79,16 @@ class AtomGraph:
 
     def __init__(self):
         self.atoms: dict[str, Atom] = {}
+        self._edge_set: set = set()               # mirrors self.edges for O(1) dedup in link() -- the
+                                                   # list scan it replaces made growth quadratic in edges
         self.edges: list[tuple] = []             # TYPED edges: (src, dst, relation) — relation is FREE TEXT,
                                                    # e.g. depend/uses/related/relates occur but nothing enforces
                                                    # a closed set; any natural-language descriptor is valid.
         self._matrix: np.ndarray | None = None   # [N,384] cached embedding matrix (invalidated on write)
         self._order: list[str] = []
         self._matrix_dirty: bool = False          # lazy rebuild flag: set True on add(), cleared on rebuild
+        self._dirty_names: set = set()            # names whose row must be (re)written -- lets matrix()
+                                                    # update/append only what changed instead of restacking
         self._edge_strength: dict[tuple, float] = {}   # (src,dst,relation) -> LEARNED scalar, default 0.5.
                                                    # Keyed by the edge INSTANCE, never derived from parsing
                                                    # the relation string — moved only by real verified outcomes
@@ -96,9 +100,19 @@ class AtomGraph:
     def get(self, n): return self.atoms.get(n)
 
     def link(self, src: str, dst: str, relation: str = "depend"):
-        if src in self.atoms and dst in self.atoms and (src, dst, relation) not in self.edges:
-            self.edges.append((src, dst, relation))
-            self._adj = None                                # invalidate adjacency cache
+        """O(1) dedup via a parallel set. This used to test `(src,dst,relation) not in self.edges` against
+        a LIST, i.e. an O(E) scan on every single call -- and _self_organize calls it once per
+        similar-enough node pair, so growth was quadratic in EDGES, not nodes. Measured directly: with
+        realistic (semantically similar) embeddings, inserts 901-1200 ran 6.9x slower than inserts 1-300
+        at only ~4.8k edges; a real SWE step-concept graph reached 121,558 edges, where the scan dominates
+        everything and made graph prep effectively un-runnable. self.edges stays a list because
+        save()/load() and every consumer iterate it positionally; the set is pure bookkeeping."""
+        if src in self.atoms and dst in self.atoms:
+            key = (src, dst, relation)
+            if key not in self._edge_set:
+                self.edges.append(key)
+                self._edge_set.add(key)
+                self._adj = None                            # invalidate adjacency cache
 
     def strength(self, src: str, dst: str, relation: str) -> float:
         """The LEARNED per-edge scalar (default 0.5 -- neutral, never yet reinforced by a real outcome)."""
@@ -133,6 +147,7 @@ class AtomGraph:
             atom.emb = encode_batch([atom.description or atom.name])[0]   # REAL embedding
         self.atoms[atom.name] = atom
         self._matrix_dirty = True                                          # lazy rebuild on next matrix() call
+        self._dirty_names.add(atom.name)
         return atom
 
     def _self_organize(self, atom: Atom, dedup: float = 0.90, link_lo: float = 0.50, min_k_connect: int = 2) -> None:
@@ -170,13 +185,20 @@ class AtomGraph:
         if not order:
             return
         sims = M @ atom.emb
+        # VECTORIZED candidate selection. This used to be a Python loop over EVERY node on EVERY insert
+        # (with a float() per element), so growth cost O(N) interpreted iterations per insert and O(N^2)
+        # overall -- the thing that actually made real graph prep un-runnable (a 6.3k-text build had to be
+        # killed at 20 minutes). numpy finds the qualifying indices; Python only touches the ones that
+        # actually get linked, which is a far smaller set.
+        hits = np.nonzero((sims >= link_lo) & (sims < dedup))[0]
         linked_any = False
-        for i, o in enumerate(order):
-            if o != atom.name and link_lo <= float(sims[i]) < dedup:
+        for i in hits:
+            o = order[i]
+            if o != atom.name:
                 self.link(atom.name, o, "related"); self.link(o, atom.name, "related")
                 linked_any = True
         if not linked_any:
-            ranked = sorted(range(len(order)), key=lambda i: -float(sims[i]))
+            ranked = np.argsort(-sims)
             connected = 0
             for i in ranked:
                 o = order[i]
@@ -204,6 +226,7 @@ class AtomGraph:
                 ex = self.atoms[order[j]]
                 if len(atom.description) > len(ex.description):   # keep the more informative text
                     ex.description = atom.description; ex.emb = atom.emb; self._matrix_dirty = True
+                    self._dirty_names.add(ex.name)   # merged: this row's embedding changed in place
                 return order[j], "merged"
         self.add(atom)
         self._self_organize(atom, dedup=dedup, link_lo=link_lo)
@@ -214,14 +237,45 @@ class AtomGraph:
 
     def matrix(self):
         """[N,384] embedding matrix + the name order, cached until the graph changes.
-        Lazy rebuild: add() only sets a dirty flag; the actual np.stack happens here,
-        so bulk inserts (seed_graph, _grow_from_cot) pay the O(N) cost once, not N times."""
-        if self._matrix is None or self._matrix_dirty:
+
+        INCREMENTAL, not a full rebuild. The lazy dirty-flag version below still re-stacked EVERY atom
+        whenever anything changed, so a growth loop that calls matrix() once per insert (which
+        add_or_merge does, to find near-duplicates) costs O(N) per insert and O(N^2) overall. That is not
+        theoretical: growing a real step-concept graph from SWE traces stalled at ~43% after 90 CPU-minutes
+        on ~13k texts, and a 6.3k-text run had to be killed at 20 minutes -- it was the single thing
+        blocking the SWE experiment from being runnable at all.
+
+        Now only genuinely changed rows are touched: new atoms are appended (np.vstack of one block) and
+        atoms whose embedding was replaced by a dedup-merge have just their own row overwritten. Falls back
+        to a full rebuild if anything unexpected happens (name removed, order/matrix out of sync), so
+        correctness never depends on the bookkeeping being perfect."""
+        if self._matrix is None:
             self._order = list(self.atoms)
-            if self._order:
-                self._matrix = np.stack([self.atoms[n].emb for n in self._order]).astype(np.float32)
+            self._matrix = (np.stack([self.atoms[n].emb for n in self._order]).astype(np.float32)
+                            if self._order else np.zeros((0, EMBED_DIM), np.float32))
+            self._dirty_names = set()
+            self._matrix_dirty = False
+            return self._matrix, self._order
+
+        if self._matrix_dirty:
+            dirty = getattr(self, "_dirty_names", None)
+            index = {n: i for i, n in enumerate(self._order)}
+            stale = dirty is None or len(self._order) != self._matrix.shape[0] or any(
+                n not in self.atoms for n in self._order)
+            if stale:                                   # unexpected state -> rebuild, correctness first
+                self._order = list(self.atoms)
+                self._matrix = (np.stack([self.atoms[n].emb for n in self._order]).astype(np.float32)
+                                if self._order else np.zeros((0, EMBED_DIM), np.float32))
             else:
-                self._matrix = np.zeros((0, EMBED_DIM), np.float32)
+                updates = [n for n in dirty if n in index]
+                additions = [n for n in self.atoms if n not in index]
+                for n in updates:                        # merged atoms: overwrite that single row
+                    self._matrix[index[n]] = np.asarray(self.atoms[n].emb, dtype=np.float32)
+                if additions:                            # new atoms: one appended block
+                    block = np.stack([self.atoms[n].emb for n in additions]).astype(np.float32)
+                    self._matrix = np.vstack([self._matrix, block]) if self._matrix.size else block
+                    self._order.extend(additions)
+            self._dirty_names = set()
             self._matrix_dirty = False
         return self._matrix, self._order
 
