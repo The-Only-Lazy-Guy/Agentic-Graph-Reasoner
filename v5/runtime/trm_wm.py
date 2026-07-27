@@ -1657,7 +1657,8 @@ def _math_cot_tasks_from_graph(g, n_train: int = 24, n_held: int = 8, n_raw: int
 def _swe_action_tasks_from_graph(g, n_train: int = 24, n_held: int = 8, n_trajectories: int = 60,
                                  k_related: int = 3, min_prior_steps: int = 3, max_ctx_steps: int = 12,
                                  seed: int = 0, trajectories: list | None = None,
-                                 max_issue_chars: int = 1500, max_step_chars: int = 200):
+                                 max_issue_chars: int = 1500, max_step_chars: int = 200,
+                                 target_args_chars: int = 0):
     """Real long-horizon task pool: NEXT-ACTION PREDICTION on nvidia/Open-SWE-Traces.
 
     Given a real GitHub issue plus the agent's real prior steps 1..T, predict step T+1's tool call. This is
@@ -1751,8 +1752,22 @@ def _swe_action_tasks_from_graph(g, n_train: int = 24, n_held: int = 8, n_trajec
                 if not related:
                     stats["skipped_no_related"] += 1
                     continue
+                # TARGET MUST MATCH WHAT IS SCORED. The first version teacher-forced the full
+                # `tool(args)` string, but verify() only checks the TOOL NAME, and the two are wildly
+                # mismatched in size: measured over 3,396 real steps the full target runs p50 43 / p90 377
+                # / max 3,949 tokens while the tool name is always 3. So nearly all the loss landed on
+                # argument strings -- instance-specific absolute paths and shell commands that are not
+                # learnable in principle -- and none of it on the 3 tokens being graded. That is visible
+                # in real output: the model emitted plausible ARGUMENTS ('"cd /workspace/old_api && ls
+                # -la ...') and never named a tool, while the ablated baseline emitted
+                # '[action: execute_bash]' and passed. It also explains WM getting WORSE as lm loss
+                # improved -- it was optimizing the part that is not measured.
+                # target_args_chars > 0 restores a truncated-args target for anyone who wants it.
                 args = (nxt.get("args") or "").strip()
-                target = f"{gold_tool}({args})" if args else f"{gold_tool}()"
+                if target_args_chars > 0:
+                    target = f"{gold_tool}({args[:target_args_chars]})" if args else f"{gold_tool}()"
+                else:
+                    target = gold_tool
                 out.append((text, related, target, gold_tool))
             if len(out) >= want:
                 break
@@ -2120,7 +2135,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             evict_to_memory: bool = False, swe_docs_path: str | None = None,
             passive_growth: bool = False, gate_init: float = 0.8,
             swe_max_issue_chars: int = 1500, swe_max_ctx_steps: int = 12,
-            gate_max: float = 0.0, merged: bool = False):
+            gate_max: float = 0.0, merged: bool = False, swe_target_args_chars: int = 0):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
@@ -2257,7 +2272,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                   f"(avoids the real datasets/torch ordering crash)")
         train_tasks, held_tasks, related_desc_pool, sw_stats = _swe_action_tasks_from_graph(
             g, n_train=n_train, n_held=n_held, trajectories=pre_trajs,
-            max_issue_chars=swe_max_issue_chars, max_ctx_steps=swe_max_ctx_steps)
+            max_issue_chars=swe_max_issue_chars, max_ctx_steps=swe_max_ctx_steps,
+            target_args_chars=swe_target_args_chars)
         atom_names = related_desc_pool
         print(f"  swe-action: real Open-SWE-Traces next-action prediction -> {sw_stats['n_train']} train "
               f"({sw_stats['n_train_traj']} trajectories), {sw_stats['n_held']} held-out "
@@ -2993,6 +3009,14 @@ def main():
                          "~5,300-token prompts; since training attention memory is quadratic in sequence "
                          "length, a real run hit ~60GB VRAM on a 4-bit 4B model. The head of an issue holds "
                          "the actual problem statement; the tail is usually traces and version tables.")
+    ap.add_argument("--swe-target-args-chars", type=int, default=0,
+                    help="--task-domain swe-action: chars of tool ARGUMENTS to include in the "
+                         "teacher-forcing target. 0 (default) = tool name only, which is what verify() "
+                         "actually scores. Including full args was an objective/metric mismatch: measured "
+                         "over 3,396 real steps the full tool(args) target runs p50 43 / p90 377 / max "
+                         "3,949 tokens while the graded tool name is always 3, so nearly all the loss fell "
+                         "on instance-specific paths and shell commands that cannot generalize. Set >0 "
+                         "only if you also change verify() to grade arguments.")
     ap.add_argument("--merged", action="store_true",
                     help="MERGE the top trm's job into the bottom trm and drop the second network. The "
                          "bottom trm carries its own latent state across chunks and attends its own "
@@ -3129,7 +3153,8 @@ def main():
                  evict_to_memory=a.evict_to_memory, swe_docs_path=(a.swe_docs_path or None),
                  passive_growth=a.passive_growth, gate_init=a.gate_init,
                  swe_max_issue_chars=a.swe_max_issue_chars,
-                 swe_max_ctx_steps=a.swe_max_ctx_steps, gate_max=a.gate_max, merged=a.merged)
+                 swe_max_ctx_steps=a.swe_max_ctx_steps, gate_max=a.gate_max, merged=a.merged,
+                 swe_target_args_chars=a.swe_target_args_chars)
     else:
         selftest()
 
