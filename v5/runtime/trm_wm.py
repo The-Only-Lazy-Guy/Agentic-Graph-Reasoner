@@ -52,7 +52,8 @@ from embedder import encode_batch, EMBED_DIM
 class GatedCrossAttn(nn.Module):
     """h (LM hidden [B,S,d]) attends to slots [K,d]; output = h + tanh(g)*proj(attn). g init 0 -> identity."""
 
-    def __init__(self, d: int, n_heads: int = 4, delta_scale: float = 0.3):
+    def __init__(self, d: int, n_heads: int = 4, delta_scale: float = 0.3,
+                 delta_mode: str = "rescale", gate_init: float = 0.0):
         super().__init__()
         assert d % n_heads == 0
         self.h, self.dh = n_heads, d // n_heads
@@ -60,27 +61,56 @@ class GatedCrossAttn(nn.Module):
         self.k = nn.Linear(d, d)
         self.v = nn.Linear(d, d)
         self.o = nn.Linear(d, d)
-        self.g = nn.Parameter(torch.zeros(1))
+        self.g = nn.Parameter(torch.full((1,), gate_init))
         # CAP the injection at delta_scale*||h|| (was 100% of ||h|| -- a sledgehammer that, combined with an
         # unregularized gate free to swing to tanh~0.97, could overwrite rather than blend with the residual
         # stream, encouraging memorization over a generalizable nudge).
         self.delta_scale = delta_scale
+        # "rescale" is the original behaviour and stays the default so every existing caller is
+        # bit-identical; "clip" is opt-in. See forward() for why the difference matters.
+        self.delta_mode = delta_mode
         for lin in (self.v, self.o):
             nn.init.eye_(lin.weight)
             nn.init.zeros_(lin.bias)
 
-    def forward(self, h: torch.Tensor, slots: torch.Tensor) -> torch.Tensor:
+    def forward(self, h: torch.Tensor, slots: torch.Tensor,
+                slots_v: torch.Tensor | None = None) -> torch.Tensor:
+        """slots supplies the KEYS (what each slot is addressable by); slots_v, when given, supplies the
+        VALUES (what gets copied out). Splitting them matters because the positional band that makes a
+        slot addressable is pure noise once it has been addressed: v and o are eye-initialised, so
+        attend->v->o->residual is a direct token-embedding copy, and Qwen ties its embeddings, so an
+        injected input-embedding row lifts that token's own logit. Feeding tokemb+band as the value
+        corrupts exactly the digit the copy exists to deliver. None keeps the single-stream behaviour."""
         B, S, d = h.shape
         if slots.dim() == 2:
             slots = slots.unsqueeze(0).expand(B, -1, -1)
+        if slots_v is None:
+            slots_v = slots
+        elif slots_v.dim() == 2:
+            slots_v = slots_v.unsqueeze(0).expand(B, -1, -1)
         Bk, K, _ = slots.shape
         q = self.q(h).view(B, S, self.h, self.dh).transpose(1, 2)
         k = self.k(slots).view(Bk, K, self.h, self.dh).permute(0, 2, 1, 3)
-        v = self.v(slots).view(Bk, K, self.h, self.dh).permute(0, 2, 1, 3)
+        v = self.v(slots_v).view(Bk, K, self.h, self.dh).permute(0, 2, 1, 3)
         att = torch.softmax((q @ k.transpose(-1, -2)) / (self.dh ** 0.5), dim=-1)
         ctx = (att @ v).transpose(1, 2).reshape(B, S, d)
         delta = self.o(ctx)
-        delta = delta / (delta.norm(dim=-1, keepdim=True) + 1e-6) * (h.norm(dim=-1, keepdim=True) * self.delta_scale)
+        cap = h.norm(dim=-1, keepdim=True) * self.delta_scale
+        dn = delta.norm(dim=-1, keepdim=True) + 1e-6
+        if self.delta_mode == "clip":
+            # CLIP to the cap instead of RESCALING to it. Rescaling forces every position to receive an
+            # injection of exactly delta_scale*||h||, discarding the adapter's own magnitude -- so the
+            # channel pushes exactly as hard on `step` and `computed`, where the LM's prior is already
+            # right, as on the digit it has to override. That makes per-position emphasis unrepresentable,
+            # which is fatal for copying specifically: measured, the narration takes the ADDRESS from the
+            # channel (routing 0.963 vs 0.209 chance) and the VALUE from its prior, emitting
+            # `step 3 computed 1000 / 2 = 500` for a target of `step 3 computed 108 - 27 = 81` -- right
+            # slot, right format, arithmetically self-consistent, invented. Clipping keeps the same bound
+            # and lets the adapter stay quiet where it has nothing to add and spend the whole budget where
+            # it does.
+            delta = delta * torch.clamp(cap / dn, max=1.0)
+        else:
+            delta = delta / dn * cap
         return h + torch.tanh(self.g) * delta
 
 
@@ -101,7 +131,8 @@ class WMReasoner(nn.Module):
     DEEP SUPERVISION: intermediate y_t values from each TRM cycle are regressed against
     oracle-computed intermediate targets (native_text_embedding of true intermediate results).
     Loss is MSE in d_lm space — NOT CE against atom pools (TRM is not a ranker)."""
-    def __init__(self, d_lm: int, couple_layers, trm, n_heads: int = 4, M: int = 4, top_trm=None):
+    def __init__(self, d_lm: int, couple_layers, trm, n_heads: int = 4, M: int = 4, top_trm=None,
+                 gate_init: float = 0.0):
         super().__init__()
         self.T = trm.T
         self.M = M
@@ -111,9 +142,11 @@ class WMReasoner(nn.Module):
         self.proj_y = nn.Linear(trm.d, d_lm)
 
         # Gated cross-attention adapters (unchanged)
-        self.adapters = nn.ModuleList([GatedCrossAttn(d_lm, n_heads) for _ in couple_layers])
+        self.adapters = nn.ModuleList([GatedCrossAttn(d_lm, n_heads, gate_init=gate_init) for _ in couple_layers])
         self.couple_layers = list(couple_layers)
         self._slots = None
+        # Optional separate VALUE stream (see GatedCrossAttn.forward). None => keys are also the values.
+        self._slots_v = None
 
         # Deep supervision: map y_t [d] → d_lm for MSE against native_text_embedding targets
         self.ds_proj = nn.Linear(trm.d, d_lm)
@@ -137,6 +170,17 @@ class WMReasoner(nn.Module):
         # chance of generalizing to domains where no verifier exists.
         self.critic_ctx = nn.Linear(EMBED_DIM * 2, d_lm)
         self.critic = nn.Sequential(nn.Linear(d_lm, d_lm // 2), nn.GELU(), nn.Linear(d_lm // 2, 1))
+
+        # EVENT SIGNALS for the BOTTOM trm. The hierarchical design put these on the top trm only
+        # (top_event_emb, created inside the `if top_trm is not None` branch below), so in MERGED mode --
+        # where there IS no top trm -- generate_with_reground computed `pending_event` on every chunk and
+        # then dropped it on the floor: the event triggers fired, and nothing in the network could receive
+        # them. This is the bottom-level receiver, so events remain real input in both architectures.
+        # Zero-init => a strict no-op until trained, same safe-by-construction convention as
+        # top_to_bottom_proj and GatedCrossAttn's gate.
+        #   0 = no event, 1 = trigger_patterns fired, 2 = instability fired, 3 = both
+        self.event_emb = nn.Embedding(4, trm.d_in)
+        nn.init.zeros_(self.event_emb.weight)
 
         # HIERARCHICAL (optional): a second, slower-timescale TRM (top_trm, same TRMReasoner class, its
         # own T -- the real TRM paper's own recipe runs many recursion steps for hard tasks, e.g. ~24; this
@@ -201,14 +245,37 @@ class WMReasoner(nn.Module):
         late_mean = sum(late) / len(late)
         return late_mean / early_mean
 
+    def _slots_from(self, y_t: torch.Tensor) -> torch.Tensor:
+        """Project per-cycle y_t [T, trm.d] into the LM's space, applying ACT halting when it is on.
+
+        Halting used to be DECORATIVE. TRMReasoner computed halt_weights, refine() stored them on
+        self._halt_weights, and nothing ever read them: slots were proj_y(y_t) over all T steps, so an
+        `--adaptive-t` run injected every step at full strength no matter what the halt head predicted. The
+        only consumer of adaptivity at all was ponder_loss (via _n_steps), i.e. the model paid a cost for
+        steps it was never allowed to skip.
+
+        Weights are normalized by their MAX, not used raw. halt_weights sum to 1 across T, so scaling
+        directly would shrink every slot by ~1/T and gut the injection strength -- that would confound
+        "the model chose to halt" with "the adapter got quieter". Dividing by the max leaves the step the
+        model actually committed to at full strength and attenuates the ones it wanted to skip, which is
+        soft truncation, shape-stable, and differentiable."""
+        slots = self.proj_y(y_t)                               # [T, d_lm]
+        if self.trm.adaptive and self._halt_weights is not None:
+            w = self._halt_weights.to(slots.dtype)
+            slots = slots * (w / w.max().clamp(min=1e-6)).unsqueeze(-1)
+        return slots
+
     def refine(self, task_emb: torch.Tensor, atom_embs: torch.Tensor, native: bool = False,
               track_deltas: bool = False):
         """task_emb [d_in], atom_embs [N, d_in] (both in TRM's d_in space, typically MiniLM 384-d).
         Runs the proper TRM (two-latent, cross-attn) to produce per-cycle y_t solution embeddings,
         projects to d_lm for GatedCrossAttn adapters.
 
-        native=True is ACCEPTED for backward compat but no longer needed — TRMReasoner handles
-        its own internal projections regardless of input space."""
+        native=True is ACCEPTED for backward compat but is a NO-OP and must not be read as "pass me
+        LM-native embeddings": task_proj/atom_proj are both nn.Linear(d_in=EMBED_DIM, d), so d_lm-space
+        input (e.g. native_text_embedding's 2560-d vectors on Qwen3-4B) is an immediate shape error.
+        membrane.py's WM path really did pass those, and it crashed on the first call -- nothing had ever
+        constructed a Membrane(wb=..., wm=...) so it was never executed. Inputs here are MiniLM."""
         if self.trm.adaptive:
             y_t, halt_w, n_steps = self.trm(task_emb, atom_embs)  # y_t [T, d], halt_w [T]
             self._halt_weights = halt_w
@@ -217,7 +284,7 @@ class WMReasoner(nn.Module):
             y_t = self.trm(task_emb, atom_embs)                    # [T, trm.d]
             self._halt_weights = None
             self._n_steps = None
-        slots = self.proj_y(y_t)                               # [T, d_lm] — working memory
+        slots = self._slots_from(y_t)                          # [T, d_lm] — working memory
         self._slots = slots
         states = [y_t[i] for i in range(self.T)]                # per-step y_t for DS
 
@@ -229,7 +296,7 @@ class WMReasoner(nn.Module):
 
     def recurrent_refine(self, task_emb: torch.Tensor, atom_embs: torch.Tensor,
                          memory: torch.Tensor | None = None, resume_state: tuple | None = None,
-                         track_deltas: bool = False):
+                         track_deltas: bool = False, event_signal: int = 0):
         """MERGED architecture: the bottom TRM does the top TRM's job itself, and there is no top TRM.
 
         The top level's only real responsibilities were (a) carrying latent state across chunks,
@@ -254,14 +321,31 @@ class WMReasoner(nn.Module):
         memory: [M, d_in] accumulated context (progress embeddings, evicted spans) -- concatenated with
         atom_embs so the trm attends graph knowledge and its own history in one place.
         resume_state: (z, y) from this method's previous call, giving real cross-call recurrence.
+        event_signal: the CAUSE of this call (0 none / 1 pattern / 2 instability / 3 both), added to the
+        task input through the zero-init event_emb -- the merged path's replacement for the top trm's
+        top_event_emb. Without it the event triggers in generate_with_reground were computed every chunk
+        and then discarded in merged mode, so the "event-based" half of the design was inert there.
         Returns the same shapes refine() does, plus the new (z, y) state appended."""
         ctx = atom_embs
         if memory is not None and memory.numel():
             mem = memory if memory.dim() == 2 else memory.unsqueeze(0)
             ctx = torch.cat([atom_embs, mem.to(atom_embs.dtype)], dim=0)
+        if event_signal:
+            task_emb = task_emb + self.event_emb(
+                torch.tensor(int(event_signal), device=task_emb.device))
         z_init, y_init = resume_state if resume_state is not None else (None, None)
-        y_t, new_state = self.trm(task_emb, ctx, z_init=z_init, y_init=y_init, return_state=True)
-        slots = self.proj_y(y_t)
+        # ADAPTIVE-SAFE unpack. TRMReasoner.forward returns (ys, state) normally but (ys, state,
+        # halt_weights, n_steps) when adaptive=True -- this used to unpack unconditionally into two names,
+        # so `--merged --adaptive-t` died on "too many values to unpack" before producing a single token.
+        # refine() had the adaptive branch; this method never got it.
+        out = self.trm(task_emb, ctx, z_init=z_init, y_init=y_init, return_state=True)
+        if self.trm.adaptive:
+            y_t, new_state, halt_w, n_steps = out
+            self._halt_weights, self._n_steps = halt_w, n_steps
+        else:
+            y_t, new_state = out
+            self._halt_weights, self._n_steps = None, None
+        slots = self._slots_from(y_t)
         self._slots = slots
         states = [y_t[i] for i in range(self.T)]
         if track_deltas:
@@ -359,11 +443,16 @@ class WMReasoner(nn.Module):
             ae = ae.unsqueeze(0)
         self._slots, _ = self.refine(te, ae)
 
-    def set_slots_direct(self, slots: torch.Tensor):
+    def set_slots_direct(self, slots: torch.Tensor, slots_v: torch.Tensor | None = None):
         self._slots = slots.unsqueeze(0) if slots.dim() == 1 else slots
+        # Always assigned, never left over: a stale value stream from a previous ask would be read as
+        # this ask's content and would be invisible in every metric.
+        self._slots_v = None if slots_v is None else (
+            slots_v.unsqueeze(0) if slots_v.dim() == 1 else slots_v)
 
     def clear(self):
         self._slots = None
+        self._slots_v = None
 
     def save(self, path: str):
         """Persist the trained adapter + TRMReasoner (+ top_trm, if this is a hierarchical WMReasoner)."""
@@ -374,6 +463,10 @@ class WMReasoner(nn.Module):
             "T": self.T,
             "trm_d": self.trm.d,
             "trm_d_in": self.trm.d_in,
+            # Recorded so a reloader can rebuild the SAME TRMReasoner. Without it, an --adaptive-t
+            # checkpoint reloads as a non-adaptive model and its halt_head weights are dropped in silence
+            # by load_state_dict(strict=False) -- the checkpoint would quietly lose its halting policy.
+            "trm_adaptive": bool(getattr(self.trm, "adaptive", False)),
             "n_heads": self.adapters[0].h if len(self.adapters) else 4,
         }
         if self.top_trm is not None:
@@ -410,7 +503,9 @@ class WMReasoner(nn.Module):
             if self._slots is None:
                 return None
             h = out[0] if isinstance(out, tuple) else out
-            h2 = self.adapters[idx](h.float(), self._slots.float()).to(h.dtype)
+            sv = getattr(self, "_slots_v", None)
+            h2 = self.adapters[idx](h.float(), self._slots.float(),
+                                    None if sv is None else sv.float()).to(h.dtype)
             if isinstance(out, tuple):
                 return (h2,) + tuple(out[1:])
             return h2
@@ -530,7 +625,8 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
                            instability_trigger: float | None = None,
                            sink_tokens: int = 0, reground_bottom: bool = False,
                            top_no_graph: bool = False, top_memory_max: int = 16,
-                           evict_to_memory: bool = False, merged: bool = False):
+                           evict_to_memory: bool = False, merged: bool = False,
+                           session=None):
     """Generate, re-grounding WMReasoner's slots every chunk_tokens instead of once up front.
 
     If R.top_trm is set, also runs the slow/top-level TRM every `top_every` CHUNKS (not every chunk) --
@@ -665,12 +761,19 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
             if merged:
                 # MERGED: no top trm at all -- the bottom trm carries its own state and attends its own
                 # memory alongside the graph atoms, with no zero-init projection in between.
-                if generated_so_far and (top_mem is None or len(top_memory_list) < top_memory_max):
+                # SLIDING, not first-N. This used to append only `if len(top_memory_list) <
+                # top_memory_max`, so once the bank filled it froze permanently: on any generation longer
+                # than top_memory_max chunks the trm kept attending the FIRST 16 progress snapshots and
+                # never saw anything recent -- the exact opposite of memory that tracks what has been
+                # written. Every sibling memory path here already slid with [-top_memory_max:].
+                if generated_so_far:
                     top_memory_list.append(torch.as_tensor(
                         encode_batch([generated_so_far])[0], dtype=torch.float32, device=wb.device))
+                    top_memory_list = top_memory_list[-top_memory_max:]
                     top_mem = torch.stack(top_memory_list)
                 out_m = R.recurrent_refine(bottom_task_emb, atom_embs, memory=top_mem,
-                                           resume_state=bottom_state, track_deltas=want_deltas)
+                                           resume_state=bottom_state, track_deltas=want_deltas,
+                                           event_signal=pending_event)
                 bottom_state = out_m[-1]
                 refine_out = (*out_m[:-1], None, None)
             else:
@@ -766,12 +869,16 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
                 top_memory_list = top_memory_list[-top_memory_max:]
         top_mem = torch.stack(top_memory_list) if top_memory_list else None
         if merged:
-            if generated_so_far and len(top_memory_list) < top_memory_max:
+            # SLIDING window, same fix as the no-cache path above: the old `len(...) < top_memory_max`
+            # guard froze the memory bank at the first N chunks instead of tracking recent progress.
+            if generated_so_far:
                 top_memory_list.append(torch.as_tensor(
                     encode_batch([generated_so_far])[0], dtype=torch.float32, device=wb.device))
+                top_memory_list = top_memory_list[-top_memory_max:]
                 top_mem = torch.stack(top_memory_list)
             out_m = R.recurrent_refine(bottom_task_emb, atom_embs, memory=top_mem,
-                                       resume_state=bottom_state, track_deltas=want_deltas)
+                                       resume_state=bottom_state, track_deltas=want_deltas,
+                                       event_signal=pending_event)
             bottom_state = out_m[-1]
             refine_out = (*out_m[:-1], None, None)
         else:
@@ -849,17 +956,26 @@ def generate_with_reground(wb, R, pids, task_emb, atom_embs, chunk_tokens: int =
             # exactly the long generations this is meant for, that context is the FIRST ~128 tokens
             # re-embedded over and over while later content is silently dropped. An evicted span is bounded
             # and small, so embedding it is faithful, and successive spans tile the real history.
-            if evict_to_memory:
+            if evict_to_memory or session is not None:
                 n_now = cur_ids.shape[-1]
                 drop_end = n_now - (evict_window - sink_tokens)
                 dropped = cur_ids[0, sink_tokens:drop_end] if sink_tokens > 0 else cur_ids[0, :n_now - evict_window]
                 if dropped.numel() > 0:
                     dropped_text = wb.tok.decode(dropped.tolist(), skip_special_tokens=True).strip()
                     if dropped_text:
-                        top_memory_list.append(torch.as_tensor(
-                            encode_batch([dropped_text])[0], dtype=torch.float32, device=wb.device))
-                        if len(top_memory_list) > top_memory_max:
-                            top_memory_list = top_memory_list[-top_memory_max:]
+                        # SESSION GRAPH, when one is supplied, because the flat bank below is still a form
+                        # of forgetting: it is capped at top_memory_max, so span N silently deletes span
+                        # N-16, and its only retrieval key is recency -- an early span is unreachable no
+                        # matter how relevant it later becomes. The graph keeps every span, addressable by
+                        # meaning, and keeps the VERBATIM text rather than a 384-d pooled vector, so a
+                        # recalled digit is copied instead of reconstructed. See membrane_session.py.
+                        if session is not None:
+                            session.write(dropped_text)
+                        if evict_to_memory:
+                            top_memory_list.append(torch.as_tensor(
+                                encode_batch([dropped_text])[0], dtype=torch.float32, device=wb.device))
+                            if len(top_memory_list) > top_memory_max:
+                                top_memory_list = top_memory_list[-top_memory_max:]
             evict_cache(past, keep_last_cache, keep_first=sink_tokens)
             if sink_tokens > 0:
                 cur_ids = torch.cat([cur_ids[:, :sink_tokens], cur_ids[:, -(evict_window - sink_tokens):]], dim=-1)
@@ -2610,6 +2726,13 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         print(f"  passive growth ON: verified generations are banked as REAL graph nodes mid-training "
               f"(failures -> trap nodes, capped at {growth.trap_budget}/epoch to avoid the trap-flooding "
               f"that required a graph repair here before).")
+    # Train the recurrent regime whenever it is the one we will evaluate in. See the rollout below.
+    recurrent_train = merged
+    if recurrent_train:
+        print(f"  merged: training is a 2-chunk RECURRENT rollout (resume_state + memory + progress-"
+              f"shifted task embedding), matching what generate_with_reground does at eval. Previously "
+              f"recurrent_refine was never called under a gradient at all -- the weights were fitted "
+              f"one-shot and deployed recurrent. Costs ~2 LM forwards per example.")
     heartbeat_every = max(1, (len(train_ex) // batch_size) // 5)   # ~5 pings per epoch, regardless of size
     for ep in range(epochs):
         if growth is not None:
@@ -2627,6 +2750,10 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 print(f"    [ep 0 heartbeat] training example {n}/{len(train_ex)}...", flush=True)
             batch = train_ex[b0:b0 + batch_size]
             all_states, pids_list, tids_list, slots_list = [], [], [], []
+            # Second-chunk lists, used only by the recurrent rollout below. Kept separate (rather than
+            # appended to the chunk-1 lists) because an example whose target is a single token has no
+            # second half and simply does not contribute a chunk 2 -- the two batches can differ in size.
+            pids2_list, tids2_list, slots2_list = [], [], []
             ds_tgt_list = []
             n_steps_list = []
             for task_emb, gold_idxs, atoms_needed, pids, text, target_code, tests in batch:
@@ -2634,44 +2761,87 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                     torch.as_tensor(encode_batch([atom_names[idx]])[0], dtype=torch.float32, device=wb.device)
                     for idx in gold_idxs
                 ])
-                # hierarchical_refine (not plain refine): when R.top_trm is None this is byte-identical to
-                # refine() (confirmed by the zero-init no-op test); when top_trm is set, this is the ONLY
-                # call site in the whole training loop that exercises top_trm/top_to_bottom_proj, so it's
-                # also the only place they can ever receive a gradient. Previously only generate_with_reground
-                # (eval-time, no .backward() anywhere near it) touched hierarchical_refine -- top_to_bottom_proj
-                # was mathematically guaranteed to sit at zero-init forever, regardless of epoch count (a real,
-                # confirmed-by-reading-the-code gap, not a "needs more epochs" issue).
-                slots, states, _top_state, _top_resume = R.hierarchical_refine(task_emb, mini_atom_embs)
-                if R._n_steps is not None:
-                    n_steps_list.append(R._n_steps)
-                # DEFER injection: with batch_size>1, calling set_slots_direct here would be overwritten by
-                # every subsequent example, so only the LAST example's slots would survive to the single
-                # batched forward pass below -- GatedCrossAttn then broadcasts that one example's slots to
-                # the WHOLE batch (its slots.dim()==2 branch), silently corrupting every other example's
-                # gradient (real/wrong content, right target). Stack per-example slots into [B,T,d_lm] and
-                # inject ONCE, after the loop, so each batch row attends to its OWN slots.
-                slots_list.append(slots)
                 pids = build_prompt(text)
                 return_body = target_code.split(": ", 1)[1] if ": " in target_code else target_code
                 tids = wb.tok(" " + return_body, return_tensors="pt").input_ids.to(wb.device)
                 eos = torch.tensor([[wb.tok.eos_token_id]], device=wb.device)
                 tids = torch.cat([tids, eos], dim=-1)
-                pids_list.append(pids); tids_list.append(tids)
+
+                if recurrent_train:
+                    # RECURRENT (merged) TRAINING: a two-chunk teacher-forced rollout, so the weights are
+                    # trained in the SAME regime eval runs them in.
+                    #
+                    # This closes a real train/test mismatch. recurrent_refine's cross-call state
+                    # (resume_state) and its memory-concatenated cross-attention context existed only
+                    # inside generate_with_reground, which is called under torch.no_grad() at eval time.
+                    # No training call site ever touched it, so every parameter it uses was fitted under
+                    # one-shot refine() -- fresh z0/y0, graph atoms only, static task embedding -- and then
+                    # deployed on chunk 2+ with a resumed latent, a memory bank appended to its context and
+                    # a progress-shifted task embedding it had never seen once.
+                    #
+                    # Chunk 1: fresh state, predict the first half of the target from the prompt.
+                    # Chunk 2: resume chunk 1's (z, y), attend the first half as memory, shift the task
+                    #          embedding by it (mirroring reground_bottom=True), predict the second half
+                    #          with the first half in context.
+                    # Cost is ~2 LM forwards per example; only --merged runs pay it.
+                    h = tids.shape[-1] // 2
+                    s1, st1, state1 = R.recurrent_refine(task_emb, mini_atom_embs)
+                    if R._n_steps is not None:
+                        n_steps_list.append(R._n_steps)
+                    if h >= 1 and tids.shape[-1] - h >= 1:
+                        tids_a, tids_b = tids[:, :h], tids[:, h:]
+                        prog_text = wb.tok.decode(tids_a[0], skip_special_tokens=True)
+                        prog = torch.as_tensor(encode_batch([prog_text])[0], dtype=torch.float32,
+                                               device=wb.device)
+                        s2, st2, _state2 = R.recurrent_refine(
+                            task_emb + prog, mini_atom_embs, memory=prog.unsqueeze(0),
+                            resume_state=state1)
+                        if R._n_steps is not None:
+                            n_steps_list.append(R._n_steps)
+                        slots_list.append(s1); pids_list.append(pids); tids_list.append(tids_a)
+                        slots2_list.append(s2)
+                        pids2_list.append(torch.cat([pids, tids_a], dim=-1)); tids2_list.append(tids_b)
+                        states = st2                       # chunk 2 holds the full-composition target
+                    else:                                  # 1-token target: no second half to roll out
+                        slots_list.append(s1); pids_list.append(pids); tids_list.append(tids)
+                        states = st1
+                else:
+                    # hierarchical_refine (not plain refine): when R.top_trm is None this is byte-identical to
+                    # refine() (confirmed by the zero-init no-op test); when top_trm is set, this is the ONLY
+                    # call site in the whole training loop that exercises top_trm/top_to_bottom_proj, so it's
+                    # also the only place they can ever receive a gradient. Previously only generate_with_reground
+                    # (eval-time, no .backward() anywhere near it) touched hierarchical_refine -- top_to_bottom_proj
+                    # was mathematically guaranteed to sit at zero-init forever, regardless of epoch count (a real,
+                    # confirmed-by-reading-the-code gap, not a "needs more epochs" issue).
+                    slots, states, _top_state, _top_resume = R.hierarchical_refine(task_emb, mini_atom_embs)
+                    if R._n_steps is not None:
+                        n_steps_list.append(R._n_steps)
+                    # DEFER injection: with batch_size>1, calling set_slots_direct here would be overwritten by
+                    # every subsequent example, so only the LAST example's slots would survive to the single
+                    # batched forward pass below -- GatedCrossAttn then broadcasts that one example's slots to
+                    # the WHOLE batch (its slots.dim()==2 branch), silently corrupting every other example's
+                    # gradient (real/wrong content, right target). Stack per-example slots into [B,T,d_lm] and
+                    # inject ONCE, after the loop, so each batch row attends to its OWN slots.
+                    slots_list.append(slots)
+                    pids_list.append(pids); tids_list.append(tids)
                 all_states.append(states)
                 if ds_weight > 0:
                     ds_tgt_list.append(_ds_targets_for_task(
                         wb, code_expr_of.get(text), atoms_needed, R.T, _ds_cache))
 
-            R.set_slots_direct(torch.stack(slots_list, dim=0))   # [B, T, d_lm] -- per-example, always
+            def _chunk_loss(p_list, t_list, s_list):
+                """One batched (or single) teacher-forced pass with per-example slots injected."""
+                R.set_slots_direct(torch.stack(s_list, dim=0))   # [B, T, d_lm] -- per-example, always
+                if len(p_list) > 1:
+                    input_ids, labels, attn_mask = _pad_and_batch(p_list, t_list, pad_id, wb.device)
+                    return wb.model(input_ids=input_ids, attention_mask=attn_mask, labels=labels).loss
+                return wb.model(input_ids=torch.cat([p_list[0], t_list[0]], dim=-1),
+                                labels=torch.cat([torch.full_like(p_list[0], -100), t_list[0]],
+                                                 dim=-1)).loss
 
-            if batch_size > 1 and len(batch) > 1:
-                input_ids, labels, attn_mask = _pad_and_batch(pids_list, tids_list, pad_id, wb.device)
-                outs = wb.model(input_ids=input_ids, attention_mask=attn_mask, labels=labels)
-                lm_loss = outs.loss
-            else:
-                outs = wb.model(input_ids=torch.cat([pids_list[0], tids_list[0]], dim=-1),
-                                labels=torch.cat([torch.full_like(pids_list[0], -100), tids_list[0]], dim=-1))
-                lm_loss = outs.loss
+            lm_loss = _chunk_loss(pids_list, tids_list, slots_list)
+            if pids2_list:
+                lm_loss = lm_loss + _chunk_loss(pids2_list, tids2_list, slots2_list)
 
             # Gate regularization: penalize |tanh(g)| — prevents adapter overwriting hidden states
             gate_reg = sum(torch.tanh(a.g) ** 2 for a in R.adapters) / len(R.adapters)
@@ -2783,12 +2953,18 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 ablated_ok += int(abl_ok)
                 dump.append((text, target_code, code, wm_ok, code_abl, abl_ok, instability))
 
-                # HIERARCHICAL A/B: only when --top-trm-t > 0 was actually requested (R.top_trm is not
-                # None) -- opt-in, zero cost/behavior change to every run that doesn't ask for it. Reports
-                # a SECOND real generation (periodic re-grounding, see generate_with_reground) side-by-side
-                # with the existing static-slots result above, never replacing it -- this is a comparison,
-                # not a swap, per the plan.
-                if R.top_trm is not None:
+                # RE-GROUNDING A/B: opt-in via --top-trm-t (hierarchical) OR --merged, zero cost/behavior
+                # change to any run that asks for neither. Reports a SECOND real generation (periodic
+                # re-grounding, see generate_with_reground) side-by-side with the static-slots result
+                # above, never replacing it -- a comparison, not a swap.
+                #
+                # `or merged` is a REAL fix, not a widened condition. generate_with_reground is the only
+                # caller of recurrent_refine, and it was reachable only when R.top_trm was not None -- so
+                # --merged, whose entire purpose is to DELETE the top trm, silently did nothing unless you
+                # also passed --top-trm-t to construct the network it removes. Every "merged" result in
+                # this codebase was therefore produced by a run that also built a top trm and then bypassed
+                # it. Merged now runs on its own.
+                if R.top_trm is not None or merged:
                     # This IS the clean baseline -- no eviction here even if --evict-window was passed, so
                     # "reground" always means the same thing across runs. use_kv_cache alone (no eviction)
                     # is validated byte-identical to the no-cache path on real Qwen3-4B, so this call's
@@ -2878,7 +3054,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             if _enst:
                 nsteps_str = f"  mean_steps {sum(_enst)/len(_enst):.2f}"
                 R._eval_nsteps = []
-            reground_str = f"  reground {reground_ok_count}/{len(held_ex)}" if R.top_trm is not None else ""
+            reground_str = (f"  reground {reground_ok_count}/{len(held_ex)}"
+                            if (R.top_trm is not None or merged) else "")
             evicted_str = (f"  reground_evicted {reground_evicted_ok_count}/{len(held_ex)}"
                           if evict_window is not None else "")
             print(f"  held WM {held_ok}/{len(held_ex)}  ablated {ablated_ok}/{len(held_ex)}{reground_str}"
@@ -2993,8 +3170,12 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
 
     if save_path:
         R.save(save_path)
-        print(f"\n  saved trained WMReasoner to {save_path} ({sum(p.numel() for p in R.parameters())} params) "
-              f"-- load it into membrane.py's Membrane(..., wb=..., wm_path=...) to use the trained adapter live.")
+        print(f"\n  saved trained WMReasoner to {save_path} ({sum(p.numel() for p in R.parameters())} params). "
+              f"Use it live with:  python -m v5.runtime.membrane --interactive --lm {lm_name} "
+              f"--wm-path {save_path}   (membrane.attach_wm rebuilds the TRM from this checkpoint's own "
+              f"recorded shape and registers the LM hooks). This line used to name a Membrane(wm_path=...) "
+              f"argument that did not exist, and no code path anywhere ever put a trained adapter on a live "
+              f"graph.")
 
     # EXPLAIN: the model must be able to say what it did, grounded in real memory -- not silently. Two real
     # probes, not a design claim: (1) SHORT-TERM -- ask about a task just solved this session; SessionFocus's
@@ -3320,6 +3501,125 @@ def main():
                  adaptive_t=a.adaptive_t, ponder_weight=a.ponder_weight)
     else:
         selftest()
+
+
+class TRMPointerGenerator(nn.Module):
+    """TRM that generates text by mixing vocabulary generation with input-token copying.
+
+    The TRM's own cross-attention weights serve as the pointer distribution —
+    no separate pointer head. At each step the TRM refines z/y over n cycles
+    against [input + generated] context, then y produces p_gen (copy vs generate)
+    and vocabulary logits. The mixed output is p_gen * P_vocab + (1-p_gen) * P_copy
+    where P_copy = attention over input tokens.
+
+    For the session copy-number task: numbers get copied (p_gen→0, pointer selects
+    the right input token), other text gets generated (p_gen→1)."""
+
+    def __init__(self, d_lm: int, d_in: int = 384, d: int = 256, n: int = 6,
+                 vocab_size: int = 151936):
+        from v5.runtime.algo_trm import _build as _build_trm
+        _, _, TRMReasoner = _build_trm()
+        super().__init__()
+        self.trm = TRMReasoner(d_in=d_in, d=d, T=n)
+        self.p_gen = nn.Linear(d, 1)
+        self.vocab_proj = nn.Linear(d, d_lm)
+        self.input_proj = nn.Linear(d_lm, d_in)
+        self.n = n
+        self.vocab_size = vocab_size
+
+    def forward(self, input_embs, lm_embed, generated_embs=None, task_emb=None):
+        """Forward pass for one token position.
+
+        input_embs: [N, d_in] per-token input embeddings
+        lm_embed: [vocab_size, d_lm] LM embedding table (frozen)
+        generated_embs: [G, d_in] or None — already-generated tokens
+        task_emb: [d_in] or None — optional task embedding (zero if None)
+
+        Returns: (pg [1], vocab_logits [vocab_size], w [N+G])"""
+        R = [input_embs]
+        if generated_embs is not None and generated_embs.numel():
+            R.append(generated_embs)
+        R = torch.cat(R)
+        R_proj = self.trm.atom_proj(R)
+        z, y = self.trm.z0, self.trm.y0
+        if task_emb is None:
+            task_emb = torch.zeros(self.trm.d_in, device=R.device, dtype=R.dtype)
+        x_proj = self.trm.task_proj(task_emb)
+        for _ in range(self.n):
+            z, y, y_out, w = self.trm.step(x_proj, z, y, R_proj, return_attn=True)
+        pg = torch.sigmoid(self.p_gen(y))
+        vocab_logits = self.vocab_proj(y_out) @ lm_embed.T
+        return pg, vocab_logits, w
+
+    def mixed_dist(self, pg, vocab_logits, w, input_ids, n_input):
+        """Build mixed output: p_gen * P_vocab + (1-p_gen) * P_copy.
+
+        pg: [1]; vocab_logits: [V]; w: [N+G]; input_ids: [N]; n_input: int.
+        Returns [V] probability over vocabulary."""
+        device = w.device
+        vocab_dist = torch.softmax(vocab_logits, dim=-1)
+        input_w = w[:n_input]
+        input_w = input_w / (input_w.sum() + 1e-8)
+        copy_dist = torch.zeros(self.vocab_size, device=device, dtype=w.dtype)
+        copy_dist.scatter_add_(0, input_ids, input_w)
+        return pg * vocab_dist + (1 - pg) * copy_dist
+
+    def generate(self, input_embs, input_ids, lm_embed, max_steps=48,
+                 eos_token_id=151643, task_emb=None):
+        """Greedy decode. Returns generated token IDs."""
+        device = input_embs.device
+        generated = []
+        generated_embs = None
+        n_input = input_embs.shape[0]
+        if task_emb is None:
+            task_emb = torch.zeros(self.trm.d_in, device=device, dtype=torch.float32)
+        for _ in range(max_steps):
+            pg, vocab_logits, w = self.forward(input_embs, lm_embed, generated_embs, task_emb)
+            dist = self.mixed_dist(pg, vocab_logits, w, input_ids, n_input)
+            tok = int(dist.argmax())
+            if tok == eos_token_id:
+                break
+            generated.append(tok)
+            tok_emb = self.input_proj(lm_embed[tok]).unsqueeze(0)
+            generated_embs = tok_emb if generated_embs is None else \
+                torch.cat([generated_embs, tok_emb])
+        return generated
+
+
+def _train_trm_pointer_generator(model, train_examples, lm_embed, dev,
+                                 epochs=60, lr=3e-4):
+    """Train TRMPointerGenerator on (input_ids, target_ids) pairs.
+
+    train_examples: list of (input_ids [N], target_ids [L]).
+    Uses teacher forcing with CE on the mixed output distribution."""
+    import torch.nn.functional as _F
+    torch.manual_seed(0)
+    if len(train_examples) < 2:
+        return 0.0
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    model.train()
+    for ep in range(epochs):
+        total = 0.0; n_tok = 0
+        for input_ids, target_ids in train_examples:
+            input_ids = input_ids.to(dev)
+            target_ids = target_ids.to(dev)
+            n_in = input_ids.shape[0]
+            # Pre-compute detached embeddings: input + all target positions
+            input_embs = model.input_proj(lm_embed[input_ids]).detach()
+            target_embs = model.input_proj(lm_embed[target_ids]).detach()
+            for pos in range(target_ids.shape[0]):
+                gen = target_embs[:pos]  # [pos, d_in], already detached
+                pg, vlog, w = model.forward(input_embs, lm_embed, gen)
+                dist = model.mixed_dist(pg, vlog, w, input_ids, n_in)
+                loss = _F.cross_entropy(dist.unsqueeze(0), target_ids[pos].unsqueeze(0))
+                opt.zero_grad(); loss.backward(); opt.step()
+                total += float(loss.detach()); n_tok += 1
+        if ep % 10 == 0:
+            print(f"      [pg-train] ep {ep} loss={total / max(1, n_tok):.4f}")
+    model.eval()
+    avg = total / max(1, n_tok)
+    print(f"      [pg-train] final loss={avg:.4f}  ({len(train_examples)} examples, {epochs} epochs)")
+    return avg
 
 
 if __name__ == "__main__":
