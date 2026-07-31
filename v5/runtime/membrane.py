@@ -50,13 +50,15 @@ _, _, TRMReasoner, *_ = _build_trm()                          # the actual nn.Mo
 
 def _hf_cache_dir() -> str:
     """Model/dataset cache dir: HF_HOME if set, else the first existing candidate (keeps the
-    local Windows cache working), else a portable ~/.cache/huggingface default."""
+    local Windows cache working), else a portable ~/.cache/huggingface default. The E:\\ fallback
+    is Windows-only — on POSIX a literal 'E:\\cache\\hf' dir (e.g. created by a stale run) must
+    never win over the portable default."""
     h = os.environ.get("HF_HOME")
     if h:
         return h
-    for cand in (r"E:\cache\hf", str(Path.home() / ".cache" / "huggingface")):
-        if os.path.isdir(cand):
-            return cand
+    if os.name == "nt":
+        if os.path.isdir(r"E:\cache\hf"):
+            return r"E:\cache\hf"
     return str(Path.home() / ".cache" / "huggingface")
 
 
