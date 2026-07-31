@@ -48,6 +48,18 @@ from v5.runtime.algo_trm import _build as _build_trm          # the real Tiny Re
 _, _, TRMReasoner, *_ = _build_trm()                          # the actual nn.Module used across the repo
 
 
+def _hf_cache_dir() -> str:
+    """Model/dataset cache dir: HF_HOME if set, else the first existing candidate (keeps the
+    local Windows cache working), else a portable ~/.cache/huggingface default."""
+    h = os.environ.get("HF_HOME")
+    if h:
+        return h
+    for cand in (r"E:\cache\hf", str(Path.home() / ".cache" / "huggingface")):
+        if os.path.isdir(cand):
+            return cand
+    return str(Path.home() / ".cache" / "huggingface")
+
+
 # ================================================================================================
 # 1. THE GRAPH — atoms carry real code + a real MiniLM embedding; depend-edges are the call graph
 # ================================================================================================
@@ -2632,7 +2644,7 @@ def _load_lm(lm_name: str):
     if not lm_name:
         return None
     from transformers import AutoTokenizer, AutoModelForCausalLM
-    cd = os.environ.get("HF_HOME", r"E:\cache\hf")
+    cd = _hf_cache_dir()
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     dt = torch.float16 if dev == "cuda" else torch.float32
     tk = AutoTokenizer.from_pretrained(lm_name, cache_dir=cd)
@@ -3327,7 +3339,7 @@ def demo_speech(lm_name: str = "") -> bool:
     if lm_name:
         from transformers import AutoTokenizer, AutoModelForCausalLM
         import torch as _t
-        cd = os.environ.get("HF_HOME", r"E:\cache\hf")
+        cd = _hf_cache_dir()
         tk = AutoTokenizer.from_pretrained(lm_name, cache_dir=cd)
         dev = "cuda" if _t.cuda.is_available() else "cpu"
         md = AutoModelForCausalLM.from_pretrained(
@@ -3363,7 +3375,7 @@ def demo_speech(lm_name: str = "") -> bool:
 
 def _gsm_stream(n: int) -> list:
     """Real GSM8K problem statements, in order. The haystack is 100% real text; nothing is generated."""
-    cd = os.environ.get("HF_HOME", r"E:\cache\hf")
+    cd = _hf_cache_dir()
     # Read the CACHED ARROW with pyarrow, deliberately never touching `datasets` here. Two independent
     # reasons, both hit while building this:
     #   1. load_dataset("openai/gsm8k") resolves the repo against the Hub even when every byte is on disk,
@@ -3377,7 +3389,11 @@ def _gsm_stream(n: int) -> list:
     import pyarrow as pa
     hit = _glob.glob(os.path.join(cd, "datasets", "openai___gsm8k", "**", "*train.arrow"), recursive=True)
     if not hit:
-        raise SystemExit(f"no cached GSM8K arrow under {cd} — this path is offline-only by design")
+        raise SystemExit(
+            f"no cached GSM8K arrow under {cd} - this path is offline-only by design. "
+            f"Cache it once (separate process, avoids the torch/datasets import deadlock):\n"
+            f"  HF_HOME={cd} python -c "
+            f"\"from datasets import load_dataset; load_dataset('openai/gsm8k', 'main', split='train')\"")
     with pa.memory_map(hit[0], "r") as src:
         qs = pa.ipc.open_stream(src).read_all().column("question").to_pylist()
     return [q.strip().replace("\n", " ") for q in qs[:n]]
@@ -3852,7 +3868,7 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
          a single end-to-end number would hide which half broke.
     """
     from transformers import AutoTokenizer, AutoModelForCausalLM
-    cd = os.environ.get("HF_HOME", r"E:\cache\hf")
+    cd = _hf_cache_dir()
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     tok = AutoTokenizer.from_pretrained(lm_name, cache_dir=cd)
     model = AutoModelForCausalLM.from_pretrained(
