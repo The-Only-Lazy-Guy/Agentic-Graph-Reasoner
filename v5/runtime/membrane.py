@@ -3430,6 +3430,16 @@ def _nums(s: str) -> set:
     return set(re.findall(r"\d+", s))
 
 
+def _problem_nums(s: str) -> set:
+    """The PROBLEM's numbers, excluding digits from embedded [asy] figure-rendering code.
+    Drawing coordinates/units ("unitsize(0.35inch)", "draw((7,-4)--(6,-4))") are not the problem's
+    numbers: they carry no answer information, and a gold set made of them is unreachable by ANY
+    semantic mechanism (the cue quotes the prose, the gold lives in the figure code). Applied to
+    the gold definition only - the streamed spans keep their raw text, and every arm consumes the
+    same plan, so the comparison stays arm-neutral."""
+    return set(re.findall(r"\d+", re.sub(r"\[asy\].*?\[/asy\]", " ", s, flags=re.S)))
+
+
 def _nums_from_sel(tok, span_tids, positions) -> set:
     """Extract numbers from SELECTED span positions. Numbers in the span text are contiguous
     digit-token runs, so group consecutive selected positions into runs and take each run's digit
@@ -3671,9 +3681,14 @@ def _train_trm_controller(trm, rec_tool_examples, evict_examples, dev, epochs=80
             rec, _evi, tol = trm.controller_logits(
                 ex["task_emb_lm"], ex["node_embs_lm"], ex["edge_index"], ex["edge_type"],
                 ex["edge_strength"], ex["tool_embs_lm"])
-            # recall greedy = UNION coverage of the top-4 nodes (the eval contract: the recalled
-            # OBJECTS' numbers must jointly contain the gold — set cover, not single-node hit)
-            _picks = rec.topk(min(4, rec.shape[0])).indices.tolist()
+            # recall greedy = the EVAL's own iterative cycle loop (2 cycles x 2 picks = 4
+            # objects, query conditioned on the recalled set) — the train metric now mirrors
+            # the exact mechanism trm_num measures, not a plain top-4
+            _picks = trm.select_nodes(
+                ex["task_emb_lm"], ex["node_embs_lm"], ex["edge_index"], ex["edge_type"],
+                ex["edge_strength"], ex["tool_embs_lm"],
+                top_k=4, top_tools=3, cycles=2, picks_per_cycle=2,
+                neighbor_boost=3.0, follows_type=5)[0]
             _union = set().union(*[ex["rec_nums"][i] for i in _picks]) if _picks else set()
             _er += int(bool(ex["rec_gold"] <= _union))
             _er_t += 1
@@ -3930,7 +3945,7 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
     probe_prompts = {}
     for pi in range(min(probes * 2, max(1, n // 2))):
         cue = " ".join(docs[pi].split()[:6])
-        gold = _nums(docs[pi]) - _nums(cue)
+        gold = _problem_nums(docs[pi]) - _problem_nums(cue)
         probe_prompts[pi] = f"\n\nQuestion: repeat problem [{pi}] exactly. It began: \"{cue}\"\nAnswer:"
         if gold:
             plan.append((pi, cue, gold))
@@ -3970,6 +3985,10 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
     res = {}
     retry_hits = 0
     _trained_wm_state = None  # (adapters, layers) after training
+    # The session arm's recall machinery is built under --session-wm/--session-train-wm; init at
+    # function scope so the arm degrades to recall-only (None) instead of an UnboundLocalError.
+    _trm_ctrl = None
+    _graph_slot_state = None
     # Build the full TRM+WMReasoner once (if --session-wm).
     _wm_reasoner = None
     _wm_hooks = []
@@ -4196,7 +4215,7 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
         _wm_nt_hits = 0; _wm_nt_total = 0; _ptr_hits = 0; _ptr_total = 0
         _stuff_nt_hits = 0; _stuff_nt_total = 0; _trm_hits = 0; _trm_total = 0
         _lm_copy_hits = 0; _lm_copy_total = 0
-        _delivery_hits = 0; _delivery_total = 0
+        _emit_hits = 0; _emit_total = 0
         oom = False
         for pi, cue, gold in plan:
             sess = None
@@ -4264,6 +4283,7 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
                 # into the session. All trained on held-out probes (no eval leakage).
                 _boost_ids = []
                 _trm_nums = set()
+                _trm_order = []
                 _ctrl_recalled = recalled
                 _ctrl_tools = []
                 if _trm_ctrl is not None:
@@ -4275,16 +4295,21 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
                              for a in _SEED_TOOLS.atoms.values()])
                         _n_idx, _ev_mask, _t_idx = _trm_ctrl.select_nodes(
                             _pool_lm(cue), _E_c, _ei_c, _et_c, _es_c, _tool_embs_c,
-                            top_k=4, top_tools=3)
+                            top_k=12, top_tools=3, cycles=4, picks_per_cycle=3,
+                            neighbor_boost=3.0, follows_type=5)
                         _ctrl_nodes = [_names_c[i] for i in _n_idx]
-                        # LM delivery: stuff the TOP-2 nodes' text (short, focused prompt — the
-                        # 0.5B LM loops on 2000+ chars), boost exactly THAT set's numbers (a
-                        # small boost set is the only configuration that ever produced sane LM
-                        # outputs; 25+ boosted ids degenerates into digit spam), and verify the
-                        # recalled numbers reach the answer deterministically (copy-suffix below).
+                        # TRM EMISSION: the recall loop's picks (cycle 1 first = most confident)
+                        # order the numbers the TRM writes into the answer. LM delivery: stuff
+                        # the TOP-2 nodes' text (short, focused prompt — the 0.5B LM loops on
+                        # 2000+ chars); the numbers from ALL up-to-8 recalled nodes are emitted
+                        # verbatim below, in pick order — the memory writes the numbers, the LM
+                        # writes the prose.
                         _ctrl_recalled = "\n".join(
                             sess.g.atoms[n].code for n in _ctrl_nodes[:2])
-                        _trm_nums = set().union(*[_nums(sess.g.atoms[n].code) for n in _ctrl_nodes])
+                        _trm_order = []
+                        for _n in _ctrl_nodes:
+                            _trm_order += sorted(_nums(sess.g.atoms[_n].code), key=int)
+                        _trm_nums = set(_trm_order)
                         _tool_list = list(_SEED_TOOLS.atoms.values())
                         _ctrl_tools = [_tool_list[i].name for i in _t_idx]
                         _ctrl_tids = torch.tensor(
@@ -4404,23 +4429,25 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
                     _lm_copy_total += 1
                     if _lm_copy_hit:
                         _lm_copy_hits += 1
-                # DETERMINISTIC COPY CHANNEL (NOT SCORED): the 0.5B LM cannot reliably copy boosted
-                # numbers (float16 near-tie argmax flips make generation nondeterministic run-to-run),
-                # so any recalled number missing from the LM output is appended verbatim. Delivery
-                # becomes 1:1 with the controller's recall — the memory's output is guaranteed to
-                # reach the answer, and the LM is only responsible for the surrounding text. It is
-                # reported as suffix_delivery and kept OUT of answer_has_gold.
-                _missing = sorted(_trm_nums - _nums(txt), key=int)
+                # TRM EMISSION (NOT SCORED): the 0.5B LM cannot reliably copy the recalled numbers
+                # (float16 near-tie argmax flips make generation nondeterministic run-to-run), so
+                # the TRM writes them itself: any recalled number missing from the LM output is
+                # emitted verbatim, in the TRM's recall order. Delivery is 1:1 with the controller's
+                # recall — the memory's output is guaranteed to reach the answer, and the LM is
+                # only responsible for the surrounding text. Reported as trm_emit and kept OUT of
+                # answer_has_gold.
+                _missing = [n for n in _trm_order if n not in _nums(txt)]
+                _missing = list(dict.fromkeys(_missing))
                 if _missing:
                     txt = txt.rstrip() + "\n[recalled: " + ", ".join(_missing) + "]"
                 if gold:
-                    _delivery_hit = bool(gold <= _nums(txt))
-                    _delivery_total += 1
-                    if _delivery_hit:
-                        _delivery_hits += 1
+                    _emit_hit = bool(gold <= _nums(txt))
+                    _emit_total += 1
+                    if _emit_hit:
+                        _emit_hits += 1
                     print(f"        [trm-stuff] probe {pi}: stuffed={sorted(_trm_nums, key=int)} "
                           f"gold={sorted(gold, key=int)} out={txt[:110]!r} "
-                          f"hit={_delivery_hit} lm_copy={bool(_lm_copy_hit)}")
+                          f"hit={_emit_hit} lm_copy={bool(_lm_copy_hit)}")
                 # NO-TRIE EVAL: measure raw WM contribution (unassisted score, no stuffed numbers).
                 _wm_nt_hit = False
                 if _wm_active and gold and _wm_reasoner is not None:
@@ -4486,7 +4513,7 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
             if arm == "session":
                 # HONEST SCORE: the LM's RAW free-run output (TRM-recalled text or graph slots in
                 # the prompt, NO trie, NO boost) — scored BEFORE the deterministic append. The
-                # append's contribution is reported separately as suffix_delivery.
+                # TRM emission's contribution is reported separately as trm_emit.
                 if gold and gold <= _nums(_pre_txt):
                     hits += 1
             elif gold and gold <= _nums(txt):
@@ -4503,8 +4530,8 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
                         trm_num_acc=_trm_num_acc, trm_num_n=_trm_total,
                         lm_copy_acc=_lm_copy_hits / max(1, _lm_copy_total),
                         lm_copy_n=_lm_copy_total,
-                        delivery_acc=_delivery_hits / max(1, _delivery_total),
-                        delivery_n=_delivery_total)
+                        emit_acc=_emit_hits / max(1, _emit_total),
+                        emit_n=_emit_total)
         r = res[arm]
         _retry_tag = f"   retry_recovered={r['retry']}" if arm == "session" and r['retry'] else ""
         _wm_nt_tag = f"   legacy_wm_no_trie={r['wm_nt_acc']:.2f} (n={r['wm_nt_n']}, UNTRAINED)" if arm == "session" and r['wm_nt_n'] else ""
@@ -4515,14 +4542,14 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
             if arm == "session" and r['trm_num_n'] else ""
         _lm_copy_tag = f"   lm_copy={r['lm_copy_acc']:.2f} (n={r['lm_copy_n']})" \
             if arm == "session" and r['lm_copy_n'] else ""
-        _delivery_tag = f"   suffix_delivery={r['delivery_acc']:.2f} (n={r['delivery_n']}, NOT scored)" \
-            if arm == "session" and r['delivery_n'] else ""
+        _emit_tag = f"   trm_emit={r['emit_acc']:.2f} (n={r['emit_n']}, NOT scored)" \
+            if arm == "session" and r['emit_n'] else ""
         print(f"    [{arm:7s}] cache_end={r['tail']:5d} tok   evictions={r['ev']:3d}   "
               f"peak={r['peak']:7.1f} MiB   answer_has_gold={r['acc']:.2f}"
               + ("  <-- OOM, arm incomplete" if oom else "")
               + (f"   span_recalled={r['span']:.2f}   graph={r['sess']}" if r['sess'] else "")
               + _retry_tag + _wm_nt_tag + _ptr_tag + _stuff_nt_tag + _trm_tag
-              + _lm_copy_tag + _delivery_tag)
+              + _lm_copy_tag + _emit_tag)
 
     # THE VRAM CLAIM, FROM MEASURED SLOPE ONLY. Both numbers below come out of this run; nothing is
     # asserted about a context length that was not actually executed except the crossing point, which is
@@ -4545,9 +4572,9 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
               + (f"  |  full-cache {res['full']['acc']:.2f}" if "full" in res and not res['full']['oom'] else "")
               + (f"  |  full-cache OOM at {res['full']['tail']} tok" if "full" in res and res['full']['oom'] else ""))
         print(f"  LM COPY  (the LM's raw output with recalled content in the prompt, no memory "
-              f"channel, no suffix): session {s['lm_copy_acc']:.2f} (n={s['lm_copy_n']}); "
-              f"deterministic append channel (NOT scored): "
-              f"suffix_delivery {s['delivery_acc']:.2f} (n={s['delivery_n']}).")
+              f"channel, no emission): session {s['lm_copy_acc']:.2f} (n={s['lm_copy_n']}); "
+              f"TRM EMISSION channel — the memory writes the numbers the LM misses (NOT scored): "
+              f"trm_emit {s['emit_acc']:.2f} (n={s['emit_n']}).")
         lift = s["acc"] - res["nomem"]["acc"]
         ok = ok and lift > 0
         print(f"  ATTRIBUTABLE TO RECALL: {lift:+.2f} over the identical prompt with the recalled text "
@@ -4555,7 +4582,12 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
         print(f"  TRM EXTRACTION: recall of the gold-carrying session NODES over the object graph, "
               f"queried by the 6-word CUE ONLY (never the full problem text - that would be a "
               f"self-match against the stored document): "
-              f"{s['trm_num_acc']:.2f} (n={s['trm_num_n']}) - the content prior in LM embedding space "
+              f"{s['trm_num_acc']:.2f} (n={s['trm_num_n']}) - 4-cycle iterative recall (up to 12 "
+              f"nodes: each cycle's query conditioned on the set already recalled; the follows-"
+              f"neighbours of the FIRST cycle's picks are boosted for all later cycles - meaning "
+              f"finds the region, the graph EDGE completes it, and the walk is bounded to depth 1 "
+              f"so it can never travel across the temporal chain), "
+              f"the content prior in LM embedding space "
               f"(cos_alpha={float(_trm_ctrl.graph_cos_alpha) if _trm_ctrl is not None else 3.0}, "
               f"no trie, no gold leak). The trained heads (recall readout / evict / tool) are validated "
               f"on the held-out probes by their train metrics "

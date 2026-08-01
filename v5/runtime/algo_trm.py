@@ -228,7 +228,9 @@ def _build():
         def controller_logits(self, task_emb_lm: torch.Tensor, node_embs_lm: torch.Tensor,
                               edge_index: torch.Tensor, edge_type: torch.Tensor,
                               edge_strength: torch.Tensor,
-                              tool_embs_lm: torch.Tensor) -> tuple:
+                              tool_embs_lm: torch.Tensor,
+                              ctx_emb_lm: torch.Tensor | None = None,
+                              ctx_scale: float = 0.5) -> tuple:
             """OBJECT-LEVEL graph controller: logits over the session graph's NODES (objects), with
             edges as extra information, plus the main graph's TOOLS.
 
@@ -238,6 +240,12 @@ def _build():
             edge_type:     [E] relation-type ids (follows/grounds/related/...).
             edge_strength: [E] learned per-edge scalars in [0,1].
             tool_embs_lm:  [M, d_lm] the main graph's tool embeddings (retrievable objects).
+            ctx_emb_lm:    [d_lm] or None — embedding of the nodes this controller has ALREADY
+                           picked (the running recall set). When given, the recall prior's query
+                           becomes task + ctx_scale * ctx: later cycles "remember what the session
+                           already recalled" (the TRM's step() loop) instead of re-scoring every
+                           node against the bare cue.
+            ctx_scale:     weight of the already-picked set in the cycle-conditioned query.
 
             Returns (recall_logits [N], evict_logits [N], tool_logits [M]):
               recall_logits: which session nodes to SURFACE to the LM (multi-label, BCE-trained).
@@ -276,8 +284,15 @@ def _build():
             # space gets right (8/8). The raw-space prior is therefore the controller's recall
             # signal; the trained heads (evict, tool) and the projections they consume remain
             # learned components validated by their train metrics.
+            # CYCLE-CONDITIONED PRIOR: the recall query is the cue PLUS the already-recalled set
+            # (mean of the picked node embeddings), so a later cycle's ranking shifts toward what
+            # the session already read — the step()-loop conditioning that makes repeated picks
+            # add COVERAGE instead of re-issuing the same region. Cosine is still raw LM space.
+            _q = task_emb_lm.float()
+            if ctx_emb_lm is not None and ctx_emb_lm.numel():
+                _q = _q + ctx_scale * ctx_emb_lm.float()
             rec = self.graph_cos_alpha * torch.nn.functional.cosine_similarity(
-                task_emb_lm.float().unsqueeze(0), node_embs_lm.float())
+                _q.unsqueeze(0), node_embs_lm.float())
             evi = (self.evict_head(y_out).unsqueeze(0) * R_nodes).sum(-1) / math.sqrt(self.d)
             tol = (self.tool_head(y_out).unsqueeze(0) * R_tools).sum(-1) / math.sqrt(self.d)
             tol = tol + (x.unsqueeze(0) * R_tools).sum(-1) / math.sqrt(self.d)
@@ -286,18 +301,73 @@ def _build():
         def select_nodes(self, task_emb_lm: torch.Tensor, node_embs_lm: torch.Tensor,
                          edge_index: torch.Tensor, edge_type: torch.Tensor,
                          edge_strength: torch.Tensor, tool_embs_lm: torch.Tensor,
-                         top_k: int = 8, top_tools: int = 3) -> tuple:
-            """One-shot OBJECT selection over the session graph. Returns
-            (node_idx list, evict_mask list[N] bool, tool_idx list)."""
+                         top_k: int = 8, top_tools: int = 3,
+                         cycles: int = 1, picks_per_cycle: int = 2,
+                         ctx_scale: float = 0.5,
+            neighbor_boost: float = 0.0,
+            follows_type: int | None = None) -> tuple:
+            """Iterative (step()-style) OBJECT selection over the session graph.
+
+            cycles=1 reproduces the original one-shot top-k. For cycles>1 the controller
+            alternates pick/mask/condition: each cycle re-scores the REMAINING nodes with the
+            query shifted toward the already-picked set (see controller_logits's ctx_emb_lm),
+            so later picks "remember what the session already recalled" and keep adding
+            COVERAGE instead of re-issuing the same region. top_k bounds the TOTAL picks.
+
+            neighbor_boost/follows_type: when > 0, the follows-neighbours of the FIRST cycle's
+            picks are boosted (by that amount) for every later cycle — the "recalled A, which
+            reminds me of B" hop through the session graph's temporal edges, which is how a
+            document region split by an eviction boundary is completed (meaning finds the region,
+            the EDGE completes it). Depth is BOUNDED TO 1: only first-cycle picks spread the
+            boost, never walk-picks, so the completion hop can never drag picks across the
+            temporal chain into unrelated spans.
+            Returns (node_idx list, evict_mask list[N] bool, tool_idx list)."""
             dev = node_embs_lm.device
-            with torch.no_grad():
-                rec, evi, tol = self.controller_logits(
-                    task_emb_lm, node_embs_lm, edge_index, edge_type, edge_strength, tool_embs_lm)
             N = node_embs_lm.shape[0]
             M = tool_embs_lm.shape[0]
-            n_idx = rec.topk(min(top_k, N)).indices.tolist()
+            total = min(top_k, N)
+            per = max(1, picks_per_cycle)
+            picked: list = []
+            mask = torch.zeros(N, dtype=torch.bool, device=dev)
+            _boost = torch.zeros(N, device=dev)
+            _first_picks: list = []
+            rec = evi = tol = None
+            with torch.no_grad():
+                for _c in range(max(1, cycles)):
+                    if len(picked) >= total:
+                        break
+                    _ctx = None
+                    if picked:
+                        _ctx = node_embs_lm[picked].mean(dim=0)
+                    rec, evi, tol = self.controller_logits(
+                        task_emb_lm, node_embs_lm, edge_index, edge_type, edge_strength,
+                        tool_embs_lm, ctx_emb_lm=_ctx, ctx_scale=ctx_scale)
+                    _rec_c = rec.clone() + _boost
+                    _rec_c[mask] = float('-inf')
+                    _n_new = min(per, total - len(picked))
+                    if _n_new <= 0:
+                        break
+                    _new = [int(i) for i in _rec_c.topk(_n_new).indices.tolist()
+                            if not bool(mask[i])]
+                    for _j in _new:
+                        picked.append(_j)
+                        mask[_j] = True
+                    if _c == 0:
+                        _first_picks = list(_new)
+                        if neighbor_boost and edge_index is not None and edge_index.numel():
+                            _src = edge_index[0].tolist()
+                            _dst = edge_index[1].tolist()
+                            _typ = edge_type.tolist()
+                            for _j in _first_picks:
+                                for _k, (_s, _d) in enumerate(zip(_src, _dst)):
+                                    if follows_type is not None and _typ[_k] != follows_type:
+                                        continue
+                                    if _s == _j and not bool(mask[_d]):
+                                        _boost[_d] = neighbor_boost
+                                    if _d == _j and not bool(mask[_s]):
+                                        _boost[_s] = neighbor_boost
             t_idx = tol.topk(min(top_tools, M)).indices.tolist()
-            return ([int(i) for i in n_idx],
+            return ([int(i) for i in picked],
                     [bool(e) for e in (evi < 0).tolist()],
                     [int(i) for i in t_idx])
 
@@ -491,20 +561,30 @@ def _selftest() -> bool:
     assert rec.shape == (6,) and evi.shape == (6,) and tol.shape == (3,), \
         f"controller shapes {rec.shape} {evi.shape} {tol.shape}"
     bce = torch.nn.functional.binary_cross_entropy_with_logits(
-        rec, torch.zeros_like(rec))
+        tol, torch.zeros_like(tol))
     bce.backward()
-    assert trm_t.recall_head.weight.grad is not None and \
-        trm_t.recall_head.weight.grad.abs().sum() > 0
+    assert trm_t.tool_head.weight.grad is not None and \
+        trm_t.tool_head.weight.grad.abs().sum() > 0
     assert trm_t.graph_msg.weight.grad is not None and \
         trm_t.graph_msg.weight.grad.abs().sum() > 0, "edge message-passing grad missing"
+    assert not rec.requires_grad, "recall prior must stay a frozen raw-LM-space cosine"
+    ctx_lm = torch.randn(64)
+    rec2, _, _ = trm_t.controller_logits(task_lm, node_lm, edge_index, edge_type,
+                                         edge_strength, tool_lm, ctx_emb_lm=ctx_lm)
+    assert not torch.allclose(rec2, rec), "cycle-conditioned query must shift the prior"
     n_idx, evict_mask, t_idx = trm_t.select_nodes(task_lm, node_lm, edge_index, edge_type,
                                                   edge_strength, tool_lm, top_k=3, top_tools=2)
     assert len(n_idx) <= 3 and len(t_idx) <= 2 and len(evict_mask) == 6
     assert all(isinstance(i, int) and 0 <= i < 6 for i in n_idx), f"node sel {n_idx}"
+    n_idx2, _, _ = trm_t.select_nodes(task_lm, node_lm, edge_index, edge_type,
+                                      edge_strength, tool_lm, top_k=6, top_tools=2,
+                                      cycles=3, picks_per_cycle=2)
+    assert len(n_idx2) <= 6 and len(set(n_idx2)) == len(n_idx2), "loop must not re-pick"
     keep = trm_t.evict_decision(task_lm, node_lm, edge_index, edge_type, edge_strength)
     assert isinstance(keep, bool)
     print(f"  [12] graph controller (objects+edges): rec {list(rec.shape)} evi {list(evi.shape)} "
-          f"tool {list(tol.shape)}, grad OK (msg+heads), sel {len(n_idx)} nodes/{len(t_idx)} tools -> PASS")
+          f"tool {list(tol.shape)}, grad OK (msg+heads), prior frozen, ctx shifts rec, "
+          f"sel {len(n_idx)} nodes/{len(t_idx)} tools, loop {len(n_idx2)} -> PASS")
 
     print("\n  ALGO_TRM SELFTEST -> PASS  (V3 TRMReasoner + ACT adaptive + token head + graph controller)")
     return True
