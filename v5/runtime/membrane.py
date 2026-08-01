@@ -4051,6 +4051,24 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
     #   GSM8K n=200  1.00 / 1.00 / span_recalled 1.00 / lm_copy 0.62
     #   MATH  n=40   1.00 / 1.00 / span_recalled 1.00 / lm_copy 0.75
     #   MATH  n=200  1.00 / 1.00 / span_recalled 1.00 / lm_copy 0.25 (probe 5 = dilution case)
+    #
+    # TRM HONEST STATUS (we have NOT exercised the TRM much): the 1.00 above runs on the
+    # frozen priors + loop; the TRM's TRAINED heads are evict/tool-side only (validated
+    # 33/98, 21/27), and the WMReasoner slots / gated cross-attention into the LM's last 3
+    # layers do NOT move lm_copy (0.25-0.50, unchanged ballpark). The gap is THE TRM<->LM
+    # CONNECTION, not retrieval. Forward options (see session-graph-memory.md APPEND 3):
+    #   (1) STRONGER TRM<->LM COUPLING - more MLPs / deeper attention between the slot table
+    #       and LM hidden states (current: one GatedCrossAttn per coupled layer, gate-init
+    #       0.5, delta capped 0.3*||h||); richer readout, per-layer projections, or attention
+    #       over slots from EVERY LM position - untested on this path.
+    #   (2) ANOTHER TRM / hierarchical TRM - CAUTION: already banked a null (hierarchical
+    #       2-timescale TRM on real Qwen3-4B: 14/16 vs 13/16 = noise; both levels saw the
+    #       same atoms = no informational asymmetry). Weaker bet than (1).
+    #   (3) LIGHTLY TUNE THE DECODER - LoRA ~1-2% of params on the frozen LM, verified-trace
+    #       recipe (consistent with project-model-strategy); keeps the <=6GB thesis and turns
+    #       the measured weak link (live arithmetic drift, e.g. 1+2+7+4=13) trainable.
+    #   FALSIFIER for any of these: same honest matrix - trm_num stays 1.00, answer_has_gold
+    #   (now 0.25-0.50) must move UP, LM-side drift must shrink.
     # ==========================================================================
     # The session arm's recall machinery is built under --session-wm/--session-train-wm; init at
     # function scope so the arm degrades to recall-only (None) instead of an UnboundLocalError.
