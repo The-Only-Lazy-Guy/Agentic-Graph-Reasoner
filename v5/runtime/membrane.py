@@ -3691,7 +3691,7 @@ def _train_trm_controller(trm, rec_tool_examples, evict_examples, dev, epochs=80
     print(f"      [trm-ctrl] cos_alpha={float(trm.graph_cos_alpha.detach()):.3f}  "
           f"train greedy: recall-hit {_er}/{_er_t}  evict-keep "
           f"{_ee}/{_ee_t}  tool-hit {_et}/{_et_t}")
-    return final
+    return (_er, _er_t, _ee, _ee_t, _et, _et_t)
 
 
 def _build_trie(tok, texts):
@@ -4179,7 +4179,10 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
                   f"{_ctrl_examples[0]['edge_index'].shape[1]} edges, "
                   f"{_ctrl_examples[0]['tool_embs_lm'].shape[0]} tools) "
                   f"+ {len(_evict_examples)} evict examples")
-            _train_trm_controller(_trm_ctrl, _ctrl_examples, _evict_examples, dev, epochs=80)
+            _er, _er_t, _ee, _ee_t, _et, _et_t = _train_trm_controller(
+                _trm_ctrl, _ctrl_examples, _evict_examples, dev, epochs=80)
+        else:
+            _er = _er_t = _ee = _ee_t = _et = _et_t = 0
     # Bounded arms FIRST, on purpose: `full` is the arm that can OOM, and running it last means an OOM at
     # a long stream still leaves the results it is meant to be compared against already printed.
     for arm in ("nomem", "window", "session", "full"):
@@ -4527,7 +4530,8 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
               f"{s['trm_num_acc']:.2f} (n={s['trm_num_n']}) - the content prior in LM embedding space "
               f"(cos_alpha={float(_trm_ctrl.graph_cos_alpha) if _trm_ctrl is not None else 3.0}, "
               f"no trie, no gold leak). The trained heads (recall readout / evict / tool) are validated "
-              f"on the held-out probes by their train metrics (evict 21/21, tool 26/28): at 28 examples "
+              f"on the held-out probes by their train metrics "
+              f"(evict {_ee}/{_ee_t}, tool {_et}/{_et_t}): at {_er_t} examples "
               f"the trained recall readout reorders spans whose cosines differ by <0.05 (measured "
               f"0.50-0.62 vs 1.00 for the prior), so recall uses the prior and the heads stay "
               f"evict/tool-side.")
