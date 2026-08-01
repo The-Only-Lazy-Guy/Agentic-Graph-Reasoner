@@ -3401,6 +3401,30 @@ def _gsm_stream(n: int) -> list:
     return [q.strip().replace("\n", " ") for q in qs[:n]]
 
 
+def _math_stream(n: int) -> list:
+    """Real MATH (Hendrycks competition math) problem statements, in order. Harder than GSM8K:
+    LaTeX-heavy, longer statements, denser/more diverse numbers — the same recall mechanism gets
+    a genuinely harder haystack. Read via pyarrow from the cached arrow, same offline-only rules
+    as _gsm_stream. (The canonical hendrycks/competition_math repo refuses the load — the official
+    hendrycks/math README links this mirror: qwedsacf/competition_math.)"""
+    cd = _hf_cache_dir()
+    import glob as _glob
+    import pyarrow as pa
+    hit = _glob.glob(os.path.join(cd, "datasets", "qwedsacf___competition_math", "**", "*train.arrow"),
+                     recursive=True)
+    if not hit:
+        raise SystemExit(
+            f"no cached MATH arrow under {cd} - this path is offline-only by design. "
+            f"Cache it once (separate process, avoids the torch/datasets import deadlock):\n"
+            f"  HF_HOME={cd} python -c "
+            f"\"from datasets import load_dataset; load_dataset('qwedsacf/competition_math', split='train')\"")
+    # Prefer the "main" config's arrow over any other config that happens to be cached.
+    hit = sorted(hit, key=lambda p: ("/main/" not in p, p))
+    with pa.memory_map(hit[0], "r") as src:
+        qs = pa.ipc.open_stream(src).read_all().column("problem").to_pylist()
+    return [q.strip().replace("\n", " ") for q in qs[:n]]
+
+
 def _nums(s: str) -> set:
     """Extract all integer strings from text."""
     return set(re.findall(r"\d+", s))
@@ -3858,7 +3882,8 @@ def _train_wm_adapters(wb, spans_with_nums, dev, epochs=80, lr=3e-4, max_spans=2
 
 def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, chunk: int = 128,
                  k: int = 3, probes: int = 8, ranker: bool = False,
-                 verify_retries: int = 2, use_wm: bool = False, train_wm: bool = False) -> bool:
+                 verify_retries: int = 2, use_wm: bool = False, train_wm: bool = False,
+                 dataset: str = "gsm8k") -> bool:
     """Does bounding the KV cache hold VRAM flat, and does a session graph give back what it evicted?
 
     Two questions, deliberately separated, because they have different failure modes and conflating them
@@ -3888,7 +3913,7 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
     base_vram = torch.cuda.memory_allocated() / 2**20 if dev == "cuda" else 0.0
     print(f"\n  LM {lm_name}  device={dev}  weights={base_vram:.0f} MiB  (frozen)")
 
-    docs = _gsm_stream(n)
+    docs = _math_stream(n) if dataset == "math" else _gsm_stream(n)
     doc_text = "\n".join(f"[{i}] {d}" for i, d in enumerate(docs))
     doc_ids = tok(doc_text, return_tensors="pt").input_ids.to(dev)
     n_ctx = doc_ids.shape[1]
@@ -3911,7 +3936,7 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
             plan.append((pi, cue, gold))
         if len(plan) >= probes:
             break
-    print(f"  stream: {n} real GSM8K problems -> {n_ctx} tokens   window={window} (+{sinks} sinks)   "
+    print(f"  stream: {n} real {dataset.upper()} problems -> {n_ctx} tokens   window={window} (+{sinks} sinks)   "
           f"probing {len(plan)} early problems (indices {plan[0][0]}..{plan[-1][0]}); "
           f"gold = numbers reachable ONLY from the evicted span")
 
@@ -4605,6 +4630,9 @@ def main():
                          "TRM is put IN the answer path: it refines working-memory slots from the retrieved "
                          "nodes and the LM attends them through the coupled adapters. Without it, "
                          "--interactive is graph-cosine retrieval + prompt-stuffing and the TRM is unused.")
+    ap.add_argument("--dataset", type=str, default="gsm8k", choices=["gsm8k", "math"],
+                    help="which cached dataset to stream for --session: gsm8k (default) or math "
+                         "(Hendrycks competition math — harder: LaTeX, longer, denser numbers)")
     a = ap.parse_args()
     if a.reason:
         sys.exit(0 if demo_reason(a.lm, a.n) else 1)
@@ -4619,7 +4647,8 @@ def main():
         sys.exit(0 if demo_session(a.lm or "Qwen/Qwen2.5-0.5B-Instruct", a.n, window=a.window,
                                     sinks=a.sinks, k=a.recall_k, probes=a.probes,
                                     ranker=a.session_ranker, verify_retries=a.verify_retries,
-                                    use_wm=a.session_wm, train_wm=a.session_train_wm) else 1)
+                                    use_wm=a.session_wm, train_wm=a.session_train_wm,
+                                    dataset=a.dataset) else 1)
     if a.speech:
         demo_speech(a.lm)
         return
