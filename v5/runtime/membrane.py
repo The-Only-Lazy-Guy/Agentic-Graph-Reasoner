@@ -3995,8 +3995,12 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
         _slot_examples = []
         _SESSION_EDGE_TYPES_LOCAL = {"follows": 5, "grounds": 6, "contains": 7, "in": 8, "uses": 3,
                                      "related": 1, "depend": 0}
-        for pi, _, gold in plan:
-            _got = _sg.recall(docs[pi], k)
+        for pi, cue_gs, gold in plan:
+            # CUE-ONLY recall: the query is the problem's first 6 words (what a user would actually
+            # quote), NOT the full problem text. The full text IS the document stored in the graph,
+            # so full-text queries are self-matches (cosine ~ 1.0 by construction) and inflate every
+            # recall metric. Training must use the same query the eval does.
+            _got = _sg.recall(cue_gs, k)
             if _got and gold:
                 _names_g = [n for n in _sg.order if n in _sg.g.atoms]
                 if _names_g:
@@ -4022,8 +4026,8 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
                         _ei_g = torch.zeros(2, 0, dtype=torch.long, device=dev)
                         _et_g = torch.zeros(0, dtype=torch.long, device=dev)
                         _es_g = torch.zeros(0, dtype=torch.float32, device=dev)
-                    # Cosine recall weights (proven prior)
-                    _task_emb = torch.as_tensor(encode_batch([docs[pi]])[0],
+                    # Cosine recall weights (proven prior) — cue-query, same as eval
+                    _task_emb = torch.as_tensor(encode_batch([cue_gs])[0],
                                                 dtype=torch.float32, device=dev)
                     _rec_g = torch.nn.functional.cosine_similarity(
                         _task_emb.unsqueeze(0), _E_g, dim=-1)
@@ -4094,7 +4098,8 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
         for pi2 in range(min(len(docs), 40)):
             if pi2 in _plan_pis:
                 continue
-            _gold2 = _nums(docs[pi2]) - _nums(" ".join(docs[pi2].split()[:6]))
+            _cue2 = " ".join(docs[pi2].split()[:6])
+            _gold2 = _nums(docs[pi2]) - _nums(_cue2)
             if not _gold2:
                 continue
             _names2 = [n for n in _sg.order if n in _sg.g.atoms]
@@ -4129,9 +4134,9 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
                 if not bool(_recall_y2[_i2]) and _gold2 <= _nums(_sg.g.atoms[_n2].code):
                     _recall_y2[_i2] = 1.0
             _rec_nums2 = [_nums(_sg.g.atoms[_n].code) for _n in _names2]
-            # TOOL LABELS: the tools whose descriptions most resemble the probe (cosine, honest —
+            # TOOL LABELS: the tools whose descriptions most resemble the cue (cosine, honest —
             # the embedder's own relevance signal, not gold). The TRM learns to fetch them.
-            _q2 = torch.as_tensor(encode_batch([docs[pi2]])[0], dtype=torch.float32)
+            _q2 = torch.as_tensor(encode_batch([_cue2])[0], dtype=torch.float32)
             _td2 = torch.stack([torch.as_tensor(a.emb, dtype=torch.float32)
                                 for a in _SEED_TOOLS.atoms.values()])
             _tcos2 = _td2 @ _q2
@@ -4139,7 +4144,7 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
             for _j in _tcos2.topk(min(2, _td2.shape[0])).indices.tolist():
                 _tool_y2[_j] = 1.0
             _ctrl_examples.append(dict(
-                task_emb_lm=_pool_lm(docs[pi2]), node_embs_lm=_node_embs2, edge_index=_ei2,
+                task_emb_lm=_pool_lm(_cue2), node_embs_lm=_node_embs2, edge_index=_ei2,
                 edge_type=_et2, edge_strength=_es2, tool_embs_lm=_tool_embs2,
                 recall_y=_recall_y2, tool_y=_tool_y2, rec_gold=set(_gold2),
                 rec_nums=_rec_nums2))
@@ -4191,6 +4196,7 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
         _wm_nt_hits = 0; _wm_nt_total = 0; _ptr_hits = 0; _ptr_total = 0
         _stuff_nt_hits = 0; _stuff_nt_total = 0; _trm_hits = 0; _trm_total = 0
         _lm_copy_hits = 0; _lm_copy_total = 0
+        _delivery_hits = 0; _delivery_total = 0
         oom = False
         for pi, cue, gold in plan:
             sess = None
@@ -4219,9 +4225,11 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
                                   for n in sess.order if n in sess.g.atoms]
                     print(f"  [session] training WM adapters on {len(_all_spans)} session spans...")
                     _trained_wm_state = _train_wm_adapters(wb, _all_spans, dev)
-                # RETRIEVAL: full problem text (not 6-word cue) gives MiniLM 10x more signal.
-                # Then EXPAND via "follows" edges — temporal neighbors often contain more of the same problem.
-                got = sess.recall(docs[pi], k)
+                # RETRIEVAL: CUE-ONLY — the query is the first 6 words (what a user quotes), never
+                # the full problem text (which IS the stored document — a self-match, cosine ~1.0,
+                # would make every recall metric tautological). Then EXPAND via "follows" edges —
+                # temporal neighbors often contain more of the same problem.
+                got = sess.recall(cue, k)
                 _got_names = {a.name for a in got}
                 for _src, _dst, _rel in getattr(sess.g, "edges", []):
                     if _rel == "follows":
@@ -4239,7 +4247,7 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
                     # which the graph-slot training replaced — these adapters/rank() are now
                     # UNTRAINED, so this eval is a chance-level baseline, kept for reference only.
                     if gold and _wm_reasoner is not None and hasattr(_wm_reasoner.trm, 'rank'):
-                        _ptr_task = torch.as_tensor(encode_batch([docs[pi]])[0], dtype=torch.float32, device=dev)
+                        _ptr_task = torch.as_tensor(encode_batch([cue])[0], dtype=torch.float32, device=dev)
                         _ptr_atoms = torch.stack([
                             torch.as_tensor(encode_batch([a.code])[0], dtype=torch.float32, device=dev)
                             for a in got])
@@ -4266,7 +4274,7 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
                             [_pool_lm(a.description or a.code)
                              for a in _SEED_TOOLS.atoms.values()])
                         _n_idx, _ev_mask, _t_idx = _trm_ctrl.select_nodes(
-                            _pool_lm(docs[pi]), _E_c, _ei_c, _et_c, _es_c, _tool_embs_c,
+                            _pool_lm(cue), _E_c, _ei_c, _et_c, _es_c, _tool_embs_c,
                             top_k=4, top_tools=3)
                         _ctrl_nodes = [_names_c[i] for i in _n_idx]
                         # LM delivery: stuff the TOP-2 nodes' text (short, focused prompt — the
@@ -4302,7 +4310,7 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
                               f"tools={_ctrl_tools} "
                               f"(graph={len(_names_c)} nodes, {_ei_c.shape[1]} edges)")
                         if os.environ.get("V5_DBG"):
-                            _cvec = _pool_lm(docs[pi])
+                            _cvec = _pool_lm(cue)
                             _cn = _cvec / _cvec.norm()
                             _cs = torch.nn.functional.cosine_similarity(
                                 _cn.unsqueeze(0), _E_c / _E_c.norm(dim=1, keepdim=True), dim=-1)
@@ -4318,7 +4326,7 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
                 # path (incl. wm_no_trie below) is a chance-level baseline, kept for reference only.
                 _wm_active = False
                 if use_wm and got and _wm_reasoner is not None:
-                    _task_emb = torch.as_tensor(encode_batch([docs[pi]])[0], dtype=torch.float32, device=dev)
+                    _task_emb = torch.as_tensor(encode_batch([cue])[0], dtype=torch.float32, device=dev)
                     _atom_embs = torch.stack([
                         torch.as_tensor(encode_batch([a.code])[0], dtype=torch.float32, device=dev)
                         for a in got])
@@ -4344,7 +4352,7 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
                         _E_gs, _ei_gs, _et_gs, _es_gs = _session_tensors(
                             sess, _names_gs, embed_fn=_mini_emb)
                         _rec_gs = torch.nn.functional.cosine_similarity(
-                            _mini_emb(docs[pi]).unsqueeze(0), _E_gs, dim=-1)
+                            _mini_emb(cue).unsqueeze(0), _E_gs, dim=-1)
                         with torch.no_grad():
                             _slots_gs = _enc_gs(_E_gs, _ei_gs, _et_gs, _es_gs,
                                                 torch.softmax(_rec_gs * 3.0, dim=0))
@@ -4386,23 +4394,33 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
                     # LM COPY (honest, pre-suffix): could the LM itself put the recalled numbers in the
                     # output? This is what the memory claim must rest on eventually — the controller
                     # recalls, and the LM writes what it read. The suffix below must never inflate this.
+                # SCORE THE LM'S RAW OUTPUT ONLY. txt below is the free-run generation (or the
+                # graph-slot generation); _pre_txt is what the session arm's answer_has_gold is
+                # scored on — BEFORE the deterministic append. The memory channel's guarantee is
+                # then a separate, reported number, never part of the LM's score.
+                _pre_txt = txt
                 if gold:
-                    _lm_copy_hit = bool(gold <= _nums(txt))
+                    _lm_copy_hit = bool(gold <= _nums(_pre_txt))
                     _lm_copy_total += 1
                     if _lm_copy_hit:
                         _lm_copy_hits += 1
-                # DETERMINISTIC COPY CHANNEL: the 0.5B LM cannot reliably copy boosted numbers
-                # (float16 near-tie argmax flips make generation nondeterministic run-to-run), so
-                # any recalled number missing from the LM output is appended verbatim. Delivery
+                # DETERMINISTIC COPY CHANNEL (NOT SCORED): the 0.5B LM cannot reliably copy boosted
+                # numbers (float16 near-tie argmax flips make generation nondeterministic run-to-run),
+                # so any recalled number missing from the LM output is appended verbatim. Delivery
                 # becomes 1:1 with the controller's recall — the memory's output is guaranteed to
-                # reach the answer, and the LM is only responsible for the surrounding text.
+                # reach the answer, and the LM is only responsible for the surrounding text. It is
+                # reported as suffix_delivery and kept OUT of answer_has_gold.
                 _missing = sorted(_trm_nums - _nums(txt), key=int)
                 if _missing:
                     txt = txt.rstrip() + "\n[recalled: " + ", ".join(_missing) + "]"
                 if gold:
+                    _delivery_hit = bool(gold <= _nums(txt))
+                    _delivery_total += 1
+                    if _delivery_hit:
+                        _delivery_hits += 1
                     print(f"        [trm-stuff] probe {pi}: stuffed={sorted(_trm_nums, key=int)} "
                           f"gold={sorted(gold, key=int)} out={txt[:110]!r} "
-                          f"hit={bool(gold <= _nums(txt))} lm_copy={bool(_lm_copy_hit)}")
+                          f"hit={_delivery_hit} lm_copy={bool(_lm_copy_hit)}")
                 # NO-TRIE EVAL: measure raw WM contribution (unassisted score, no stuffed numbers).
                 _wm_nt_hit = False
                 if _wm_active and gold and _wm_reasoner is not None:
@@ -4466,8 +4484,10 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
             if dev == "cuda":
                 peak = max(peak, torch.cuda.max_memory_allocated() / 2**20)
             if arm == "session":
-                # HONEST SCORE: TRM-extracted numbers stuffed into the prompt, LM free-run (NO trie).
-                if gold and gold <= _nums(txt):
+                # HONEST SCORE: the LM's RAW free-run output (TRM-recalled text or graph slots in
+                # the prompt, NO trie, NO boost) — scored BEFORE the deterministic append. The
+                # append's contribution is reported separately as suffix_delivery.
+                if gold and gold <= _nums(_pre_txt):
                     hits += 1
             elif gold and gold <= _nums(txt):
                 hits += 1
@@ -4482,7 +4502,9 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
                         stuff_nt_n=_stuff_nt_total,
                         trm_num_acc=_trm_num_acc, trm_num_n=_trm_total,
                         lm_copy_acc=_lm_copy_hits / max(1, _lm_copy_total),
-                        lm_copy_n=_lm_copy_total)
+                        lm_copy_n=_lm_copy_total,
+                        delivery_acc=_delivery_hits / max(1, _delivery_total),
+                        delivery_n=_delivery_total)
         r = res[arm]
         _retry_tag = f"   retry_recovered={r['retry']}" if arm == "session" and r['retry'] else ""
         _wm_nt_tag = f"   legacy_wm_no_trie={r['wm_nt_acc']:.2f} (n={r['wm_nt_n']}, UNTRAINED)" if arm == "session" and r['wm_nt_n'] else ""
@@ -4493,11 +4515,14 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
             if arm == "session" and r['trm_num_n'] else ""
         _lm_copy_tag = f"   lm_copy={r['lm_copy_acc']:.2f} (n={r['lm_copy_n']})" \
             if arm == "session" and r['lm_copy_n'] else ""
+        _delivery_tag = f"   suffix_delivery={r['delivery_acc']:.2f} (n={r['delivery_n']}, NOT scored)" \
+            if arm == "session" and r['delivery_n'] else ""
         print(f"    [{arm:7s}] cache_end={r['tail']:5d} tok   evictions={r['ev']:3d}   "
               f"peak={r['peak']:7.1f} MiB   answer_has_gold={r['acc']:.2f}"
               + ("  <-- OOM, arm incomplete" if oom else "")
               + (f"   span_recalled={r['span']:.2f}   graph={r['sess']}" if r['sess'] else "")
-              + _retry_tag + _wm_nt_tag + _ptr_tag + _stuff_nt_tag + _trm_tag + _lm_copy_tag)
+              + _retry_tag + _wm_nt_tag + _ptr_tag + _stuff_nt_tag + _trm_tag
+              + _lm_copy_tag + _delivery_tag)
 
     # THE VRAM CLAIM, FROM MEASURED SLOPE ONLY. Both numbers below come out of this run; nothing is
     # asserted about a context length that was not actually executed except the crossing point, which is
@@ -4519,14 +4544,17 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
               f"window-only {res['window']['acc']:.2f}  |  session {s['acc']:.2f}"
               + (f"  |  full-cache {res['full']['acc']:.2f}" if "full" in res and not res['full']['oom'] else "")
               + (f"  |  full-cache OOM at {res['full']['tail']} tok" if "full" in res and res['full']['oom'] else ""))
-        print(f"  LM COPY  (the LM's own output, no memory channel): session "
-              f"{s['lm_copy_acc']:.2f} (n={s['lm_copy_n']}) - the pre-suffix rate; "
-              f"the memory channel adds the gap to session above.")
+        print(f"  LM COPY  (the LM's raw output with recalled content in the prompt, no memory "
+              f"channel, no suffix): session {s['lm_copy_acc']:.2f} (n={s['lm_copy_n']}); "
+              f"deterministic append channel (NOT scored): "
+              f"suffix_delivery {s['delivery_acc']:.2f} (n={s['delivery_n']}).")
         lift = s["acc"] - res["nomem"]["acc"]
         ok = ok and lift > 0
         print(f"  ATTRIBUTABLE TO RECALL: {lift:+.2f} over the identical prompt with the recalled text "
               f"deleted (no-memory arm). Anything the cue alone could buy is subtracted here.")
-        print(f"  TRM EXTRACTION: recall of the gold-carrying session NODES over the object graph: "
+        print(f"  TRM EXTRACTION: recall of the gold-carrying session NODES over the object graph, "
+              f"queried by the 6-word CUE ONLY (never the full problem text - that would be a "
+              f"self-match against the stored document): "
               f"{s['trm_num_acc']:.2f} (n={s['trm_num_n']}) - the content prior in LM embedding space "
               f"(cos_alpha={float(_trm_ctrl.graph_cos_alpha) if _trm_ctrl is not None else 3.0}, "
               f"no trie, no gold leak). The trained heads (recall readout / evict / tool) are validated "
