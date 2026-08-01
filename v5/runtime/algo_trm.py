@@ -230,7 +230,10 @@ def _build():
                               edge_strength: torch.Tensor,
                               tool_embs_lm: torch.Tensor,
                               ctx_emb_lm: torch.Tensor | None = None,
-                              ctx_scale: float = 0.5) -> tuple:
+                              ctx_scale: float = 0.5,
+                              win_embs_lm: torch.Tensor | None = None,
+                              win_parent: torch.Tensor | None = None,
+                              win_beta: float | None = None) -> tuple:
             """OBJECT-LEVEL graph controller: logits over the session graph's NODES (objects), with
             edges as extra information, plus the main graph's TOOLS.
 
@@ -246,6 +249,17 @@ def _build():
                            already recalled" (the TRM's step() loop) instead of re-scoring every
                            node against the bare cue.
             ctx_scale:     weight of the already-picked set in the cycle-conditioned query.
+            win_embs_lm:   [W, d_lm] or None — SUB-WINDOW HOPFIELD KEYS: each node stores several
+                           overlapping 64-token window patterns (plus its full-span mean). When
+                           given, the recall prior retrieves the SHARPEST matching window per node
+                           instead of the span's pooled mean: rec = alpha * (1/beta) *
+                           logsumexp_j(beta * cos(q, win_j)) over the node's windows — the modern
+                           Hopfield retrieval form, interpolating mean -> max as beta grows. A cue
+                           buried in a multi-problem span (whose pooled mean dilutes it) is still
+                           found exactly, and short spans keep their old single-pattern behavior.
+            win_parent:    [W] long — node index of each window row (required with win_embs_lm).
+            win_beta:      retrieval sharpness (Hopfield inverse temperature) for this call;
+                           None falls back to the plain pooled-mean cosine prior.
 
             Returns (recall_logits [N], evict_logits [N], tool_logits [M]):
               recall_logits: which session nodes to SURFACE to the LM (multi-label, BCE-trained).
@@ -291,8 +305,20 @@ def _build():
             _q = task_emb_lm.float()
             if ctx_emb_lm is not None and ctx_emb_lm.numel():
                 _q = _q + ctx_scale * ctx_emb_lm.float()
-            rec = self.graph_cos_alpha * torch.nn.functional.cosine_similarity(
-                _q.unsqueeze(0), node_embs_lm.float())
+            if win_embs_lm is not None and win_parent is not None and win_beta is not None:
+                # SUB-WINDOW HOPFIELD RETRIEVAL (see docstring): per-window cosine, then the
+                # (1/beta) log-sum-exp over each node's windows. beta -> inf recovers the
+                # max-matching window (sharpest pattern); beta -> 0 the window mean (the old
+                # pooled prior). The query is still raw-LM-space and frozen — this is the
+                # content prior's representation, not a learned component.
+                _w = torch.nn.functional.cosine_similarity(
+                    _q.unsqueeze(0), win_embs_lm.float())
+                _s = torch.zeros(node_embs_lm.shape[0], device=node_embs_lm.device)
+                _s.index_add_(0, win_parent, torch.exp(win_beta * _w))
+                rec = self.graph_cos_alpha * torch.log(_s) / win_beta
+            else:
+                rec = self.graph_cos_alpha * torch.nn.functional.cosine_similarity(
+                    _q.unsqueeze(0), node_embs_lm.float())
             evi = (self.evict_head(y_out).unsqueeze(0) * R_nodes).sum(-1) / math.sqrt(self.d)
             tol = (self.tool_head(y_out).unsqueeze(0) * R_tools).sum(-1) / math.sqrt(self.d)
             tol = tol + (x.unsqueeze(0) * R_tools).sum(-1) / math.sqrt(self.d)
@@ -305,7 +331,10 @@ def _build():
                          cycles: int = 1, picks_per_cycle: int = 2,
                          ctx_scale: float = 0.5,
             neighbor_boost: float = 0.0,
-            follows_type: int | None = None) -> tuple:
+            follows_type: int | None = None,
+            win_embs_lm: torch.Tensor | None = None,
+            win_parent: torch.Tensor | None = None,
+            win_beta_lo: float = 8.0, win_beta_hi: float = 32.0) -> tuple:
             """Iterative (step()-style) OBJECT selection over the session graph.
 
             cycles=1 reproduces the original one-shot top-k. For cycles>1 the controller
@@ -321,6 +350,10 @@ def _build():
             the EDGE completes it). Depth is BOUNDED TO 1: only first-cycle picks spread the
             boost, never walk-picks, so the completion hop can never drag picks across the
             temporal chain into unrelated spans.
+            win_embs_lm/win_parent: SUB-WINDOW HOPFIELD KEYS (see controller_logits) — each
+            cycle's retrieval runs over the window patterns with an ANNEALED sharpness
+            beta: win_beta_lo (broad, exploratory) in cycle 1 -> win_beta_hi (sharp, exact)
+            in the last cycle. None = plain pooled-mean cosine prior.
             Returns (node_idx list, evict_mask list[N] bool, tool_idx list)."""
             dev = node_embs_lm.device
             N = node_embs_lm.shape[0]
@@ -339,9 +372,14 @@ def _build():
                     _ctx = None
                     if picked:
                         _ctx = node_embs_lm[picked].mean(dim=0)
+                    _beta = None
+                    if win_embs_lm is not None:
+                        _beta = win_beta_lo * ((win_beta_hi / win_beta_lo) **
+                                               (_c / max(1, cycles - 1)))
                     rec, evi, tol = self.controller_logits(
                         task_emb_lm, node_embs_lm, edge_index, edge_type, edge_strength,
-                        tool_embs_lm, ctx_emb_lm=_ctx, ctx_scale=ctx_scale)
+                        tool_embs_lm, ctx_emb_lm=_ctx, ctx_scale=ctx_scale,
+                        win_embs_lm=win_embs_lm, win_parent=win_parent, win_beta=_beta)
                     _rec_c = rec.clone() + _boost
                     _rec_c[mask] = float('-inf')
                     _n_new = min(per, total - len(picked))
@@ -580,11 +618,42 @@ def _selftest() -> bool:
                                       edge_strength, tool_lm, top_k=6, top_tools=2,
                                       cycles=3, picks_per_cycle=2)
     assert len(n_idx2) <= 6 and len(set(n_idx2)) == len(n_idx2), "loop must not re-pick"
+    # SUB-WINDOW HOPFIELD KEYS: (a) one window per node == the node itself must recover the
+    # plain cosine prior at high beta; (b) window retrieval beats the pooled mean when a
+    # window matches the cue better than the span's mean (diluted-span case: 2-node span whose
+    # mean is noise but whose SECOND half is the cue).
+    _win_one = node_lm.clone()
+    _par_one = torch.arange(6, dtype=torch.long)
+    rec_w, _, _ = trm_t.controller_logits(task_lm, node_lm, edge_index, edge_type,
+                                          edge_strength, tool_lm,
+                                          win_embs_lm=_win_one, win_parent=_par_one,
+                                          win_beta=64.0)
+    assert torch.allclose(rec_w, rec, atol=0.05), \
+        "1-window-per-node at high beta must recover the pooled cosine prior"
+    _dil = torch.randn(64) * 0.3                      # node 0 = a span whose MEAN is far from q
+    _node_dil = torch.stack([_dil] + list(node_lm[1:]))
+    _win_dil = torch.stack([_dil, torch.randn(64) * 0.3, _dil + 0.9 * task_lm, _dil,
+                            _dil + 0.9 * task_lm])
+    _par_dil = torch.tensor([0, 0, 0, 1, 2], dtype=torch.long)
+    rec_win, _, _ = trm_t.controller_logits(task_lm, _node_dil, edge_index, edge_type,
+                                            edge_strength, tool_lm,
+                                            win_embs_lm=_win_dil, win_parent=_par_dil,
+                                            win_beta=16.0)
+    rec_pool, _, _ = trm_t.controller_logits(task_lm, _node_dil, edge_index, edge_type,
+                                             edge_strength, tool_lm)
+    assert float(rec_win[0]) > float(rec_pool[0]) + 0.5, \
+        "window key must lift a diluted span above its pooled-mean score"
+    n_idx3, _, _ = trm_t.select_nodes(task_lm, node_lm, edge_index, edge_type,
+                                      edge_strength, tool_lm, top_k=4, top_tools=2,
+                                      cycles=2, picks_per_cycle=2,
+                                      win_embs_lm=_win_one, win_parent=_par_one)
+    assert len(n_idx3) <= 4 and len(set(n_idx3)) == len(n_idx3), "window loop must not re-pick"
     keep = trm_t.evict_decision(task_lm, node_lm, edge_index, edge_type, edge_strength)
     assert isinstance(keep, bool)
     print(f"  [12] graph controller (objects+edges): rec {list(rec.shape)} evi {list(evi.shape)} "
           f"tool {list(tol.shape)}, grad OK (msg+heads), prior frozen, ctx shifts rec, "
-          f"sel {len(n_idx)} nodes/{len(t_idx)} tools, loop {len(n_idx2)} -> PASS")
+          f"sel {len(n_idx)} nodes/{len(t_idx)} tools, loop {len(n_idx2)}, "
+          f"hopfield-windows (1-per-node==cos, diluted-span lift) -> PASS")
 
     print("\n  ALGO_TRM SELFTEST -> PASS  (V3 TRMReasoner + ACT adaptive + token head + graph controller)")
     return True

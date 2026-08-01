@@ -3688,7 +3688,8 @@ def _train_trm_controller(trm, rec_tool_examples, evict_examples, dev, epochs=80
                 ex["task_emb_lm"], ex["node_embs_lm"], ex["edge_index"], ex["edge_type"],
                 ex["edge_strength"], ex["tool_embs_lm"],
                 top_k=4, top_tools=3, cycles=2, picks_per_cycle=2,
-                neighbor_boost=3.0, follows_type=5)[0]
+                neighbor_boost=3.0, follows_type=5,
+                win_embs_lm=ex.get("win_embs_lm"), win_parent=ex.get("win_parent"))[0]
             _union = set().union(*[ex["rec_nums"][i] for i in _picks]) if _picks else set()
             _er += int(bool(ex["rec_gold"] <= _union))
             _er_t += 1
@@ -4081,6 +4082,33 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
                 return _lm_embed.new_zeros(_lm_embed.shape[1])
             return _lm_embed[torch.tensor(_ids, device=dev)].mean(dim=0)  # [d_lm]
 
+        def _window_pool(text, win_tokens=64, stride=32):
+            """SUB-WINDOW HOPFIELD KEYS for one span: overlapping 64-token pooled views (+ the
+            full-span mean when the span is longer than one window). A span pooling several
+            problems to ONE mean buries the cue-relevant tail (measured: rank ~20 for a span
+            whose own cue text sits in its last 60 tokens); the window keys let the recall
+            prior retrieve the SHARPEST matching sub-view instead of the diluted mean. Short
+            spans keep exactly one window (= the old pooled mean), so nothing regresses."""
+            _ids = wb.tok(text, add_special_tokens=False).input_ids
+            if not _ids:
+                return [_lm_embed.new_zeros(_lm_embed.shape[1])]
+            _embs = _lm_embed[torch.tensor(_ids, device=dev)]          # [L, d]
+            _wins = [_embs[i:i + win_tokens].mean(dim=0)
+                     for i in range(0, max(1, len(_ids) - win_tokens + 1), stride)]
+            if len(_ids) > win_tokens:
+                _wins.append(_embs.mean(dim=0))
+            return _wins
+
+        def _window_tensors(sg, node_names):
+            """Build (win_embs [W, d], win_parent [W]) for a node list: the stacked window
+            patterns of every node plus the parent-index map (window j belongs to node
+            win_parent[j]). Consumed by the graph controller's Hopfield recall prior."""
+            _ww = [_window_pool(sg.g.atoms[n].code) for n in node_names]
+            _win_embs = torch.stack([e for _w in _ww for e in _w])
+            _win_parent = torch.tensor([i for i, _w in enumerate(_ww) for _ in _w],
+                                       dtype=torch.long, device=dev)
+            return _win_embs, _win_parent
+
         _plan_pis = {pi for pi, _, _ in plan}
         _SESSION_EDGE_TYPES = {"follows": 5, "grounds": 6, "contains": 7, "in": 8, "uses": 3,
                                "related": 1, "depend": 0}
@@ -4162,11 +4190,13 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
             _tool_y2 = torch.zeros(_td2.shape[0], device=dev)
             for _j in _tcos2.topk(min(2, _td2.shape[0])).indices.tolist():
                 _tool_y2[_j] = 1.0
+            _win2 = _window_tensors(_sg, _names2)
             _ctrl_examples.append(dict(
                 task_emb_lm=_pool_lm(_cue2), node_embs_lm=_node_embs2, edge_index=_ei2,
                 edge_type=_et2, edge_strength=_es2, tool_embs_lm=_tool_embs2,
                 recall_y=_recall_y2, tool_y=_tool_y2, rec_gold=set(_gold2),
-                rec_nums=_rec_nums2))
+                rec_nums=_rec_nums2,
+                win_embs_lm=_win2[0], win_parent=_win2[1]))
         # EVICT EXAMPLES: ONE per node (not per probe — the decision is write-time, before any
         # question exists). task = the node's OWN text; the graph state is the prefix up to and
         # including this node (candidate = last row); the label is "this span FULLY answers some
@@ -4293,10 +4323,12 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
                         _tool_embs_c = torch.stack(
                             [_pool_lm(a.description or a.code)
                              for a in _SEED_TOOLS.atoms.values()])
+                        _win_c = _window_tensors(sess, _names_c)
                         _n_idx, _ev_mask, _t_idx = _trm_ctrl.select_nodes(
                             _pool_lm(cue), _E_c, _ei_c, _et_c, _es_c, _tool_embs_c,
                             top_k=12, top_tools=3, cycles=4, picks_per_cycle=3,
-                            neighbor_boost=3.0, follows_type=5)
+                            neighbor_boost=3.0, follows_type=5,
+                            win_embs_lm=_win_c[0], win_parent=_win_c[1])
                         _ctrl_nodes = [_names_c[i] for i in _n_idx]
                         # TRM EMISSION: the recall loop's picks (cycle 1 first = most confident)
                         # order the numbers the TRM writes into the answer. LM delivery: stuff
@@ -4587,8 +4619,12 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
               f"neighbours of the FIRST cycle's picks are boosted for all later cycles - meaning "
               f"finds the region, the graph EDGE completes it, and the walk is bounded to depth 1 "
               f"so it can never travel across the temporal chain), "
-              f"the content prior in LM embedding space "
-              f"(cos_alpha={float(_trm_ctrl.graph_cos_alpha) if _trm_ctrl is not None else 3.0}, "
+              f"the content prior in LM embedding space as SUB-WINDOW HOPFIELD KEYS "
+              f"(overlapping 64-token views per span + the full-span mean; retrieval = "
+              f"(1/beta) log-sum-exp over each node's windows with beta annealed 8 -> 32 across "
+              f"cycles, so a cue buried in a multi-problem span is retrieved by its sharpest "
+              f"matching sub-view, never diluted by the span's mean; "
+              f"cos_alpha={float(_trm_ctrl.graph_cos_alpha) if _trm_ctrl is not None else 3.0}, "
               f"no trie, no gold leak). The trained heads (recall readout / evict / tool) are validated "
               f"on the held-out probes by their train metrics "
               f"(evict {_ee}/{_ee_t}, tool {_et}/{_et_t}): at {_er_t} examples "
