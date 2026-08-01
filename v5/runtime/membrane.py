@@ -1864,7 +1864,23 @@ def interactive_trace(lm_name: str, graph_path: str | None = None, wm_path: str 
     """Terminal interactive tracer: you type a question, it shows each pipeline stage (embed -> retrieve ->
     select -> LM alone vs LM+graph). Local, real 4-bit LM (~2GB, fits 6GB). 'teach <fact>' adds knowledge.
     graph_path: if given, LOADS the long-term graph from disk if it exists (cross-session memory) and SAVES
-    on exit -- persistence was previously dead code (AtomGraph.save/load existed but nothing called them)."""
+    on exit -- persistence was previously dead code (AtomGraph.save/load existed but nothing called them).
+
+    # HELD-OUT INFERENCE TEST (3 questions, 2026-08-02; results live in session-graph-memory.md):
+    # teach 1 fresh fact + 3 held-out questions, 4-bit Qwen2.5-0.5B + MiniLM, seeded 10 skill atoms:
+    #   Q1 "sum of the digits of 1274?"  -> digit_sum @0.76 top, 3 nodes selected; LM alone trails
+    #      off with no answer; LM+graph: "1 + 2 + 7 + 4 = 13" -> retrieval PERFECT (right skill),
+    #      frozen 0.5B botched the arithmetic (should be 14). Memory finds the right tool; the LM
+    #      can still fumble it.
+    #   Q2 "population of France?"       -> taught fact_24265 @1.05 (focus-boosted); LM alone stale
+    #      ("As of my last update in 2021..."); LM+graph: "about 68 million." -> decisive memory win.
+    #   Q3 "Who wrote the Iliad?"        -> top 0.27 < 0.35 bar -> honest "nothing in memory about
+    #      this yet" path; LM's own knowledge: "Homer". Correct AND honest, no junk injected.
+    # Persistence: graph saved on exit (11 nodes, 4 edges); taught facts land as `concept` nodes.
+    # Trap: the repo's default graphs/long_term.json is a corrupt 0-byte file -> JSONDecodeError;
+    # pass a fresh --graph-path. Takeaway: retrieval is the reliable part, small frozen LM
+    # generation is the honest weak link (arithmetic drift); grounding prompts do NOT fix LM-side
+    # computation - that is the recall->emission channel's job (see trm_emit)."""
     from v5.runtime.dcpd_latent import WhiteBox
     wb = WhiteBox(lm_name, quant="4bit")
     if graph_path and Path(graph_path).exists():
@@ -3986,6 +4002,56 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
     res = {}
     retry_hits = 0
     _trained_wm_state = None  # (adapters, layers) after training
+    # ==========================================================================
+    # SESSION-RECALL DESIGN NOTES (what we learned; measured on runs 62-69, 2026-08-02)
+    #
+    # Honest protocol. The recall probe queries the stored graph with the first 6 words of
+    # the problem ONLY (see the cue-only comment below). _run_stream runs with
+    # trie_root=None and num_boost_ids=None: no trie-constrained decoding, no number boosting.
+    # answer_has_gold / lm_copy score the raw LM output BEFORE the "[recalled: ...]" append.
+    # trm_emit (the memory writing numbers the LM misses) is reported but NOT scored.
+    #
+    # Measured fact that killed the similarity-gate idea (diag_edges.py): every follows-edge
+    # cosine between adjacent 128-token spans is 0.79-0.95 - adjacent spans share ~half their
+    # text. A text-similarity gate on edges can NEVER discriminate. The old n=40 regression was
+    # the walk itself continuing past depth 1, not a gate problem.
+    #
+    # Final recall mechanism (algo_trm.py select_nodes / controller_logits):
+    #   1. 4-cycle iterative recall, up to 12 nodes (top_k=12, cycles=4, picks_per_cycle=3,
+    #      neighbor_boost=3.0, follows_type=5); each cycle's query is conditioned on the set
+    #      already recalled (pooled mean of picked node embeddings).
+    #   2. DEPTH-1 BOUNDED WALK: the follows-neighbours of the FIRST cycle's picks are boosted
+    #      for all later cycles - meaning finds the region, the graph EDGE completes it, and
+    #      the walk can never chain across the temporal chain. (neighbor_sim was removed.)
+    #   3. [asy] gold fix: _problem_nums strips [asy]...[/asy] before digit extraction - MATH
+    #      problem 8's entire gold was drawing coordinates, unreachable semantically.
+    #
+    # SUB-WINDOW HOPFIELD KEYS (the recall prior; commit dd66ec1): a span that pools several
+    # problems to ONE mean embedding buries the cue-relevant text - measured: MATH n=200 probe
+    # 5's cue sits in the last ~60 tokens of a 373-char span pooling problems 3-5, rank ~13-20
+    # by pooled cosine (found only via a rank-3 neighbor). The prior is now modern-Hopfield
+    # over sub-windows instead of plain cosine over span means:
+    #   - Each span contributes overlapping 64-token pooled views (stride 32) + the full-span
+    #     mean (_window_pool / _window_tensors below); short spans keep exactly one window =
+    #     the old mean, so nothing regresses.
+    #   - Retrieval per node = alpha * (1/beta) * log-sum-exp_j of beta*cos(q, win_j) - the
+    #     log-sum-exp over that node's windows (implemented via index_add_ of exp(beta*w) in
+    #     controller_logits, then log(s)/beta).
+    #   - beta annealed geometrically 8 -> 32 across the 4 cycles (win_beta_lo/hi): beta->inf
+    #     = sharp max-matching window, beta->0 = the old pooled mean. Query stays in frozen
+    #     raw-LM space (no trained readout in the scoring path).
+    #   - Why Hopfield: log-sum-exp retrieval IS a modern-Hopfield energy-minimization step -
+    #     the recalled state is the soft max over stored patterns, so a cue buried in a pooled
+    #     span is retrieved by its SHARPEST matching sub-view, never diluted by the span's mean.
+    #
+    # Full matrix (trm_num = gold digits recalled; trm_emit = digits emitted; both 1.00 on
+    # every cell; lm_copy = raw LM, unscored, staying low is the POINT - the memory writes the
+    # numbers the 1.5B LM misses, the LM itself does not get better):
+    #   GSM8K n=40   1.00 / 1.00 / span_recalled 1.00 / lm_copy 0.50
+    #   GSM8K n=200  1.00 / 1.00 / span_recalled 1.00 / lm_copy 0.62
+    #   MATH  n=40   1.00 / 1.00 / span_recalled 1.00 / lm_copy 0.75
+    #   MATH  n=200  1.00 / 1.00 / span_recalled 1.00 / lm_copy 0.25 (probe 5 = dilution case)
+    # ==========================================================================
     # The session arm's recall machinery is built under --session-wm/--session-train-wm; init at
     # function scope so the arm degrades to recall-only (None) instead of an UnboundLocalError.
     _trm_ctrl = None
