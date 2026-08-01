@@ -31,6 +31,7 @@ Mechanism proven by --selftest on distilgpt2 (no Qwen needed):
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 from pathlib import Path
@@ -522,6 +523,124 @@ def native_text_embedding(wb, text: str) -> torch.Tensor:
     lm_emb = out_emb.weight if (out_emb is not None and not tie) else wb.model.get_input_embeddings().weight
     ids = wb.tok(text, return_tensors="pt").input_ids.to(wb.device)
     return lm_emb[ids[0]].float().mean(0).detach()
+
+
+
+# ================================================================================================
+# TinyGNN + GraphSlotEncoder — active subgraph → fixed K slots for LM injection
+# ================================================================================================
+class TinyGNN(nn.Module):
+    """One message-passing layer over typed edges. ~30K params."""
+
+    def __init__(self, d_in: int = 384, d_hidden: int = 64, n_rel: int = 12):
+        super().__init__()
+        self.rel_emb = nn.Embedding(n_rel, 16)
+        self.W_msg = nn.Linear(d_in + 16, d_hidden)
+        self.W_self = nn.Linear(d_in, d_hidden)
+        self.W_out = nn.Linear(d_hidden, d_in)
+        self.norm = nn.LayerNorm(d_in)
+
+    def forward(self, x, edge_index, edge_type, edge_strength):
+        N = x.shape[0]
+        if edge_index is None or edge_index.numel() == 0:
+            return x
+        src, dst = edge_index[0], edge_index[1]
+        type_emb = self.rel_emb(edge_type)
+        msg_in = torch.cat([x[src], type_emb], dim=-1)
+        msg = self.W_msg(msg_in) * edge_strength.unsqueeze(-1)
+        aggr = torch.zeros(N, msg.shape[-1], device=x.device, dtype=msg.dtype)
+        aggr = aggr.index_add_(0, dst, msg)
+        h = self.W_self(x) + aggr
+        h = torch.relu(h)
+        out = self.W_out(h)
+        return self.norm(x + out)
+
+
+class GraphSlotEncoder(nn.Module):
+    """Encodes an active session subgraph into K fixed LM-space slots.
+    Each slot is an attention-pool over graph nodes (interpretable, not opaque)."""
+
+    def __init__(self, d_node: int = 384, d_lm: int = 1536, K: int = 8):
+        super().__init__()
+        self.K = K
+        self.d_node = d_node
+        self.slot_queries = nn.Parameter(torch.randn(K, d_node) * 0.02)
+        self.gnn = TinyGNN(d_in=d_node, d_hidden=128)
+        self.proj = nn.Linear(d_node, d_lm)
+        self.slot_gate = nn.Parameter(torch.zeros(K))
+
+    def forward(self, node_embs, edge_index, edge_type, edge_strength,
+                recall_weights: torch.Tensor | None = None):
+        h = self.gnn(node_embs, edge_index, edge_type, edge_strength)
+        if recall_weights is not None:
+            h = h * recall_weights.unsqueeze(-1)
+        scores = torch.matmul(self.slot_queries, h.t()) / math.sqrt(self.d_node)
+        attn = torch.softmax(scores, dim=-1)
+        slots = torch.matmul(attn, h)
+        slots = self.proj(slots)
+        return slots * torch.sigmoid(self.slot_gate).unsqueeze(-1)
+
+
+def _train_wm_graph_slots(wb, slot_encoder, train_examples, dev, epochs=40, lr=3e-4):
+    """Train GraphSlotEncoder + GatedCrossAttn adapters jointly on graph slots.
+
+    train_examples: list of (node_embs [N,d_node], edge_index, edge_type, edge_strength,
+                             recall_weights [N], target_text, prompt_text).
+    The encoder is NOT frozen: slot_queries/GNN/gate are learned together with the
+    adapters (design doc 3.1 — each slot learns what to attend to in the graph).
+    """
+
+    import torch.nn.functional as _F
+    torch.manual_seed(0)
+    if len(train_examples) < 2:
+        return None, None
+
+    layers = [len(wb.layers) - 3, len(wb.layers) - 2, len(wb.layers) - 1]
+    adapters = [GatedCrossAttn(wb.d_model).to(dev) for _ in layers]
+    params = [p for a in adapters for p in a.parameters() if p.requires_grad]
+    params += [p for p in slot_encoder.parameters() if p.requires_grad]
+    opt = torch.optim.Adam(params, lr=lr)
+
+    _slot_container = [None]
+
+    def _make_hook(adapter):
+        def _hook(mod, inp, out):
+            h = out[0] if isinstance(out, tuple) else out
+            if _slot_container[0] is None:
+                return None
+            h2 = adapter(h.float(), _slot_container[0].float()).to(h.dtype)
+            if isinstance(out, tuple):
+                return (h2,) + tuple(out[1:])
+            return h2
+        return _hook
+
+    handles = [wb.layers[L].register_forward_hook(_make_hook(a))
+               for L, a in zip(layers, adapters)]
+
+    for ep in range(epochs):
+        total = 0.0
+        for node_embs, edge_index, edge_type, edge_strength, recall_weights, target, prompt in train_examples:
+            slots = slot_encoder(node_embs, edge_index, edge_type, edge_strength, recall_weights)
+            _slot_container[0] = slots
+            tid = wb.tok(target, return_tensors="pt").input_ids.to(dev)[0]
+            if tid.numel() == 0 or tid[0] == wb.tok.eos_token_id:
+                continue
+            pids = wb.tok(prompt, return_tensors="pt").input_ids.to(dev)
+            plen = pids.shape[1]
+            inp = torch.cat([pids, tid[:-1].unsqueeze(0)], dim=1)
+            lg = wb.model(inp).logits
+            loss = _F.cross_entropy(lg[:, plen - 1:].reshape(-1, lg.shape[-1]), tid)
+            opt.zero_grad(); loss.backward(); opt.step()
+            total += float(loss.detach())
+        if ep % 10 == 0:
+            print(f"      [graph-slot] ep {ep} loss={total / len(train_examples):.4f}")
+
+    for h in handles:
+        h.remove()
+    final = total / len(train_examples)
+    print(f"      [graph-slot] final loss={final:.4f}  ({len(train_examples)} examples, {epochs} epochs)  "
+          f"gates=[{', '.join(f'{float(a.g.detach()):.3f}' for a in adapters)}]")
+    return adapters, layers
 
 
 def _ds_targets_for_task(wb, code_expr: str, atoms_needed, T: int, cache: dict) -> "torch.Tensor | None":

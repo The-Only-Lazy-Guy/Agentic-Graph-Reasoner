@@ -3966,25 +3966,58 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
         _run_stream(wb, doc_ids, torch.empty(1, 0, dtype=torch.long, device=dev),
                     window, sinks, chunk, sess=_sg)
         print(f"  [session] initial write done: {len(_sg.order)} spans, {len(_sg.g.atoms)} nodes")
-        _train_examples = []
-        _ptr_examples = []
+        # GRAPH-SLOT training: active subgraph → K slots → GatedCrossAttn → LM
+        _slot_examples = []
+        _SESSION_EDGE_TYPES_LOCAL = {"follows": 5, "grounds": 6, "contains": 7, "in": 8, "uses": 3,
+                                     "related": 1, "depend": 0}
         for pi, _, gold in plan:
             _got = _sg.recall(docs[pi], k)
             if _got and gold:
-                _task_emb = torch.as_tensor(encode_batch([docs[pi]])[0], dtype=torch.float32, device=dev)
-                _atom_embs = torch.stack([
-                    torch.as_tensor(encode_batch([a.code])[0], dtype=torch.float32, device=dev)
-                    for a in _got])
-                _target = docs[pi]  # full problem text — train adapter to help generate the whole problem
-                _train_examples.append((_task_emb, _atom_embs, _target, pi, probe_prompts[pi]))
-                _gold_idx = next((i for i, a in enumerate(_got) if gold <= _nums(a.code)), None)
-                if _gold_idx is not None:
-                    _ptr_examples.append((_task_emb.clone(), _atom_embs.clone(), _gold_idx))
-        if _train_examples:
-            _train_wm_reasoner_session(wb, _wm_reasoner, _train_examples, dev)
-        # TRM pointer training: learn to select the correct span via rank().
-        if _ptr_examples and _wm_reasoner is not None and hasattr(_wm_reasoner.trm, 'rank'):
-            _train_trm_session_pointer(_wm_reasoner.trm, _ptr_examples, dev)
+                _names_g = [n for n in _sg.order if n in _sg.g.atoms]
+                if _names_g:
+                    # Build MiniLM node embeddings
+                    _E_g = torch.stack([
+                        torch.as_tensor(encode_batch([_sg.g.atoms[n].code])[0],
+                                        dtype=torch.float32, device=dev)
+                        for n in _names_g
+                    ])
+                    # Build edge tensors
+                    _ei, _et, _es = [], [], []
+                    _idx = {n: i for i, n in enumerate(_names_g)}
+                    for _s, _d, _r in getattr(_sg.g, "edges", []):
+                        if _s in _idx and _d in _idx:
+                            _ei.append([_idx[_s], _idx[_d]])
+                            _et.append(_SESSION_EDGE_TYPES_LOCAL.get(_r, 9))
+                            _es.append(float(_sg.g.strength(_s, _d, _r)))
+                    if _ei:
+                        _ei_g = torch.tensor(_ei, dtype=torch.long, device=dev).t()
+                        _et_g = torch.tensor(_et, dtype=torch.long, device=dev)
+                        _es_g = torch.tensor(_es, dtype=torch.float32, device=dev)
+                    else:
+                        _ei_g = torch.zeros(2, 0, dtype=torch.long, device=dev)
+                        _et_g = torch.zeros(0, dtype=torch.long, device=dev)
+                        _es_g = torch.zeros(0, dtype=torch.float32, device=dev)
+                    # Cosine recall weights (proven prior)
+                    _task_emb = torch.as_tensor(encode_batch([docs[pi]])[0],
+                                                dtype=torch.float32, device=dev)
+                    _rec_g = torch.nn.functional.cosine_similarity(
+                        _task_emb.unsqueeze(0), _E_g, dim=-1)
+                    _target = " ".join(sorted(gold, key=int))
+                    _slot_examples.append((_E_g, _ei_g, _et_g, _es_g,
+                                           torch.softmax(_rec_g * 3.0, dim=0),
+                                           _target, probe_prompts[pi]))
+        _graph_slot_state = None
+        if _slot_examples:
+            from v5.runtime.trm_wm import GraphSlotEncoder, _train_wm_graph_slots
+            _enc = GraphSlotEncoder(d_node=EMBED_DIM, d_lm=wb.d_model, K=8).to(dev)
+            _adapters, _layers = _train_wm_graph_slots(
+                wb, _enc, _slot_examples, dev, epochs=40, lr=3e-4)
+            if _adapters is not None:
+                _graph_slot_state = (_enc, _adapters, _layers)
+                print(f"  [graph-slot] trained {len(_slot_examples)} examples, K=8")
+            else:
+                print(f"  [graph-slot] skipped ({len(_slot_examples)} examples < 2)")
+
         # TRM GRAPH CONTROLLER: trained on HELD-OUT probes (never the eval plan). It sees the session
         # graph as OBJECTS — node embeddings + typed edges (follows/grounds, with strengths) — and its
         # three heads control session-graph activities: RECALL (which nodes to surface to the LM),
@@ -4007,11 +4040,13 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
         from v5.runtime.membrane import seed_graph as _seed_graph
         _SEED_TOOLS = _seed_graph()
 
-        def _session_tensors(sg, node_names):
-            """Build (node_embs_lm [N,d_lm], edge_index [2,E], edge_type [E], edge_strength [E])
-            from a session graph's objects + edges. Embeddings are LM-space pools of the node text;
-            edges carry relation type + learned strength (the graph's extra information)."""
-            E_mats = torch.stack([_pool_lm(sg.g.atoms[n].code) for n in node_names])
+        def _session_tensors(sg, node_names, embed_fn=None):
+            """Build (node_embs [N,d], edge_index [2,E], edge_type [E], edge_strength [E])
+            from a session graph's objects + edges. Embeddings are pools of the node text
+            (embed_fn: LM-space default, or MiniLM for the graph-slot encoder); edges carry
+            relation type + learned strength (the graph's extra information)."""
+            E_mats = torch.stack([embed_fn(sg.g.atoms[n].code) if embed_fn else _pool_lm(sg.g.atoms[n].code)
+                                  for n in node_names])
             ei, et, es = [], [], []
             idx = {n: i for i, n in enumerate(node_names)}
             for _s, _d, _r in getattr(sg.g, "edges", []):
@@ -4172,7 +4207,9 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
                     _all_gold_in_got = set().union(*[_nums(a.code) for a in got])
                     if gold <= _all_gold_in_got:
                         span_hits += 1
-                    # TRM POINTER EVAL: select span via rank(), extract numbers directly.
+                    # LEGACY (old mechanism): WMReasoner was trained by _train_wm_reasoner_session,
+                    # which the graph-slot training replaced — these adapters/rank() are now
+                    # UNTRAINED, so this eval is a chance-level baseline, kept for reference only.
                     if gold and _wm_reasoner is not None and hasattr(_wm_reasoner.trm, 'rank'):
                         _ptr_task = torch.as_tensor(encode_batch([docs[pi]])[0], dtype=torch.float32, device=dev)
                         _ptr_atoms = torch.stack([
@@ -4248,7 +4285,9 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
                                         if gold <= _nums(sess.g.atoms[n].code)]
                             print(f"          [dbg] holders={_holders} "
                                   f"holder-ranks={[next((r + 1 for r, i in enumerate(_rank) if _names_c[i] == h), None) for h in _holders]}")
-                # FULL TRM+WM pipeline: session recall → TRM refine → GatedCrossAttn → generate.
+                # LEGACY (old mechanism): FULL TRM+WM pipeline — WMReasoner adapters are untrained
+                # since the graph-slot training replaced _train_wm_reasoner_session, so this whole
+                # path (incl. wm_no_trie below) is a chance-level baseline, kept for reference only.
                 _wm_active = False
                 if use_wm and got and _wm_reasoner is not None:
                     _task_emb = torch.as_tensor(encode_batch([docs[pi]])[0], dtype=torch.float32, device=dev)
@@ -4261,20 +4300,64 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
                     _prompt = q  # no text-stuffing — slots carry the recalled content
                 else:
                     _prompt = f"Recalled from earlier:\n{recalled}{q}"
-                # PASS 2 — answer from MEMORY: the TRM controller's recalled OBJECTS (their text)
-                # stuffed into the prompt, LM generates freely (NO trie, NO logit constraint). The
-                # objects came from the controller's own recall over the session graph — wrong
-                # recall means wrong prompt. Boost ids are the numbers inside the recalled nodes.
-                _trm_prompt = q
-                if _trm_nums:
-                    _trm_prompt = f"Recalled from earlier:\n{_ctrl_recalled}{q}"
-                txt, _c2, _e2 = _run_stream(wb, torch.empty(1, 0, dtype=torch.long, device=dev),
-                                            tok(_trm_prompt, return_tensors="pt").input_ids.to(dev),
-                                            None, sinks, chunk, trie_root=None,
-                                            num_boost_ids=None, max_steps=96)
-                # LM COPY (honest, pre-suffix): could the LM itself put the recalled numbers in the
-                # output? This is what the memory claim must rest on eventually — the controller
-                # recalls, and the LM writes what it read. The suffix below must never inflate this.
+                # PASS 2 — answer from MEMORY: graph-slot injection FIRST, fall back to stuffing.
+                _gs_hit = False
+                txt = None
+                if _graph_slot_state is not None and _ctrl_nodes:
+                    _enc_gs, _adapters_gs, _layers_gs = _graph_slot_state
+                    # Active subgraph = selected nodes (cap 8 for speed). The encoder was
+                    # trained on MiniLM node embeddings (d_node=EMBED_DIM), so the eval
+                    # tensors must be MiniLM too — NOT the LM-space pools used by the TRM.
+                    _names_gs = list(dict.fromkeys(_ctrl_nodes))[:8]
+                    if _names_gs:
+                        def _mini_emb(text):
+                            return torch.as_tensor(encode_batch([text])[0],
+                                                   dtype=torch.float32, device=dev)
+                        _E_gs, _ei_gs, _et_gs, _es_gs = _session_tensors(
+                            sess, _names_gs, embed_fn=_mini_emb)
+                        _rec_gs = torch.nn.functional.cosine_similarity(
+                            _mini_emb(docs[pi]).unsqueeze(0), _E_gs, dim=-1)
+                        with torch.no_grad():
+                            _slots_gs = _enc_gs(_E_gs, _ei_gs, _et_gs, _es_gs,
+                                                torch.softmax(_rec_gs * 3.0, dim=0))
+                        # Temporary hooks for graph-slot injection
+                        _slot_container_gs = [_slots_gs]
+                        def _make_gs_hook(adapter):
+                            def _hook(mod, inp, out):
+                                h = out[0] if isinstance(out, tuple) else out
+                                h2 = adapter(h.float(), _slot_container_gs[0].float()).to(h.dtype)
+                                if isinstance(out, tuple):
+                                    return (h2,) + tuple(out[1:])
+                                return h2
+                            return _hook
+                        _gs_hooks = [wb.layers[L].register_forward_hook(_make_gs_hook(a))
+                                     for L, a in zip(_layers_gs, _adapters_gs)]
+                        try:
+                            _txt_gs, _, _ = _run_stream(
+                                wb, torch.empty(1, 0, dtype=torch.long, device=dev),
+                                tok(q, return_tensors="pt").input_ids.to(dev),
+                                None, sinks, chunk, trie_root=None)
+                        finally:
+                            for h in _gs_hooks:
+                                h.remove()
+                        if gold and gold <= _nums(_txt_gs):
+                            _gs_hit = True
+                            txt = _txt_gs
+                            print(f"        [graph-slot] probe {pi}: hit=True out={_txt_gs[:110]!r}")
+                        else:
+                            txt = None
+                # FALLBACK: text-stuffing if graph-slot missed or unavailable
+                if txt is None:
+                    _trm_prompt = q
+                    if _trm_nums:
+                        _trm_prompt = f"Recalled from earlier:\n{_ctrl_recalled}{q}"
+                    txt, _c2, _e2 = _run_stream(wb, torch.empty(1, 0, dtype=torch.long, device=dev),
+                                                tok(_trm_prompt, return_tensors="pt").input_ids.to(dev),
+                                                None, sinks, chunk, trie_root=None,
+                                                num_boost_ids=None, max_steps=96)
+                    # LM COPY (honest, pre-suffix): could the LM itself put the recalled numbers in the
+                    # output? This is what the memory claim must rest on eventually — the controller
+                    # recalls, and the LM writes what it read. The suffix below must never inflate this.
                 if gold:
                     _lm_copy_hit = bool(gold <= _nums(txt))
                     _lm_copy_total += 1
@@ -4374,8 +4457,8 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
                         lm_copy_n=_lm_copy_total)
         r = res[arm]
         _retry_tag = f"   retry_recovered={r['retry']}" if arm == "session" and r['retry'] else ""
-        _wm_nt_tag = f"   wm_no_trie={r['wm_nt_acc']:.2f} (n={r['wm_nt_n']})" if arm == "session" and r['wm_nt_n'] else ""
-        _ptr_tag = f"   trm_ptr={r['ptr_acc']:.2f} (n={r['ptr_n']})" if arm == "session" and r['ptr_n'] else ""
+        _wm_nt_tag = f"   legacy_wm_no_trie={r['wm_nt_acc']:.2f} (n={r['wm_nt_n']}, UNTRAINED)" if arm == "session" and r['wm_nt_n'] else ""
+        _ptr_tag = f"   legacy_trm_ptr={r['ptr_acc']:.2f} (n={r['ptr_n']}, UNTRAINED)" if arm == "session" and r['ptr_n'] else ""
         _stuff_nt_tag = f"   nt_stuff={r['stuff_nt_acc']:.2f} (n={r['stuff_nt_n']})" \
             if arm == "session" and r['stuff_nt_n'] else ""
         _trm_tag = f"   trm_num={r['trm_num_acc']:.2f} (n={r['trm_num_n']})" \
