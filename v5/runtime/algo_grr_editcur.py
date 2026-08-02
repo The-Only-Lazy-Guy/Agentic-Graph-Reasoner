@@ -83,15 +83,33 @@ class EditGraph:
     def __init__(self):
         self.text: dict[str, str] = {}
         self.edges: set[tuple] = set()                    # (src, dst, relation)
+        self._nbr: dict | None = None                     # invalidate-on-write neighbour cache
 
     def add(self, nid: str, text: str):
         self.text[nid] = text
 
     def link(self, a: str, b: str, rel: str = "depend"):
         self.edges.add((a, b, rel))
+        self._nbr = None
 
     def unlink(self, a: str, b: str, rel: str = "depend"):
         self.edges.discard((a, b, rel))
+        self._nbr = None
+
+    def nbr_map(self) -> dict:
+        """All-relations neighbour sets, built once per edge-set version. neighbours() rescans
+        every edge, which is fine for 25 atoms and quadratic-in-disguise at session scale: a
+        600-span graph scores ~600 candidates per source, so an uncached lookup turns the feature
+        build into hundreds of millions of Python operations."""
+        if self._nbr is None:
+            m: dict = {n: set() for n in self.text}
+            for a, b, _r in self.edges:
+                if a in m:
+                    m[a].add(b)
+                if b in m:
+                    m[b].add(a)
+            self._nbr = m
+        return self._nbr
 
     def has(self, a: str, b: str, rel: str | None = None) -> bool:
         return any(s == a and d == b and (rel is None or r == rel) for s, d, r in self.edges)
@@ -201,10 +219,13 @@ def run_atom(g: EditGraph, root: str, code: dict, entry: dict):
 N_FEAT = 7
 
 
-def pair_features(g: EditGraph, i: str, j: str, cofire: dict, theta: dict) -> list:
-    ti, tj = _tok(g.text.get(i, "")), _tok(g.text.get(j, ""))
+def pair_features(g: EditGraph, i: str, j: str, cofire: dict, theta: dict,
+                  nbrs: dict | None = None, toks: dict | None = None) -> list:
+    ti = toks[i] if toks else _tok(g.text.get(i, ""))
+    tj = toks[j] if toks else _tok(g.text.get(j, ""))
     jac = len(ti & tj) / len(ti | tj) if (ti or tj) else 0.0
-    ni, nj = g.neighbours(i), g.neighbours(j)
+    nb = nbrs if nbrs is not None else g.nbr_map()
+    ni, nj = nb.get(i, set()), nb.get(j, set())
     n_all = max(1, len(g.text))
     common = len(ni & nj) / n_all
     dist = 0.0 if j in ni else (0.5 if (ni & nj) else 1.0)                # 1-hop / 2-hop / far
@@ -227,7 +248,11 @@ def pair_matrix(g: EditGraph, src: str, cands: list, cofire: dict, theta: dict) 
     zeros and self-cancels, while a column that actually discriminates keeps its spread. The same
     learned weight then means "trust this cue to the extent it separates the candidates here",
     which is the property that has to survive the jump from code atoms to prose spans."""
-    X = torch.tensor([pair_features(g, src, c, cofire, theta) for c in cands],
+    nb = g.nbr_map()
+    tk = {src: _tok(g.text.get(src, ""))}
+    for c in cands:
+        tk[c] = _tok(g.text.get(c, ""))
+    X = torch.tensor([pair_features(g, src, c, cofire, theta, nbrs=nb, toks=tk) for c in cands],
                      dtype=torch.float32)
     for col in (0, 1):                                        # token overlap, co-firing
         v = X[:, col]
@@ -236,7 +261,8 @@ def pair_matrix(g: EditGraph, src: str, cands: list, cofire: dict, theta: dict) 
     return X
 
 
-def dynamics_stats(g: EditGraph, steps: int = 3, w_comp: float = 0.4) -> tuple:
+def dynamics_stats(g: EditGraph, steps: int = 3, w_comp: float = 0.4,
+                   max_probes: int = 120, seed: int = 0) -> tuple:
     """Run the spiking layer with every node used in turn as the query, and record (a) how often
     each PAIR fires together and (b) each node's final theta. Unsupervised: no labels, no model --
     just the layer's own behaviour on the graph it is sitting in. cofire is the hebbian explore
@@ -249,9 +275,16 @@ def dynamics_stats(g: EditGraph, steps: int = 3, w_comp: float = 0.4) -> tuple:
         if s in idx and d in idx:
             adj[idx[s], idx[d]] = adj[idx[d], idx[s]] = 1.0
     toks = {x: _tok(g.text.get(x, "")) for x in ids}
+    # The rival mask is a function of the graph, not of the probe, so it is built ONCE. Rebuilding
+    # it inside the step loop is an [N,N] allocation per step per probe, which is what made this
+    # unusable at session scale (N ~ 600 spans).
+    comp = torch.ones(n, n) - adj - torch.eye(n)
+    probes = ids
+    if n > max_probes:                                  # subsample: co-fire is a rate, not a census
+        probes = random.Random(seed).sample(ids, max_probes)
     cofire: dict = {}
     theta_sum = torch.zeros(n)
-    for q in ids:                                                          # each node is a probe
+    for q in probes:
         tq = toks[q]
         drive = torch.tensor([len(tq & toks[x]) / max(1, len(tq | toks[x])) for x in ids],
                              dtype=torch.float32)
@@ -260,15 +293,15 @@ def dynamics_stats(g: EditGraph, steps: int = 3, w_comp: float = 0.4) -> tuple:
         layer.reset_state(n)
         fired = torch.zeros(n)
         for _ in range(steps):
-            y = layer.step(drive, adj, torch.ones(n, n) - adj - torch.eye(n))
+            y = layer.step(drive, adj, comp)
             fired = torch.clamp(fired + y, max=1.0)
         theta_sum += layer.theta
         lit = [ids[k] for k in range(n) if fired[k] > 0]
         for a in lit:
             for b in lit:
                 if a != b:
-                    cofire[(a, b)] = cofire.get((a, b), 0.0) + 1.0 / n
-    theta = {ids[k]: float(theta_sum[k] / max(1, n)) for k in range(n)}
+                    cofire[(a, b)] = cofire.get((a, b), 0.0) + 1.0 / len(probes)
+    theta = {ids[k]: float(theta_sum[k] / max(1, len(probes))) for k in range(n)}
     return cofire, theta
 
 
