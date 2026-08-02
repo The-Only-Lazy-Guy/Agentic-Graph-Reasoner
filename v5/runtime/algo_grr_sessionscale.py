@@ -134,7 +134,8 @@ def graph_from_eviction(problems: list, lm_name: str, window: int = 512, sinks: 
 # the A/B
 # ================================================================================================
 def recall_ab(g0: EditGraph, problems: list, pol=None, top_k: int = 12, cycles: int = 4,
-              picks: int = 3, cand_cap: int = 60, verbose: bool = True) -> dict:
+              picks: int = 3, cand_cap: int = 60, boost_by_strength: bool = False,
+              verbose: bool = True) -> dict:
     """Identical mechanism in both arms (real select_nodes, frozen Hopfield prior, depth-1 walk);
     the only difference is whether the policy's `related` edges are present."""
     from embedder import encode_batch
@@ -157,7 +158,7 @@ def recall_ab(g0: EditGraph, problems: list, pol=None, top_k: int = 12, cycles: 
             n_idx, _e, _t = trm.select_nodes(
                 Q[k], E, ei, et, es, tools, top_k=top_k, top_tools=0, cycles=cycles,
                 picks_per_cycle=picks, neighbor_boost=3.0, follows_type=None,
-                win_embs_lm=Ew, win_parent=Wp)
+                win_embs_lm=Ew, win_parent=Wp, boost_by_strength=boost_by_strength)
             got: set = set()
             for i in n_idx:
                 got |= _digits(g0.text[ids[i]])
@@ -188,7 +189,12 @@ def recall_ab(g0: EditGraph, problems: list, pol=None, top_k: int = 12, cycles: 
             continue
         with torch.no_grad():
             sc = pol(pair_matrix(g0, s, cands, cofire, theta))
-        g1.link(s, cands[int(sc.argmax())], "related")
+        # The edge carries the policy's CONFIDENCE, not just its choice: softmax-max over the
+        # shortlist, which is high only when one candidate clearly wins. Under
+        # boost_by_strength the recall loop then weighs a hesitant edge less than the
+        # structural `follows` edges, which stay at 1.0.
+        conf = float(torch.softmax(sc, dim=0).max())
+        g1.link(s, cands[int(sc.argmax())], "related", weight=conf)
         added += 1
     edited, _ = run(g1, f"+ {added} policy `related` edges")
     return {"n": n, "base": base, "edited": edited, "added": added, "spans": len(ids)}
@@ -247,7 +253,8 @@ def _selftest() -> bool:
 
 
 def _run(dataset: str, n: int, source: str, lm: str, min_level: int, top_k: int,
-         span_words: int, window: int = 512, chunk: int = 128) -> bool:
+         span_words: int, window: int = 512, chunk: int = 128,
+         boost_by_strength: bool = False, drop_follows: float = 0.0) -> bool:
     pol, loaded = _load_policy()
     print(f"algo_grr_sessionscale --run: dataset={dataset} n={n} source={source} "
           f"min_level={min_level} top_k={top_k}")
@@ -256,8 +263,24 @@ def _run(dataset: str, n: int, source: str, lm: str, min_level: int, top_k: int,
     print(f"  {len(problems)} problems with non-empty gold")
     g = (graph_from_eviction(problems, lm, window=window, chunk=chunk)
          if source == "eviction" else graph_from_words(problems, span_words=span_words))
+    if drop_follows > 0:
+        # FRAGMENT THE CHAIN. A real session graph is not a perfect line -- this project measured
+        # 84% isolated nodes / 74 components on its own long-term graph before repair. With the
+        # chain intact every span already has a follows neighbour boosted at full strength, and
+        # because the boost is taken as a max, a strength-weighted learned edge (median confidence
+        # 0.18) can never outrank it. Repair is the only regime where a learned edge can contribute.
+        # SORTED, not set order. g.edges is a set of string tuples, and Python randomises string
+        # hashing per process, so a seeded RNG walking the set drops a DIFFERENT subset in every
+        # run -- measured: two arms that should have shared an identical fragmented graph got
+        # bases of 0.447 and 0.467. Sorting makes the corruption reproducible across processes.
+        import random as _r
+        _rng = _r.Random(0)
+        for _a, _b, _r2 in sorted(e for e in g.edges if e[2] == "follows"):
+            if _rng.random() < drop_follows:
+                g.unlink(_a, _b, _r2)
     print(f"  graph: {len(g.ids())} spans, {len(g.edges)} follows edges\n")
-    r = recall_ab(g, problems, pol=pol, top_k=top_k)
+    r = recall_ab(g, problems, pol=pol, top_k=top_k,
+                  boost_by_strength=boost_by_strength)
     if not r.get("n"):
         print(f"  {r.get('note')}")
         return False
@@ -281,12 +304,16 @@ def main() -> None:
     ap.add_argument("--lm", default="Qwen/Qwen2.5-0.5B-Instruct")
     ap.add_argument("--window", type=int, default=512, help="KV cache cap (eviction)")
     ap.add_argument("--chunk", type=int, default=128, help="feed chunk (eviction)")
+    ap.add_argument("--strength-boost", action="store_true", dest="sb",
+                    help="scale neighbor_boost by edge strength (learned edges carry confidence)")
+    ap.add_argument("--drop-follows", type=float, default=0.0, dest="df",
+                    help="fragment the temporal chain: drop this fraction of follows edges")
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
     if a.run:
         sys.exit(0 if _run(a.dataset, a.n, a.source, a.lm, a.min_level, a.top_k,
-                           a.span_words, a.window, a.chunk) else 1)
+                           a.span_words, a.window, a.chunk, a.sb, a.df) else 1)
     ap.print_help()
 
 

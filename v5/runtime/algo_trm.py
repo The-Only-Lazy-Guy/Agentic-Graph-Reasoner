@@ -334,7 +334,8 @@ def _build():
             follows_type: int | None = None,
             win_embs_lm: torch.Tensor | None = None,
             win_parent: torch.Tensor | None = None,
-            win_beta_lo: float = 8.0, win_beta_hi: float = 32.0) -> tuple:
+            win_beta_lo: float = 8.0, win_beta_hi: float = 32.0,
+            boost_by_strength: bool = False) -> tuple:
             """Iterative (step()-style) OBJECT selection over the session graph.
 
             cycles=1 reproduces the original one-shot top-k. For cycles>1 the controller
@@ -396,14 +397,39 @@ def _build():
                             _src = edge_index[0].tolist()
                             _dst = edge_index[1].tolist()
                             _typ = edge_type.tolist()
+                            _str = (edge_strength.tolist()
+                                    if (boost_by_strength and edge_strength is not None
+                                        and edge_strength.numel() == len(_src))
+                                    else None)
                             for _j in _first_picks:
                                 for _k, (_s, _d) in enumerate(zip(_src, _dst)):
                                     if follows_type is not None and _typ[_k] != follows_type:
                                         continue
+                                    # STRENGTH-WEIGHTED BOOST (opt-in). With _str None this is the
+                                    # original constant and every existing caller is bit-identical.
+                                    #
+                                    # Why the option exists, measured: as a constant, the boost is a
+                                    # BINARY FLAG rather than a weight. On a 348-span eviction graph,
+                                    # neighbor_boost=3.0 and neighbor_boost=1.0 gave bit-identical
+                                    # recall (0.552 base / 0.519 edited) while 0.0 gave 0.474/0.474 --
+                                    # any nonzero value dominates the compressed log-sum-exp spread,
+                                    # so only "is this a first-pick neighbour" survives. The flag
+                                    # genuinely earns its place (+0.078 over no boost), but it cannot
+                                    # say one edge is more trustworthy than another, so ADDING edges
+                                    # can only dilute it: learned `related` edges cost 0.005-0.053
+                                    # across every scale/dataset/substrate tried.
+                                    # edge_strength was already a parameter here and was discarded.
+                                    # Honouring it lets a learned edge carry a confidence, and gives
+                                    # membrane_edits' record_success/record_failure strengths -- inert
+                                    # for recall until now -- a route into retrieval.
+                                    _b = neighbor_boost * (_str[_k] if _str is not None else 1.0)
+                                    # max, not assign: a node reachable by several edges keeps its
+                                    # STRONGEST evidence instead of whichever edge happened to be
+                                    # visited last.
                                     if _s == _j and not bool(mask[_d]):
-                                        _boost[_d] = neighbor_boost
+                                        _boost[_d] = max(float(_boost[_d]), _b)
                                     if _d == _j and not bool(mask[_s]):
-                                        _boost[_s] = neighbor_boost
+                                        _boost[_s] = max(float(_boost[_s]), _b)
             t_idx = tol.topk(min(top_tools, M)).indices.tolist()
             return ([int(i) for i in picked],
                     [bool(e) for e in (evi < 0).tolist()],

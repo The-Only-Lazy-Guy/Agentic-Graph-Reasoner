@@ -83,17 +83,23 @@ class EditGraph:
     def __init__(self):
         self.text: dict[str, str] = {}
         self.edges: set[tuple] = set()                    # (src, dst, relation)
+        self.strength: dict[tuple, float] = {}            # (src,dst,rel) -> confidence in [0,1]
         self._nbr: dict | None = None                     # invalidate-on-write neighbour cache
 
     def add(self, nid: str, text: str):
         self.text[nid] = text
 
-    def link(self, a: str, b: str, rel: str = "depend"):
+    def link(self, a: str, b: str, rel: str = "depend", weight: float = 1.0):
+        """weight is the edge's CONFIDENCE. An asserted structural edge (a call, a temporal
+        follows) is 1.0; a learned edge should carry how sure the policy was, so a downstream
+        consumer can weigh it instead of treating every edge as equally true."""
         self.edges.add((a, b, rel))
+        self.strength[(a, b, rel)] = float(weight)
         self._nbr = None
 
     def unlink(self, a: str, b: str, rel: str = "depend"):
         self.edges.discard((a, b, rel))
+        self.strength.pop((a, b, rel), None)
         self._nbr = None
 
     def nbr_map(self) -> dict:
@@ -132,6 +138,7 @@ class EditGraph:
         g = EditGraph()
         g.text = dict(self.text)
         g.edges = set(self.edges)
+        g.strength = dict(self.strength)
         return g
 
 

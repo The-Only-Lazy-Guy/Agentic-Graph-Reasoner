@@ -195,7 +195,7 @@ def _tensors(g: EditGraph, ids: list) -> tuple:
         if a in idx and b in idx:
             ei.append([idx[a], idx[b]])
             et.append(FOLLOWS_T if r == "follows" else RELATED_T)
-            es.append(1.0)
+            es.append(float(g.strength.get((a, b, r), 1.0)))
     if ei:
         return (E, torch.tensor(ei, dtype=torch.long).t(),
                 torch.tensor(et, dtype=torch.long), torch.tensor(es, dtype=torch.float32))
