@@ -4849,6 +4849,157 @@ def locate_thinker(g: AtomGraph, q: np.ndarray, top_w: int = 10, T: int = 3,
             "worlds": len(g.worlds)}
 
 
+# ── RL: force the loop to actually think ──────────────────────────────────────────────────────────
+# The heuristic thinker's observation channel measured NULL (no-exec identical). That is not evidence
+# that observations are useless -- nothing ever TRAINED the loop to use them. `ctx=0.5` was a constant
+# I picked. Here the sequence of descents is a real policy trained by REINFORCE against the terminal
+# verifier (did COMMIT name the gold file), which is exactly the generate-and-verify shape that is the
+# only thing that has moved a number all session.
+#
+# The decision is genuinely sequential and observation-dependent: at each step the policy picks ONE
+# world to open; opening it REVEALS its files and their scores; the best score found so far is an INPUT
+# to the next choice and to when to stop. A policy that cannot see what it found cannot know whether to
+# keep looking -- so `no-exec` (observation features zeroed) becomes a falsifier with teeth instead of
+# a no-op.
+N_LOCF = 9
+
+
+def _loc_feats(cw: float, size: int, depth: int, best: float, n_open: int, n_seen: int,
+               gap: float, tokov: float, budget: float) -> list:
+    """One candidate world, in the state the policy is actually in. `best`/`n_seen`/`gap` are the
+    OBSERVATION channel -- what opening previous worlds revealed. Zeroing them is the ablation."""
+    return [cw, min(size, 64) / 64.0, min(depth, 8) / 8.0, best, min(n_open, 8) / 8.0,
+            min(n_seen, 64) / 64.0, gap, tokov, budget]
+
+
+class LocPolicy(nn.Module):
+    """~200 params. Scores 'open this world next', plus a STOP head reading only the observation."""
+
+    def __init__(self, hidden: int = 16):
+        super().__init__()
+        self.net = nn.Sequential(nn.Linear(N_LOCF, hidden), nn.Tanh(), nn.Linear(hidden, 1))
+        self.stop = nn.Sequential(nn.Linear(4, 8), nn.Tanh(), nn.Linear(8, 1))
+
+    def forward(self, x):
+        return self.net(x).squeeze(-1)
+
+    def stop_logit(self, best: float, n_open: int, n_seen: int, gap: float):
+        return self.stop(torch.tensor([best, min(n_open, 8) / 8.0, min(n_seen, 64) / 64.0, gap],
+                                      dtype=torch.float32)).squeeze()
+
+
+def locate_rl_episode(pol, g: AtomGraph, q: np.ndarray, cand_w: int = 24, T: int = 4,
+                      sample: bool = False, no_exec: bool = False, gold: str | None = None):
+    """One episode. Returns (commit, files_seen, logps, n_open). Worlds are ranked by centroid ONCE
+    (O(W)); the policy chooses the ORDER to open them and when to stop."""
+    qv = np.asarray(q, dtype=np.float32)
+    WM, wnames = g._world_matrix()
+    if not wnames:
+        return None, 0, [], 0, False
+    wsim = WM @ qv
+    top = list((-wsim).argsort()[:cand_w])
+    seen, logps, best, gap = [], [], 0.0, 0.0
+    opened: set = set()
+    for _t in range(T):
+        avail = [i for i in top if i not in opened]
+        if not avail:
+            break
+        obs_best = 0.0 if no_exec else best
+        obs_seen = 0 if no_exec else len(seen)
+        obs_gap = 0.0 if no_exec else gap
+        feats = torch.tensor(
+            [_loc_feats(float(wsim[i]), len(g.worlds.get(wnames[i], [])),
+                        wnames[i].count("/"), obs_best, len(opened), obs_seen, obs_gap,
+                        0.0, _t / max(1, T)) for i in avail], dtype=torch.float32)
+        logits = pol(feats)
+        if sample:
+            d = torch.distributions.Categorical(logits=logits)
+            k = int(d.sample())
+            logps.append(d.log_prob(torch.tensor(k)))
+        else:
+            k = int(logits.argmax())
+        j = avail[k]
+        opened.add(j)
+        members = g.worlds.get(wnames[j], [])
+        if members:
+            E = np.stack([g.atoms[m].emb for m in members])
+            s = E @ qv
+            for mi in (-s).argsort()[:8]:
+                seen.append((float(s[int(mi)]), members[int(mi)]))
+            seen.sort(reverse=True)
+            del seen[16:]
+            nb = seen[0][0]
+            gap = nb - (seen[1][0] if len(seen) > 1 else 0.0)
+            best = nb
+        # STOP is a real decision and it reads ONLY the observation.
+        if _t + 1 < T and seen:
+            sl = pol.stop_logit(0.0 if no_exec else best, len(opened),
+                                0 if no_exec else len(seen), 0.0 if no_exec else gap)
+            if sample:
+                p = torch.sigmoid(sl)
+                stop = bool(torch.bernoulli(p))
+                logps.append(torch.log(p + 1e-8) if stop else torch.log(1 - p + 1e-8))
+                if stop:
+                    break
+            elif float(sl) > 0:
+                break
+    n_files = sum(len(g.worlds.get(wnames[j], [])) for j in opened)
+    saw = bool(gold) and any(nm == gold for _s, nm in seen)
+    return (seen[0][1] if seen else None), n_files, logps, len(opened), saw
+
+
+def train_locate_rl(pol, train, trees, path_emb, epochs: int = 6, lr: float = 5e-3,
+                    no_exec: bool = False, verbose: bool = True):
+    """REINFORCE against the terminal verifier, easiest-first (curriculum by the gold world's rank:
+    difficulty is measured by routing, not asserted)."""
+    import random
+    opt = torch.optim.Adam(pol.parameters(), lr=lr)
+    graphs = []
+    for r in train:
+        files = [f for f in trees[r["instance_id"]] if f in path_emb]
+        g = build_repo_graph(files, path_emb)
+        WM, wn = g._world_matrix()
+        rank = 999
+        if wn:
+            gd = _dirname(r["gold"])
+            order = [wn[i] for i in (-(WM @ r["q"])).argsort()]
+            rank = order.index(gd) if gd in order else 999
+        graphs.append((g, r, rank))
+    graphs.sort(key=lambda t: t[2])                       # curriculum: reachable ones first
+    # ONE gradient step per epoch was the first version and it did not train at all (6 steps total,
+    # train_reward flat at ~0.03). Iterations x minibatches instead: episodes cost ~2ms, so thousands
+    # are free.
+    #
+    # REWARD SHAPING, declared rather than hidden: terminal commit==gold is ~3-13% and far too sparse
+    # for REINFORCE to find anything. Partial credit is given for OPENING A WORLD THAT CONTAINS THE
+    # GOLD (`gold in seen`), which is the task's own decomposition -- the file's own notes say "the gap
+    # between top1 0.18 and top20 0.58 IS the task", i.e. recall first, then precision. The REPORTED
+    # metric is always the terminal one; shaping only shapes the search.
+    rng = random.Random(0)
+    iters = max(40, epochs * 10)
+    hist = []
+    for it in range(iters):
+        frac = min(1.0, 0.25 + 0.75 * (it + 1) / iters)   # curriculum widens with competence
+        pool_ = graphs[: max(24, int(len(graphs) * frac))]
+        batch = [pool_[rng.randrange(len(pool_))] for _ in range(24)]
+        rs = []
+        for g, r, _rk in batch:
+            c, _n, logps, _o, saw = locate_rl_episode(pol, g, r["q"], sample=True,
+                                                      no_exec=no_exec, gold=r["gold"])
+            rs.append((1.0 if c == r["gold"] else (0.3 if saw else 0.0), logps,
+                       1.0 if c == r["gold"] else 0.0))
+        base = sum(x for x, _l, _t in rs) / max(1, len(rs))
+        live = [(x, lp) for x, lp, _t in rs if lp]
+        if live:
+            loss = torch.stack([-(x - base) * torch.stack(lp).sum() for x, lp in live]).mean()
+            opt.zero_grad(); loss.backward(); opt.step()
+        hist.append(sum(t for _x, _l, t in rs) / max(1, len(rs)))
+        if verbose and (it + 1) % 10 == 0:
+            print(f"    iter {it+1:3d}  pool={len(pool_)}  shaped={base:.3f}  "
+                  f"terminal={sum(hist[-10:]) / 10:.4f}", flush=True)
+    return pol
+
+
 def demo_locate(lm_name: str = "", arm: str = "thinker", n: int | None = None, abl: str = "",
                 held_repos=("pytest-dev/pytest", "sphinx-doc/sphinx"), n_held: int = 60,
                 seed: int = 0) -> bool:
@@ -4870,6 +5021,14 @@ def demo_locate(lm_name: str = "", arm: str = "thinker", n: int | None = None, a
     print(f"  arm={arm}  ablations={sorted(abls) or 'none'}\n")
 
     use_worlds = "no-worlds" not in abls
+    no_exec = "no-exec" in abls
+    pol = None
+    if arm == "rl":
+        pol = LocPolicy()
+        print("  training the descent policy by REINFORCE on the terminal verifier "
+              f"(no_exec={no_exec})...")
+        train_locate_rl(pol, train, trees, path_emb, no_exec=no_exec)
+        print()
     wb = None
     if arm == "cot":
         from v5.runtime.dcpd_latent import WhiteBox
@@ -4888,6 +5047,10 @@ def demo_locate(lm_name: str = "", arm: str = "thinker", n: int | None = None, a
                 res = locate_thinker(g, r["q"], no_exec=("no-exec" in abls))
                 pick, _ = res["commit"], None
                 seen_tot += res["files_seen"]
+            elif arm == "rl":
+                c, nf, _lp, _o, _saw = locate_rl_episode(pol, g, r["q"], no_exec=no_exec)
+                pick = c
+                seen_tot += nf
             elif arm == "cot":
                 # The frontier-style arm: hand the LM the issue plus as much of the file list as a
                 # small context can hold, and let it reason to an answer. Its prompt IS the load.
@@ -5071,9 +5234,11 @@ def main():
                     help="LONG-HORIZON: real SWE-bench file localization over a small-world repo graph. "
                          "The thinker ROUTEs (O(W)) and DESCENDs instead of reading the repo; the LM only "
                          "verbalizes. Reports accuracy AND load (files_seen, lm_tokens) together.")
-    ap.add_argument("--arm", type=str, default="thinker", choices=["thinker", "cosine", "cot"],
+    ap.add_argument("--arm", type=str, default="thinker",
+                    choices=["thinker", "cosine", "cot", "rl"],
                     help="--locate arm: thinker (small-world loop) | cosine (the 0.1800 floor) | "
-                         "cot (frontier-style: LM reads a file list and reasons, token-counted)")
+                         "cot (frontier-style: LM reads a file list and reasons, token-counted) | "
+                         "rl (the descent policy TRAINED by REINFORCE on the terminal verifier)")
     ap.add_argument("--abl", type=str, default="",
                     help="--locate ablations, comma separated: no-worlds, no-exec")
     ap.add_argument("--selftest", action="store_true",
