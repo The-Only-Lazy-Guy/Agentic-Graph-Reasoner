@@ -4849,6 +4849,92 @@ def locate_thinker(g: AtomGraph, q: np.ndarray, top_w: int = 10, T: int = 3,
             "worlds": len(g.worlds)}
 
 
+# ── LM AS ENCODER on the COMMIT decision -- where the measured bottleneck actually is ────────────
+# Why this exists: every earlier arm reported lm_tokens 0.0, and that was STRUCTURAL, not a counting
+# bug -- WhiteBox was only ever constructed in the `cot` branch, so the thinker and RL arms never
+# touched an LM at all. They ranked files by MiniLM cosine over PATH STRINGS
+# ("astropy/modeling/separable.py" -> "astropy modeling separable"). That is also the accuracy
+# ceiling: measured world recall @40 is 0.80, so the gold directory is usually reachable, but path
+# words alone cannot separate siblings inside it, and top-1 sticks at 0.13-0.18.
+#
+# So the LM goes exactly where the failure is: scoring the ~24 candidates the router already found.
+# ENCODER ONLY -- one forward per text, no autoregressive decode. That distinction is the whole
+# efficiency claim, so encode and generate tokens are counted and reported SEPARATELY: a prompt token
+# read once is not the same cost as a token generated in a loop.
+def _lm_encode(wb, texts: list, layer: int = -1, max_tok: int = 64, batch: int = 32):
+    """Mean-pooled hidden states for each text. Returns (matrix [n,d], tokens_encoded)."""
+    out, ntok = [], 0
+    for i in range(0, len(texts), batch):
+        chunk = texts[i:i + batch]
+        enc = wb.tok(chunk, return_tensors="pt", padding=True, truncation=True,
+                     max_length=max_tok).to(wb.device)
+        ntok += int(enc["attention_mask"].sum())
+        with torch.no_grad():
+            hs = wb.model(**enc, output_hidden_states=True).hidden_states[layer]
+        m = enc["attention_mask"].unsqueeze(-1).to(hs.dtype)
+        pooled = (hs * m).sum(1) / m.sum(1).clamp(min=1)
+        out.append(torch.nn.functional.normalize(pooled.float(), dim=-1).cpu())
+    return (torch.cat(out) if out else torch.zeros(0, 1)), ntok
+
+
+class CommitHead(nn.Module):
+    """Scores one candidate against the issue, in the LM's own space. Tiny and bilinear-ish: a
+    low-rank interaction plus the raw cosine, so it can only re-rank what the encoder already
+    separates -- and it starts as (approximately) that cosine, which is the prior-preserving default
+    this project keeps insisting on."""
+
+    def __init__(self, d_lm: int, r: int = 32):
+        super().__init__()
+        self.pq = nn.Linear(d_lm, r, bias=False)
+        self.pc = nn.Linear(d_lm, r, bias=False)
+        self.w = nn.Parameter(torch.tensor([1.0, 0.0]))     # [raw cosine, learned interaction]
+
+    def forward(self, q: torch.Tensor, C: torch.Tensor) -> torch.Tensor:
+        cos = C @ q
+        inter = (self.pc(C) * self.pq(q).unsqueeze(0)).sum(-1)
+        return self.w[0] * cos + self.w[1] * inter
+
+
+def train_commit_head(wb, train, trees, path_emb, n_train: int = 90, epochs: int = 12,
+                      lr: float = 3e-3, verbose: bool = True):
+    """Listwise CE over the router's OWN candidates, labelled by the verifier (which one is gold).
+
+    Only instances where the router actually surfaced the gold are trainable -- on the rest there is
+    nothing for a commit head to learn, and pretending otherwise would train it on lists whose correct
+    answer is absent. That trainable fraction is printed, because it is also the ceiling this arm can
+    reach on top of the router.
+    """
+    head = CommitHead(wb.d_model)
+    opt = torch.optim.Adam(head.parameters(), lr=lr)
+    data, kept = [], 0
+    for r in train[:n_train]:
+        files = [f for f in trees[r["instance_id"]] if f in path_emb]
+        g = build_repo_graph(files, path_emb)
+        cands = locate_thinker(g, r["q"])["ranked"][:24]
+        if r["gold"] not in cands:
+            continue
+        qm, _ = _lm_encode(wb, [r["problem"][:600]])
+        C, _ = _lm_encode(wb, cands)
+        data.append((qm[0], C, cands.index(r["gold"])))
+        kept += 1
+    if verbose:
+        print(f"    commit head: {kept}/{min(n_train, len(train))} train instances have the gold in "
+              f"the router's candidates (the ceiling this arm can add on top of the router)")
+    if not data:
+        return head
+    for ep in range(epochs):
+        tot = 0.0
+        for q, C, y in data:
+            loss = torch.nn.functional.cross_entropy(head(q, C).unsqueeze(0),
+                                                     torch.tensor([y]))
+            opt.zero_grad(); loss.backward(); opt.step()
+            tot += float(loss)
+        if verbose and (ep + 1) % 4 == 0:
+            print(f"    epoch {ep+1:2d}  loss={tot / len(data):.4f}  "
+                  f"w=[cos {float(head.w[0]):+.2f}, learned {float(head.w[1]):+.2f}]", flush=True)
+    return head
+
+
 # ── RL: force the loop to actually think ──────────────────────────────────────────────────────────
 # The heuristic thinker's observation channel measured NULL (no-exec identical). That is not evidence
 # that observations are useless -- nothing ever TRAINED the loop to use them. `ctx=0.5` was a constant
@@ -5029,13 +5115,17 @@ def demo_locate(lm_name: str = "", arm: str = "thinker", n: int | None = None, a
               f"(no_exec={no_exec})...")
         train_locate_rl(pol, train, trees, path_emb, no_exec=no_exec)
         print()
-    wb = None
-    if arm == "cot":
+    wb = head = None
+    if arm in ("cot", "lmcommit"):
         from v5.runtime.dcpd_latent import WhiteBox
         wb = WhiteBox(lm_name or "Qwen/Qwen2.5-0.5B-Instruct", quant="4bit")
+        print(f"  LM: {wb.name if hasattr(wb, 'name') else lm_name} quant={wb.quant} "
+              f"d={wb.d_model} vram={wb.vram_gb:.2f}GB")
+    if arm == "lmcommit":
+        head = train_commit_head(wb, train, trees, path_emb)
 
     def run(split, tag):
-        ok = seen_tot = tok_tot = 0
+        ok = seen_tot = tok_tot = enc_tot = 0
         t0 = time.time()
         for r in split:
             files = [f for f in trees[r["instance_id"]] if f in path_emb]
@@ -5047,6 +5137,18 @@ def demo_locate(lm_name: str = "", arm: str = "thinker", n: int | None = None, a
                 res = locate_thinker(g, r["q"], no_exec=("no-exec" in abls))
                 pick, _ = res["commit"], None
                 seen_tot += res["files_seen"]
+            elif arm == "lmcommit":
+                res = locate_thinker(g, r["q"], no_exec=no_exec)
+                cands = res["ranked"][:24]
+                seen_tot += res["files_seen"]
+                if not cands:
+                    pick = None
+                else:
+                    qm, n1 = _lm_encode(wb, [r["problem"][:600]])
+                    C, n2 = _lm_encode(wb, [c for c in cands])
+                    enc_tot += n1 + n2
+                    with torch.no_grad():
+                        pick = cands[int(head(qm[0], C).argmax())]
             elif arm == "rl":
                 c, nf, _lp, _o, _saw = locate_rl_episode(pol, g, r["q"], no_exec=no_exec)
                 pick = c
@@ -5069,10 +5171,11 @@ def demo_locate(lm_name: str = "", arm: str = "thinker", n: int | None = None, a
         dt = time.time() - t0
         n_ = max(1, len(split))
         print(f"    {tag:<22} top1 {ok / n_:.4f} ({ok}/{n_})  files_seen/inst {seen_tot / n_:>7.1f}  "
-              f"lm_tokens/inst {tok_tot / n_:>7.1f}  {dt / n_:.2f}s/inst")
+              f"lm_enc/inst {enc_tot / n_:>7.1f}  lm_gen/inst {tok_tot / n_:>6.1f}  "
+              f"{dt / n_:.2f}s/inst")
         return ok / n_, seen_tot / n_, tok_tot / n_
 
-    print("  split                  accuracy            LOAD (what the thesis is about)")
+    print("  split                  accuracy            LOAD (enc = read once; gen = autoregressive)")
     a_i = run(held_i, "held-INSTANCE")
     a_r = run(hr, "held-REPO")
     if torch.cuda.is_available():
@@ -5235,10 +5338,12 @@ def main():
                          "The thinker ROUTEs (O(W)) and DESCENDs instead of reading the repo; the LM only "
                          "verbalizes. Reports accuracy AND load (files_seen, lm_tokens) together.")
     ap.add_argument("--arm", type=str, default="thinker",
-                    choices=["thinker", "cosine", "cot", "rl"],
+                    choices=["thinker", "cosine", "cot", "rl", "lmcommit"],
                     help="--locate arm: thinker (small-world loop) | cosine (the 0.1800 floor) | "
                          "cot (frontier-style: LM reads a file list and reasons, token-counted) | "
-                         "rl (the descent policy TRAINED by REINFORCE on the terminal verifier)")
+                         "rl (the descent policy TRAINED by REINFORCE on the terminal verifier) | "
+                         "lmcommit (router finds candidates, then the LM ENCODER + a trained head "
+                         "makes the commit -- the arm where the LM is actually used)")
     ap.add_argument("--abl", type=str, default="",
                     help="--locate ablations, comma separated: no-worlds, no-exec")
     ap.add_argument("--selftest", action="store_true",
