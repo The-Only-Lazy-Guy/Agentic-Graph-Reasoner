@@ -4946,6 +4946,29 @@ def symbol_owners(cont: dict, repo: str, files: list) -> dict:
 # The split seen at 4 channels persists: plain fusion is better WITHIN seen repos (0.5267 vs 0.5033),
 # the thinker is better ACROSS unseen repos (0.3822 vs 0.3694).
 #
+# WHERE THE REMAINING ERRORS LIVE, measured rather than guessed -- this is the number that says what
+# to build next. An error whose gold sits at rank 2 is a RANKING problem a reranker can capture; one
+# at rank 400 is an EVIDENCE problem no reweighting reaches.
+#     held-INSTANCE  recall @1 0.527  @3 0.703  @5 0.773  @10 0.820  @20 0.857  @50 0.910
+#     held-REPO      recall @1 0.369  @3 0.561  @5 0.624  @10 0.713  @20 0.809  @50 0.904
+#     median gold rank: 0 of ~1852 files (held-I), 1 of ~485 (held-R)
+# recall@10 = 0.820 against top1 = 0.527 means ~29 points are a pure RANKING problem. It also
+# CORRECTS an earlier claim of mine that ~50% of instances have no locator and 0.80 is unreachable:
+# that was true of single lexical channels, not of the fused scorer.
+#
+# TOP-10 LM RERANKER (scripts/loc_rerank.py). One forward per candidate, score =
+# logit(" yes") - logit(" no") at the final position -- a cross-encoder read off the LM head, no
+# generation. Final score = z(fused) + lam*z(lm), lam fit on train, so lam=0 restores the incumbent
+# exactly. Evidence is REAL source: module docstring plus the definitions the issue actually names,
+# affordable for 10 files and not for 1852, which is the whole reason this stage exists.
+#     Qwen2.5-0.5B  lam sweep 0.514 / 0.514 / 0.429 at lam 0 / 0.5 / 1.5  -> lam fits to 0, i.e. the
+#                   reranker correctly switches ITSELF OFF. The 0.5B cannot do this job, consistent
+#                   with it being a worse retrieval encoder than a 22M MiniLM at every layer.
+#     Qwen2.5-1.5B  lam sweep 0.514 / 0.529 / 0.557, still RISING at the edge of the sweep
+#                   held-INSTANCE (n=150): fused 0.5133 -> reranked 0.5333, ceiling 0.8133
+# Scale flips the sign. A 4B is within the stated budget and is the obvious next test; lam had not
+# turned over at 1.5, so the sweep is truncated and the 1.5B number is a lower bound.
+#
 # MEASURED HEADROOM before building (grid over weight vectors, so an upper bound, not a promise):
 #     global weights (current)          held-I 0.3667   held-R 0.1786
 #     oracle PER-REPO weights           held-I 0.4333   held-R 0.3214
