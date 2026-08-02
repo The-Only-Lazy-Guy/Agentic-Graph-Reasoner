@@ -4735,6 +4735,20 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
 # their real repo file trees and the real gold file the reference patch edits. The verifier is terminal
 # and exact -- did COMMIT name the gold file.
 #
+# THE MISSING INPUT IS FILE CONTENT, and that is measured, not argued. Every arm below ranks files by
+# their PATH STRING ("astropy/modeling/separable.py" -> "astropy modeling separable"); no file content
+# is read anywhere, because artifacts/swebench_trees.json stores paths only. Real django source was
+# pulled out of the SWE-bench Docker image (WSL UbuntuE, sweb.eval.x86_64.django_1776_django-11999,
+# /testbed) and summarised to module-docstring + top-level def/class names -- 2576 files, and the gold
+# file was present for 112 of the 114 django instances. Ranking the FULL repo (no router) on those 112:
+#     PATH strings only (what every arm here does)   top1 0.1607
+#     CONTENT (docstring + symbols)                  top1 0.2411   <- +50% relative
+#     PATH + CONTENT                                 top1 0.2411
+# So the commit stage is starved of information, not of model capacity -- which is why a 0.5B LM
+# encoder (0.0000), an RL policy over world order, and a trained CommitHead all failed to beat plain
+# cosine. Caveats: one checkout's content is reused across all 112 commits, and it is one repo.
+# Getting content for the other repos is a shallow git clone each, not a Docker pull.
+#
 # REPRODUCED FLOOR before anything was built on top (identical to 4 decimals, 0 gold-missing):
 #     path-cosine  top1 0.1800   top5 0.3567   top20 0.5767
 #     random ~1379 candidates 0.0015 | repo-frequency prior (LEAKY) 0.1133
