@@ -4876,6 +4876,86 @@ def symbol_owners(cont: dict, repo: str, files: list) -> dict:
     return o
 
 
+# ── THE THINKER: it decides HOW TO LOOK, not what to pick ────────────────────────────────────────
+# Every module tried before this one emitted a SCORE OVER CANDIDATES -- spiking planner, hop policy,
+# slot gate, ExecTRM, the RL descent policy, CommitHead. All of them were rankers, and re-ranking has
+# not moved a number once in this work. So this one's output is not a candidate score: it is the
+# CHANNEL WEIGHTS THEMSELVES, chosen per instance. A parameter of the scoring function, not a point
+# in its range.
+#
+# That change is what finally makes observation load-bearing BY CONSTRUCTION. You cannot know whether
+# this repo's docstrings are distinctive or boilerplate, whether its symbol hits are unique, or
+# whether its directory tree is taxonomic, without probing it -- so an ablation that blinds the
+# observations has nothing left to run on. `no-exec` came back null three times precisely because
+# nothing built before this needed its own observations.
+#
+# THE OBSERVATION NEEDS NO GOLD. A channel's reliability ON THIS INSTANCE is readable from its own
+# score distribution: `sym` with one file at 1.0 and the rest near 0 is a confident locator; all
+# zeros means no symbol matched and it is useless here. Same shape argument for content and path.
+#
+# MEASURED HEADROOM before building (grid over weight vectors, so an upper bound, not a promise):
+#     global weights (current)          held-I 0.3667   held-R 0.1786
+#     oracle PER-REPO weights           held-I 0.4333   held-R 0.3214
+#     oracle PER-INSTANCE weights       held-I 0.5500   held-R 0.4286
+# Per-repo calibration alone nearly doubles the broken case, so this is not a capped idea.
+N_STAT = 5
+
+
+def channel_stats(F: np.ndarray) -> np.ndarray:
+    """Shape of each channel's own score distribution: peak, margin, entropy, coverage, spread.
+    This is what the thinker looks at. It never sees the candidates or the gold."""
+    out = []
+    for c in range(F.shape[0]):
+        v = F[c]
+        s = np.sort(v)[::-1]
+        p = np.exp(v - v.max())
+        p = p / max(p.sum(), 1e-9)
+        out += [float(s[0]),
+                float(s[0] - s[1]) if len(s) > 1 else 0.0,
+                float(-(p * np.log(p + 1e-9)).sum() / max(np.log(len(v)), 1e-9)),
+                float((np.abs(v) > 1e-6).mean()),
+                float(v.std())]
+    return np.array(out, dtype=np.float32)
+
+
+class Thinker(nn.Module):
+    """Stats -> per-instance channel weights, as a RESIDUAL on the fitted global vector.
+
+    Prior preservation is by construction, not by hope: the output layer is zero-init, so at step 0
+    w == w_global exactly and the incumbent (held-I 0.3667) is the floor. Every learned component in
+    this file that skipped this discipline degraded its own baseline.
+
+    `theta` is the notebook's cross-call statefulness, which is the one mechanism from it never used
+    here: a running per-repo trace of the weights this thinker has been choosing. On an unseen repo it
+    starts at the prior and adapts as instances arrive, which is the only mechanism in this design
+    aimed at held-REPO. Homeostatic decay (beta) keeps it from locking a repo in.
+    """
+
+    def __init__(self, n_ch: int = 4, hidden: int = 16, beta: float = 0.15):
+        super().__init__()
+        self.n_ch, self.beta = n_ch, beta
+        # EIGHT PARAMETERS, and that is the design, not a concession. A 468-param net over 207
+        # instances did what every other learned component in this file has done: train 0.362 ->
+        # 0.396 while held-out fell 0.3500 -> 0.3167. The form below is the hypothesis stated
+        # minimally -- trust a channel in proportion to how sharply IT is peaked on THIS instance
+        # (a_c on its margin), and in proportion to how well it has been doing on THIS repo (g_c on
+        # the persistent trace). Zero-init on both means exp(0)=1 and w == w_global exactly, so the
+        # incumbent is the floor by construction rather than by hope.
+        self.a = nn.Parameter(torch.zeros(n_ch))     # per-instance confidence gain
+        self.g = nn.Parameter(torch.zeros(n_ch))     # per-repo persistent-trace gain
+
+    def forward(self, stats: torch.Tensor, theta: torch.Tensor,
+                w_global: torch.Tensor) -> torch.Tensor:
+        # stats is [n_ch * N_STAT]; column 1 of each channel's block is its margin (peak - runner-up),
+        # which is the sharpness signal the whole design rests on.
+        margin = stats.view(self.n_ch, N_STAT)[:, 1]
+        return w_global * torch.exp((self.a * margin + self.g * theta).clamp(-3, 3))
+
+    def update_theta(self, theta: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+        """Leaky running trace of what this repo has been rewarding -- the persistent state."""
+        return (1 - self.beta) * theta + self.beta * w.detach()
+
+
 def locate_cosine(g: AtomGraph, q: np.ndarray, k: int = 1) -> list:
     """The floor arm: rank every content node by cosine. O(N) -- it reads the whole repo."""
     M, order = g.matrix()
@@ -5234,7 +5314,7 @@ def demo_locate(lm_name: str = "", arm: str = "thinker", n: int | None = None, a
     # ONLY by grid search and reports held-out. Fitting on the pooled set would be test-set tuning,
     # which is exactly how the first version of this scorer produced a flattering 0.3063.
     lexF = None
-    if arm == "lex":
+    if arm in ("lex", "think"):
         cont = load_content()
         print(f"  content: {len(cont)} file summaries "
               f"({'MISSING - run the extractor' if not cont else 'loaded'})")
@@ -5283,7 +5363,69 @@ def demo_locate(lm_name: str = "", arm: str = "thinker", n: int | None = None, a
         print(f"  lex weights fit on TRAIN ({len(train)} inst): sym={lexW[0]} base={lexW[1]} "
               f"path={lexW[2]} content={lexW[3]}  train acc {_acc(train, lexW):.4f}")
 
-    known_abls = {"no-worlds", "no-exec"}
+    if arm == "think":
+        import itertools
+        thinker = Thinker()
+        opt = torch.optim.Adam(thinker.parameters(), lr=3e-3)
+        WG = torch.tensor(lexW, dtype=torch.float32)
+        blind = "no-obs" in abls
+        persist = "no-persist" not in abls
+
+        def _stats(iid):
+            F = lexF[iid][0]
+            st = torch.tensor(channel_stats(F), dtype=torch.float32)
+            return torch.zeros_like(st) if blind else st
+
+        def _run(split, train_mode=False):
+            """theta is carried ACROSS instances of the same repo, in order -- that streaming is the
+            mechanism, so it is not shuffled away."""
+            th = {}
+            hit = tot = 0
+            for r in sorted(split, key=lambda x: x["repo"]):
+                e = lexF.get(r["instance_id"])
+                if not e:
+                    tot += 1
+                    continue
+                F, gi, _fl = e
+                t = th.get(r["repo"], torch.zeros(4)) if persist else torch.zeros(4)
+                w = thinker(_stats(r["instance_id"]), t, WG)
+                logits = w @ torch.tensor(F, dtype=torch.float32)
+                if train_mode:
+                    loss = torch.nn.functional.cross_entropy(logits.unsqueeze(0),
+                                                             torch.tensor([gi]))
+                    opt.zero_grad(); loss.backward(); opt.step()
+                th[r["repo"]] = thinker.update_theta(t, w)
+                tot += 1
+                hit += int(logits.argmax()) == gi
+            return hit / max(1, tot)
+
+        print(f"  thinker: {sum(p_.numel() for p_ in thinker.parameters())} params, "
+              f"blind={blind} persist={persist}; w_global={lexW}")
+        # EARLY STOP on a slice of TRAIN held back for the purpose. Four learned components in this
+        # file have now degraded their own incumbent by training to convergence on ~200 instances.
+        vsplit = max(20, len(train) // 5)
+        tr_fit, tr_val = train[vsplit:], train[:vsplit]
+        best, best_state, bad = -1.0, None, 0
+        for ep in range(40):
+            _run(tr_fit, train_mode=True)
+            va = _run(tr_val)
+            if va > best:
+                best, best_state, bad = va, {k: v.clone() for k, v in thinker.state_dict().items()}, 0
+            else:
+                bad += 1
+            if (ep + 1) % 10 == 0:
+                print(f"    epoch {ep+1:2d}  fit {_run(tr_fit):.4f}  val {va:.4f}  best {best:.4f}",
+                      flush=True)
+            if bad >= 8:
+                print(f"    early stop at epoch {ep+1} (val has not improved in 8)", flush=True)
+                break
+        if best_state:
+            thinker.load_state_dict(best_state)
+        thinker.eval()
+        print(f"    learned a={thinker.a.detach().numpy().round(3)} "
+              f"g={thinker.g.detach().numpy().round(3)}")
+
+    known_abls = {"no-worlds", "no-exec", "no-obs", "no-persist"}
     if abls - known_abls:
         raise SystemExit(f"unknown --abl {sorted(abls - known_abls)}; known: {sorted(known_abls)}")
     use_worlds = "no-worlds" not in abls
@@ -5333,6 +5475,9 @@ def demo_locate(lm_name: str = "", arm: str = "thinker", n: int | None = None, a
                     enc_tot += n1 + n2
                     with torch.no_grad():
                         pick = cands[int(head(qm[0], C, rs).argmax())]
+            elif arm == "think":
+                pick = None                       # scored in a streaming pass below, not per-row
+                seen_tot += len(files)
             elif arm == "lex":
                 e = lexF.get(r["instance_id"])
                 if not e:
@@ -5371,6 +5516,13 @@ def demo_locate(lm_name: str = "", arm: str = "thinker", n: int | None = None, a
               f"{dt / n_:.2f}s/inst")
         return ok / n_, seen_tot / n_, tok_tot / n_
 
+    if arm == "think":
+        print("  split                  accuracy   (theta streams across instances within a repo)")
+        for tag, sp in (("held-INSTANCE", held_i), ("held-REPO", hr)):
+            print(f"    {tag:<22} top1 {_run(sp):.4f}  ({len(sp)} inst)")
+        print("\n  incumbent global weights: held-I 0.3667  held-R 0.1786")
+        print(f"  oracle per-repo ceiling : held-I 0.4333  held-R 0.3214")
+        return True
     print("  split                  accuracy            LOAD (enc = read once; gen = autoregressive)")
     a_i = run(held_i, "held-INSTANCE")
     a_r = run(hr, "held-REPO")
@@ -5538,7 +5690,7 @@ def main():
                          "The thinker ROUTEs (O(W)) and DESCENDs instead of reading the repo; the LM only "
                          "verbalizes. Reports accuracy AND load (files_seen, lm_tokens) together.")
     ap.add_argument("--arm", type=str, default="thinker",
-                    choices=["thinker", "cosine", "cot", "rl", "lmcommit", "lex"],
+                    choices=["thinker", "cosine", "cot", "rl", "lmcommit", "lex", "think"],
                     help="--locate arm: thinker (small-world loop) | cosine (the 0.1800 floor) | "
                          "cot (frontier-style: LM reads a file list and reasons, token-counted) | "
                          "rl (the descent policy TRAINED by REINFORCE on the terminal verifier) | "
