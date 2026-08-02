@@ -4958,10 +4958,18 @@ def selftest_locate() -> bool:
     chk("[5] more recursion inspects strictly more, i.e. the loop actually iterates",
         b["files_seen"] > a["files_seen"], f"T=1 {a['files_seen']} vs T=3 {b['files_seen']}")
 
+    # [6] The no-exec ablation must be WIRED and reachable. It is deliberately NOT asserted to change
+    # the answer, because measured on the real held sets it does not: 0.1333 / 0.1818 with the loop
+    # and 0.1333 / 0.1818 with observations replaced by expectations. An earlier version of this test
+    # demanded a difference and went red, which is a test asserting a claim the data refutes. The
+    # honest reading is that the observation feedback is not load-bearing here -- what carries this
+    # mode is HIERARCHICAL RETRIEVAL (route -> descend), not the thinking loop. Third time this
+    # ablation has come back null this session.
     c = locate_thinker(g, q, T=3, per_step=4, no_exec=True)
-    chk("[6] the no-exec ablation is a REAL difference (observations vs expectations)",
-        c["ranked"][:3] != b["ranked"][:3] or c["files_seen"] != b["files_seen"],
-        "context mutation changes the trajectory")
+    same = (c["ranked"][:3] == b["ranked"][:3])
+    chk("[6] no-exec ablation is wired and reachable (and measured NULL, not asserted otherwise)",
+        c["commit"] is not None and c["files_seen"] > 0,
+        f"identical top-3 to the full loop: {same} -- the measured null, recorded not hidden")
 
     print(f"\n  MEMBRANE_LOCATE SELFTEST -> {'PASS' if ok else 'FAIL'}")
     return ok
