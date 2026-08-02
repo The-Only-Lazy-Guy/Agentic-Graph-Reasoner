@@ -4917,6 +4917,35 @@ def symbol_owners(cont: dict, repo: str, files: list) -> dict:
 # commit, which is what the 238 drops are; scikit-learn (104/177) and sphinx (71/136) lose the most
 # to refactors, so their share of the remainder is the least commit-faithful.
 #
+# EIGHT-CHANNEL RESULT (artifacts/repo_rich.jsonl -- every def/class INCLUDING methods, string
+# literals >=12 chars, and imports, for all 10,978 files). NOT YET PORTED INTO THIS FILE: the scorer
+# lives in the scratchpad script that produced these numbers, and `--arm lex/think` here still use
+# the original four channels. Porting it is the next deployment step, stated so the numbers below
+# are not mistaken for what `--locate` currently runs.
+#
+#   STANDALONE               train    held-I   held-R      the informative part is which ones carry
+#     sym (top-level only)  0.2097   0.1800   0.0955
+#     base                  0.0524   0.0400   0.0828
+#     path                  0.1767   0.1933   0.2357
+#     content               0.2408   0.2367   0.2484
+#     ids (INCLUDING methods) 0.2320 0.2433   0.1465   <- best single channel on held-I
+#     str (quoted literals) 0.0476   0.0300   0.0828   <- much weaker than expected
+#     imports               0.0049   0.0067   0.0446
+#     tb-path               0.2058   0.2033   0.1019
+#
+#   FUSED, gradient-fit on train    0.4961   0.5267   0.3694
+#   FUSED + thinker                 0.5097   0.5033   0.3822
+#
+# `ids` beating the old `sym` (0.2433 vs 0.1800) is the expected consequence of the old extraction
+# keeping only TOP-LEVEL defs -- most code lives in methods inside classes.
+#
+# GREEDY FUSION WAS THE BOTTLENECK, not the channels: forward selection zeroed ids, str and imports
+# outright (weights [.5,.5,4,2.5,0,0,0,1]) because once path and content are in, no single further
+# step improves train. Refitting all eight jointly by softmax-CE took held-I 0.4733 -> 0.5267.
+#
+# The split seen at 4 channels persists: plain fusion is better WITHIN seen repos (0.5267 vs 0.5033),
+# the thinker is better ACROSS unseen repos (0.3822 vs 0.3694).
+#
 # MEASURED HEADROOM before building (grid over weight vectors, so an upper bound, not a promise):
 #     global weights (current)          held-I 0.3667   held-R 0.1786
 #     oracle PER-REPO weights           held-I 0.4333   held-R 0.3214
