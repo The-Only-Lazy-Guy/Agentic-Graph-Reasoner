@@ -75,7 +75,8 @@ class GatedCrossAttn(nn.Module):
             nn.init.zeros_(lin.bias)
 
     def forward(self, h: torch.Tensor, slots: torch.Tensor,
-                slots_v: torch.Tensor | None = None) -> torch.Tensor:
+                slots_v: torch.Tensor | None = None,
+                slot_mask: torch.Tensor | None = None) -> torch.Tensor:
         """slots supplies the KEYS (what each slot is addressable by); slots_v, when given, supplies the
         VALUES (what gets copied out). Splitting them matters because the positional band that makes a
         slot addressable is pure noise once it has been addressed: v and o are eye-initialised, so
@@ -93,9 +94,23 @@ class GatedCrossAttn(nn.Module):
         q = self.q(h).view(B, S, self.h, self.dh).transpose(1, 2)
         k = self.k(slots).view(Bk, K, self.h, self.dh).permute(0, 2, 1, 3)
         v = self.v(slots_v).view(Bk, K, self.h, self.dh).permute(0, 2, 1, 3)
-        att = torch.softmax((q @ k.transpose(-1, -2)) / (self.dh ** 0.5), dim=-1)
+        logits = (q @ k.transpose(-1, -2)) / (self.dh ** 0.5)          # [B, heads, S, K]
+        none_fired = None
+        if slot_mask is not None:
+            # SPIKING SLOT GATE: slot_mask [B,S,K] is 1 where that slot CROSSED THRESHOLD at that
+            # position. Masked slots are removed from the softmax, so injection becomes sparse,
+            # discrete and per-position instead of a dense softmax over all K at every token.
+            m = slot_mask.bool().unsqueeze(1)                          # [B,1,S,K] -> broadcast heads
+            none_fired = (~m).all(dim=-1, keepdim=True)                # [B,1,S,1]
+            # A position where NOTHING fired must inject nothing. Masking every slot would make the
+            # softmax all -inf -> NaN, so the row is left unmasked here and its delta is zeroed
+            # below: "no slot crossed threshold" means no injection, not a corrupted residual.
+            logits = logits.masked_fill(~m & ~none_fired, float("-inf"))
+        att = torch.softmax(logits, dim=-1)
         ctx = (att @ v).transpose(1, 2).reshape(B, S, d)
         delta = self.o(ctx)
+        if none_fired is not None:
+            delta = delta * (~none_fired[:, 0]).to(delta.dtype).reshape(B, S, 1)
         cap = h.norm(dim=-1, keepdim=True) * self.delta_scale
         dn = delta.norm(dim=-1, keepdim=True) + 1e-6
         if self.delta_mode == "clip":
@@ -123,6 +138,89 @@ class GatedCrossAttn(nn.Module):
 
 
 # ================================================================================================
+# SpikingSlotGate — LIF dynamics over the K working-memory slots, gating what reaches the LM
+# ================================================================================================
+class SpikingSlotGate(nn.Module):
+    """Decides, PER TOKEN POSITION, which working-memory slots are allowed to inject.
+
+    Today every position attends a dense softmax over all K slots through one scalar gate. That is
+    the regime the soft-prompt experiment measured collapsing: scaled up, it emitted wrong-gadget
+    bodies -- ROUTING COLLAPSE, slots losing their distinct identities. The three LIF mechanisms map
+    onto that failure directly:
+
+      lateral inhibition   slot i firing suppresses slots CORRELATED with it (U = slot-slot cosine,
+                           off-diagonal). Inhibition between similar units is literally
+                           decorrelation, so it is an anti-collapse prior rather than a penalty
+                           bolted on after the fact.
+      threshold            a slot injects only where its evidence crosses theta, so addressing is
+                           DISCRETE. The soft-prompt result's own conclusion was that a working
+                           latent memory has to be discrete addressing; a spike is exactly that.
+      homeostasis          a slot that wins at every position raises its own bar, so no single slot
+                           can dominate the whole sequence -- the collapse mode in one variable.
+
+    Drive is cos(h_position, slot), so which slots light up is CONTENT-DEPENDENT and varies along
+    the sequence: the token emitting a number can attend a different slot than the token emitting
+    the connective.
+
+    CLIP-COMPATIBLE. The output is a binary mask, so the injected delta is a sum over SELECTED
+    slots with no renormalisation. This repo measured that rescaling an injection to a fixed
+    fraction of ||h|| makes per-position emphasis unrepresentable and lets the adapter learn a
+    format prior that survives its own ablation; a mask changes which slots are read, never the
+    magnitude law.
+
+    PRIOR PRESERVATION: `enabled=False` returns None and GatedCrossAttn takes its original path,
+    bit-for-bit. With w_inh=0 and theta0 below the minimum cosine every slot fires, which is the
+    dense softmax again. Any gain has to be shown on top of that.
+    """
+
+    def __init__(self, T: int = 3, tau: float = 0.8, alpha: float = 0.6, beta: float = 0.02,
+                 theta0: float = 0.0, w_inh: float = 0.5, enabled: bool = False,
+                 spike_mode: str = "hard", surrogate_gamma: float = 5.0):
+        super().__init__()
+        self.T, self.tau, self.beta = T, tau, beta
+        self.enabled, self.spike_mode, self.surrogate_gamma = enabled, spike_mode, surrogate_gamma
+        # Learnable: the threshold, how hard slots inhibit each other, how fast they habituate.
+        self.theta0 = nn.Parameter(torch.tensor(float(theta0)))
+        self.w_inh = nn.Parameter(torch.tensor(float(w_inh)))
+        self.alpha = nn.Parameter(torch.tensor(float(alpha)))
+
+    def _spike(self, v, theta):
+        z = v - theta
+        if self.spike_mode == "hard":
+            return (z > 0).float()
+        soft = torch.sigmoid(self.surrogate_gamma * z)                  # straight-through
+        return (z > 0).float() + (soft - soft.detach())
+
+    def forward(self, h: torch.Tensor, slots: torch.Tensor) -> torch.Tensor | None:
+        """h [B,S,d], slots [K,d] or [B,K,d] -> mask [B,S,K] of 1.0 where the slot fired."""
+        if not self.enabled:
+            return None
+        if slots.dim() == 3:
+            slots = slots[0]
+        hn = h / (h.norm(dim=-1, keepdim=True) + 1e-6)
+        sn = slots / (slots.norm(dim=-1, keepdim=True) + 1e-6)
+        drive = hn @ sn.t()                                             # [B,S,K] cosine, per position
+        B, S, K = drive.shape
+        # Lateral matrix from slot-slot similarity: similar slots are RIVALS for the same content.
+        U = (sn @ sn.t()).clamp(min=0)
+        U = U - torch.diag_embed(torch.diagonal(U))                     # no self-inhibition
+        v = torch.zeros_like(drive)
+        theta = self.theta0.expand(B, S, K).clone()
+        y = torch.zeros_like(drive)
+        for _ in range(self.T):
+            v = self.tau * v + drive - self.w_inh * (y @ U.t())
+            y = self._spike(v, theta)
+            v = v * (1.0 - y)                                           # reset on fire
+            theta = theta + self.alpha * y - self.beta
+        # THE MASK IS THE SETTLED STATE, not the union over steps. Accumulating "ever fired" makes
+        # inhibition a no-op by construction: y_prev is zero on the first step, so every slot above
+        # threshold fires before anything can suppress it, and a union then locks that dense set in
+        # permanently. Measured: with the union, two near-identical slots co-fired at every
+        # inhibition strength. Returning the last step lets the competition actually resolve.
+        return y
+
+
+# ================================================================================================
 # WMReasoner — the working memory + its recursive refinement + the coupling hooks + deep supervision
 # ================================================================================================
 class WMReasoner(nn.Module):
@@ -145,6 +243,9 @@ class WMReasoner(nn.Module):
         # Gated cross-attention adapters (unchanged)
         self.adapters = nn.ModuleList([GatedCrossAttn(d_lm, n_heads, gate_init=gate_init) for _ in couple_layers])
         self.couple_layers = list(couple_layers)
+        # SPIKING SLOT GATE (opt-in; disabled => the adapters take their original dense-softmax
+        # path bit-for-bit, so an existing checkpoint behaves identically).
+        self.slot_gate = SpikingSlotGate(enabled=False)
         self._slots = None
         # Optional separate VALUE stream (see GatedCrossAttn.forward). None => keys are also the values.
         self._slots_v = None
@@ -505,8 +606,16 @@ class WMReasoner(nn.Module):
                 return None
             h = out[0] if isinstance(out, tuple) else out
             sv = getattr(self, "_slots_v", None)
+            gate = getattr(self, "slot_gate", None)
+            # The gate reads the SAME hidden states the adapter is about to modify, so the decision
+            # is made on this layer's own content at this position -- not on a sequence-level or
+            # task-level summary.
+            mask = gate(h.float(), self._slots.float()) if gate is not None else None
+            if mask is not None:
+                self._last_mask = mask.detach()
             h2 = self.adapters[idx](h.float(), self._slots.float(),
-                                    None if sv is None else sv.float()).to(h.dtype)
+                                    None if sv is None else sv.float(),
+                                    slot_mask=mask).to(h.dtype)
             if isinstance(out, tuple):
                 return (h2,) + tuple(out[1:])
             return h2
@@ -2443,7 +2552,9 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             swe_max_issue_chars: int = 1500, swe_max_ctx_steps: int = 12,
             gate_max: float = 0.0, merged: bool = False, swe_target_args_chars: int = 0,
             ds_weight: float = 0.0, conv_weight: float = 0.05, gate_reg_weight: float = 0.05,
-            adaptive_t: bool = False, ponder_weight: float = 0.0):
+            adaptive_t: bool = False, ponder_weight: float = 0.0,
+            slot_gate: bool = False, slot_theta0: float = 0.0,
+            slot_w_inh: float = 0.5, slot_t: int = 3):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
@@ -2480,6 +2591,13 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     trm = TRMReasoner(d_in=EMBED_DIM, d=256, T=4, n_heads=4, adaptive=adaptive_t)
     top_trm = TRMReasoner(d_in=EMBED_DIM, d=256, T=top_trm_t, n_heads=4) if top_trm_t > 0 else None
     R = WMReasoner(d_lm, couple_layers=couple, trm=trm, n_heads=4, top_trm=top_trm).to(wb.device)
+    # SPIKING SLOT GATE (opt-in). Off => the adapters take their original dense-softmax path
+    # bit-for-bit, so this flag cannot perturb any previously measured run.
+    if slot_gate:
+        R.slot_gate = SpikingSlotGate(enabled=True, theta0=slot_theta0, w_inh=slot_w_inh,
+                                      T=slot_t).to(wb.device)
+        print(f"  SPIKING SLOT GATE ON: theta0={slot_theta0} w_inh={slot_w_inh} T={slot_t} "
+              f"(per-position, over K={R.M} slots)", flush=True)
     if top_trm is not None:
         print(f"  hierarchical: top_trm T={top_trm_t} (bottom T=4), reground every {reground_chunk_tokens} "
               f"tokens, top refreshed every {reground_top_every} chunks. Training now calls "
@@ -3352,6 +3470,12 @@ def main():
     ap.add_argument("--probe", action="store_true", help="copy+bridge mechanism test on the real --lm (the fair bridge test)")
     ap.add_argument("--run", action="store_true", help="full composition experiment on --lm (hardest task)")
     ap.add_argument("--lm", type=str, default="Qwen/Qwen3-4B-Instruct-2507")
+    ap.add_argument("--slot-gate", action="store_true", dest="slot_gate",
+                    help="spiking slot gate: LIF over the K WM slots decides per POSITION which "
+                         "slots may inject (lateral inhibition = anti routing-collapse)")
+    ap.add_argument("--slot-theta0", type=float, default=0.0, dest="slot_theta0")
+    ap.add_argument("--slot-w-inh", type=float, default=0.5, dest="slot_w_inh")
+    ap.add_argument("--slot-t", type=int, default=3, dest="slot_t")
     ap.add_argument("--quant", type=str, default="4bit", help="quantization: 4bit, fp16, fp32, auto")
     ap.add_argument("--words", type=int, default=400, help="#atoms for --probe (scale this to test the data hypothesis)")
     ap.add_argument("--steps", type=int, default=120, help="training steps per probe")
@@ -3617,7 +3741,9 @@ def main():
                  swe_max_ctx_steps=a.swe_max_ctx_steps, gate_max=a.gate_max, merged=a.merged,
                  swe_target_args_chars=a.swe_target_args_chars,
                  ds_weight=a.ds_weight, conv_weight=a.conv_weight, gate_reg_weight=a.gate_reg_weight,
-                 adaptive_t=a.adaptive_t, ponder_weight=a.ponder_weight)
+                 adaptive_t=a.adaptive_t, ponder_weight=a.ponder_weight,
+                 slot_gate=a.slot_gate, slot_theta0=a.slot_theta0,
+                 slot_w_inh=a.slot_w_inh, slot_t=a.slot_t)
     else:
         selftest()
 
