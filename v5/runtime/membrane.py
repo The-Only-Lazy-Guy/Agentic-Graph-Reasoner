@@ -4735,19 +4735,30 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
 # their real repo file trees and the real gold file the reference patch edits. The verifier is terminal
 # and exact -- did COMMIT name the gold file.
 #
-# THE MISSING INPUT IS FILE CONTENT, and that is measured, not argued. Every arm below ranks files by
-# their PATH STRING ("astropy/modeling/separable.py" -> "astropy modeling separable"); no file content
-# is read anywhere, because artifacts/swebench_trees.json stores paths only. Real django source was
-# pulled out of the SWE-bench Docker image (WSL UbuntuE, sweb.eval.x86_64.django_1776_django-11999,
-# /testbed) and summarised to module-docstring + top-level def/class names -- 2576 files, and the gold
-# file was present for 112 of the 114 django instances. Ranking the FULL repo (no router) on those 112:
-#     PATH strings only (what every arm here does)   top1 0.1607
-#     CONTENT (docstring + symbols)                  top1 0.2411   <- +50% relative
-#     PATH + CONTENT                                 top1 0.2411
-# So the commit stage is starved of information, not of model capacity -- which is why a 0.5B LM
-# encoder (0.0000), an RL policy over world order, and a trained CommitHead all failed to beat plain
-# cosine. Caveats: one checkout's content is reused across all 112 commits, and it is one repo.
-# Getting content for the other repos is a shallow git clone each, not a Docker pull.
+# FILE CONTENT HELPS, BUT LESS AND LESS UNIFORMLY THAN ONE REPO SUGGESTED. Every arm below ranks
+# files by their PATH STRING; swebench_trees.json stores paths only. Content was obtained for all 12
+# repos -- django from its own SWE-bench Docker image (/testbed, commit-accurate), the other 11 from
+# shallow HEAD clones -- and summarised to module-docstring + top-level def/class names (10,978
+# files). Ranking the FULL repo, per repo, gold-coverage reported because HEAD != the instance commit:
+#
+#   repo             n   cov    path  content        repo            n   cov    path  content
+#   django         112   98%   0.161    0.241        astropy         6  100%   0.167    0.333
+#   sympy           75   97%   0.187    0.147        pylint          6  100%   0.167    0.000
+#   matplotlib      23  100%   0.043    0.087        xarray          4   80%   0.000    0.000
+#   scikit-learn    11   48%   0.545    0.273 (!)    seaborn         3   75%   0.000    0.667
+#   pytest          16   94%   0.188    0.375        flask           3  100%   0.333    0.333
+#   sphinx          12   75%   0.250    0.167        requests        6    0%   -- no content --
+#   POOLED         271         0.177    0.207     (fusing the two channels, z-scored, gives 0.203)
+#
+# CORRECTION to an earlier note of mine that called content "the unlock, +50% relative": that was
+# django alone. Pooled over 271 instances it is +0.030 absolute / +17% relative, and it is NOT a
+# uniform win -- content LOSES on sympy (75 instances, the second largest), sphinx and pylint.
+# The pattern that fits: content helps where the directory tree is uninformative and file purposes
+# are distinct (django apps, pytest plugins), and hurts where the taxonomy IS the semantic index
+# (sympy/solvers, sympy/matrices) and every docstring is drawn from the same vocabulary as the issue.
+# So the right channel is repo-dependent; a fixed choice is wrong, a summed fusion does not fix it,
+# and a learned combiner has ~37 labels to work with, which this file has already measured as too few.
+# scikit-learn is flagged: 48% gold coverage, so its column is refactor artefact, not signal.
 #
 # REPRODUCED FLOOR before anything was built on top (identical to 4 decimals, 0 gold-missing):
 #     path-cosine  top1 0.1800   top5 0.3567   top20 0.5767
