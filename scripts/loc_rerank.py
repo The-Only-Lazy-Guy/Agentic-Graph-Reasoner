@@ -154,13 +154,24 @@ NO = wb.tok(" no", add_special_tokens=False).input_ids[-1]
 print(f"  LM {LM} quant={wb.quant} vram={wb.vram_gb:.2f}GB  yes/no ids {YES}/{NO}")
 
 
+_null_cache = {}
+NL = chr(10)
+_TAIL = "Question: does this file contain the code the issue is about? Answer:"
+
+
+def _prompt(issue, repo, cand, toks):
+    return (f"Issue: {issue[:600]}" + NL + NL + f"File: {cand}" + NL
+            + evidence(repo, cand, toks) + NL + NL + _TAIL)
+
+
+def _null_prompt(repo, cand, toks):
+    """Same prompt shape, issue replaced by a content-free stub."""
+    return _prompt("a bug report about this project.", repo, cand, toks)
+
+
 @torch.no_grad()
-def lm_scores(issue, repo, cands, toks):
-    """One forward per candidate; score = logit(' yes') - logit(' no') at the final position."""
-    prompts = [
-        f"Issue: {issue[:600]}\n\nFile: {c}\n{evidence(repo, c, toks)}\n\n"
-        f"Question: does this file contain the code the issue is about? Answer:"
-        for c in cands]
+def _forward_scores(prompts):
+    """One forward per prompt, batched. Score = logit(' yes') - logit(' no') at the last real token."""
     out = []
     for i in range(0, len(prompts), 4):
         enc = wb.tok(prompts[i:i + 4], return_tensors="pt", padding=True, truncation=True,
@@ -173,7 +184,35 @@ def lm_scores(issue, repo, cands, toks):
     return np.array(out, dtype=np.float32)
 
 
-def evaluate(split, lam, K=10, limit=None):
+@torch.no_grad()
+def null_scores(repo, cands, toks):
+    """Query-FREE score for each candidate: the same prompt with the issue replaced by a neutral
+    stub. logit(yes)-logit(no) carries a large candidate-specific bias -- long files and common
+    paths score high no matter what was asked -- and subtracting this isolates the part that
+    actually responds to THIS issue. Cached per file, so the cost amortises to ~zero across the
+    instances of a repo."""
+    need = [c for c in cands if (repo, c) not in _null_cache]
+    if need:
+        _q = "Issue: a bug report about this project."
+        _tail = "Question: does this file contain the code the issue is about? Answer:"
+        ps = [_null_prompt(repo, c, toks) for c in need]
+        for c, v in zip(need, _forward_scores(ps)):
+            _null_cache[(repo, c)] = v
+    return np.array([_null_cache[(repo, c)] for c in cands], dtype=np.float32)
+
+
+@torch.no_grad()
+def lm_scores(issue, repo, cands, toks):
+    """One forward per candidate; score = logit(' yes') - logit(' no') at the final position.
+    With PMI=1 the query-free baseline is subtracted, which removes the candidate-specific bias
+    (long files and common paths score high regardless of what was asked)."""
+    raw = _forward_scores([_prompt(issue, repo, c, toks) for c in cands])
+    if os.environ.get("PMI", "1") == "1":
+        raw = raw - null_scores(repo, cands, toks)
+    return raw
+
+
+def evaluate(split, lam, K=int(os.environ.get("K", "10")), limit=None):
     sp = split[:limit] if limit else split
     base_hit = new_hit = ceil_hit = 0
     for r in sp:
@@ -191,7 +230,7 @@ def evaluate(split, lam, K=10, limit=None):
 
 LAM_TR = tr[:70]
 best_lam, best_a = 0.0, -1
-for lam in (0.0, 0.5, 1.5):
+for lam in (0.0, 0.5, 1.5, 3.0, 6.0):
     _, a, _ = evaluate(LAM_TR, lam)
     print(f"    lam={lam:<5} train-slice rerank {a:.4f}", flush=True)
     if a > best_a:

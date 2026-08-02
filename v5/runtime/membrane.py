@@ -4969,6 +4969,20 @@ def symbol_owners(cont: dict, repo: str, files: list) -> dict:
 # Scale flips the sign. A 4B is within the stated budget and is the obvious next test; lam had not
 # turned over at 1.5, so the sweep is truncated and the 1.5B number is a lower bound.
 #
+# THREE "FREE" IMPROVEMENTS TRIED WITHOUT GROWING THE LM. Two refuted, recorded so they are not
+# retried:
+#   lam sweep completed   0.514 / 0.529 / 0.557 / 0.443 / 0.386 at lam 0 / .5 / 1.5 / 3 / 6.
+#                         A true optimum at 1.5 -- an earlier note of mine called it "still rising",
+#                         which was only true because the sweep stopped at the peak.
+#   PMI / null-prompt calibration  REFUTED. Subtracting a query-free baseline per candidate was
+#                         predicted to remove candidate bias (long files, common paths). It collapses
+#                         the signal instead: 0.514 / 0.500 / 0.314 / 0.186 / 0.129, lam fits to 0.
+#                         The "bias" is partly real signal -- core files ARE more often the gold.
+#   PER-REPO fusion weights  REFUTED. held-I 0.5200 vs 0.5267 global. The oracle that suggested this
+#                         (per-repo 0.4333 vs global 0.3667) selected each repo's best vector USING
+#                         THE EVAL LABELS, so it was an upper bound that had seen the answers; fit
+#                         honestly on train it does not transfer.
+#
 # MEASURED HEADROOM before building (grid over weight vectors, so an upper bound, not a promise):
 #     global weights (current)          held-I 0.3667   held-R 0.1786
 #     oracle PER-REPO weights           held-I 0.4333   held-R 0.3214
