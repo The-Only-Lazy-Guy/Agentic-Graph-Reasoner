@@ -5339,6 +5339,122 @@ def train_locate_rl(pol, train, trees, path_emb, epochs: int = 6, lr: float = 5e
     return pol
 
 
+def demo_memory(n_repo_min: int = 40, seed: int = 0, boost: float = 0.15) -> bool:
+    """DOES THE GRAPH REMEMBER? One PERSISTENT AtomGraph per repo, streamed through that repo's real
+    instances in order, edited from VERIFIED outcomes only, and read back through utility().
+
+    Everything in --locate before this rebuilt build_repo_graph() per instance and threw it away, so
+    nothing learned on instance 1 could reach instance 2 -- record_success/record_failure and the
+    learned confidence/importance/access_count on Atom never fired once. This wires the loop that was
+    already built in membrane_edits.py and never connected.
+
+    Editing a graph is pointless unless something READS the edits, so utility() (confidence, access,
+    importance) enters scoring as its own channel. Writes are verifier-gated: the pathway is recorded
+    only when the commit was actually right, so the graph learns from confirmed experience rather
+    than from its own guesses.
+
+    THE FALSIFIER IS THE COMPOUNDING CURVE, not the mean: accuracy must RISE with position inside a
+    repo. If instance 600 of django is no better than instance 20, the graph is not remembering and
+    the memory thesis fails on real data.
+
+    THE CONTROL THAT MATTERS: a frequency prior that simply counts how often each file has already
+    been gold. Reinforcing successes could just be relearning the repo-frequency prior, which is
+    already measured at 0.1133 and marked LEAKY. If the graph channel does not beat that, structure
+    adds nothing over counting.
+    """
+    from v5.runtime.membrane_edits import record_success, utility
+    rows = json.loads((_LOC_ART / "swebench_loc_big.json").read_text(encoding="utf-8"))
+    cont = load_content()
+    by_repo: dict = {}
+    for r in rows:
+        by_repo.setdefault(r["repo"], []).append(r)
+    files_by_repo: dict = {}
+    for (repo, path) in cont:
+        files_by_repo.setdefault(repo, []).append(path)
+
+    print(f"algo memory: does the graph get better at a repo by working in it?\n")
+    import collections as _c
+    import random
+    tot = _c.Counter()
+    buckets = {k: [0, 0] for k in ("Q1", "Q2", "Q3", "Q4")}
+    for repo, inst in sorted(by_repo.items(), key=lambda kv: -len(kv[1])):
+        files = sorted(files_by_repo.get(repo, []))
+        if len(inst) < n_repo_min or not files:
+            continue
+        g = build_repo_graph(files, {f: e for f, e in zip(
+            files, np.concatenate([encode_batch([x.replace("/", " ").replace("_", " ")
+                                                 for x in files[i:i + 256]])
+                                   for i in range(0, len(files), 256)]))})
+        idx = {f: i for i, f in enumerate(files)}
+        usable = [r for r in inst if r["gold"] in idx]
+        random.Random(seed).shuffle(usable)
+        txt = [content_text(cont, repo, f) for f in files]
+        Ec = np.concatenate([encode_batch(txt[i:i + 256]) for i in range(0, len(txt), 256)])
+        own = symbol_owners(cont, repo, files)
+        qs = np.concatenate([encode_batch([r["problem"][:1000] for r in usable[i:i + 256]])
+                             for i in range(0, len(usable), 256)])
+        freq = _c.Counter()                      # the control: raw past-gold counts
+        M, order = g.matrix()
+        for k, (r, q) in enumerate(zip(usable, qs)):
+            sym, base = lex_features(cont, repo, files, r["problem"], own)
+            # Vectorised utility. membrane_edits.utility() recomputes max(access_count) over the
+            # WHOLE graph on every call, so calling it per file per instance is O(N^2) per instance
+            # (2576 x 2576 x 659 for django) -- it never finished. Same formula, one pass.
+            _mx = max((x.access_count for x in g.atoms.values()), default=0) or 1
+            util = np.array([(0.35 * g.atoms[f].confidence
+                              + 0.35 * (g.atoms[f].access_count / _mx)
+                              + 0.30 * g.atoms[f].importance) if f in g.atoms else 0.0
+                             for f in files], dtype=np.float32)
+            fr = np.array([freq.get(f, 0) for f in files], dtype=np.float32)
+            # read the LEARNED EDGES back too: how strongly is this file tied to files that have
+            # been used together before? node stats alone cannot express structure.
+            _ut = _c.Counter()
+            for _s2, _d2, _r2 in g.edges:
+                if _r2 == "used-together":
+                    _w2 = g.strength(_s2, _d2, _r2)
+                    _ut[_s2] += _w2
+                    _ut[_d2] += _w2
+            deg = np.array([_ut.get(f, 0.0) for f in files], dtype=np.float32)
+            base_score = _z(sym) + _z(base) + _z(M @ q) + 2 * _z(Ec @ q)
+            pick_mem = files[int((base_score + 1.5 * _z(util) + 1.5 * _z(deg)).argmax())]
+            pick_static = files[int(base_score.argmax())]
+            pick_freq = files[int((base_score + 1.5 * _z(fr)).argmax())]
+            good = pick_mem == r["gold"]
+            tot["n"] += 1
+            tot["mem"] += good
+            tot["static"] += pick_static == r["gold"]
+            tot["freq"] += pick_freq == r["gold"]
+            b = ("Q1", "Q2", "Q3", "Q4")[min(3, (k * 4) // max(1, len(usable)))]
+            buckets[b][0] += good
+            buckets[b][1] += 1
+            if pick_static == r["gold"]:                  # VERIFIER-GATED WRITE
+                # PATHWAY, not a single node. A length-1 pathway makes record_success's
+                # edge-linking loop (range(len(pathway)-1)) a no-op, so the first version of this
+                # experiment learned only node attributes and created ZERO edges -- django's "5152
+                # edges" was exactly 2576 contains + 2576 in, the untouched initial structure. The
+                # co-retrieved top files ARE the pathway: they were considered together for a real
+                # issue, which is what "used-together" is supposed to mean.
+                co = [files[i] for i in (-base_score).argsort()[:4]]
+                if r["gold"] not in co:
+                    co = [r["gold"]] + co[:3]
+                record_success(g, co, task_text=r["problem"][:200], boost=boost)
+                freq[r["gold"]] += 1
+        print(f"    {repo:<26} {len(usable):>4} instances streamed, graph now "
+              f"{len(g.edges)} edges", flush=True)
+
+    n = max(1, tot["n"])
+    print(f"\n  scored {n} instances across the repos with >= {n_repo_min} instances")
+    print(f"    static graph (no edits, control)   {tot['static'] / n:.4f}")
+    print(f"    + raw past-gold FREQUENCY (control){tot['freq'] / n:.4f}")
+    print(f"    + GRAPH utility (edited memory)    {tot['mem'] / n:.4f}")
+    print(f"\n  COMPOUNDING CURVE (accuracy by position within each repo's stream)")
+    for k in ("Q1", "Q2", "Q3", "Q4"):
+        h, c = buckets[k]
+        print(f"    {k}  {h}/{c} = {h / max(1, c):.4f}")
+    print(f"\n  the curve is the claim: if Q4 is not above Q1, the graph is not remembering.")
+    return True
+
+
 def demo_locate(lm_name: str = "", arm: str = "thinker", n: int | None = None, abl: str = "",
                 held_repos=("pytest-dev/pytest", "sphinx-doc/sphinx"), n_held: int = 60,
                 seed: int = 0) -> bool:
@@ -5738,6 +5854,10 @@ def main():
                          "TRM is put IN the answer path: it refines working-memory slots from the retrieved "
                          "nodes and the LM attends them through the coupled adapters. Without it, "
                          "--interactive is graph-cosine retrieval + prompt-stuffing and the TRM is unused.")
+    ap.add_argument("--memory", action="store_true",
+                    help="DOES THE GRAPH REMEMBER: one persistent AtomGraph per repo, streamed through "
+                         "its real instances, edited from VERIFIED outcomes via membrane_edits and read "
+                         "back through utility(). Reports the compounding curve, not just the mean.")
     ap.add_argument("--locate", action="store_true",
                     help="LONG-HORIZON: real SWE-bench file localization over a small-world repo graph. "
                          "The thinker ROUTEs (O(W)) and DESCENDs instead of reading the repo; the LM only "
@@ -5758,6 +5878,8 @@ def main():
                     help="which cached dataset to stream for --session: gsm8k (default) or math "
                          "(Hendrycks competition math — harder: LaTeX, longer, denser numbers)")
     a = ap.parse_args()
+    if a.memory:
+        sys.exit(0 if demo_memory() else 1)
     if a.locate:
         if a.selftest:
             sys.exit(0 if selftest_locate() else 1)
