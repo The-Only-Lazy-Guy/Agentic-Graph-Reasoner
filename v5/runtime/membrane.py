@@ -4819,6 +4819,63 @@ def build_repo_graph(files: list, path_emb: dict, worlds: bool = True) -> AtomGr
     return g
 
 
+_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def load_content() -> dict:
+    """(repo, path) -> {doc, syms}. django comes from its own SWE-bench image checkout (commit
+    accurate); the other 11 repos from shallow HEAD clones. Missing files simply fall back to the
+    path string, so every arm still runs without this."""
+    out: dict = {}
+    for fn, default_repo in (("django_content.jsonl", "django/django"),
+                             ("repo_content.jsonl", None)):
+        p = _LOC_ART / fn
+        if not p.exists():
+            continue
+        for line in p.open(encoding="utf-8"):
+            d = json.loads(line)
+            out[(d.get("repo", default_repo), d["path"])] = d
+    return out
+
+
+def content_text(cont: dict, repo: str, path: str) -> str:
+    d = cont.get((repo, path))
+    base = path.replace("/", " ").replace("_", " ")
+    return base if not d else f"{base} . {d['doc']} . {' '.join(d['syms'])}".strip()
+
+
+def lex_features(cont: dict, repo: str, files: list, problem: str, owners: dict) -> tuple:
+    """Two channels a sentence embedding structurally cannot express, because mean-pooling destroys
+    exact identifier identity.
+
+    sym : the issue names a symbol this file DEFINES, weighted 1/(number of files defining it). The
+          inverse weight is the point -- measured on 271 real instances, 39.5% of issues name a
+          symbol that is defined in exactly ONE file in the whole repo, i.e. a near-deterministic
+          locator that cosine over a 384-d mean-pool throws away.
+    base: the issue mentions this file's bare basename (48.7% of instances).
+    """
+    toks = set(_IDENT.findall(problem))
+    sym = np.array([sum(1.0 / owners.get(s, 1)
+                        for s in set(cont.get((repo, f), {}).get("syms", ()))
+                        if s in toks) for f in files], dtype=np.float32)
+    base = np.array([1.0 if f.rsplit("/", 1)[-1][:-3] in toks else 0.0 for f in files],
+                    dtype=np.float32)
+    return sym, base
+
+
+def _z(v: np.ndarray) -> np.ndarray:
+    sd = float(v.std())
+    return (v - v.mean()) / sd if sd > 1e-9 else np.zeros_like(v)
+
+
+def symbol_owners(cont: dict, repo: str, files: list) -> dict:
+    o: dict = {}
+    for f in files:
+        for s in set(cont.get((repo, f), {}).get("syms", ())):
+            o[s] = o.get(s, 0) + 1
+    return o
+
+
 def locate_cosine(g: AtomGraph, q: np.ndarray, k: int = 1) -> list:
     """The floor arm: rank every content node by cosine. O(N) -- it reads the whole repo."""
     M, order = g.matrix()
@@ -5173,6 +5230,59 @@ def demo_locate(lm_name: str = "", arm: str = "thinker", n: int | None = None, a
           f"held-INSTANCE {len(held_i)} | held-REPO {len(hr)} ({', '.join(held_repos)})")
     print(f"  arm={arm}  ablations={sorted(abls) or 'none'}\n")
 
+    # --arm lex precomputes per-instance feature matrices once, then fits 4 channel weights on TRAIN
+    # ONLY by grid search and reports held-out. Fitting on the pooled set would be test-set tuning,
+    # which is exactly how the first version of this scorer produced a flattering 0.3063.
+    lexF = None
+    if arm == "lex":
+        cont = load_content()
+        print(f"  content: {len(cont)} file summaries "
+              f"({'MISSING - run the extractor' if not cont else 'loaded'})")
+        lexF = {}
+        byrepo: dict = {}
+        for r in rows:
+            byrepo.setdefault(r["repo"], []).append(r)
+        for repo, rs in byrepo.items():
+            us = [r for r in rs if (repo, r["gold"]) in cont]
+            if not us:
+                continue
+            files = sorted({f for r in us for f in trees[r["instance_id"]]
+                            if f in path_emb and (repo, f) in cont})
+            if not files:
+                continue
+            own = symbol_owners(cont, repo, files)
+            # CHUNKED: a single encode_batch over a whole repo (~2500 files) tried to allocate
+            # 2 GB and died on CPU.
+            _txt = [content_text(cont, repo, f) for f in files]
+            Ec = np.concatenate([encode_batch(_txt[i:i + 256])
+                                 for i in range(0, len(_txt), 256)])
+            Ep = np.stack([path_emb[f] for f in files])
+            idx = {f: i for i, f in enumerate(files)}
+            for r in us:
+                fl = [f for f in trees[r["instance_id"]] if f in idx]
+                if r["gold"] not in fl:
+                    continue
+                ii = [idx[f] for f in fl]
+                sym, base = lex_features(cont, repo, fl, r["problem"], own)
+                lexF[r["instance_id"]] = (
+                    np.stack([_z(sym), _z(base), _z(Ep[ii] @ r["q"]), _z(Ec[ii] @ r["q"])]),
+                    fl.index(r["gold"]), fl)
+        import itertools
+        def _acc(split, w):
+            hit = tot = 0
+            for r in split:
+                e = lexF.get(r["instance_id"])
+                if not e:
+                    continue
+                tot += 1
+                hit += int((w @ e[0]).argmax()) == e[1]
+            return hit / max(1, tot)
+        grid = [np.array(c, dtype=float) for c in
+                itertools.product([0, 1, 2, 3], [0, 1, 2], [0, 0.5, 1], [0, 0.5, 1, 2])]
+        lexW = max(grid, key=lambda w: _acc(train, w))
+        print(f"  lex weights fit on TRAIN ({len(train)} inst): sym={lexW[0]} base={lexW[1]} "
+              f"path={lexW[2]} content={lexW[3]}  train acc {_acc(train, lexW):.4f}")
+
     known_abls = {"no-worlds", "no-exec"}
     if abls - known_abls:
         raise SystemExit(f"unknown --abl {sorted(abls - known_abls)}; known: {sorted(known_abls)}")
@@ -5223,6 +5333,13 @@ def demo_locate(lm_name: str = "", arm: str = "thinker", n: int | None = None, a
                     enc_tot += n1 + n2
                     with torch.no_grad():
                         pick = cands[int(head(qm[0], C, rs).argmax())]
+            elif arm == "lex":
+                e = lexF.get(r["instance_id"])
+                if not e:
+                    pick = None
+                else:
+                    pick = e[2][int((lexW @ e[0]).argmax())]
+                seen_tot += len(files)
             elif arm == "rl":
                 c, nf, _lp, _o, _saw = locate_rl_episode(pol, g, r["q"], no_exec=no_exec,
                                                          qwords=r.get("qw"))
@@ -5421,12 +5538,13 @@ def main():
                          "The thinker ROUTEs (O(W)) and DESCENDs instead of reading the repo; the LM only "
                          "verbalizes. Reports accuracy AND load (files_seen, lm_tokens) together.")
     ap.add_argument("--arm", type=str, default="thinker",
-                    choices=["thinker", "cosine", "cot", "rl", "lmcommit"],
+                    choices=["thinker", "cosine", "cot", "rl", "lmcommit", "lex"],
                     help="--locate arm: thinker (small-world loop) | cosine (the 0.1800 floor) | "
                          "cot (frontier-style: LM reads a file list and reasons, token-counted) | "
                          "rl (the descent policy TRAINED by REINFORCE on the terminal verifier) | "
                          "lmcommit (router finds candidates, then the LM ENCODER + a trained head "
-                         "makes the commit -- the arm where the LM is actually used)")
+                         "makes the commit -- the arm where the LM is actually used) | "
+                         "lex (symbol-uniqueness + basename + path + content, weights fit on TRAIN)")
     ap.add_argument("--abl", type=str, default="",
                     help="--locate ablations, comma separated: no-worlds, no-exec")
     ap.add_argument("--selftest", action="store_true",
