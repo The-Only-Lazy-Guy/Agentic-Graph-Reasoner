@@ -4969,6 +4969,24 @@ def symbol_owners(cont: dict, repo: str, files: list) -> dict:
 # Scale flips the sign. A 4B is within the stated budget and is the obvious next test; lam had not
 # turned over at 1.5, so the sweep is truncated and the 1.5B number is a lower bound.
 #
+# THINKER CAPACITY SWEEP at 8 channels (scripts/loc_thinker_sweep.py, n=1725). Adding MLPs or
+# attention makes it WORSE, and the thinker itself is now within noise of a ZERO-parameter fit:
+#     variant              params   train    held-I   held-R
+#     fused (no thinker)        0   0.4961   0.5267   0.3694   <- best held-R
+#     Tiny                     16   0.5019   0.5300   0.3567   <- best held-I, by 1 instance
+#     MLP-16                  920   0.4990   0.5167   0.3121
+#     MLP-64                 3656   0.4961   0.5067   0.3185
+#     Attn-32 (channel tokens)4545  0.4961   0.5267   0.3503
+#
+# This PARTIALLY RETRACTS the 4-channel result recorded above, where the thinker clearly beat the
+# fused scorer (held-I 0.4467 vs 0.3700). With 8 channels the global fit is strong enough that
+# per-instance calibration has almost nothing left to correct -- IMPROVING THE FEATURES REMOVED THE
+# NEED FOR THE THINKER. Its earlier advantage was largely compensating for a weaker base.
+#
+# Note the direction is the OPPOSITE of the n=300 -> n=1725 scaling result, where capacity was
+# data-limited and the 468-param model went from worst to best. Capacity helps when the base is weak
+# and the data is large; here the base got strong instead.
+#
 # THREE "FREE" IMPROVEMENTS TRIED WITHOUT GROWING THE LM. Two refuted, recorded so they are not
 # retried:
 #   lam sweep completed   0.514 / 0.529 / 0.557 / 0.443 / 0.386 at lam 0 / .5 / 1.5 / 3 / 6.
