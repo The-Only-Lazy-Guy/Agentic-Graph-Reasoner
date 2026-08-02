@@ -4722,6 +4722,251 @@ def demo_session(lm_name: str, n: int = 60, window: int = 512, sinks: int = 8, c
     return ok
 
 
+# ==================================================================================================
+# LONG-HORIZON LOCALIZATION -- the thinker navigates a small-world graph; the LM only verbalizes.
+#
+# The thesis this measures: frontier models do their reasoning IN TOKEN SPACE, so a repo of ~910 python
+# files costs an enormous prompt. If the reasoning lives in a graph + a thinker instead, the decoder's
+# job shrinks to verbalizing a decision that was already made -- and the cost stops scaling with the
+# repo. That is not a new mechanism here: AtomGraph.route() is already O(W), not O(N), and worlds are
+# already real nodes with contains/in edges. This wires the existing machinery to a real task.
+#
+# DATA IS REAL AND UNSYNTHESIZED: 300 SWE-bench_Verified instances (artifacts/swebench_loc.jsonl) with
+# their real repo file trees and the real gold file the reference patch edits. The verifier is terminal
+# and exact -- did COMMIT name the gold file.
+#
+# REPRODUCED FLOOR before anything was built on top (identical to 4 decimals, 0 gold-missing):
+#     path-cosine  top1 0.1800   top5 0.3567   top20 0.5767
+#     random ~1379 candidates 0.0015 | repo-frequency prior (LEAKY) 0.1133
+# The gap between top1 0.18 and top20 0.58 IS the task: turn recall into a correct commit.
+# ==================================================================================================
+_LOC_ART = Path(_ROOT) / "artifacts"
+
+
+def _load_loc(n: int | None = None):
+    """(rows, trees, path_emb). Read-only borrow of the prepped artifacts; nothing is regenerated."""
+    rows = [json.loads(l) for l in (_LOC_ART / "swebench_loc.jsonl").open(encoding="utf-8")]
+    trees = json.loads((_LOC_ART / "swebench_trees.json").read_text(encoding="utf-8"))
+    z = np.load(_LOC_ART / "swebench_pathemb.npz", allow_pickle=True)
+    path_emb = {p: v for p, v in zip(list(z["paths"]), z["emb"])}
+    if n:
+        rows = rows[:n]
+    return rows, trees, path_emb
+
+
+def _dirname(p: str) -> str:
+    return p.rsplit("/", 1)[0] if "/" in p else "."
+
+
+def build_repo_graph(files: list, path_emb: dict, worlds: bool = True) -> AtomGraph:
+    """A repo's file tree as an AtomGraph whose WORLDS are its directories.
+
+    Directories are used as the world partition rather than cosine clustering, because a repo already
+    ships its own small-world structure and it is free: no O(N^2) similarity pass, and the partition is
+    the one the code's authors actually meant. Embeddings come from the cached path table, so add()
+    never re-encodes (it only embeds when emb is None) and building a 900-file graph is milliseconds.
+
+    worlds=False builds the same content graph with NO routing layer -- the ablation that asks whether
+    small-world routing is load-bearing or whether plain cosine over every file does just as well.
+    """
+    g = AtomGraph()
+    for p in files:
+        e = path_emb.get(p)
+        if e is None:
+            continue
+        g.add(Atom(name=p, code="", kind="file", provenance="repo",
+                   description=p.replace("/", " ").replace("_", " "),
+                   emb=np.asarray(e, dtype=np.float32)))
+    if not worlds or not g.atoms:
+        return g
+    g.enable_worlds(materialize=True)
+    by_dir: dict = {}
+    for p in g.atoms:
+        by_dir.setdefault(_dirname(p), []).append(p)
+    for d, members in by_dir.items():
+        g.worlds[d] = list(members)
+        for m in members:
+            g.world_of[m] = d
+        cen = np.mean(np.stack([g.atoms[m].emb for m in members]), axis=0).astype(np.float32)
+        nrm = float(np.linalg.norm(cen))
+        g._world_centroid[d] = (cen / nrm) if nrm else cen
+        g._materialize_world(d)
+    return g
+
+
+def locate_cosine(g: AtomGraph, q: np.ndarray, k: int = 1) -> list:
+    """The floor arm: rank every content node by cosine. O(N) -- it reads the whole repo."""
+    M, order = g.matrix()
+    if not order:
+        return []
+    return [order[i] for i in (-(M @ q)).argsort()[:k]]
+
+
+def locate_thinker(g: AtomGraph, q: np.ndarray, top_w: int = 10, T: int = 3,
+                   per_step: int = 8, ctx: float = 0.5, no_exec: bool = False) -> dict:
+    """ROUTE -> DESCEND -> INSPECT -> COMMIT, with the context mutated by what INSPECT returns.
+
+    The point of the loop is that it never scans the repo. route() compares the query against W world
+    CENTROIDS (O(W)); only the members of the chosen worlds are ever scored. `files_seen` is reported
+    because it is the load: the thinker's cost is that number, not the repo size.
+
+    The query is conditioned on what has already been inspected (q_t = norm(q + ctx * mean(observed))),
+    so later steps think about what earlier steps found -- the context is mutated by the model's own
+    acts rather than being a fixed candidate set that can only be re-weighted.
+
+    no_exec: the observation is replaced by the CANDIDATE'S OWN embedding instead of the inspected
+    node's, i.e. the loop updates on what it expected rather than on what it found. This ablation
+    already fired once this session on ExecTRM (0.030 vs 0.030), so it is the one to watch.
+    """
+    qv = np.asarray(q, dtype=np.float32)
+    seen, observed, pool = [], [], []
+    for _t in range(max(1, T)):
+        qt = qv if not observed else (qv + ctx * np.mean(np.stack(observed), axis=0))
+        nrm = float(np.linalg.norm(qt))
+        qt = (qt / nrm) if nrm else qt
+        ws = g.route(qt, top_w=top_w)                       # O(W): the repo is never scanned
+        cand = [m for w in ws for m in g.members(w) if m not in seen]
+        if not cand:
+            break
+        E = np.stack([g.atoms[c].emb for c in cand])
+        for i in (-(E @ qt)).argsort()[:per_step]:
+            c = cand[int(i)]
+            seen.append(c)
+            # INSPECT: the observation is the node the loop actually landed on.
+            observed.append(g.atoms[c].emb if not no_exec else qt)
+    # COMMIT scores every inspected candidate against ONE query. Scoring them as they were visited is
+    # a real bug, not a nicety: qt is re-conditioned on each step, so per-step scores are cosines
+    # against DIFFERENT vectors and ranking them together compares numbers that were never on the same
+    # scale. Measured cost of getting this wrong: top1 0.0500 against a 0.4667 routing ceiling.
+    if not seen:
+        return {"commit": None, "ranked": [], "files_seen": 0, "worlds": len(g.worlds)}
+    Es = np.stack([g.atoms[c].emb for c in seen])
+    order = (-(Es @ qv)).argsort()
+    ranked = [seen[int(i)] for i in order]
+    return {"commit": ranked[0],
+            "ranked": ranked,
+            "files_seen": len(seen),
+            "worlds": len(g.worlds)}
+
+
+def demo_locate(lm_name: str = "", arm: str = "thinker", n: int | None = None, abl: str = "",
+                held_repos=("pytest-dev/pytest", "sphinx-doc/sphinx"), n_held: int = 60,
+                seed: int = 0) -> bool:
+    """Arms and ablations over the real localization task. Reports accuracy AND load together --
+    accuracy alone cannot test a claim about token cost."""
+    import random
+    import time
+    abls = {a.strip() for a in abl.split(",") if a.strip()}
+    rows, trees, path_emb = _load_loc(n)
+    qs = encode_batch([r["problem"][:1000] for r in rows])
+    for r, q in zip(rows, qs):
+        r["q"] = q
+    hr = [r for r in rows if r["repo"] in held_repos]
+    rest = [r for r in rows if r["repo"] not in held_repos]
+    random.Random(seed).shuffle(rest)
+    held_i, train = rest[:n_held], rest[n_held:]
+    print(f"algo locate: {len(rows)} real SWE-bench instances | train {len(train)} | "
+          f"held-INSTANCE {len(held_i)} | held-REPO {len(hr)} ({', '.join(held_repos)})")
+    print(f"  arm={arm}  ablations={sorted(abls) or 'none'}\n")
+
+    use_worlds = "no-worlds" not in abls
+    wb = None
+    if arm == "cot":
+        from v5.runtime.dcpd_latent import WhiteBox
+        wb = WhiteBox(lm_name or "Qwen/Qwen2.5-0.5B-Instruct", quant="4bit")
+
+    def run(split, tag):
+        ok = seen_tot = tok_tot = 0
+        t0 = time.time()
+        for r in split:
+            files = [f for f in trees[r["instance_id"]] if f in path_emb]
+            g = build_repo_graph(files, path_emb, worlds=use_worlds)
+            if arm == "cosine" or (arm == "thinker" and not use_worlds):
+                pick = (locate_cosine(g, r["q"], 1) or [None])[0]
+                seen_tot += len(files)                       # the floor reads the whole repo
+            elif arm == "thinker":
+                res = locate_thinker(g, r["q"], no_exec=("no-exec" in abls))
+                pick, _ = res["commit"], None
+                seen_tot += res["files_seen"]
+            elif arm == "cot":
+                # The frontier-style arm: hand the LM the issue plus as much of the file list as a
+                # small context can hold, and let it reason to an answer. Its prompt IS the load.
+                shortlist = locate_cosine(g, r["q"], 40)
+                prompt = ("Which ONE file must be edited to fix this issue?\n"
+                          f"Issue: {r['problem'][:700]}\n\nCandidate files:\n"
+                          + "\n".join(shortlist) + "\n\nAnswer with the file path only.")
+                tok_tot += len(wb.tok(prompt).input_ids)
+                out = str(wb.generate_chat(prompt, max_new=48))
+                tok_tot += len(wb.tok(out).input_ids)
+                pick = next((f for f in shortlist if f in out), None)
+                seen_tot += len(shortlist)
+            else:
+                raise ValueError(f"unknown arm {arm}")
+            ok += int(pick == r["gold"])
+        dt = time.time() - t0
+        n_ = max(1, len(split))
+        print(f"    {tag:<22} top1 {ok / n_:.4f} ({ok}/{n_})  files_seen/inst {seen_tot / n_:>7.1f}  "
+              f"lm_tokens/inst {tok_tot / n_:>7.1f}  {dt / n_:.2f}s/inst")
+        return ok / n_, seen_tot / n_, tok_tot / n_
+
+    print("  split                  accuracy            LOAD (what the thesis is about)")
+    a_i = run(held_i, "held-INSTANCE")
+    a_r = run(hr, "held-REPO")
+    if torch.cuda.is_available():
+        print(f"\n  peak VRAM {torch.cuda.max_memory_allocated() / 2 ** 30:.2f} GB "
+              f"(budget 6.00 GB)")
+    print(f"\n  floor to beat: path-cosine top1 0.1800 | leaky repo-frequency prior 0.1133")
+    return a_i[0] > 0
+
+
+def selftest_locate() -> bool:
+    """Mechanism only: the data is real, the worlds are real, and routing does not read the repo."""
+    print("membrane --locate --selftest: small-world localization mechanism\n")
+    ok = True
+
+    def chk(t, c, d=""):
+        nonlocal ok
+        ok &= bool(c)
+        print(f"  [{'PASS' if c else 'FAIL'}] {t}{('  - ' + d) if d else ''}")
+
+    rows, trees, path_emb = _load_loc()
+    chk("[1] 300 real SWE-bench instances with real trees load",
+        len(rows) == 300 and len(trees) == 300 and len(path_emb) > 10000,
+        f"{len(rows)} rows, {len(path_emb)} cached path embeddings")
+
+    r = rows[0]
+    files = [f for f in trees[r["instance_id"]] if f in path_emb]
+    g = build_repo_graph(files, path_emb)
+    chk("[2] the repo becomes a small-world graph (worlds MUCH fewer than files)",
+        len(g.worlds) < len(files) / 3 and len(g.atoms) > len(files),
+        f"{len(files)} files -> {len(g.worlds)} worlds ({len(g.atoms)} nodes incl. routing)")
+
+    chk("[3] world nodes are real graph nodes with contains/in edges, kept out of matrix()",
+        all(g.is_routing(w) for w in g.worlds)
+        and len(g.matrix()[1]) == len(files)
+        and any(rel == "contains" for _s, _d, rel in g.edges),
+        f"matrix has {len(g.matrix()[1])} content rows, {len(g.edges)} edges")
+
+    q = encode_batch([r["problem"][:1000]])[0]
+    res = locate_thinker(g, q)
+    chk("[4] the thinker COMMITS without reading the repo (this is the load claim)",
+        res["commit"] is not None and res["files_seen"] < len(files) / 2,
+        f"inspected {res['files_seen']} of {len(files)} files")
+
+    a = locate_thinker(g, q, T=1, per_step=4)
+    b = locate_thinker(g, q, T=3, per_step=4)
+    chk("[5] more recursion inspects strictly more, i.e. the loop actually iterates",
+        b["files_seen"] > a["files_seen"], f"T=1 {a['files_seen']} vs T=3 {b['files_seen']}")
+
+    c = locate_thinker(g, q, T=3, per_step=4, no_exec=True)
+    chk("[6] the no-exec ablation is a REAL difference (observations vs expectations)",
+        c["ranked"][:3] != b["ranked"][:3] or c["files_seen"] != b["files_seen"],
+        "context mutation changes the trajectory")
+
+    print(f"\n  MEMBRANE_LOCATE SELFTEST -> {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
 def main():
     ap = argparse.ArgumentParser(description="one real integrated membrane: neural retrieval + TRM + verify + learn")
     ap.add_argument("--reason", action="store_true",
@@ -4814,10 +5059,26 @@ def main():
                          "TRM is put IN the answer path: it refines working-memory slots from the retrieved "
                          "nodes and the LM attends them through the coupled adapters. Without it, "
                          "--interactive is graph-cosine retrieval + prompt-stuffing and the TRM is unused.")
+    ap.add_argument("--locate", action="store_true",
+                    help="LONG-HORIZON: real SWE-bench file localization over a small-world repo graph. "
+                         "The thinker ROUTEs (O(W)) and DESCENDs instead of reading the repo; the LM only "
+                         "verbalizes. Reports accuracy AND load (files_seen, lm_tokens) together.")
+    ap.add_argument("--arm", type=str, default="thinker", choices=["thinker", "cosine", "cot"],
+                    help="--locate arm: thinker (small-world loop) | cosine (the 0.1800 floor) | "
+                         "cot (frontier-style: LM reads a file list and reasons, token-counted)")
+    ap.add_argument("--abl", type=str, default="",
+                    help="--locate ablations, comma separated: no-worlds, no-exec")
+    ap.add_argument("--selftest", action="store_true",
+                    help="mechanism selftest for the active mode (currently --locate)")
     ap.add_argument("--dataset", type=str, default="gsm8k", choices=["gsm8k", "math"],
                     help="which cached dataset to stream for --session: gsm8k (default) or math "
                          "(Hendrycks competition math — harder: LaTeX, longer, denser numbers)")
     a = ap.parse_args()
+    if a.locate:
+        if a.selftest:
+            sys.exit(0 if selftest_locate() else 1)
+        sys.exit(0 if demo_locate(a.lm, arm=a.arm, n=(a.n if a.n != 40 else None),
+                                  abl=a.abl) else 1)
     if a.reason:
         sys.exit(0 if demo_reason(a.lm, a.n) else 1)
     if a.speech_trm:
