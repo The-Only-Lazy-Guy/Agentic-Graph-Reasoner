@@ -4950,6 +4950,16 @@ def train_commit_head(wb, train, trees, path_emb, n_train: int = 90, epochs: int
 N_LOCF = 9
 
 
+def _path_overlap(path: str, qwords: set | None) -> float:
+    """Fraction of a directory path's words that appear in the issue text. This feature used to be
+    passed a hardcoded 0.0 at its only call site, i.e. the policy carried a permanently dead input
+    where the most obvious cheap signal belonged."""
+    if not qwords:
+        return 0.0
+    w = {t for t in re.split(r"[^a-z0-9]+", path.lower()) if len(t) > 2}
+    return (len(w & qwords) / len(w)) if w else 0.0
+
+
 def _loc_feats(cw: float, size: int, depth: int, best: float, n_open: int, n_seen: int,
                gap: float, tokov: float, budget: float) -> list:
     """One candidate world, in the state the policy is actually in. `best`/`n_seen`/`gap` are the
@@ -4975,7 +4985,8 @@ class LocPolicy(nn.Module):
 
 
 def locate_rl_episode(pol, g: AtomGraph, q: np.ndarray, cand_w: int = 24, T: int = 4,
-                      sample: bool = False, no_exec: bool = False, gold: str | None = None):
+                      sample: bool = False, no_exec: bool = False, gold: str | None = None,
+                      qwords: set | None = None):
     """One episode. Returns (commit, files_seen, logps, n_open). Worlds are ranked by centroid ONCE
     (O(W)); the policy chooses the ORDER to open them and when to stop."""
     qv = np.asarray(q, dtype=np.float32)
@@ -4996,7 +5007,8 @@ def locate_rl_episode(pol, g: AtomGraph, q: np.ndarray, cand_w: int = 24, T: int
         feats = torch.tensor(
             [_loc_feats(float(wsim[i]), len(g.worlds.get(wnames[i], [])),
                         wnames[i].count("/"), obs_best, len(opened), obs_seen, obs_gap,
-                        0.0, _t / max(1, T)) for i in avail], dtype=torch.float32)
+                        _path_overlap(wnames[i], qwords), _t / max(1, T))
+             for i in avail], dtype=torch.float32)
         logits = pol(feats)
         if sample:
             d = torch.distributions.Categorical(logits=logits)
@@ -5013,7 +5025,10 @@ def locate_rl_episode(pol, g: AtomGraph, q: np.ndarray, cand_w: int = 24, T: int
             for mi in (-s).argsort()[:8]:
                 seen.append((float(s[int(mi)]), members[int(mi)]))
             seen.sort(reverse=True)
-            del seen[16:]
+            # NO TRUNCATION. `del seen[16:]` was here and it silently discarded the gold whenever it
+            # was found but ranked past 16 -- and both the COMMIT and the `saw` partial-credit reward
+            # read this list, so the bug capped the arm AND corrupted the training signal. At most
+            # cand_w*8 entries ever land here, so there was nothing to save.
             nb = seen[0][0]
             gap = nb - (seen[1][0] if len(seen) > 1 else 0.0)
             best = nb
@@ -5070,8 +5085,9 @@ def train_locate_rl(pol, train, trees, path_emb, epochs: int = 6, lr: float = 5e
         batch = [pool_[rng.randrange(len(pool_))] for _ in range(24)]
         rs = []
         for g, r, _rk in batch:
-            c, _n, logps, _o, saw = locate_rl_episode(pol, g, r["q"], sample=True,
-                                                      no_exec=no_exec, gold=r["gold"])
+            c, _n, logps, _o, saw = locate_rl_episode(
+                pol, g, r["q"], sample=True, no_exec=no_exec, gold=r["gold"],
+                qwords=r.get("qw"))
             rs.append((1.0 if c == r["gold"] else (0.3 if saw else 0.0), logps,
                        1.0 if c == r["gold"] else 0.0))
         base = sum(x for x, _l, _t in rs) / max(1, len(rs))
@@ -5098,6 +5114,7 @@ def demo_locate(lm_name: str = "", arm: str = "thinker", n: int | None = None, a
     qs = encode_batch([r["problem"][:1000] for r in rows])
     for r, q in zip(rows, qs):
         r["q"] = q
+        r["qw"] = {t for t in re.split(r"[^a-z0-9]+", r["problem"][:1200].lower()) if len(t) > 2}
     hr = [r for r in rows if r["repo"] in held_repos]
     rest = [r for r in rows if r["repo"] not in held_repos]
     random.Random(seed).shuffle(rest)
@@ -5150,7 +5167,8 @@ def demo_locate(lm_name: str = "", arm: str = "thinker", n: int | None = None, a
                     with torch.no_grad():
                         pick = cands[int(head(qm[0], C).argmax())]
             elif arm == "rl":
-                c, nf, _lp, _o, _saw = locate_rl_episode(pol, g, r["q"], no_exec=no_exec)
+                c, nf, _lp, _o, _saw = locate_rl_episode(pol, g, r["q"], no_exec=no_exec,
+                                                         qwords=r.get("qw"))
                 pick = c
                 seen_tot += nf
             elif arm == "cot":
