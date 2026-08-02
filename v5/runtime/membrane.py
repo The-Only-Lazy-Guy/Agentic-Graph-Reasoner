@@ -4893,6 +4893,30 @@ def symbol_owners(cont: dict, repo: str, files: list) -> dict:
 # score distribution: `sym` with one file at 1.0 and the rest near 0 is a confident locator; all
 # zeros means no symbol matched and it is useless here. Same shape argument for content and path.
 #
+# SCALED RESULT (artifacts/swebench_loc_big.json -- 1725 real SWE-bench instances mined from the
+# full test split, single non-test .py file in the reference patch; candidate sets and content come
+# from the repo checkouts, 238 instances dropped because HEAD no longer contains their gold path):
+#
+#   train 1030 | held-INSTANCE 300 | held-REPO 157        (the n=300 set gave 207 / 60 / 33)
+#     arm                     train    held-I    held-R
+#     path only              0.1767   0.1933   0.2357
+#     content only           0.2408   0.2367   0.2484
+#     lex global (incumbent) 0.3767   0.3700   0.2803
+#     thinker-8              0.4320   0.4467   0.3185
+#     thinker-468            0.4388   0.4367   0.3503
+#
+# THE THINKER NOW BEATS THE INCUMBENT ON BOTH HELD SETS (+0.077 held-I, +0.070 held-R), where at
+# n=300 it was WORSE on held-I. And the model-size flip was PREDICTED BEFORE THE RUN: "if data
+# starvation is the real diagnosis, the 468-param model should lose at n=300 and win at n=1725."
+# It did -- held-REPO 0.1515 at n=300, 0.3503 at n=1725, now the best arm there. Four learned
+# components in this file had previously degraded their own incumbent; the cause was the data, not
+# the idea.
+#
+# Caveats kept attached: held-REPO is still only TWO repos (pytest, sphinx), so "unseen repo" is
+# measured on two samples of repo-kind; trees come from HEAD clones rather than each instance's base
+# commit, which is what the 238 drops are; scikit-learn (104/177) and sphinx (71/136) lose the most
+# to refactors, so their share of the remainder is the least commit-faithful.
+#
 # MEASURED HEADROOM before building (grid over weight vectors, so an upper bound, not a promise):
 #     global weights (current)          held-I 0.3667   held-R 0.1786
 #     oracle PER-REPO weights           held-I 0.4333   held-R 0.3214
