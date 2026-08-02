@@ -15,6 +15,29 @@ off. Nothing here scores "was the right node retrieved".
 
     selftest : python -m v5.runtime.algo_grr_slotgate --selftest
     ab       : python -m v5.runtime.algo_grr_slotgate --ab --lm Qwen/Qwen2.5-0.5B-Instruct
+
+FIRST MEASURED A/B (small budget: real 4-bit Qwen2.5-0.5B, 24 train / 8 held, 3 epochs, the most
+that fits the run limit here; the 13-15/16 figure on record used Qwen3-4B and far more training, so
+these absolute numbers are NOT comparable to it -- only the two arms to each other, same budget).
+
+  gate OFF   held WM 0/8 -> 1/8 -> 2/8   ablated 0/8   slot_cos 0.9999 -> 1.0000
+  gate ON    held WM 0/8 -> 0/8          ablated 0/8   slot_cos 1.0000
+
+The gate does not help, and the diagnostic says why. `slot_cos` (trm_wm ~3282) is the mean
+off-diagonal cosine between the flattened slot TABLES OF DIFFERENT HELD-OUT TASKS. At 1.0000 the
+working memory is the SAME for every task: the slots carry essentially no task-specific variance.
+
+That makes a read-side gate powerless by construction. This gate chooses WHICH slots a position may
+read; it cannot create variance that was never written. Masking a task-invariant signal can only
+remove information, which is exactly the direction observed (ON <= OFF at matched epochs). The
+lateral-inhibition-as-anti-collapse argument is also aimed at the wrong quantity: U here is the
+WITHIN-table slot-slot correlation, while the collapse the diagnostic reports is ACROSS tasks.
+
+So the coupling is not the (only) bottleneck on this path -- slot PRODUCTION is. Decorrelation
+pressure has to act where slots are written (a diversity term on the TRM's refine output across
+tasks, or inhibition applied at generation), and only then can a read-side gate have anything to
+select between. Caveat kept explicit: at 3 epochs on a 0.5B some of that invariance is plain
+undertraining, so this rules the gate out as a FIX for collapse, not the TRM as a component.
 """
 from __future__ import annotations
 
