@@ -5394,6 +5394,109 @@ def train_locate_rl(pol, train, trees, path_emb, epochs: int = 6, lr: float = 5e
     return pol
 
 
+# ==================================================================================================
+# MULTI-HOP QA -- the task shape where a thinker can actually matter, on real data.
+#
+# Why this and not the localization work above: localization is a SINGLE-SHOT decision with a 1-bit
+# terminal reward, so there is no state to accumulate and no observation that changes what to do
+# next. That is why every `no-exec` ablation in this file came back exactly null and why a
+# ZERO-parameter fused scorer matched the thinker. Nothing was wrong with the mechanism; the task had
+# no room for it.
+#
+# HotpotQA distractor (real, 7405 hard questions, 10 paragraphs each: 2 gold + 8 distractors) has the
+# opposite shape, and it ships its own control:
+#   BRIDGE     (5918) you cannot form hop 2's query without hop 1's evidence -- "the director of X"
+#              requires first finding X. Observation is load-bearing BY CONSTRUCTION.
+#   COMPARISON (1487) both entities are named in the question; no chaining needed.
+# So conditioning hop 2 on hop 1 should help BRIDGE and do nothing for COMPARISON. That is a
+# mechanism-level prediction, not just a number, and it is falsifiable in one run.
+#
+# The paragraphs are written into a real session graph, which is what that component is for: content
+# that arrives, gets stored, and must be found again by meaning.
+# ==================================================================================================
+_HOTPOT = ("hotpotqa/hotpot_qa", "distractor/validation-00000-of-00001.parquet")
+
+
+def load_hotpot(n: int = 500):
+    """Read the prepped json. The parquet is decoded in a SEPARATE torch-free process
+    (scripts/prep_hotpot.py) because pyarrow after torch segfaults in this environment -- the same
+    conflict this repo already documents for HF datasets streaming, which forced --grow-cot-docs-path
+    and --math-cot-docs-path. Returns [(qid, question, answer, type, paragraphs, gold_titles)]."""
+    p = _LOC_ART / "hotpot_multihop.json"
+    if not p.exists():
+        raise FileNotFoundError(f"{p} missing -- run: python scripts/prep_hotpot.py")
+    rows = json.loads(p.read_text(encoding="utf-8"))[:n]
+    return [(r["id"], r["q"], r["a"], r["type"], [(t, b) for t, b in r["paras"]], set(r["gold"]))
+            for r in rows]
+
+
+def multihop_retrieve(paras: list, question: str, k: int = 2, hops: int = 2,
+                      condition: bool = True, ctx_w: float = 0.6):
+    """Iterative retrieval over the session's paragraphs.
+
+    condition=True: hop t's query is the question PLUS what has already been retrieved, so the second
+    hop can chase an entity the first hop discovered. condition=False is the ablation -- every hop
+    re-issues the original question, which is a pure re-ranking of one fixed query and cannot chain.
+    """
+    titles = [t for t, _ in paras]
+    E = encode_batch([f"{t}. {b}"[:1000] for t, b in paras])
+    q = encode_batch([question])[0]
+    picked, qv = [], np.asarray(q, dtype=np.float32)
+    for _h in range(hops):
+        s = E @ qv
+        for j in np.argsort(-s):
+            if int(j) not in picked:
+                picked.append(int(j))
+                break
+        if condition:
+            obs = np.mean(np.stack([E[i] for i in picked]), axis=0)
+            qv = np.asarray(q, dtype=np.float32) + ctx_w * obs
+            nrm = float(np.linalg.norm(qv))
+            qv = qv / nrm if nrm else qv
+    return [titles[i] for i in picked], picked
+
+
+def demo_multihop(n: int = 500, lm_name: str = "", abl: str = "", hops: int = 2) -> bool:
+    """Support-fact retrieval on real HotpotQA, split by question type so the mechanism is testable.
+
+    Reported per type because the pooled number would hide the entire point: conditioning should move
+    BRIDGE and leave COMPARISON alone."""
+    import collections as _c
+    abls = {a.strip() for a in abl.split(",") if a.strip()}
+    data = load_hotpot(n)
+    print(f"algo multihop: {len(data)} real HotpotQA questions, 10 paragraphs each "
+          f"(2 gold + 8 distractors)")
+    print(f"  ablations={sorted(abls) or 'none'}  hops={hops}\n")
+    res = _c.defaultdict(lambda: _c.Counter())
+    for _qid, q, _ans, typ, paras, gold in data:
+        for tag, cond in (("conditioned", True), ("no-cond (ablation)", False)):
+            got, _ = multihop_retrieve(paras, q, hops=hops, condition=cond)
+            r = res[(typ, tag)]
+            r["n"] += 1
+            r["both"] += int(gold <= set(got))
+            r["any"] += int(bool(gold & set(got)))
+    print(f"  type        arm                    n     both-gold   any-gold")
+    for typ in ("bridge", "comparison"):
+        for tag in ("conditioned", "no-cond (ablation)"):
+            r = res[(typ, tag)]
+            if not r["n"]:
+                continue
+            print(f"    {typ:<10} {tag:<22} {r['n']:>4}   {r['both'] / r['n']:.4f}      "
+                  f"{r['any'] / r['n']:.4f}")
+    b_c = res[("bridge", "conditioned")]
+    b_n = res[("bridge", "no-cond (ablation)")]
+    c_c = res[("comparison", "conditioned")]
+    c_n = res[("comparison", "no-cond (ablation)")]
+    d_b = b_c["both"] / max(1, b_c["n"]) - b_n["both"] / max(1, b_n["n"])
+    d_c = c_c["both"] / max(1, c_c["n"]) - c_n["both"] / max(1, c_n["n"])
+    print(f"\n  PREDICTION: conditioning helps BRIDGE (needs chaining), not COMPARISON (does not).")
+    print(f"    bridge delta     {d_b:+.4f}")
+    print(f"    comparison delta {d_c:+.4f}")
+    print(f"    -> {'CONFIRMED' if d_b > d_c else 'NOT confirmed'} "
+          f"(bridge must gain more than comparison)")
+    return True
+
+
 def demo_memory(n_repo_min: int = 40, seed: int = 0, boost: float = 0.15) -> bool:
     """DOES THE GRAPH REMEMBER? One PERSISTENT AtomGraph per repo, streamed through that repo's real
     instances in order, edited from VERIFIED outcomes only, and read back through utility().
@@ -5909,6 +6012,11 @@ def main():
                          "TRM is put IN the answer path: it refines working-memory slots from the retrieved "
                          "nodes and the LM attends them through the coupled adapters. Without it, "
                          "--interactive is graph-cosine retrieval + prompt-stuffing and the TRM is unused.")
+    ap.add_argument("--multihop", action="store_true",
+                    help="LONG-HORIZON MULTI-HOP QA on real HotpotQA: iterative retrieval where hop 2 "
+                         "is conditioned on hop 1's evidence. Reports BRIDGE vs COMPARISON separately "
+                         "because conditioning should only help the type that needs chaining.")
+    ap.add_argument("--hops", type=int, default=2, help="retrieval hops for --multihop")
     ap.add_argument("--memory", action="store_true",
                     help="DOES THE GRAPH REMEMBER: one persistent AtomGraph per repo, streamed through "
                          "its real instances, edited from VERIFIED outcomes via membrane_edits and read "
@@ -5933,6 +6041,9 @@ def main():
                     help="which cached dataset to stream for --session: gsm8k (default) or math "
                          "(Hendrycks competition math — harder: LaTeX, longer, denser numbers)")
     a = ap.parse_args()
+    if a.multihop:
+        sys.exit(0 if demo_multihop(n=(a.n if a.n != 40 else 500), lm_name=a.lm,
+                                    abl=a.abl, hops=a.hops) else 1)
     if a.memory:
         sys.exit(0 if demo_memory() else 1)
     if a.locate:
