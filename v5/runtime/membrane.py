@@ -4819,7 +4819,9 @@ def locate_thinker(g: AtomGraph, q: np.ndarray, top_w: int = 10, T: int = 3,
     already fired once this session on ExecTRM (0.030 vs 0.030), so it is the one to watch.
     """
     qv = np.asarray(q, dtype=np.float32)
-    seen, observed, pool = [], [], []
+    seen, observed = [], []
+    scored = 0                                            # every file whose embedding we dot -- the
+                                                          # real retrieval work, see the note below
     for _t in range(max(1, T)):
         qt = qv if not observed else (qv + ctx * np.mean(np.stack(observed), axis=0))
         nrm = float(np.linalg.norm(qt))
@@ -4829,6 +4831,7 @@ def locate_thinker(g: AtomGraph, q: np.ndarray, top_w: int = 10, T: int = 3,
         if not cand:
             break
         E = np.stack([g.atoms[c].emb for c in cand])
+        scored += len(cand)
         for i in (-(E @ qt)).argsort()[:per_step]:
             c = cand[int(i)]
             seen.append(c)
@@ -4839,13 +4842,19 @@ def locate_thinker(g: AtomGraph, q: np.ndarray, top_w: int = 10, T: int = 3,
     # against DIFFERENT vectors and ranking them together compares numbers that were never on the same
     # scale. Measured cost of getting this wrong: top1 0.0500 against a 0.4667 routing ceiling.
     if not seen:
-        return {"commit": None, "ranked": [], "files_seen": 0, "worlds": len(g.worlds)}
+        return {"commit": None, "ranked": [], "files_seen": 0, "files_scored": scored,
+                "worlds": len(g.worlds)}
     Es = np.stack([g.atoms[c].emb for c in seen])
     order = (-(Es @ qv)).argsort()
     ranked = [seen[int(i)] for i in order]
+    # files_seen counts what was KEPT (<= T*per_step by construction, so it is a constant, not a
+    # measurement). files_scored counts every embedding actually compared, which is the load. Reporting
+    # the former as "the load" understated this arm ~11x (24.0 reported vs ~266 really scored) and the
+    # headline "78x cheaper than cosine" was wrong because of it.
     return {"commit": ranked[0],
             "ranked": ranked,
             "files_seen": len(seen),
+            "files_scored": scored,
             "worlds": len(g.worlds)}
 
 
@@ -4878,21 +4887,32 @@ def _lm_encode(wb, texts: list, layer: int = -1, max_tok: int = 64, batch: int =
 
 
 class CommitHead(nn.Module):
-    """Scores one candidate against the issue, in the LM's own space. Tiny and bilinear-ish: a
-    low-rank interaction plus the raw cosine, so it can only re-rank what the encoder already
-    separates -- and it starts as (approximately) that cosine, which is the prior-preserving default
-    this project keeps insisting on."""
+    """RESIDUAL ON THE INCUMBENT, not a replacement for it.
 
-    def __init__(self, d_lm: int, r: int = 32):
+    The first version scored `w[0]*LM_cosine + w[1]*interaction` with w=[1,0], so at initialisation it
+    WAS the LM's cosine over path strings -- measured 0.0000 top-1, while the router ordering it threw
+    away sits at 0.1333. It scored 0.0167. algo_trm_act.py:1592-1597 documents this exact mistake and
+    its fix ("re-ranked candidates from scratch and never saw the cosine ordering that built the pool
+    ... It scored 0.050"), so this is the second time it has been made in this repo.
+
+    Now the ROUTER's own score is an explicit term at weight 1.0 and every learned term is zero-init:
+    at step 0 this reproduces the router's ranking exactly, the incumbent is the floor by
+    construction, and training can only add. Rank is small (8) because the trainable set is ~37
+    instances -- the data-starvation failure this project keeps rediscovering.
+    """
+
+    def __init__(self, d_lm: int, r: int = 8):
         super().__init__()
         self.pq = nn.Linear(d_lm, r, bias=False)
         self.pc = nn.Linear(d_lm, r, bias=False)
-        self.w = nn.Parameter(torch.tensor([1.0, 0.0]))     # [raw cosine, learned interaction]
+        nn.init.zeros_(self.pq.weight)
+        nn.init.zeros_(self.pc.weight)
+        # [router cosine, LM cosine, learned interaction]
+        self.w = nn.Parameter(torch.tensor([1.0, 0.0, 0.0]))
 
-    def forward(self, q: torch.Tensor, C: torch.Tensor) -> torch.Tensor:
-        cos = C @ q
+    def forward(self, q: torch.Tensor, C: torch.Tensor, router: torch.Tensor) -> torch.Tensor:
         inter = (self.pc(C) * self.pq(q).unsqueeze(0)).sum(-1)
-        return self.w[0] * cos + self.w[1] * inter
+        return self.w[0] * router + self.w[1] * (C @ q) + self.w[2] * inter
 
 
 def train_commit_head(wb, train, trees, path_emb, n_train: int = 90, epochs: int = 12,
@@ -4905,7 +4925,7 @@ def train_commit_head(wb, train, trees, path_emb, n_train: int = 90, epochs: int
     reach on top of the router.
     """
     head = CommitHead(wb.d_model)
-    opt = torch.optim.Adam(head.parameters(), lr=lr)
+    opt = torch.optim.Adam(head.parameters(), lr=lr, weight_decay=1e-2)
     data, kept = [], 0
     for r in train[:n_train]:
         files = [f for f in trees[r["instance_id"]] if f in path_emb]
@@ -4913,9 +4933,10 @@ def train_commit_head(wb, train, trees, path_emb, n_train: int = 90, epochs: int
         cands = locate_thinker(g, r["q"])["ranked"][:24]
         if r["gold"] not in cands:
             continue
+        rs = torch.tensor([float(g.atoms[c].emb @ r["q"]) for c in cands], dtype=torch.float32)
         qm, _ = _lm_encode(wb, [r["problem"][:600]])
         C, _ = _lm_encode(wb, cands)
-        data.append((qm[0], C, cands.index(r["gold"])))
+        data.append((qm[0], C, rs, cands.index(r["gold"])))
         kept += 1
     if verbose:
         print(f"    commit head: {kept}/{min(n_train, len(train))} train instances have the gold in "
@@ -4924,8 +4945,8 @@ def train_commit_head(wb, train, trees, path_emb, n_train: int = 90, epochs: int
         return head
     for ep in range(epochs):
         tot = 0.0
-        for q, C, y in data:
-            loss = torch.nn.functional.cross_entropy(head(q, C).unsqueeze(0),
+        for q, C, rs, y in data:
+            loss = torch.nn.functional.cross_entropy(head(q, C, rs).unsqueeze(0),
                                                      torch.tensor([y]))
             opt.zero_grad(); loss.backward(); opt.step()
             tot += float(loss)
@@ -5025,10 +5046,11 @@ def locate_rl_episode(pol, g: AtomGraph, q: np.ndarray, cand_w: int = 24, T: int
             for mi in (-s).argsort()[:8]:
                 seen.append((float(s[int(mi)]), members[int(mi)]))
             seen.sort(reverse=True)
-            # NO TRUNCATION. `del seen[16:]` was here and it silently discarded the gold whenever it
-            # was found but ranked past 16 -- and both the COMMIT and the `saw` partial-credit reward
-            # read this list, so the bug capped the arm AND corrupted the training signal. At most
-            # cand_w*8 entries ever land here, so there was nothing to save.
+            # NO TRUNCATION. `del seen[16:]` used to be here. CORRECTION to an earlier claim of mine:
+            # it did NOT cap the arm -- the commit is seen[0] of a descending sort, and deleting
+            # indices 16+ cannot move index 0 (measured: commit differed 0/150). What it did corrupt is
+            # the SHAPED REWARD, which asks whether the gold was ever found: 71/150 -> 76/150 under an
+            # oracle ordering, 43 -> 44 under a realistic one. Small but real, and free to fix.
             nb = seen[0][0]
             gap = nb - (seen[1][0] if len(seen) > 1 else 0.0)
             best = nb
@@ -5110,6 +5132,9 @@ def demo_locate(lm_name: str = "", arm: str = "thinker", n: int | None = None, a
     import random
     import time
     abls = {a.strip() for a in abl.split(",") if a.strip()}
+    # Seeded because the RL arm is stochastic in BOTH policy init and action sampling. Unseeded, the
+    # reported number moved run to run and an earlier "rl ties cosine exactly" was one lucky init.
+    torch.manual_seed(seed)
     rows, trees, path_emb = _load_loc(n)
     qs = encode_batch([r["problem"][:1000] for r in rows])
     for r, q in zip(rows, qs):
@@ -5123,6 +5148,9 @@ def demo_locate(lm_name: str = "", arm: str = "thinker", n: int | None = None, a
           f"held-INSTANCE {len(held_i)} | held-REPO {len(hr)} ({', '.join(held_repos)})")
     print(f"  arm={arm}  ablations={sorted(abls) or 'none'}\n")
 
+    known_abls = {"no-worlds", "no-exec"}
+    if abls - known_abls:
+        raise SystemExit(f"unknown --abl {sorted(abls - known_abls)}; known: {sorted(known_abls)}")
     use_worlds = "no-worlds" not in abls
     no_exec = "no-exec" in abls
     pol = None
@@ -5147,25 +5175,29 @@ def demo_locate(lm_name: str = "", arm: str = "thinker", n: int | None = None, a
         for r in split:
             files = [f for f in trees[r["instance_id"]] if f in path_emb]
             g = build_repo_graph(files, path_emb, worlds=use_worlds)
-            if arm == "cosine" or (arm == "thinker" and not use_worlds):
+            if arm == "cosine" or not use_worlds:
+                # no-worlds is NOT a silent reroute: without a routing layer there is nothing to
+                # route with, so the arm IS flat cosine and the header says so.
                 pick = (locate_cosine(g, r["q"], 1) or [None])[0]
                 seen_tot += len(files)                       # the floor reads the whole repo
             elif arm == "thinker":
-                res = locate_thinker(g, r["q"], no_exec=("no-exec" in abls))
-                pick, _ = res["commit"], None
-                seen_tot += res["files_seen"]
+                res = locate_thinker(g, r["q"], no_exec=no_exec)
+                pick = res["commit"]
+                seen_tot += res["files_scored"]
             elif arm == "lmcommit":
                 res = locate_thinker(g, r["q"], no_exec=no_exec)
                 cands = res["ranked"][:24]
-                seen_tot += res["files_seen"]
+                seen_tot += res["files_scored"]
                 if not cands:
                     pick = None
                 else:
+                    rs = torch.tensor([float(g.atoms[c].emb @ r["q"]) for c in cands],
+                                      dtype=torch.float32)
                     qm, n1 = _lm_encode(wb, [r["problem"][:600]])
                     C, n2 = _lm_encode(wb, [c for c in cands])
                     enc_tot += n1 + n2
                     with torch.no_grad():
-                        pick = cands[int(head(qm[0], C).argmax())]
+                        pick = cands[int(head(qm[0], C, rs).argmax())]
             elif arm == "rl":
                 c, nf, _lp, _o, _saw = locate_rl_episode(pol, g, r["q"], no_exec=no_exec,
                                                          qwords=r.get("qw"))
@@ -5187,9 +5219,13 @@ def demo_locate(lm_name: str = "", arm: str = "thinker", n: int | None = None, a
                 raise ValueError(f"unknown arm {arm}")
             ok += int(pick == r["gold"])
         dt = time.time() - t0
-        n_ = max(1, len(split))
-        print(f"    {tag:<22} top1 {ok / n_:.4f} ({ok}/{n_})  files_seen/inst {seen_tot / n_:>7.1f}  "
-              f"lm_enc/inst {enc_tot / n_:>7.1f}  lm_gen/inst {tok_tot / n_:>6.1f}  "
+        if not split:
+            print(f"    {tag:<22} EMPTY SPLIT -- not reported (a 0/1 row here would be fabricated)")
+            return 0.0, 0.0, 0.0
+        n_ = len(split)
+        print(f"    {tag:<22} top1 {ok / n_:.4f} ({ok}/{n_})  "
+              f"files_scored/inst {seen_tot / n_:>7.1f}  lm_enc {enc_tot / n_:>6.1f}  "
+              f"lm_gen {tok_tot / n_:>5.1f}  "
               f"{dt / n_:.2f}s/inst")
         return ok / n_, seen_tot / n_, tok_tot / n_
 
@@ -5233,14 +5269,18 @@ def selftest_locate() -> bool:
 
     q = encode_batch([r["problem"][:1000]])[0]
     res = locate_thinker(g, q)
-    chk("[4] the thinker COMMITS without reading the repo (this is the load claim)",
-        res["commit"] is not None and res["files_seen"] < len(files) / 2,
-        f"inspected {res['files_seen']} of {len(files)} files")
+    # files_seen is capped at T*per_step by construction, so asserting on it could never fail. The
+    # load claim has to be made against files_SCORED -- every embedding actually compared.
+    chk("[4] the thinker scores far fewer files than the repo holds (the real load claim)",
+        res["commit"] is not None and res["files_scored"] < len(files) / 2,
+        f"scored {res['files_scored']} of {len(files)} files "
+        f"(kept {res['files_seen']}, which is a constant, not a measurement)")
 
     a = locate_thinker(g, q, T=1, per_step=4)
     b = locate_thinker(g, q, T=3, per_step=4)
-    chk("[5] more recursion inspects strictly more, i.e. the loop actually iterates",
-        b["files_seen"] > a["files_seen"], f"T=1 {a['files_seen']} vs T=3 {b['files_seen']}")
+    chk("[5] more recursion scores strictly more (the loop iterates; STRUCTURAL, cannot fail)",
+        b["files_scored"] > a["files_scored"],
+        f"T=1 {a['files_scored']} vs T=3 {b['files_scored']} -- says nothing about the ANSWER")
 
     # [6] The no-exec ablation must be WIRED and reachable. It is deliberately NOT asserted to change
     # the answer, because measured on the real held sets it does not: 0.1333 / 0.1818 with the loop
