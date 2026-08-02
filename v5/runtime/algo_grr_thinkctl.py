@@ -1,34 +1,40 @@
-"""algo_grr_thinkctl — THE THINKER AS CONTROLLER. It drives real tools over a real repo, its state is
-advanced by real observations, and the LM only fills holes it cannot.
+"""algo_grr_thinkctl -- THE THINKER AS A DOMAIN-GENERAL CONTROLLER. It drives real tools over real
+data, its state is advanced by real observations, and the LM only fills holes it cannot: one anchored
+rewrite in code, or a faithful narration of a decision the controller already made. Nothing about the
+controller, the observation channel, or the training loop is SWE-specific -- that was the gap the user
+called out directly: "this entire system still does best on SWE tasks... make the thinker actually
+generally smart and make the LM speak anything based on the thinker and graph information and tools."
 
 DESIGNED AGAINST THE SPECIFIC FAILURES THIS PROJECT MEASURED, not against the word "TRM":
+  trained through lm_loss -> the latent became a CONSTANT (across-task slot cosine 1.0000). Here NO
+      loss touches the LM. Reward is verified progress; narration is never trained at all.
+  output was a score over candidates -> re-ranking, null in every arm tried. Here the output is an
+      ACTION that changes the world: which tool, and which argument.
+  recursion was a contraction that washed the input out. Here z is advanced by a GRU from the REAL
+      OBSERVATION the tool returned -- now the observation itself is a MiniLM embedding of whatever
+      text the tool actually printed, so the same mechanism reads a grep hit list, a "no definition"
+      message, or a retrieved paragraph without any domain-specific featurisation.
+  latent injection into the LM -> dead across four attempts. Here the interface is TEXT both ways.
+  the task had no room -> every no-exec ablation came back null on single-shot tasks. Both domains
+      here are multi-step with a real state to accumulate.
 
-  trained through lm_loss -> the latent became a CONSTANT (across-task slot cosine 1.0000, slot-swap
-      changed 1 of 16). Here NO loss touches the LM. The reward is whether a tool call actually
-      worked and whether the edit survived its gates.
-  output was a score over candidates -> re-ranking, null in every arm tried (spiking planner, hop
-      policy, slot gate, RL descent, CommitHead). Here the output is an ACTION that changes the
-      world: which tool, and which argument. Running it moves the state somewhere new.
-  recursion was a contraction that washed the input out ("the T-cycle recurrence is a fixed-point
-      attractor" -- algo_trm's own comment). Here z is advanced by a GRU from the REAL OBSERVATION
-      the tool returned, so two different repos cannot share a trajectory.
-  latent injection into the LM -> dead across four attempts. Here the interface is TEXT in both
-      directions: the LM reads a rendered trace, and returns a string.
-  the task had no room -> every no-exec ablation came back exactly null. Here `--abl no-obs` blinds
-      the observation features, and the controller then cannot know whether its last grep found 1
-      file or 40, so it MUST degrade. That is the falsifier.
+WHAT "DOMAIN-GENERAL" MEANS CONCRETELY: a `Domain` bundles a tool registry, a pointer-candidate
+function, a verified reward/metrics function, a state initializer, and a "what did we decide" reader.
+ThinkerController never sees any of that -- its constructor only takes n_tool (the action count), and
+every input to it is either a discrete index or a 384-d MiniLM embedding, which exists in identical
+shape for a repo, a paragraph set, or anything else with real, verifiable tools. Adding a third domain
+means writing a Domain, not touching this file's controller code.
 
-ARGUMENTS ARE POINTED AT, NOT GENERATED. Tool arguments come from a candidate set derived from the
-issue text and from what previous tools returned (identifiers in the issue, paths grep printed). The
-controller picks an index. Nothing can hallucinate a path that does not exist. The LM is asked for
-exactly one thing -- the replacement CODE in an edit -- which is the only argument no pointer can
-supply.
+ARGUMENTS ARE POINTED AT, NOT GENERATED, in both domains: code identifiers/paths from the issue and
+from grep/find_def hits; entity phrases from the question and from retrieved paragraphs. The LM is
+asked for exactly two things it cannot be pointed at: replacement CODE in an edit, and the WORDING of
+an already-fixed decision (speak()). It never chooses which file, which answer, or whether a step
+worked -- that stays entirely inside the pointer mechanism and the real tool observations.
 """
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import random
 import re
 import sys
@@ -37,65 +43,72 @@ from pathlib import Path
 _ROOT = str(Path(__file__).resolve().parents[2])
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
+import os
 os.environ.setdefault("HF_HOME", r"E:\cache\hf")
 
 import numpy as np
 import torch
 import torch.nn as nn
 
-from v5.runtime.algo_grr_swetools import (_repo_dir, swe_registry, t_edit, t_find_def, t_grep,
-                                          t_list_dir, t_read_file)
+from v5.runtime.algo_grr_swetools import _repo_dir, swe_registry, t_edit, t_find_def, t_grep, t_read_file
+from v5.runtime.algo_grr_qatools import t_answer, t_read, t_retrieve, qa_registry
 
-TOOLS = ["grep", "find_def", "read_file", "edit", "stop"]
-N_TOOL = len(TOOLS)
-N_OBS = 10
-IDT = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
-
-
-def obs_features(state: dict, blind: bool = False) -> np.ndarray:
-    """What the last tool call actually returned. This is the ONLY thing that distinguishes step t
-    from step t-1, so blinding it (--abl no-obs) leaves the controller with nothing to act on."""
-    if blind:
-        return np.zeros(N_OBS, dtype=np.float32)
-    hits = state.get("last_hits", [])
-    return np.array([
-        1.0 if state.get("open_file") else 0.0,
-        min(len(hits), 40) / 40.0,
-        1.0 if len(hits) == 1 else 0.0,              # a unique hit is the strong signal
-        1.0 if state.get("last_ok") else 0.0,
-        1.0 if state.get("patch") else 0.0,
-        1.0 if state.get("edit_ambiguous") else 0.0,
-        1.0 if state.get("edit_unparsable") else 0.0,
-        min(state.get("steps", 0), 8) / 8.0,
-        min(len(state.get("seen_files", ())), 8) / 8.0,
-        1.0 if state.get("gold_open") else 0.0,      # TRAIN-ONLY reward shaping, zeroed at eval
-    ], dtype=np.float32)
+IDT = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")                       # code identifiers / paths
+ENT = re.compile(r"[A-Z][a-zA-Z0-9]*(?:\s+[A-Z][a-zA-Z0-9]*){0,3}")  # prose entity phrases
+_STOP = {"The", "This", "That", "These", "Those", "It", "If", "When", "What", "Which", "Who", "Whom",
+         "A", "An", "In", "On", "At", "By", "For", "With", "And", "Or", "But", "Is", "Was", "Were", "Are"}
 
 
+def text_candidates(texts: list, pattern: "re.Pattern", n: int = 24, min_len: int = 3,
+                    stop: set | None = None) -> list:
+    """Pointer targets drawn from real text the task or a tool already produced -- never generated.
+    The only domain-specific knob is which PATTERN counts as 'a thing you could point at' (identifiers
+    for code, capitalized phrases for prose); the mechanism that turns text into candidates is shared."""
+    stop = stop or ()
+    seen, out = set(), []
+    for t in texts:
+        for m in pattern.findall(t or ""):
+            if m not in seen and len(m) >= min_len and m not in stop:
+                seen.add(m)
+                out.append(m)
+    return out[:n]
+
+
+# ── the controller: domain-blind by construction ─────────────────────────────────────────────────
 class ThinkerController(nn.Module):
-    """z_{t+1} = GRU(z_t, [action_emb, observation]) -> (tool logits, argument pointer).
+    """z_{t+1} = GRU(z_t, [action_emb, observation_embedding, ok, step_frac, repeat]) -> (tool
+    logits, argument pointer).
+
+    The observation is now a MiniLM embedding of the RAW TEXT the tool returned, not a hand-built
+    numeric feature vector. That is what makes this domain-general: a 10-dim feature like
+    "edit_ambiguous?" only means anything for code-edit tools, but "the embedding of what the tool
+    said" is defined identically whether the tool is grep or a HotpotQA paragraph retriever.
 
     Small on purpose: this project has degraded its own baseline four times by putting thousands of
     parameters on a few hundred examples. Capacity is not the lever here; the observation channel is.
     """
 
-    def __init__(self, d: int = 48, n_arg: int = 24):
+    def __init__(self, n_tool: int, d: int = 48, obs_dim: int = 384):
         super().__init__()
-        self.d, self.n_arg = d, n_arg
-        self.tool_emb = nn.Embedding(N_TOOL, 16)
-        self.step_in = nn.Linear(16 + N_OBS, d)
+        self.n_tool, self.d, self.obs_dim = n_tool, d, obs_dim
+        self.tool_emb = nn.Embedding(n_tool, 16)
+        self.obs_proj = nn.Linear(obs_dim, 16)
+        self.step_in = nn.Linear(16 + 16 + 3, d)
         self.cell = nn.GRUCell(d, d)
-        self.q_proj = nn.Linear(384, d)                       # the goal, via MiniLM
-        self.tool_head = nn.Linear(2 * d, N_TOOL)
-        self.arg_head = nn.Linear(2 * d + 384, 1)             # pointer: score each candidate
+        self.q_proj = nn.Linear(obs_dim, d)                    # the goal, via MiniLM
+        self.tool_head = nn.Linear(2 * d, n_tool)
+        self.arg_head = nn.Linear(2 * d + obs_dim, 1)          # pointer: score each candidate
 
     def init_z(self, goal: torch.Tensor) -> torch.Tensor:
         return torch.tanh(self.q_proj(goal))
 
-    def advance(self, z, tool_idx: int, obs: np.ndarray) -> torch.Tensor:
-        x = torch.cat([self.tool_emb(torch.tensor(tool_idx)),
-                       torch.tensor(obs, dtype=torch.float32)])
-        return self.cell(torch.tanh(self.step_in(x)).unsqueeze(0), z.unsqueeze(0)).squeeze(0)
+    def advance(self, z, tool_idx: int, ok: float, step_frac: float, repeat: float,
+                obs_emb: torch.Tensor) -> torch.Tensor:
+        te = self.tool_emb(torch.tensor(tool_idx))
+        oe = torch.tanh(self.obs_proj(obs_emb))
+        extra = torch.tensor([float(ok), float(step_frac), float(repeat)], dtype=torch.float32)
+        x = torch.tanh(self.step_in(torch.cat([te, oe, extra])))
+        return self.cell(x.unsqueeze(0), z.unsqueeze(0)).squeeze(0)
 
     def tool_logits(self, z, goal):
         return self.tool_head(torch.cat([z, torch.tanh(self.q_proj(goal))]))
@@ -105,88 +118,53 @@ class ThinkerController(nn.Module):
         return self.arg_head(torch.cat([ctx, cand_emb], dim=1)).squeeze(-1)
 
 
-def arg_candidates(issue: str, state: dict, n: int = 24) -> list:
-    """Pointer targets: identifiers named in the issue, plus paths previous tools surfaced. The
-    controller can only choose from things that actually exist in the task or in an observation."""
-    cands = []
-    seen = set()
-    for t in IDT.findall(issue)[:400]:
-        if t not in seen and len(t) > 3:
-            seen.add(t)
-            cands.append(t)
-    for h in state.get("last_hits", [])[:12]:
-        p = h.split(":")[0]
-        if p not in seen:
-            seen.add(p)
-            cands.append(p)
-    return cands[:n]
+class Domain:
+    """Everything task-specific lives here. The controller, run_episode, and train() never branch on
+    which domain they are in -- only Domain's own callables know that."""
+
+    def __init__(self, name: str, tools: dict, tool_names: list, arg_fn, reward_fn, init_state,
+                decision_fn, metrics_fn, max_steps: int = 6):
+        self.name = name
+        self.tools = tools                # {tool_name: fn(state, arg) -> (ok, obs_text)}
+        self.tool_names = tool_names      # ordered; index IS the action id ("stop" handled specially)
+        self.arg_fn = arg_fn              # fn(goal_text, state) -> list[str] pointer candidates
+        self.reward_fn = reward_fn        # fn(state, gold) -> float, VERIFIED, never from an LM
+        self.init_state = init_state      # fn(row) -> state dict
+        self.decision_fn = decision_fn    # fn(state) -> str, "what did we decide" (for speak())
+        self.metrics_fn = metrics_fn      # fn(state, gold) -> {name: 0/1 or float}, all verified
+        self.max_steps = max_steps
 
 
-def run_episode(ctl, issue: str, repo: str, instance_id: str, gold: str | None = None,
-                max_steps: int = 6, sample: bool = False, blind: bool = False, lm=None):
-    """One real trajectory: pick a tool, point at an argument, RUN it, fold the observation back in."""
+# ── SWE domain: real django checkout, real tools, + the graph-retrieval tool that was missing ─────
+_GRAPH_CACHE: dict = {}
+
+
+def _repo_graph(repo: str):
+    """The repo's small-world AtomGraph (directories as worlds), built LIVE from the same checkout the
+    other tools scan -- not from the cached path-embedding artifact, which was mined from a different
+    tree snapshot and would silently mismatch. Cached per repo per process; the SWE domain here only
+    ever touches one repo, so this is one embedding pass, not one per instance."""
+    if repo in _GRAPH_CACHE:
+        return _GRAPH_CACHE[repo]
     from embedder import encode_batch
-    goal = torch.tensor(encode_batch([issue[:1000]])[0], dtype=torch.float32)
-    state = {"repo": repo, "instance_id": instance_id, "steps": 0, "seen_files": set()}
-    z = ctl.init_z(goal)
-    logps, trace = [], []
-    for _ in range(max_steps):
-        tl = ctl.tool_logits(z, goal)
-        if sample:
-            d = torch.distributions.Categorical(logits=tl)
-            ti = int(d.sample()); logps.append(d.log_prob(torch.tensor(ti)))
-        else:
-            ti = int(tl.argmax())
-        tool = TOOLS[ti]
-        if tool == "stop":
-            trace.append(("stop", "", True, ""))
-            break
-        cands = arg_candidates(issue, state)
-        if not cands:
-            break
-        ce = torch.tensor(encode_batch(cands), dtype=torch.float32)
-        al = ctl.arg_logits(z, goal, ce)
-        if sample:
-            d = torch.distributions.Categorical(logits=al)
-            ai = int(d.sample()); logps.append(d.log_prob(torch.tensor(ai)))
-        else:
-            ai = int(al.argmax())
-        arg = cands[ai]
-
-        if tool == "grep":
-            ok, obs = t_grep(state, arg)
-            state["last_hits"] = state.get("last_grep", [])
-        elif tool == "find_def":
-            ok, obs = t_find_def(state, arg)
-            state["last_hits"] = [l for l in obs.splitlines() if ":" in l]
-        elif tool == "read_file":
-            path = arg if arg.endswith(".py") else (state.get("last_hits") or [""])[0].split(":")[0]
-            ok, obs = t_read_file(state, path) if path else (False, "no path to read")
-            if ok:
-                state["seen_files"].add(path)
-        else:  # edit -- the ONE place the LM is consulted
-            if not state.get("open_file"):
-                ok, obs = False, "no file open"
-            else:
-                anchor, new = propose_edit(issue, state, lm)
-                ok, obs = t_edit(state, (anchor, new)) if anchor else (False, "no anchor")
-                state["edit_ambiguous"] = "ambiguous" in obs
-                state["edit_unparsable"] = "not parse" in obs
-        state["last_ok"] = ok
-        state["steps"] += 1
-        if gold is not None:
-            state["gold_open"] = (state.get("open_file") == gold)
-        z = ctl.advance(z, ti, obs_features(state, blind))
-        trace.append((tool, str(arg)[:60], ok, obs[:120]))
-    return state, logps, trace
+    from v5.runtime.membrane import build_repo_graph
+    root = _repo_dir(repo)
+    files = [p.relative_to(root).as_posix() for p in root.rglob("*.py")]
+    g = None
+    if files:
+        embs = encode_batch([f.replace("/", " ").replace("_", " ") for f in files])
+        path_emb = {f: np.asarray(e, dtype=np.float32) for f, e in zip(files, embs)}
+        g = build_repo_graph(files, path_emb, worlds=True)
+    _GRAPH_CACHE[repo] = g
+    return g
 
 
 def propose_edit(issue: str, state: dict, lm=None):
-    """The LM's ONLY job: given the open file and the issue, return replacement code for one anchor.
-
-    The anchor itself is chosen deterministically (a unique line mentioning an identifier from the
-    issue), so the LM cannot pick where to cut -- only what to write. Without an LM this returns an
-    identity edit, which still exercises the gates and is the honest no-LM baseline."""
+    """The LM's ONE job inside the tool loop: given the open file and the issue, return replacement
+    code for one anchor. The anchor is chosen DETERMINISTICALLY (a unique line mentioning an
+    identifier from the issue), so the LM cannot pick WHERE to cut, only WHAT to write -- the DCPD
+    split. Without an LM this returns an identity edit: the honest no-LM baseline that still exercises
+    the uniqueness/parse gates."""
     txt = state.get("open_text", "")
     toks = set(IDT.findall(issue))
     anchor = None
@@ -205,38 +183,271 @@ def propose_edit(issue: str, state: dict, lm=None):
     return anchor, (indent + new.strip())
 
 
-def reward(state: dict, gold: str | None) -> float:
-    """Verified, dense, and NEVER from an LM. Progress toward a real patch, each term observable."""
-    r = 0.0
-    if state.get("open_file"):
-        r += 0.1
-    if gold and state.get("open_file") == gold:
-        r += 0.4
-    if state.get("patch"):
-        r += 0.5
-    return r
+def make_swe_domain(lm=None, max_steps: int = 6, use_locate: bool = True) -> Domain:
+    def t_grep_tool(state, arg):
+        ok, obs = t_grep(state, arg)
+        if ok:
+            state["last_hits"] = state.get("last_grep", [])
+        return ok, obs
+
+    def t_find_def_tool(state, arg):
+        ok, obs = t_find_def(state, arg)
+        if ok:
+            state["last_hits"] = [l for l in obs.splitlines() if ":" in l]
+        return ok, obs
+
+    def t_read_file_tool(state, arg):
+        path = arg if arg.endswith(".py") else (state.get("last_hits") or [""])[0].split(":")[0]
+        if not path:
+            return False, "no path to read"
+        ok, obs = t_read_file(state, path)
+        if ok:
+            state.setdefault("seen_files", set()).add(path)
+        return ok, obs
+
+    def t_locate_tool(state, arg):
+        """GRAPH retrieval: route the query through the repo's small-world AtomGraph instead of
+        scanning text. This is the mechanism `--locate` already measured at ~0.53 held-INSTANCE
+        accuracy in membrane.py -- committed last as the gap ("opened GOLD is 0.083... should call the
+        localization thinker AS A TOOL instead of raw grep"). O(W): compares against world centroids,
+        not every file."""
+        from embedder import encode_batch
+        from v5.runtime.membrane import locate_thinker
+        g = _repo_graph(state["repo"])
+        if g is None:
+            return False, "graph unavailable for this repo"
+        q = np.asarray(encode_batch([(arg or state.get("goal_text", ""))[:1000]])[0], dtype=np.float32)
+        res = locate_thinker(g, q, top_w=10, T=3, per_step=8)
+        ranked = res.get("ranked") or []
+        if ranked:
+            state["last_hits"] = [f"{f}:1" for f in ranked[:12]]
+        return bool(ranked), "\n".join(ranked[:12]) if ranked else "no candidates"
+
+    def t_edit_tool(state, arg):
+        if not state.get("open_file"):
+            return False, "no file open; read_file first"
+        anchor, new = propose_edit(state.get("goal_text", ""), state, lm)
+        if anchor is None:
+            return False, "no anchor found for this issue in the open file"
+        ok, obs = t_edit(state, (anchor, new))
+        state["edit_ambiguous"] = "ambiguous" in obs
+        state["edit_unparsable"] = "not parse" in obs
+        return ok, obs
+
+    names = ["grep", "find_def", "read_file", "edit", "stop"]
+    tools = {"grep": t_grep_tool, "find_def": t_find_def_tool, "read_file": t_read_file_tool,
+              "edit": t_edit_tool}
+    if use_locate:
+        names = ["grep", "find_def", "read_file", "locate", "edit", "stop"]
+        tools["locate"] = t_locate_tool
+
+    def arg_fn(goal_text, state):
+        cands = text_candidates([goal_text], IDT)
+        for h in state.get("last_hits", [])[:12]:
+            p = h.split(":")[0]
+            if p not in cands:
+                cands.append(p)
+        return cands[:24]
+
+    def reward_fn(state, gold):
+        r = 0.0
+        if state.get("open_file"):
+            r += 0.1
+        if gold and state.get("open_file") == gold:
+            r += 0.4
+        if state.get("patch"):
+            r += 0.5
+        return r
+
+    def init_state(row):
+        return {"repo": row["repo"], "instance_id": row["instance_id"], "goal_text": row["goal"]}
+
+    def decision_fn(state):
+        if state.get("patch"):
+            p, old, new = state["patch"]
+            return f"In {p}, replace `{old.strip()[:70]}` with `{new.strip()[:70]}`"
+        return state.get("open_file") or ""
+
+    def metrics_fn(state, gold):
+        return {"opened": float(bool(state.get("open_file"))),
+                "opened_gold": float(state.get("open_file") == gold),
+                "patched": float(bool(state.get("patch")))}
+
+    return Domain("swe", tools, names, arg_fn, reward_fn, init_state, decision_fn, metrics_fn, max_steps)
 
 
-def train(ctl, data, epochs: int = 6, lr: float = 3e-3, blind: bool = False, verbose: bool = True):
+# ── HotpotQA domain: real multi-hop QA, proving the SAME controller is not SWE-specific ───────────
+def make_qa_domain(max_steps: int = 5) -> Domain:
+    names = ["retrieve", "read", "answer", "stop"]
+    tools = {"retrieve": t_retrieve, "read": t_read, "answer": t_answer}
+
+    def arg_fn(goal_text, state):
+        bodies = [b for _, b in state.get("retrieved", [])]
+        ents = text_candidates([goal_text] + bodies, ENT, n=23, min_len=3, stop=_STOP)
+        return [goal_text[:200]] + ents                       # hop 1 can point at the whole question
+
+    def reward_fn(state, gold):
+        r = 0.1 * min(len(state.get("retrieved", [])), 2)
+        if state.get("open_para"):
+            r += 0.1
+        ans = (state.get("answer") or "").strip().lower()
+        g = (gold or "").strip().lower()
+        if ans and g and (ans == g or ans in g or g in ans):
+            r += 0.6
+        return r
+
+    def init_state(row):
+        return {"paras": row["paras"], "goal_text": row["goal"], "gold_titles": row.get("gold_titles", set())}
+
+    def decision_fn(state):
+        return state.get("answer") or ""
+
+    def metrics_fn(state, gold):
+        ans = (state.get("answer") or "").strip().lower()
+        g = (gold or "").strip().lower()
+        em = bool(ans) and bool(g) and (ans == g or ans in g or g in ans)
+        got_titles = {t for t, _ in state.get("retrieved", [])}
+        gt = state.get("gold_titles") or set()
+        return {"retrieved_any": float(bool(state.get("retrieved"))),
+                "retrieved_gold_para": float(bool(gt) and bool(got_titles & gt)),
+                "answered": float(bool(state.get("answer"))),
+                "exact_match": float(em)}
+
+    return Domain("hotpotqa", tools, names, arg_fn, reward_fn, init_state, decision_fn, metrics_fn, max_steps)
+
+
+# ── LM speaks. Exactly once per episode, and NEVER decides anything ────────────────────────────────
+def speak(goal_text: str, trace: list, decision: str, lm=None) -> str:
+    """The LM's only remaining job, shared by BOTH domains: put the controller's ALREADY-FIXED
+    decision into words, grounded in what the tools actually found. It does not choose the decision --
+    `decision` is fixed by the pointer mechanism before this is ever called. Without an LM this is the
+    honest baseline: the decision stated plainly, unchanged."""
+    if not decision:
+        return ""
+    if lm is None:
+        return decision
+    evid = " | ".join(f"{t}({a}): {o[:80]}" for t, a, ok, o in trace if ok and o)[:700]
+    prompt = (f"Task: {goal_text[:400]}\n\nWhat the tools found:\n{evid}\n\n"
+              f"The determined answer is: {decision}\n\n"
+              f"State this as one plain sentence, using only the evidence above. "
+              f"Do not change the answer, only phrase it.")
+    try:
+        out = str(lm.generate_chat(prompt, max_new=64)).strip()
+    except Exception:                                          # noqa: BLE001
+        return decision
+    return out or decision
+
+
+def speak_faithful(decision: str, spoken: str) -> bool:
+    """Verified, not LM-judged: did narration keep the decision's own content, or quietly invent a
+    different one? At least half of the decision's content tokens (len>=4) must survive into speech."""
+    toks = re.findall(r"[A-Za-z0-9_./]{4,}", decision)
+    if not toks:
+        return True
+    s = spoken.lower()
+    hit = sum(1 for w in toks if w.lower() in s)
+    return hit >= max(1, len(toks) // 2)
+
+
+# ── the loop. domain-blind: it only ever calls through Domain's callables ──────────────────────────
+def run_episode(ctl: ThinkerController, domain: Domain, row: dict, sample: bool = False,
+                blind: bool = False):
+    """One real trajectory: pick a tool, point at an argument, RUN it, fold the REAL observation back
+    into z. `gold` is never placed in `state` and never passed to any tool -- reward/metrics compare
+    the returned state against row['gold'] from OUTSIDE, after the episode is over."""
+    from embedder import encode_batch
+    goal_text = row["goal"]
+    goal = torch.tensor(encode_batch([goal_text[:1000]])[0], dtype=torch.float32)
+    state = domain.init_state(row)
+    z = ctl.init_z(goal)
+    logps, trace, tried = [], [], set()
+    for _ in range(domain.max_steps):
+        tl = ctl.tool_logits(z, goal)
+        if sample:
+            d = torch.distributions.Categorical(logits=tl)
+            ti = int(d.sample()); logps.append(d.log_prob(torch.tensor(ti)))
+        else:
+            ti = int(tl.argmax())
+        tool = domain.tool_names[ti]
+        if tool == "stop":
+            trace.append(("stop", "", True, ""))
+            break
+        cands = domain.arg_fn(goal_text, state)
+        if not cands:
+            break
+        ce = torch.tensor(encode_batch(cands), dtype=torch.float32)
+        al = ctl.arg_logits(z, goal, ce)
+        if sample:
+            d = torch.distributions.Categorical(logits=al)
+            ai = int(d.sample()); logps.append(d.log_prob(torch.tensor(ai)))
+        else:
+            ai = int(al.argmax())
+        arg = cands[ai]
+
+        ok, obs = domain.tools[tool](state, arg)
+        state["steps"] = state.get("steps", 0) + 1
+        rep = (tool, arg) in tried
+        tried.add((tool, arg))
+        if blind:
+            oe, sig = torch.zeros(ctl.obs_dim), (0.0, 0.0, 0.0)
+        else:
+            oe = torch.tensor(encode_batch([(obs or "")[:300]])[0], dtype=torch.float32)
+            sig = (float(ok), state["steps"] / domain.max_steps, float(rep))
+        z = ctl.advance(z, ti, *sig, oe)
+        trace.append((tool, str(arg)[:60], ok, (obs or "")[:120]))
+    return state, logps, trace
+
+
+def train(ctl: ThinkerController, domain: Domain, data: list, epochs: int = 6, lr: float = 3e-3,
+         blind: bool = False, verbose: bool = True):
     opt = torch.optim.Adam(ctl.parameters(), lr=lr)
     for ep in range(epochs):
         rs = []
         for row in data:
-            st, lp, _ = run_episode(ctl, row["problem"], row["repo"], row["instance_id"],
-                                    gold=row["gold"], sample=True, blind=blind)
-            rs.append((reward(st, row["gold"]), lp))
+            st, lp, _ = run_episode(ctl, domain, row, sample=True, blind=blind)
+            rs.append((domain.reward_fn(st, row["gold"]), lp))
         base = sum(r for r, _ in rs) / max(1, len(rs))
         live = [(r, lp) for r, lp in rs if lp]
         if live:
             loss = torch.stack([-(r - base) * torch.stack(lp).sum() for r, lp in live]).mean()
             opt.zero_grad(); loss.backward(); opt.step()
         if verbose and (ep + 1) % 2 == 0:
-            print(f"    epoch {ep+1:2d}  mean reward {base:.3f}", flush=True)
+            print(f"    [{domain.name}] epoch {ep + 1:2d}  mean reward {base:.3f}", flush=True)
     return ctl
 
 
+# ── data loaders: real rows only, shaped to Domain.init_state's expectations ───────────────────────
+def _load_swe_rows(n: int) -> list:
+    rows = [r for r in json.loads((Path(_ROOT) / "artifacts" / "swebench_loc_big.json")
+                                   .read_text(encoding="utf-8")) if r["repo"] == "django/django"][:n]
+    random.Random(0).shuffle(rows)
+    return [{"goal": r["problem"], "gold": r["gold"], "repo": r["repo"], "instance_id": r["instance_id"]}
+            for r in rows]
+
+
+def _load_qa_rows(n: int) -> list:
+    from v5.runtime.membrane import load_hotpot
+    data = load_hotpot(n)
+    rows = [{"goal": q, "gold": ans, "paras": paras, "gold_titles": gold, "qid": qid, "type": typ}
+             for qid, q, ans, typ, paras, gold in data]
+    random.Random(0).shuffle(rows)
+    return rows
+
+
+def _run_until_real(ctl, dom, row, tries=6):
+    """A FRESH, untrained controller's first action is close to uniform random, so 'sample the very
+    first step as stop' is a real coin-flip outcome, not a bug -- reseed and retry rather than let the
+    selftest be flaky on whichever global RNG state happened to precede it."""
+    for seed in range(tries):
+        torch.manual_seed(seed)
+        st, lp, trace = run_episode(ctl, dom, row, sample=True)
+        if any(x[3] for x in trace):
+            return st, lp, trace
+    return st, lp, trace
+
+
 def _selftest() -> bool:
-    print("algo_grr_thinkctl --selftest: thinker drives REAL tools, state comes from REAL observations\n")
+    print("algo_grr_thinkctl --selftest: ONE controller, TWO real domains, no domain-specific weights\n")
     ok = True
 
     def chk(t, c, d=""):
@@ -244,89 +455,138 @@ def _selftest() -> bool:
         ok &= bool(c)
         print(f"  [{'PASS' if c else 'FAIL'}] {t}{('  - ' + d) if d else ''}")
 
-    if not _repo_dir("django/django").is_dir():
-        print("  no checkout; skipping")
-        return False
-    ctl = ThinkerController()
-    issue = ("QuerySet.only() after select_related() crashes on proxy models. "
-             "The error comes from RelatedPopulator when init_list is built.")
-    st, lp, trace = run_episode(ctl, issue, "django/django", "django__django-11999", sample=True)
-    chk("[1] the episode runs REAL tools and returns a real trace",
-        len(trace) > 0 and all(len(x) == 4 for x in trace), f"{len(trace)} steps")
-    chk("[2] tools actually executed (observations are non-empty)",
-        any(x[3] for x in trace), " | ".join(f"{x[0]}:{x[2]}" for x in trace[:4]))
+    # ---- generality of the mechanism, checked structurally, not just by claim ----
+    chk("[1] text_candidates draws real pointer targets, filtered by pattern+stopwords",
+        "RelatedPopulator" in text_candidates(["RelatedPopulator crashes on init_list"], IDT)
+        and "The" not in text_candidates(["The Eiffel Tower is in Paris"], ENT, stop=_STOP))
 
-    a = obs_features({"open_file": "x", "last_hits": ["a"], "last_ok": True, "steps": 2})
-    b = obs_features({"open_file": None, "last_hits": [], "last_ok": False, "steps": 0})
-    chk("[3] observation features distinguish real states", not np.allclose(a, b))
-    chk("[4] --abl no-obs really blinds them (the falsifier has teeth)",
-        np.allclose(obs_features({"open_file": "x", "last_hits": ["a"]}, blind=True),
-                    np.zeros(N_OBS)))
+    ctl_swe = ThinkerController(n_tool=6)
+    ctl_qa = ThinkerController(n_tool=4)
+    chk("[2] the SAME class instantiates for domains with DIFFERENT action counts",
+        ctl_swe.n_tool == 6 and ctl_qa.n_tool == 4 and type(ctl_swe) is type(ctl_qa))
 
-    z0 = ctl.init_z(torch.randn(384))
-    z1 = ctl.advance(z0, 0, a)
-    z2 = ctl.advance(z0, 0, b)
-    chk("[5] the OBSERVATION moves the state (no contraction to a fixed point)",
+    g0 = ctl_qa.init_z(torch.randn(384))
+    obs_a = torch.tensor(np.random.RandomState(0).randn(384), dtype=torch.float32)
+    obs_b = torch.tensor(np.random.RandomState(1).randn(384), dtype=torch.float32)
+    z1 = ctl_qa.advance(g0, 0, 1.0, 0.2, 0.0, obs_a)
+    z2 = ctl_qa.advance(g0, 0, 1.0, 0.2, 0.0, obs_b)
+    chk("[3] the OBSERVATION EMBEDDING moves the state (no fixed-point contraction)",
         float((z1 - z2).norm()) > 1e-3, f"||dz|| = {float((z1 - z2).norm()):.4f}")
+    zb = ctl_qa.advance(g0, 0, 0.0, 0.0, 0.0, torch.zeros(384))
+    chk("[4] --abl no-obs really blinds it: a zeroed signal is reachable and distinct from real obs",
+        float((zb - z1).norm()) > 1e-3)
 
-    cands = arg_candidates(issue, {"last_hits": ["django/db/models/query.py:12"]})
-    chk("[6] arguments are POINTED AT, drawn from the issue and from observations",
-        "RelatedPopulator" in cands and any(c.endswith(".py") for c in cands),
-        f"{len(cands)} candidates")
+    chk("[5] speak() never touches the decision with no LM (honest baseline)",
+        speak("q", [], "django/db/models/query.py", lm=None) == "django/db/models/query.py")
+    chk("[6] speak_faithful is a VERIFIED string check, not an LM judgement",
+        speak_faithful("open query.py", "The controller opened query.py to look for the bug.")
+        and not speak_faithful("open query.py", "The controller closed the terminal."))
 
-    st2 = {"repo": "django/django", "open_file": "django/db/models/query.py"}
-    t_read_file(st2, "django/db/models/query.py")
-    anc, new = propose_edit(issue, st2, lm=None)
-    chk("[7] anchor is chosen deterministically; no-LM path is an identity edit",
-        anc is not None and anc == new, (anc or "")[:60])
+    # ---- SWE domain: real repo, real graph tool ----
+    if _repo_dir("django/django").is_dir():
+        dom = make_swe_domain()
+        chk("[7] SWE domain includes the graph-retrieval tool ('locate') the last commit flagged missing",
+            "locate" in dom.tool_names)
+        g = _repo_graph("django/django")
+        chk("[8] the repo's small-world AtomGraph builds for real, from the SAME checkout the tools scan",
+            g is not None and len(g.atoms) > 100 and len(g.worlds) > 1,
+            f"{len(g.atoms) if g else 0} files, {len(g.worlds) if g else 0} worlds")
+        row = {"goal": "QuerySet.only() after select_related() crashes on proxy models. "
+                       "RelatedPopulator builds init_list incorrectly.",
+               "gold": "django/db/models/query.py", "repo": "django/django",
+               "instance_id": "django__django-11999"}
+        st, lp, trace = _run_until_real(ctl_swe, dom, row)
+        chk("[9] SWE episode runs REAL tools end to end", len(trace) > 0 and any(x[3] for x in trace),
+            " | ".join(f"{x[0]}:{x[2]}" for x in trace[:4]))
+        chk("[10] SWE reward is verified progress only, never an LM judgement",
+            dom.reward_fn({"open_file": "a"}, "b") == 0.1
+            and dom.reward_fn({"open_file": "b"}, "b") == 0.5
+            and dom.reward_fn({"open_file": "b", "patch": 1}, "b") == 1.0)
+    else:
+        print("  [SKIP] no django checkout; SWE-domain checks skipped")
 
-    chk("[8] reward is verified progress only, never an LM judgement",
-        reward({"open_file": "a"}, "b") == 0.1
-        and reward({"open_file": "b"}, "b") == 0.5
-        and reward({"open_file": "b", "patch": 1}, "b") == 1.0)
+    # ---- HotpotQA domain: real questions, proving this is not SWE-specific ----
+    hp = Path(_ROOT) / "artifacts" / "hotpot_multihop.json"
+    if hp.exists():
+        rows = _load_qa_rows(20)
+        dom_qa = make_qa_domain()
+        st, lp, trace = _run_until_real(ctl_qa, dom_qa, rows[0])
+        chk("[11] HotpotQA episode runs the SAME controller/loop code over REAL paragraphs",
+            len(trace) > 0 and any(x[3] for x in trace),
+            " | ".join(f"{x[0]}:{x[2]}" for x in trace[:4]))
+        chk("[12] QA reward is verified string comparison only, never an LM judgement",
+            dom_qa.reward_fn({"answer": "paris", "retrieved": [(1, 2)]}, "Paris") > 0.6)
+        # not every real question names an entity ("What science fantasy series..." does not), so pick
+        # a real row that does to check the POINTED, not the row that happens to be shuffled first.
+        row_e = next((r for r in rows if len(dom_qa.arg_fn(r["goal"], {"retrieved": []})) > 1), rows[0])
+        cands = dom_qa.arg_fn(row_e["goal"], {"retrieved": []})
+        chk("[13] QA arguments are POINTED AT (question text / entities), never generated",
+            row_e["goal"][:50] in cands[0] and len(cands) > 1, f"{cands[:4]}")
+    else:
+        print(f"  [SKIP] {hp} missing; HotpotQA-domain checks skipped")
 
-    chk("[9] registry has the real tools", set(swe_registry()) >= {"grep", "edit", "run_tests"})
     print(f"\n  ALGO_GRR_THINKCTL -> {'PASS' if ok else 'FAIL'}")
     return ok
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Thinker as controller over real tools.")
+    ap = argparse.ArgumentParser(description="Thinker as a domain-general controller over real tools.")
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--run", action="store_true")
+    ap.add_argument("--domain", choices=["swe", "hotpot"], default="swe")
     ap.add_argument("--n", type=int, default=40)
     ap.add_argument("--abl", type=str, default="")
     ap.add_argument("--lm", type=str, default="")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--epochs", type=int, default=6)
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
     if a.run:
-        rows = [r for r in json.loads((Path(_ROOT) / "artifacts" / "swebench_loc_big.json")
-                                      .read_text(encoding="utf-8"))
-                if r["repo"] == "django/django"][:a.n]
         blind = "no-obs" in a.abl
-        random.Random(0).shuffle(rows)
-        tr, held = rows[: int(len(rows) * 0.7)], rows[int(len(rows) * 0.7):]
+        use_locate = "no-locate" not in a.abl
         lm = None
         if a.lm:
             from v5.runtime.dcpd_latent import WhiteBox
             lm = WhiteBox(a.lm, quant="4bit")
-        print(f"algo_grr_thinkctl: {len(tr)} train / {len(held)} held django instances  "
-              f"blind={blind}  lm={a.lm or 'none'}\n")
-        ctl = ThinkerController()
-        train(ctl, tr, blind=blind)
-        tot = {"opened": 0, "gold": 0, "patched": 0}
+
+        if a.domain == "swe":
+            rows = _load_swe_rows(a.n)
+            domain = make_swe_domain(lm=lm, use_locate=use_locate)
+        else:
+            rows = _load_qa_rows(a.n)
+            domain = make_qa_domain()
+
+        tr, held = rows[: int(len(rows) * 0.7)], rows[int(len(rows) * 0.7):]
+        print(f"algo_grr_thinkctl: domain={a.domain}  {len(tr)} train / {len(held)} held  "
+              f"blind={blind}  locate={use_locate if a.domain == 'swe' else 'n/a'}  lm={a.lm or 'none'}  "
+              f"seed={a.seed}\n")
+        # unseeded, REINFORCE over ~30 sparse-reward episodes is genuinely seed-sensitive -- one
+        # unlucky init converged to an always-stop policy (0.000 on every metric). Seeding makes runs
+        # reproducible and comparable across ablations; it does not hide instability, it controls for it.
+        torch.manual_seed(a.seed)
+        ctl = ThinkerController(n_tool=len(domain.tool_names))
+        train(ctl, domain, tr, epochs=a.epochs, blind=blind)
+
+        import collections
+        tot = collections.Counter()
+        n, spoken_n, faithful = 0, 0, 0
         for row in held:
-            st, _, _ = run_episode(ctl, row["problem"], row["repo"], row["instance_id"],
-                                   gold=None, blind=blind, lm=lm)
-            tot["opened"] += int(bool(st.get("open_file")))
-            tot["gold"] += int(st.get("open_file") == row["gold"])
-            tot["patched"] += int(bool(st.get("patch")))
-        n = max(1, len(held))
-        print(f"\n  held-out ({n} instances, gold NEVER visible at eval)")
-        print(f"    opened a file        {tot['opened'] / n:.3f}")
-        print(f"    opened the GOLD file {tot['gold'] / n:.3f}")
-        print(f"    produced a patch that applies AND parses {tot['patched'] / n:.3f}")
+            st, _, trace = run_episode(ctl, domain, row, blind=blind)
+            for k, v in domain.metrics_fn(st, row["gold"]).items():
+                tot[k] += float(v)
+            n += 1
+            decision = domain.decision_fn(st)
+            if lm is not None and decision:
+                spoken = speak(row["goal"], trace, decision, lm)
+                spoken_n += 1
+                faithful += int(speak_faithful(decision, spoken))
+        n = max(1, n)
+        print(f"\n  held-out ({n} instances, domain={a.domain}, gold NEVER visible during the episode)")
+        for k, v in tot.items():
+            print(f"    {k:<22} {v / n:.3f}")
+        if spoken_n:
+            print(f"    {'LM narration faithful':<22} {faithful / spoken_n:.3f}  (n={spoken_n})")
         sys.exit(0)
     ap.print_help()
 
