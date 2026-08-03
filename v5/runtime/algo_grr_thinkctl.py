@@ -50,8 +50,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from v5.runtime.algo_grr_swetools import _repo_dir, swe_registry, t_edit, t_find_def, t_grep, t_read_file
-from v5.runtime.algo_grr_qatools import t_answer, t_read, t_retrieve, qa_registry
+from v5.runtime.algo_grr_swetools import _repo_dir, t_edit, t_find_def, t_grep, t_read_file
+from v5.runtime.algo_grr_qatools import t_answer, t_read, t_retrieve
 
 IDT = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")                       # code identifiers / paths
 ENT = re.compile(r"[A-Z][a-zA-Z0-9]*(?:\s+[A-Z][a-zA-Z0-9]*){0,3}")  # prose entity phrases
@@ -123,7 +123,7 @@ class Domain:
     which domain they are in -- only Domain's own callables know that."""
 
     def __init__(self, name: str, tools: dict, tool_names: list, arg_fn, reward_fn, init_state,
-                decision_fn, metrics_fn, max_steps: int = 6):
+                decision_fn, metrics_fn, max_steps: int = 6, no_arg_tools: frozenset = frozenset()):
         self.name = name
         self.tools = tools                # {tool_name: fn(state, arg) -> (ok, obs_text)}
         self.tool_names = tool_names      # ordered; index IS the action id ("stop" handled specially)
@@ -133,6 +133,11 @@ class Domain:
         self.decision_fn = decision_fn    # fn(state) -> str, "what did we decide" (for speak())
         self.metrics_fn = metrics_fn      # fn(state, gold) -> {name: 0/1 or float}, all verified
         self.max_steps = max_steps
+        # tools whose fn ignores `arg` entirely (e.g. SWE's edit, whose anchor is deterministic) --
+        # a reviewer caught that sampling+scoring a pointer for these trains REINFORCE on a choice
+        # with zero causal effect on the outcome, pure noise in the gradient. Skip the pointer step
+        # for these; "stop" is always in this set since it never took an argument to begin with.
+        self.no_arg_tools = frozenset(no_arg_tools) | {"stop"}
 
 
 # ── SWE domain: real django checkout, real tools, + the graph-retrieval tool that was missing ─────
@@ -200,10 +205,7 @@ def make_swe_domain(lm=None, max_steps: int = 6, use_locate: bool = True) -> Dom
         path = arg if arg.endswith(".py") else (state.get("last_hits") or [""])[0].split(":")[0]
         if not path:
             return False, "no path to read"
-        ok, obs = t_read_file(state, path)
-        if ok:
-            state.setdefault("seen_files", set()).add(path)
-        return ok, obs
+        return t_read_file(state, path)
 
     def t_locate_tool(state, arg):
         """GRAPH retrieval: route the query through the repo's small-world AtomGraph instead of
@@ -229,10 +231,7 @@ def make_swe_domain(lm=None, max_steps: int = 6, use_locate: bool = True) -> Dom
         anchor, new = propose_edit(state.get("goal_text", ""), state, lm)
         if anchor is None:
             return False, "no anchor found for this issue in the open file"
-        ok, obs = t_edit(state, (anchor, new))
-        state["edit_ambiguous"] = "ambiguous" in obs
-        state["edit_unparsable"] = "not parse" in obs
-        return ok, obs
+        return t_edit(state, (anchor, new))
 
     names = ["grep", "find_def", "read_file", "edit", "stop"]
     tools = {"grep": t_grep_tool, "find_def": t_find_def_tool, "read_file": t_read_file_tool,
@@ -242,12 +241,21 @@ def make_swe_domain(lm=None, max_steps: int = 6, use_locate: bool = True) -> Dom
         tools["locate"] = t_locate_tool
 
     def arg_fn(goal_text, state):
-        cands = text_candidates([goal_text], IDT)
+        # tool-discovered paths go FIRST and are never truncated away. A reviewer found the previous
+        # order (issue words first, hits appended after) meant text_candidates' own n=24 cap already
+        # filled up from issue prose alone in ~96% of real issues (mean 23.9 qualifying words), so the
+        # one thing grep/find_def/locate actually exist to produce was silently unscoreable.
+        seen, cands = set(), []
         for h in state.get("last_hits", [])[:12]:
             p = h.split(":")[0]
-            if p not in cands:
+            if p not in seen:
+                seen.add(p)
                 cands.append(p)
-        return cands[:24]
+        for t in text_candidates([goal_text], IDT, n=24):
+            if t not in seen and len(cands) < 24:
+                seen.add(t)
+                cands.append(t)
+        return cands
 
     def reward_fn(state, gold):
         r = 0.0
@@ -273,7 +281,8 @@ def make_swe_domain(lm=None, max_steps: int = 6, use_locate: bool = True) -> Dom
                 "opened_gold": float(state.get("open_file") == gold),
                 "patched": float(bool(state.get("patch")))}
 
-    return Domain("swe", tools, names, arg_fn, reward_fn, init_state, decision_fn, metrics_fn, max_steps)
+    return Domain("swe", tools, names, arg_fn, reward_fn, init_state, decision_fn, metrics_fn, max_steps,
+                  no_arg_tools=frozenset({"edit"}))
 
 
 # ── HotpotQA domain: real multi-hop QA, proving the SAME controller is not SWE-specific ───────────
@@ -286,32 +295,40 @@ def make_qa_domain(max_steps: int = 5) -> Domain:
         ents = text_candidates([goal_text] + bodies, ENT, n=23, min_len=3, stop=_STOP)
         return [goal_text[:200]] + ents                       # hop 1 can point at the whole question
 
+    # gold, for this domain, is the (answer, gold_titles) pair -- kept OUT of state entirely (a
+    # reviewer found gold_titles was being written into state at init; nothing read it mid-episode,
+    # but it was a landmine for the next QA tool that "simplifies" init_state to dict(row)). reward_fn/
+    # metrics_fn receive it only from OUTSIDE, from row['gold'], same discipline as the SWE domain.
+    def _em(pred, gold_answer):
+        # EXACT match on normalized text only -- a reviewer found the prior `a in b or b in a`
+        # substring check let "John" pass against gold "Johnson", and "American" pass against gold
+        # "American Idol". Real metric-leakage into the training reward, not just the report.
+        pn = re.sub(r"[^a-z0-9 ]", "", (pred or "").strip().lower())
+        gn = re.sub(r"[^a-z0-9 ]", "", (gold_answer or "").strip().lower())
+        return bool(pn) and bool(gn) and pn == gn
+
     def reward_fn(state, gold):
+        answer_gold, _titles_gold = gold
         r = 0.1 * min(len(state.get("retrieved", [])), 2)
         if state.get("open_para"):
             r += 0.1
-        ans = (state.get("answer") or "").strip().lower()
-        g = (gold or "").strip().lower()
-        if ans and g and (ans == g or ans in g or g in ans):
+        if _em(state.get("answer"), answer_gold):
             r += 0.6
         return r
 
     def init_state(row):
-        return {"paras": row["paras"], "goal_text": row["goal"], "gold_titles": row.get("gold_titles", set())}
+        return {"paras": row["paras"], "goal_text": row["goal"]}
 
     def decision_fn(state):
         return state.get("answer") or ""
 
     def metrics_fn(state, gold):
-        ans = (state.get("answer") or "").strip().lower()
-        g = (gold or "").strip().lower()
-        em = bool(ans) and bool(g) and (ans == g or ans in g or g in ans)
+        answer_gold, titles_gold = gold
         got_titles = {t for t, _ in state.get("retrieved", [])}
-        gt = state.get("gold_titles") or set()
         return {"retrieved_any": float(bool(state.get("retrieved"))),
-                "retrieved_gold_para": float(bool(gt) and bool(got_titles & gt)),
+                "retrieved_gold_para": float(bool(titles_gold) and bool(got_titles & titles_gold)),
                 "answered": float(bool(state.get("answer"))),
-                "exact_match": float(em)}
+                "exact_match": float(_em(state.get("answer"), answer_gold))}
 
     return Domain("hotpotqa", tools, names, arg_fn, reward_fn, init_state, decision_fn, metrics_fn, max_steps)
 
@@ -340,13 +357,17 @@ def speak(goal_text: str, trace: list, decision: str, lm=None) -> str:
 
 def speak_faithful(decision: str, spoken: str) -> bool:
     """Verified, not LM-judged: did narration keep the decision's own content, or quietly invent a
-    different one? At least half of the decision's content tokens (len>=4) must survive into speech."""
+    different one? At least half (rounding UP, so 3-of-3 tokens needs 2, not 1 -- a reviewer caught
+    the prior floor division letting a short decision pass on one generic word) of the decision's
+    content tokens (len>=4) must survive into speech. Still a loose, substring-based lower bound, not
+    a tight verification -- read a 0.8-ish faithfulness number as "did not obviously invent a
+    different answer," not as proof the phrasing preserved every nuance."""
     toks = re.findall(r"[A-Za-z0-9_./]{4,}", decision)
     if not toks:
         return True
     s = spoken.lower()
     hit = sum(1 for w in toks if w.lower() in s)
-    return hit >= max(1, len(toks) // 2)
+    return hit >= max(1, -(-len(toks) // 2))
 
 
 # ── the loop. domain-blind: it only ever calls through Domain's callables ──────────────────────────
@@ -372,17 +393,20 @@ def run_episode(ctl: ThinkerController, domain: Domain, row: dict, sample: bool 
         if tool == "stop":
             trace.append(("stop", "", True, ""))
             break
-        cands = domain.arg_fn(goal_text, state)
-        if not cands:
-            break
-        ce = torch.tensor(encode_batch(cands), dtype=torch.float32)
-        al = ctl.arg_logits(z, goal, ce)
-        if sample:
-            d = torch.distributions.Categorical(logits=al)
-            ai = int(d.sample()); logps.append(d.log_prob(torch.tensor(ai)))
+        if tool in domain.no_arg_tools:
+            arg = None
         else:
-            ai = int(al.argmax())
-        arg = cands[ai]
+            cands = domain.arg_fn(goal_text, state)
+            if not cands:
+                break
+            ce = torch.tensor(encode_batch(cands), dtype=torch.float32)
+            al = ctl.arg_logits(z, goal, ce)
+            if sample:
+                d = torch.distributions.Categorical(logits=al)
+                ai = int(d.sample()); logps.append(d.log_prob(torch.tensor(ai)))
+            else:
+                ai = int(al.argmax())
+            arg = cands[ai]
 
         ok, obs = domain.tools[tool](state, arg)
         state["steps"] = state.get("steps", 0) + 1
@@ -428,7 +452,8 @@ def _load_swe_rows(n: int) -> list:
 def _load_qa_rows(n: int) -> list:
     from v5.runtime.membrane import load_hotpot
     data = load_hotpot(n)
-    rows = [{"goal": q, "gold": ans, "paras": paras, "gold_titles": gold, "qid": qid, "type": typ}
+    # gold is (answer, gold_titles) -- never split across state and an outside value; see make_qa_domain.
+    rows = [{"goal": q, "gold": (ans, gold), "paras": paras, "qid": qid, "type": typ}
              for qid, q, ans, typ, paras, gold in data]
     random.Random(0).shuffle(rows)
     return rows
@@ -502,6 +527,15 @@ def _selftest() -> bool:
             dom.reward_fn({"open_file": "a"}, "b") == 0.1
             and dom.reward_fn({"open_file": "b"}, "b") == 0.5
             and dom.reward_fn({"open_file": "b", "patch": 1}, "b") == 1.0)
+        # a reviewer found a real bug here: issue text alone routinely fills text_candidates' n=24 cap
+        # (mean 23.9 qualifying words across 100 real issues), so a hit appended AFTER truncation was
+        # silently dropped ~96% of the time -- the pointer could never reach a file grep/locate found.
+        long_issue = " ".join(f"distinctidentifierword{i}" for i in range(40))
+        cands = dom.arg_fn(long_issue, {"last_hits": ["django/db/models/query.py:12"]})
+        chk("[10b] a tool-discovered hit SURVIVES even when issue text alone would fill the cap",
+            "django/db/models/query.py" in cands, f"{len(cands)} candidates, hit present={'django/db/models/query.py' in cands}")
+        chk("[10c] 'edit' skips the pointer step entirely (its arg was sampled but never read)",
+            "edit" in dom.no_arg_tools and dom.tools["edit"].__code__.co_argcount == 2)
     else:
         print("  [SKIP] no django checkout; SWE-domain checks skipped")
 
@@ -515,7 +549,14 @@ def _selftest() -> bool:
             len(trace) > 0 and any(x[3] for x in trace),
             " | ".join(f"{x[0]}:{x[2]}" for x in trace[:4]))
         chk("[12] QA reward is verified string comparison only, never an LM judgement",
-            dom_qa.reward_fn({"answer": "paris", "retrieved": [(1, 2)]}, "Paris") > 0.6)
+            dom_qa.reward_fn({"answer": "paris", "retrieved": [(1, 2)]}, ("Paris", set())) > 0.6)
+        chk("[12b] QA exact-match is EXACT, not substring (a reviewer found 'John' passing "
+            "against gold 'Johnson')",
+            not dom_qa.reward_fn({"answer": "John", "retrieved": []}, ("Johnson", set())) > 0.15
+            and not dom_qa.reward_fn({"answer": "American", "retrieved": []},
+                                     ("American Idol", set())) > 0.15)
+        chk("[12c] gold never sits in state -- QA's init_state carries no gold field",
+            "gold" not in str(dom_qa.init_state(rows[0]).keys()).lower())
         # not every real question names an entity ("What science fantasy series..." does not), so pick
         # a real row that does to check the POINTED, not the row that happens to be shuffled first.
         row_e = next((r for r in rows if len(dom_qa.arg_fn(r["goal"], {"retrieved": []})) > 1), rows[0])
