@@ -91,3 +91,6 @@ artifacts/graph_growth/
 
 # SWE-bench cloned repos (regenerable)
 data/swe_repos/
+
+# SWE-bench test directives (regenerable: python scripts/prep_swe_tests.py)
+artifacts/swebench_tests.json

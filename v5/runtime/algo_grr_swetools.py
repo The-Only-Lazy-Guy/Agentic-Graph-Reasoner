@@ -18,6 +18,7 @@ which is the property every ablation in this project kept finding absent.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -30,6 +31,10 @@ if _ROOT not in sys.path:
 
 SRC_ROOT = os.environ.get("SWE_SRC", r"E:\swebench_src")
 _MAX_OBS = 4000
+_TESTS_JSON = Path(_ROOT) / "artifacts" / "swebench_tests.json"
+_TESTS: dict | None = None
+# django's test id in FAIL_TO_PASS reads "test_name (dotted.Class)"; its runner wants dotted.Class.test_name
+_DJ_ID = re.compile(r"^(\S+)\s+\(([^)]+)\)\s*$")
 
 
 def _repo_dir(repo: str) -> Path:
@@ -39,6 +44,43 @@ def _repo_dir(repo: str) -> Path:
 def _clip(s: str) -> str:
     s = s or ""
     return s if len(s) <= _MAX_OBS else s[:_MAX_OBS] + f"\n...[{len(s) - _MAX_OBS} more chars]"
+
+
+def instance_tests(instance_id: str) -> dict:
+    """The REAL FAIL_TO_PASS / PASS_TO_PASS directives SWE-bench ships, from the cached dataset
+    (scripts/prep_swe_tests.py extracts them). Empty dict if unavailable -- callers must treat that as
+    'cannot verify', never as 'passed'."""
+    global _TESTS
+    if _TESTS is None:
+        try:
+            _TESTS = json.loads(_TESTS_JSON.read_text(encoding="utf-8"))
+        except Exception:                                          # noqa: BLE001
+            _TESTS = {}
+    return _TESTS.get(instance_id, {})
+
+
+def test_command(instance_id: str, repo: str = "") -> str:
+    """Build the instance's REAL test command from its REAL FAIL_TO_PASS ids.
+
+    Not a guess at a runner: `python -m pytest` was the previous default and is simply wrong for
+    django, which ships no pytest at all (measured live: "No module named pytest"). django uses
+    tests/runtests.py with dotted test paths; the rest of these repos are pytest projects.
+    Returns "" when the directives are unknown -- the caller must then refuse to claim a pass.
+    """
+    meta = instance_tests(instance_id)
+    f2p = meta.get("FAIL_TO_PASS") or []
+    if not f2p:
+        return ""
+    repo = repo or meta.get("repo", "")
+    if repo == "django/django":
+        ids = []
+        for t in f2p:
+            m = _DJ_ID.match(t.strip())
+            ids.append(f"{m.group(2)}.{m.group(1)}" if m else t.strip())
+        return ("./tests/runtests.py --verbosity 2 --settings=test_sqlite --parallel 1 "
+                + " ".join(ids))
+    return "python -m pytest --no-header -rA -p no:cacheprovider " + " ".join(
+        f"'{t}'" for t in f2p)
 
 
 # ── the tools. every one returns (ok, observation_text) and MUTATES state ────────────────────────
@@ -139,10 +181,28 @@ def t_run_tests(state, arg):
     # not the test command's -- a real bug found live: django-11999 exited "successfully" from a
     # command that was actually `No module named pytest` (django doesn't ship pytest; it uses
     # tests/runtests.py), and the exit code alone said nothing was wrong.
-    script = (f"cd /testbed && python - <<'EOF'\n"
+    # the REAL command from the instance's REAL FAIL_TO_PASS directives; `arg` may override for
+    # debugging, but is never controller-authored in the agent loop.
+    cmd = arg or test_command(inst, state.get("repo", ""))
+    if not cmd:
+        return False, (f"no FAIL_TO_PASS directives known for {inst} -- cannot verify. "
+                       f"(run scripts/prep_swe_tests.py)")
+    # SWE-bench protocol, and it is NOT optional: the FAIL_TO_PASS tests are ADDED by test_patch.
+    # Skipping it made even the REAL GOLD PATCH score as a failure ("type object
+    # 'GetFieldDisplayTests' has no attribute 'test_overriding_FIELD_display'") -- i.e. the verifier
+    # was structurally incapable of ever reporting a pass. Caught by a positive control, not by
+    # reading the code. test_patch touches ONLY test files, never the source under repair, so it
+    # cannot leak the fix.
+    tp = instance_tests(inst).get("test_patch") or ""
+    apply_tp = ""
+    if tp:
+        apply_tp = ("cd /testbed && git checkout -- . && cat > /tmp/test.patch <<'TESTPATCH_EOF'\n"
+                    + tp + "\nTESTPATCH_EOF\ngit apply -v /tmp/test.patch && ")
+    script = (apply_tp
+              + f"cd /testbed && python - <<'EOF'\n"
               f"import io\np={path!r}\ns=open(p,encoding='utf-8').read()\n"
               f"s=s.replace({old!r},{new!r})\nopen(p,'w',encoding='utf-8').write(s)\nEOF\n"
-              f"cd /testbed && set -o pipefail && ({arg or 'python -m pytest -x -q'}) 2>&1 | tail -40")
+              f"cd /testbed && set -o pipefail && ({cmd}) 2>&1 | tail -40")
     try:
         # --pull=never: fail fast on an uncached image instead of silently pulling several GB. Only a
         # handful of images are cached locally (checked before this was added: 3 django instances) --
@@ -160,8 +220,16 @@ def t_run_tests(state, arg):
     # must actually be present, and "no module named"/"command not found" hard-fail regardless of
     # exit code, since those mean the command never ran as intended.
     low = out.lower()
-    hard_fail = "no module named" in low or "command not found" in low
-    ok = (r.returncode == 0) and (" passed" in out) and not hard_fail
+    hard_fail = ("no module named" in low or "command not found" in low
+                 or "no such file or directory" in low)
+    # two runners, two success markers: pytest says "N passed", django's tests/runtests.py is
+    # unittest-style and says "OK" on its own line after "Ran N tests". Requiring pytest's marker
+    # alone would false-NEGATIVE every django instance, the mirror of the false-positive already
+    # fixed. Scan ALL lines, not just the last: `git apply -v`'s stderr interleaves AFTER the test
+    # output, so the final line is routinely "Applied patch ... cleanly." -- checking only the last
+    # line made a genuinely passing gold patch (rc=0) report as a failure.
+    passed = (" passed" in low) or re.search(r"^OK\b", out, re.M) is not None
+    ok = (r.returncode == 0) and passed and not hard_fail
     state["last_tests"] = out[-2000:]
     state["test_returncode"] = r.returncode
     return ok, _clip(out)
@@ -230,13 +298,88 @@ def _selftest() -> bool:
         set(reg) == {"list_dir", "grep", "find_def", "read_file", "edit", "run_tests"},
         " ".join(sorted(reg)))
 
+    # the verifier's command construction, checked without Docker (the full ground-truth calibration
+    # is --calibrate, which needs the images). django is the case that matters: it ships NO pytest.
+    cmd = test_command("django__django-11999", "django/django")
+    chk("[9] django's test command uses runtests.py with a converted dotted id, NOT pytest",
+        "runtests.py" in cmd and "pytest" not in cmd
+        and "model_fields.tests.GetFieldDisplayTests.test_overriding_FIELD_display" in cmd,
+        cmd[:100])
+    chk("[10] test_patch is available -- FAIL_TO_PASS tests do not EXIST without it",
+        bool(instance_tests("django__django-11999").get("test_patch")))
+    chk("[11] an unknown instance yields NO command, so the caller cannot claim a pass",
+        test_command("not__a-real-instance", "x/y") == "")
+
     print(f"\n  MEMBRANE_SWETOOLS -> {'PASS' if ok else 'FAIL'}")
     return ok
+
+
+def _calibrate() -> bool:
+    """GROUND-TRUTH calibration of the verifier: for each locally cached image, a no-op edit must
+    FAIL the instance's real FAIL_TO_PASS test and the REAL GOLD PATCH must PASS it.
+
+    This is the check that actually matters, and it caught three real bugs that code review did not:
+    a false PASS from a command that never ran, a missing test_patch that made even the gold patch
+    unpassable, and a marker scan that only read the last line (which is git-apply stderr). A verifier
+    that cannot separate a no-op from the true fix produces confident, wrong numbers.
+    Needs the SWE-bench Docker images; run with --calibrate.
+    """
+    import subprocess as _sp
+    cached = ["django__django-10924", "django__django-11133", "django__django-11999"]
+    print("algo_grr_swetools --calibrate: verifier vs ground truth (needs cached Docker images)\n")
+    ok = True
+    for inst in cached:
+        meta = instance_tests(inst)
+        cmd, tp = test_command(inst, "django/django"), meta.get("test_patch") or ""
+        if not cmd or not tp:
+            print(f"  [SKIP] {inst}: no directives/test_patch")
+            continue
+        st = {"repo": "django/django", "instance_id": inst,
+              "patch": ("django/__init__.py", "from django.utils.version import get_version",
+                         "from django.utils.version import get_version")}
+        neg, _ = t_run_tests(st, None)
+        img = f"swebench/sweb.eval.x86_64.{inst.replace('__', '_1776_')}:latest"
+        gold = meta.get("gold_patch") or _gold_patch(inst)
+        pos = False
+        if gold:
+            script = ("cd /testbed && git checkout -- . && cat > /tmp/t.patch <<'TP'\n" + tp
+                      + "\nTP\ngit apply -v /tmp/t.patch && cat > /tmp/g.patch <<'GP'\n" + gold
+                      + "\nGP\ngit apply -v /tmp/g.patch && "
+                      + f"set -o pipefail && ({cmd}) 2>&1 | tail -25")
+            r = _sp.run(["wsl", "-d", os.environ.get("WSL_DISTRO", "UbuntuE"), "docker", "run",
+                         "--rm", "--pull", "never", "--entrypoint", "bash", img, "-lc", script],
+                        capture_output=True, text=True, timeout=900)
+            o = (r.stdout or "") + (r.stderr or "")
+            pos = (r.returncode == 0) and ((" passed" in o.lower())
+                                            or re.search(r"^OK\b", o, re.M) is not None)
+        good = (not neg) and pos
+        ok &= good
+        print(f"  [{'PASS' if good else 'FAIL'}] {inst}: no-op edit -> "
+              f"{'FAIL' if not neg else 'PASS(BAD)'}, gold patch -> {'PASS' if pos else 'FAIL(BAD)'}")
+    print(f"\n  SWETOOLS_CALIBRATE -> {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+def _gold_patch(inst: str) -> str:
+    """The instance's real reference patch, read from the cached SWE-bench parquet. Used ONLY by
+    --calibrate as a positive control -- never by any tool the agent can call."""
+    try:
+        import pyarrow.parquet as pq
+        p = (Path(r"E:\cache\hf\hub\datasets--princeton-nlp--SWE-bench\snapshots")
+             / "e48e2bd1e9fecd5bbd641e9414ac59da9f2e69f6" / "data" / "test-00000-of-00001.parquet")
+        t = pq.read_table(p).select(["instance_id", "patch"]).to_pydict()
+        return dict(zip(t["instance_id"], t["patch"])).get(inst, "")
+    except Exception:                                              # noqa: BLE001
+        return ""
 
 
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser(description="Real SWE tools for the agentic loop.")
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--calibrate", action="store_true",
+                    help="verify the test verifier against ground truth (needs Docker images)")
     a = ap.parse_args()
+    if a.calibrate:
+        sys.exit(0 if _calibrate() else 1)
     sys.exit(0 if (_selftest() if a.selftest else ap.print_help() or True) else 1)
