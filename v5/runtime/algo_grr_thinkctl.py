@@ -261,7 +261,12 @@ def make_swe_domain(lm=None, max_steps: int = 6, use_locate: bool = True, verify
                                                     state.get("open_text", ""), lm)
         if not ok:
             return False, f"authored tool rejected: {note}"
-        state["patch_full"] = (state["open_file"], new_text)
+        # store the TOOL, not the rewritten text. The local checkout is at HEAD while the container is
+        # at the instance's base commit, so shipping our rewritten file wrote the wrong django version
+        # into the container ("ImportError: cannot import name '_lazy_re_compile'"). The tool is
+        # re-run inside the container against the container's own file. The local run above stays as a
+        # cheap pre-filter that rejects broken tools without paying for Docker.
+        state["patch_tool"] = (state["open_file"], code)
         state["authored_code"] = code
         return True, f"authored an edit tool; it applies and parses ({note})"
 
@@ -280,7 +285,7 @@ def make_swe_domain(lm=None, max_steps: int = 6, use_locate: bool = True, verify
                 continue
             passed, note = gate_edit(state.get("open_text", ""), res)
             if passed:
-                state["patch_full"] = (state["open_file"], res)
+                state["patch_tool"] = (state["open_file"], code)
                 state["reused_tool"] = name
                 return True, f"reused banked tool {name} (cos {cos:.2f}): {note}"
         return False, "no banked tool applied cleanly here"
@@ -355,7 +360,7 @@ def make_swe_domain(lm=None, max_steps: int = 6, use_locate: bool = True, verify
                 av.add("author_tool")
                 if bank is not None and len(bank):  # nothing to replay until something is banked
                     av.add("reuse_tool")
-        if verify and (state.get("patch") or state.get("patch_full")):   # "no patch to test"
+        if verify and (state.get("patch") or state.get("patch_tool")):   # "no patch to test"
             av.add("run_tests")
         return av
 
@@ -372,7 +377,7 @@ def make_swe_domain(lm=None, max_steps: int = 6, use_locate: bool = True, verify
             r += 0.05
         if on_gold:
             r += 0.45
-        if state.get("patch") or state.get("patch_full"):
+        if state.get("patch") or state.get("patch_tool"):
             r += 0.5 if on_gold else 0.05
         if state.get("tests_passed"):
             # dominant term, deliberately: passing the REAL test suite is the only signal here that
@@ -388,8 +393,8 @@ def make_swe_domain(lm=None, max_steps: int = 6, use_locate: bool = True, verify
         return {"repo": row["repo"], "instance_id": row["instance_id"], "goal_text": row["goal"]}
 
     def decision_fn(state):
-        if state.get("patch_full"):
-            p, _ = state["patch_full"]
+        if state.get("patch_tool"):
+            p, _ = state["patch_tool"]
             how = ("reusing banked tool " + state["reused_tool"]) if state.get("reused_tool") \
                 else "an edit tool it wrote itself"
             return f"In {p}, applied {how}"
@@ -401,7 +406,7 @@ def make_swe_domain(lm=None, max_steps: int = 6, use_locate: bool = True, verify
     def metrics_fn(state, gold):
         return {"opened": float(bool(state.get("open_file"))),
                 "opened_gold": float(state.get("open_file") == gold),
-                "patched": float(bool(state.get("patch") or state.get("patch_full"))),
+                "patched": float(bool(state.get("patch") or state.get("patch_tool"))),
                 "authored_tool": float(bool(state.get("authored_code"))),
                 "reused_tool": float(bool(state.get("reused_tool"))),
                 "tests_passed": float(bool(state.get("tests_passed")))}

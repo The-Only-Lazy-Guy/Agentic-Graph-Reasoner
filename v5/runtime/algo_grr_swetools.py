@@ -173,10 +173,10 @@ def t_run_tests(state, arg):
     inst = state.get("instance_id")
     if not inst:
         return False, "no instance_id in state"
-    if not state.get("patch") and not state.get("patch_full"):
+    if not state.get("patch") and not state.get("patch_tool"):
         return False, "no patch to test"
     img = f"swebench/sweb.eval.x86_64.{inst.replace('__', '_1776_')}:latest"
-    path, old, new = state.get("patch") or (state["patch_full"][0], "", "")
+    path, old, new = state.get("patch") or (state["patch_tool"][0], "", "")
     # `set -o pipefail`: without it, `cmd | tail -40`'s exit status is tail's (almost always 0),
     # not the test command's -- a real bug found live: django-11999 exited "successfully" from a
     # command that was actually `No module named pytest` (django doesn't ship pytest; it uses
@@ -198,12 +198,32 @@ def t_run_tests(state, arg):
     if tp:
         apply_tp = ("cd /testbed && git checkout -- . && cat > /tmp/test.patch <<'TESTPATCH_EOF'\n"
                     + tp + "\nTESTPATCH_EOF\ngit apply -v /tmp/test.patch && ")
-    if state.get("patch_full"):
-        # a model-AUTHORED edit tool returns the whole new file, which a substring replace cannot
-        # express (real fixes are multi-line changes inside method bodies). Written via a heredoc so
-        # arbitrary content survives the shell intact.
-        fpath, ftext = state["patch_full"]
-        write = (f"cd /testbed && cat > {fpath} <<'FULLTEXT_EOF'\n" + ftext + "\nFULLTEXT_EOF\n")
+    if state.get("patch_tool"):
+        # SHIP THE TOOL, NOT THE TEXT. Writing the model's whole rewritten file into the container
+        # was unsound: `open_text` comes from the local HEAD checkout while the container is pinned at
+        # the instance's BASE COMMIT, so overwriting produced a file from the wrong django version
+        # ("ImportError: cannot import name '_lazy_re_compile'"). Running the authored tool INSIDE the
+        # container against the container's OWN file removes the version mismatch entirely -- and it
+        # is what "the model authored an edit tool" should mean anyway: the tool is the artifact.
+        # base64 for both payloads so no file content or code is ever parsed by the shell (a heredoc
+        # here previously executed a line of response.py as a command: "filelike: command not found").
+        import base64
+        fpath, code = state["patch_tool"]
+        runner = (
+            "import sys, re, builtins, base64\n"
+            "code = base64.b64decode(sys.argv[1]).decode('utf-8')\n"
+            "p = sys.argv[2]\n"
+            "src = open(p, encoding='utf-8').read()\n"
+            "ns = {'re': re}\n"
+            "exec(code, ns)\n"
+            "out = ns['edit'](src)\n"
+            "assert isinstance(out, str) and out.strip() and out != src, 'tool made no valid change'\n"
+            "open(p, 'w', encoding='utf-8').write(out)\n"
+            "print('TOOL_APPLIED_IN_CONTAINER')\n")
+        rb64 = base64.b64encode(runner.encode("utf-8")).decode("ascii")
+        cb64 = base64.b64encode(code.encode("utf-8")).decode("ascii")
+        write = (f"cd /testbed && echo {rb64} | base64 -d > /tmp/_apply.py && "
+                 f"python /tmp/_apply.py {cb64} {fpath} && ")
     else:
         write = (f"cd /testbed && python - <<'EOF'\n"
                  f"import io\np={path!r}\ns=open(p,encoding='utf-8').read()\n"
