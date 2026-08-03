@@ -613,9 +613,16 @@ def pretrain_pointer(ctl: ThinkerController, labels: list, epochs: int = 30, lr:
 
     Supervised cross-entropy over the candidate set, at the episode's opening state (z0) -- that is
     where the choice actually bites, since a wrong first grep sends every later step down a dead end.
-    Only arg_head/q_proj move here; the tool policy is left to RL."""
+
+    ONLY arg_head MOVES. q_proj is SHARED with tool_logits (both read tanh(q_proj(goal))), so
+    optimizing ctl.parameters() here silently retrained the tool policy through the shared projection.
+    Measured cost of getting this wrong: arm B stopped opening ANY file at all (opened 0.000,
+    opened_gold 0.000 vs the RL-only arm's 0.111) -- the pointer improved while the thing that CALLS
+    the pointer was destroyed, and 10 epochs of RL could not undo it. A first version of this
+    docstring claimed only arg_head/q_proj moved; the code moved everything, which is exactly the
+    kind of mismatch this project has been bitten by before."""
     from embedder import encode_batch
-    opt = torch.optim.Adam(ctl.parameters(), lr=lr)
+    opt = torch.optim.Adam(ctl.arg_head.parameters(), lr=lr)
     cache = [(torch.tensor(encode_batch([g[:1000]])[0], dtype=torch.float32),
               torch.tensor(encode_batch(c), dtype=torch.float32), i) for g, c, i in labels]
     for ep in range(epochs):
