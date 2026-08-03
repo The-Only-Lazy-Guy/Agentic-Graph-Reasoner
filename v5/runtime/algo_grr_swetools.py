@@ -135,19 +135,35 @@ def t_run_tests(state, arg):
         return False, "no patch to test"
     img = f"swebench/sweb.eval.x86_64.{inst.replace('__', '_1776_')}:latest"
     path, old, new = state["patch"]
+    # `set -o pipefail`: without it, `cmd | tail -40`'s exit status is tail's (almost always 0),
+    # not the test command's -- a real bug found live: django-11999 exited "successfully" from a
+    # command that was actually `No module named pytest` (django doesn't ship pytest; it uses
+    # tests/runtests.py), and the exit code alone said nothing was wrong.
     script = (f"cd /testbed && python - <<'EOF'\n"
               f"import io\np={path!r}\ns=open(p,encoding='utf-8').read()\n"
               f"s=s.replace({old!r},{new!r})\nopen(p,'w',encoding='utf-8').write(s)\nEOF\n"
-              f"cd /testbed && {arg or 'python -m pytest -x -q'} 2>&1 | tail -40")
+              f"cd /testbed && set -o pipefail && ({arg or 'python -m pytest -x -q'}) 2>&1 | tail -40")
     try:
+        # --pull=never: fail fast on an uncached image instead of silently pulling several GB. Only a
+        # handful of images are cached locally (checked before this was added: 3 django instances) --
+        # without this flag, calling this tool on any other instance would trigger a multi-GB download.
         r = subprocess.run(["wsl", "-d", os.environ.get("WSL_DISTRO", "UbuntuE"),
-                            "docker", "run", "--rm", "--entrypoint", "bash", img, "-lc", script],
+                            "docker", "run", "--rm", "--pull", "never", "--entrypoint", "bash", img,
+                            "-lc", script],
                            capture_output=True, text=True, timeout=900)
         out = (r.stdout or "") + (r.stderr or "")
     except Exception as e:                                     # noqa: BLE001
         return False, f"test run failed to start: {e!r}"
-    ok = ("failed" not in out.lower() and "error" not in out.lower()) or " passed" in out
+    # exit code is the primary signal now that pipefail makes it trustworthy. The text markers are a
+    # second, independent gate -- a real false positive was found where the process could plausibly
+    # exit 0 from a no-op (e.g. an empty test selection) with no real pass evidence at all; " passed"
+    # must actually be present, and "no module named"/"command not found" hard-fail regardless of
+    # exit code, since those mean the command never ran as intended.
+    low = out.lower()
+    hard_fail = "no module named" in low or "command not found" in low
+    ok = (r.returncode == 0) and (" passed" in out) and not hard_fail
     state["last_tests"] = out[-2000:]
+    state["test_returncode"] = r.returncode
     return ok, _clip(out)
 
 

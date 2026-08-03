@@ -50,7 +50,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from v5.runtime.algo_grr_swetools import _repo_dir, t_edit, t_find_def, t_grep, t_read_file
+from v5.runtime.algo_grr_swetools import _repo_dir, t_edit, t_find_def, t_grep, t_read_file, t_run_tests
 from v5.runtime.algo_grr_qatools import t_answer, t_read, t_retrieve
 
 IDT = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")                       # code identifiers / paths
@@ -188,7 +188,7 @@ def propose_edit(issue: str, state: dict, lm=None):
     return anchor, (indent + new.strip())
 
 
-def make_swe_domain(lm=None, max_steps: int = 6, use_locate: bool = True) -> Domain:
+def make_swe_domain(lm=None, max_steps: int = 6, use_locate: bool = True, verify: bool = False) -> Domain:
     def t_grep_tool(state, arg):
         ok, obs = t_grep(state, arg)
         if ok:
@@ -233,12 +233,40 @@ def make_swe_domain(lm=None, max_steps: int = 6, use_locate: bool = True) -> Dom
             return False, "no anchor found for this issue in the open file"
         return t_edit(state, (anchor, new))
 
+    def t_run_tests_tool(state, arg):
+        """THE real verifier: run the instance's actual SWE-bench Docker container and its actual
+        test suite. Everything else in this domain is navigation or a syntax-level gate; this is the
+        only tool that can say a patch actually FIXED anything, not just that it applied and parsed.
+        No arg -- always the instance's default test command, never a controller-authored shell string.
+
+        KNOWN LIMITATION, found live and not yet fixed: the default command is `pytest`, which is
+        wrong for django (it ships no pytest at all; its real runner is tests/runtests.py) and
+        possibly other repos here too. Confirmed real: an LM-authored edit on django__django-11999
+        applied and parsed, but the test command failed with "No module named pytest" -- that
+        correctly reports as tests_passed=False now (a prior version of the ok-heuristic misread
+        that exact failure as a pass). So tests_passed=True can be trusted; tests_passed=False on a
+        non-pytest repo does NOT yet mean the fix was wrong -- it may just mean the command never ran.
+        Proper per-repo test targeting needs real SWE-bench FAIL_TO_PASS metadata this project's mined
+        dataset does not currently carry (only instance_id/repo/gold/problem)."""
+        ok, obs = t_run_tests(state, None)
+        state["tests_passed"] = ok
+        return ok, obs
+
     names = ["grep", "find_def", "read_file", "edit", "stop"]
     tools = {"grep": t_grep_tool, "find_def": t_find_def_tool, "read_file": t_read_file_tool,
               "edit": t_edit_tool}
+    no_arg = {"edit"}
     if use_locate:
         names = ["grep", "find_def", "read_file", "locate", "edit", "stop"]
         tools["locate"] = t_locate_tool
+    if verify:
+        # gated OFF by default: docker run --pull=never fails fast on an uncached image, but the
+        # controller could still spend real step-budget on a tool that's guaranteed to fail for
+        # every instance except the ones actually cached locally, which would just add noise to
+        # ordinary training runs that were never trying to reach this tool.
+        names = [n for n in names if n != "stop"] + ["run_tests", "stop"]
+        tools["run_tests"] = t_run_tests_tool
+        no_arg.add("run_tests")
 
     def arg_fn(goal_text, state):
         # tool-discovered paths go FIRST and are never truncated away. A reviewer found the previous
@@ -265,6 +293,10 @@ def make_swe_domain(lm=None, max_steps: int = 6, use_locate: bool = True) -> Dom
             r += 0.4
         if state.get("patch"):
             r += 0.5
+        if state.get("tests_passed"):
+            # dominant term, deliberately: passing the REAL test suite is the only signal here that
+            # means "fixed," not "applied and parsed." Only reachable when verify=True.
+            r += 1.0
         return r
 
     def init_state(row):
@@ -279,10 +311,11 @@ def make_swe_domain(lm=None, max_steps: int = 6, use_locate: bool = True) -> Dom
     def metrics_fn(state, gold):
         return {"opened": float(bool(state.get("open_file"))),
                 "opened_gold": float(state.get("open_file") == gold),
-                "patched": float(bool(state.get("patch")))}
+                "patched": float(bool(state.get("patch"))),
+                "tests_passed": float(bool(state.get("tests_passed")))}
 
     return Domain("swe", tools, names, arg_fn, reward_fn, init_state, decision_fn, metrics_fn, max_steps,
-                  no_arg_tools=frozenset({"edit"}))
+                  no_arg_tools=frozenset(no_arg))
 
 
 # ── HotpotQA domain: real multi-hop QA, proving the SAME controller is not SWE-specific ───────────
@@ -567,6 +600,12 @@ def _selftest() -> bool:
             "django/db/models/query.py" in cands, f"{len(cands)} candidates, hit present={'django/db/models/query.py' in cands}")
         chk("[10c] 'edit' skips the pointer step entirely (its arg was sampled but never read)",
             "edit" in dom.no_arg_tools and dom.tools["edit"].__code__.co_argcount == 2)
+        dom_v = make_swe_domain(verify=True)
+        chk("[10d] verify=True adds the REAL Docker test-suite tool as a no-arg action",
+            "run_tests" in dom_v.tool_names and "run_tests" in dom_v.no_arg_tools
+            and dom_v.reward_fn({"tests_passed": True}, None) >= 1.0)
+        chk("[10e] verify=False (the default) never offers it -- ordinary runs are unaffected",
+            "run_tests" not in dom.tool_names)
     else:
         print("  [SKIP] no django checkout; SWE-domain checks skipped")
 
@@ -636,6 +675,11 @@ def main():
     ap.add_argument("--lm", type=str, default="")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--epochs", type=int, default=6)
+    ap.add_argument("--verify", action="store_true",
+                    help="SWE: add the real Docker test-suite tool. Off by default -- only a handful "
+                         "of SWE-bench images are cached locally, and docker run --pull=never makes "
+                         "every other instance fail fast rather than pull, so this is safe to try but "
+                         "will mostly report 'no image' outside cached instances.")
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
@@ -650,7 +694,7 @@ def main():
         held_r = []
         if a.domain == "swe":
             tr, held, held_r = _load_swe_rows(n_per_repo=a.n_per_repo, seed=a.seed)
-            domain = make_swe_domain(lm=lm, use_locate=use_locate)
+            domain = make_swe_domain(lm=lm, use_locate=use_locate, verify=a.verify)
             repo_line = (f"repos: {sorted({r['repo'] for r in tr + held})} train/held-I, "
                         f"{list(_HELD_REPOS)} held-REPO (never trained on)")
         else:
