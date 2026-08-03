@@ -123,7 +123,8 @@ class Domain:
     which domain they are in -- only Domain's own callables know that."""
 
     def __init__(self, name: str, tools: dict, tool_names: list, arg_fn, reward_fn, init_state,
-                decision_fn, metrics_fn, max_steps: int = 6, no_arg_tools: frozenset = frozenset()):
+                decision_fn, metrics_fn, max_steps: int = 6, no_arg_tools: frozenset = frozenset(),
+                available_fn=None):
         self.name = name
         self.tools = tools                # {tool_name: fn(state, arg) -> (ok, obs_text)}
         self.tool_names = tool_names      # ordered; index IS the action id ("stop" handled specially)
@@ -138,6 +139,14 @@ class Domain:
         # with zero causal effect on the outcome, pure noise in the gradient. Skip the pointer step
         # for these; "stop" is always in this set since it never took an argument to begin with.
         self.no_arg_tools = frozenset(no_arg_tools) | {"stop"}
+        # fn(state) -> set of currently-callable tool names. These are the tools' OWN documented
+        # preconditions ("no file open; read_file first", "no patch to test") -- the same conditions
+        # they already check and return as errors. Masking them makes an invalid action unpickable
+        # instead of a wasted step. That is the tool API's real contract, not privileged information:
+        # nothing here depends on gold, and the agent could read the identical constraint off the
+        # error string. Measured effect on the SWE chain: ~2.4% of random 8-step trajectories ever
+        # reached run_tests-with-a-patch unmasked.
+        self.available_fn = available_fn
 
 
 # ── SWE domain: real django checkout, real tools, + the graph-retrieval tool that was missing ─────
@@ -285,18 +294,42 @@ def make_swe_domain(lm=None, max_steps: int = 6, use_locate: bool = True, verify
                 cands.append(t)
         return cands
 
+    def available_fn(state):
+        """The tools' OWN preconditions, which they already enforce and report as errors."""
+        av = {"grep", "find_def", "stop"}
+        if use_locate:
+            av.add("locate")
+        if state.get("last_hits"):                 # read_file has nothing to open without a hit
+            av.add("read_file")
+        if state.get("open_file"):                 # "no file open; read_file first"
+            av.add("edit")
+        if verify and state.get("patch"):          # "no patch to test"
+            av.add("run_tests")
+        return av
+
     def reward_fn(state, gold):
+        # SHAPING BUG FIXED: the old terms paid +0.5 for patching ANY file but only +0.4 for finding
+        # the RIGHT one, so "open something, patch it" (0.6) strictly dominated the actual objective.
+        # The policy learned exactly that -- measured: patched 0.958, opened_gold 0.000. Patching the
+        # wrong file is now worth almost nothing, so targeting is the only route to the big reward.
+        # gold is used HERE only, at training time; run_episode never puts it in state and no tool
+        # can read it, so this is reward shaping on training labels, not leakage into the policy.
+        on_gold = bool(gold) and state.get("open_file") == gold
         r = 0.0
         if state.get("open_file"):
-            r += 0.1
-        if gold and state.get("open_file") == gold:
-            r += 0.4
+            r += 0.05
+        if on_gold:
+            r += 0.45
         if state.get("patch"):
-            r += 0.5
+            r += 0.5 if on_gold else 0.05
         if state.get("tests_passed"):
             # dominant term, deliberately: passing the REAL test suite is the only signal here that
             # means "fixed," not "applied and parsed." Only reachable when verify=True.
             r += 1.0
+        # small cost per REDUNDANT step. Without it, nothing opposed the degenerate loop actually
+        # observed in traces (read_file with the same failing arg 5-7 times in a row): repeats were
+        # free, so a policy that secured the cheap +0.1 and then idled was never pushed off it.
+        r -= 0.02 * float(state.get("repeats", 0))
         return r
 
     def init_state(row):
@@ -315,7 +348,7 @@ def make_swe_domain(lm=None, max_steps: int = 6, use_locate: bool = True, verify
                 "tests_passed": float(bool(state.get("tests_passed")))}
 
     return Domain("swe", tools, names, arg_fn, reward_fn, init_state, decision_fn, metrics_fn, max_steps,
-                  no_arg_tools=frozenset(no_arg))
+                  no_arg_tools=frozenset(no_arg), available_fn=available_fn)
 
 
 # ── HotpotQA domain: real multi-hop QA, proving the SAME controller is not SWE-specific ───────────
@@ -340,6 +373,14 @@ def make_qa_domain(max_steps: int = 5) -> Domain:
         gn = re.sub(r"[^a-z0-9 ]", "", (gold_answer or "").strip().lower())
         return bool(pn) and bool(gn) and pn == gn
 
+    def available_fn(state):
+        """t_read/t_answer are meaningless before anything has been retrieved -- and they say so
+        ("not retrieved yet: X"). Same masking discipline as the SWE domain, no gold involved."""
+        av = {"retrieve", "stop"}
+        if state.get("retrieved"):
+            av |= {"read", "answer"}
+        return av
+
     def reward_fn(state, gold):
         answer_gold, _titles_gold = gold
         r = 0.1 * min(len(state.get("retrieved", [])), 2)
@@ -347,6 +388,7 @@ def make_qa_domain(max_steps: int = 5) -> Domain:
             r += 0.1
         if _em(state.get("answer"), answer_gold):
             r += 0.6
+        r -= 0.02 * float(state.get("repeats", 0))
         return r
 
     def init_state(row):
@@ -363,7 +405,8 @@ def make_qa_domain(max_steps: int = 5) -> Domain:
                 "answered": float(bool(state.get("answer"))),
                 "exact_match": float(_em(state.get("answer"), answer_gold))}
 
-    return Domain("hotpotqa", tools, names, arg_fn, reward_fn, init_state, decision_fn, metrics_fn, max_steps)
+    return Domain("hotpotqa", tools, names, arg_fn, reward_fn, init_state, decision_fn, metrics_fn,
+                  max_steps, available_fn=available_fn)
 
 
 # ── LM speaks. Exactly once per episode, and NEVER decides anything ────────────────────────────────
@@ -417,6 +460,10 @@ def run_episode(ctl: ThinkerController, domain: Domain, row: dict, sample: bool 
     logps, trace, tried = [], [], set()
     for _ in range(domain.max_steps):
         tl = ctl.tool_logits(z, goal)
+        if domain.available_fn is not None:
+            avail = domain.available_fn(state)
+            mask = torch.tensor([0.0 if n in avail else -1e9 for n in domain.tool_names])
+            tl = tl + mask
         if sample:
             d = torch.distributions.Categorical(logits=tl)
             ti = int(d.sample()); logps.append(d.log_prob(torch.tensor(ti)))
@@ -444,6 +491,8 @@ def run_episode(ctl: ThinkerController, domain: Domain, row: dict, sample: bool 
         ok, obs = domain.tools[tool](state, arg)
         state["steps"] = state.get("steps", 0) + 1
         rep = (tool, arg) in tried
+        if rep:
+            state["repeats"] = state.get("repeats", 0) + 1
         tried.add((tool, arg))
         if blind:
             oe, sig = torch.zeros(ctl.obs_dim), (0.0, 0.0, 0.0)
@@ -456,20 +505,43 @@ def run_episode(ctl: ThinkerController, domain: Domain, row: dict, sample: bool 
 
 
 def train(ctl: ThinkerController, domain: Domain, data: list, epochs: int = 6, lr: float = 3e-3,
-         blind: bool = False, verbose: bool = True):
+         blind: bool = False, verbose: bool = True, batch: int = 8, ent_w: float = 0.01):
+    """REINFORCE with a mean-reward baseline, updated per MINIBATCH.
+
+    The previous version did ONE opt.step() per EPOCH -- 6 epochs meant SIX gradient updates for the
+    whole run. That, not "not enough data", is why every SWE number in this file sat near zero and why
+    the policy collapsed into degenerate repeat loops: it was barely optimized at all. Per-minibatch
+    updates give ~epochs*len(data)/batch steps instead (6x7=42 at the old defaults, and --epochs now
+    actually buys something).
+
+    ent_w: entropy bonus. With ~6 gradient steps the old setup could not collapse fast enough for
+    anyone to notice it would; with real optimization it collapses to a single action immediately
+    unless exploration is held open. Standard REINFORCE practice, not a workaround.
+    """
     opt = torch.optim.Adam(ctl.parameters(), lr=lr)
+    hist = []
     for ep in range(epochs):
-        rs = []
-        for row in data:
+        rs, ep_r = [], []
+        for i, row in enumerate(data):
             st, lp, _ = run_episode(ctl, domain, row, sample=True, blind=blind)
-            rs.append((domain.reward_fn(st, row["gold"]), lp))
-        base = sum(r for r, _ in rs) / max(1, len(rs))
-        live = [(r, lp) for r, lp in rs if lp]
-        if live:
-            loss = torch.stack([-(r - base) * torch.stack(lp).sum() for r, lp in live]).mean()
-            opt.zero_grad(); loss.backward(); opt.step()
+            r = domain.reward_fn(st, row["gold"])
+            rs.append((r, lp))
+            ep_r.append(r)
+            if len(rs) >= batch or i == len(data) - 1:
+                live = [(rr, l) for rr, l in rs if l]
+                if live:
+                    base = sum(rr for rr, _ in live) / len(live)
+                    pol = torch.stack([-(rr - base) * torch.stack(l).sum() for rr, l in live]).mean()
+                    ent = torch.stack([-torch.stack(l).sum() for _, l in live]).mean()
+                    (pol + ent_w * ent).backward()
+                    torch.nn.utils.clip_grad_norm_(ctl.parameters(), 1.0)
+                    opt.step()
+                    opt.zero_grad()
+                rs = []
+        m = sum(ep_r) / max(1, len(ep_r))
+        hist.append(m)
         if verbose and (ep + 1) % 2 == 0:
-            print(f"    [{domain.name}] epoch {ep + 1:2d}  mean reward {base:.3f}", flush=True)
+            print(f"    [{domain.name}] epoch {ep + 1:2d}  mean reward {m:.3f}", flush=True)
     return ctl
 
 
@@ -588,9 +660,15 @@ def _selftest() -> bool:
         chk("[9] SWE episode runs REAL tools end to end", len(trace) > 0 and any(x[3] for x in trace),
             " | ".join(f"{x[0]}:{x[2]}" for x in trace[:4]))
         chk("[10] SWE reward is verified progress only, never an LM judgement",
-            dom.reward_fn({"open_file": "a"}, "b") == 0.1
+            dom.reward_fn({"open_file": "a"}, "b") == 0.05
             and dom.reward_fn({"open_file": "b"}, "b") == 0.5
             and dom.reward_fn({"open_file": "b", "patch": 1}, "b") == 1.0)
+        chk("[10i] patching the WRONG file no longer outscores finding the RIGHT one "
+            "(the shaping bug that produced patched 0.958 / opened_gold 0.000)",
+            dom.reward_fn({"open_file": "wrong", "patch": 1}, "gold")
+            < dom.reward_fn({"open_file": "gold"}, "gold"),
+            f"wrong+patch={dom.reward_fn({'open_file': 'w', 'patch': 1}, 'g'):.2f} vs "
+            f"gold={dom.reward_fn({'open_file': 'g'}, 'g'):.2f}")
         # a reviewer found a real bug here: issue text alone routinely fills text_candidates' n=24 cap
         # (mean 23.9 qualifying words across 100 real issues), so a hit appended AFTER truncation was
         # silently dropped ~96% of the time -- the pointer could never reach a file grep/locate found.
@@ -606,6 +684,18 @@ def _selftest() -> bool:
             and dom_v.reward_fn({"tests_passed": True}, None) >= 1.0)
         chk("[10e] verify=False (the default) never offers it -- ordinary runs are unaffected",
             "run_tests" not in dom.tool_names)
+        av0 = dom.available_fn({})
+        av1 = dom.available_fn({"last_hits": ["a.py:1"], "open_file": "a.py"})
+        chk("[10f] tool masking enforces the tools' OWN preconditions (no gold involved)",
+            "edit" not in av0 and "read_file" not in av0
+            and "edit" in av1 and "read_file" in av1 and "grep" in av0,
+            f"empty state -> {sorted(av0)}")
+        chk("[10g] run_tests is masked until a patch exists",
+            "run_tests" not in dom_v.available_fn({"open_file": "a.py", "last_hits": ["a.py:1"]})
+            and "run_tests" in dom_v.available_fn({"patch": ("a.py", "x", "y")}))
+        chk("[10h] redundant steps are penalised (the degenerate repeat loop had no cost before)",
+            dom.reward_fn({"open_file": "a", "repeats": 3}, None)
+            < dom.reward_fn({"open_file": "a", "repeats": 0}, None))
     else:
         print("  [SKIP] no django checkout; SWE-domain checks skipped")
 
