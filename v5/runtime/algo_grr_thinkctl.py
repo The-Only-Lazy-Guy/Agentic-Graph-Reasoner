@@ -191,13 +191,20 @@ def propose_edit(issue: str, state: dict, lm=None):
         return anchor, anchor
     prompt = (f"Issue:\n{issue[:700]}\n\nFile {state['open_file']} contains this line:\n{anchor}\n\n"
               f"Rewrite ONLY that line to fix the issue. Output the replacement line and nothing else.")
-    out = str(lm.generate_chat(prompt, max_new=96)).strip().splitlines()
-    new = out[0] if out else anchor
+    raw = str(lm.generate_chat(prompt, max_new=96)).strip()
+    # strip markdown fences before taking a line. Measured: on 2 of 3 real instances the 1.5B wrapped
+    # its answer in ```python ... ```, so line 0 was literally "```python" -- which the parse gate then
+    # correctly rejected as a syntax error. That was a PARSING bug on my side, not a bad LM edit.
+    lines = [l for l in raw.splitlines() if not l.strip().startswith("```")]
+    new = next((l for l in lines if l.strip()), "")
+    if not new.strip():
+        return anchor, anchor
     indent = anchor[:len(anchor) - len(anchor.lstrip())]
     return anchor, (indent + new.strip())
 
 
-def make_swe_domain(lm=None, max_steps: int = 6, use_locate: bool = True, verify: bool = False) -> Domain:
+def make_swe_domain(lm=None, max_steps: int = 6, use_locate: bool = True, verify: bool = False,
+                    toolsmith: bool = False, bank=None) -> Domain:
     def t_grep_tool(state, arg):
         ok, obs = t_grep(state, arg)
         if ok:
@@ -242,6 +249,42 @@ def make_swe_domain(lm=None, max_steps: int = 6, use_locate: bool = True, verify
             return False, "no anchor found for this issue in the open file"
         return t_edit(state, (anchor, new))
 
+    def t_author_tool(state, arg):
+        """THE MODEL BUILDS ITS OWN EDITOR. Instead of rewriting one anchor line (a mechanism that
+        structurally cannot express a real fix -- measured 0/3 with the gold file handed over), the LM
+        authors `def edit(text)->str`, which is EXECUTED in a sandbox and gated on real properties:
+        it must terminate, change something, stay targeted, and leave the file parseable."""
+        from v5.runtime.algo_grr_toolsmith import author_edit_tool
+        if not state.get("open_file"):
+            return False, "no file open; read_file first"
+        ok, code, new_text, note = author_edit_tool(state.get("goal_text", ""), state["open_file"],
+                                                    state.get("open_text", ""), lm)
+        if not ok:
+            return False, f"authored tool rejected: {note}"
+        state["patch_full"] = (state["open_file"], new_text)
+        state["authored_code"] = code
+        return True, f"authored an edit tool; it applies and parses ({note})"
+
+    def t_reuse_tool(state, arg):
+        """REPLAY == REUSE: retrieve a previously VERIFIED edit tool from the worlds graph by meaning
+        and run it here. This is the compounding claim -- a tool proven on one instance is applied to
+        the next without the LM being involved at all."""
+        from v5.runtime.algo_grr_toolsmith import gate_edit, run_edit_tool
+        if not state.get("open_file"):
+            return False, "no file open; read_file first"
+        if bank is None or not len(bank):
+            return False, "no verified tools banked yet"
+        for name, code, cos in bank.retrieve(state.get("goal_text", ""), k=3):
+            good, res = run_edit_tool(code, state.get("open_text", ""))
+            if not good:
+                continue
+            passed, note = gate_edit(state.get("open_text", ""), res)
+            if passed:
+                state["patch_full"] = (state["open_file"], res)
+                state["reused_tool"] = name
+                return True, f"reused banked tool {name} (cos {cos:.2f}): {note}"
+        return False, "no banked tool applied cleanly here"
+
     def t_run_tests_tool(state, arg):
         """THE real verifier: run the instance's actual SWE-bench Docker container and its actual
         test suite. Everything else in this domain is navigation or a syntax-level gate; this is the
@@ -268,6 +311,11 @@ def make_swe_domain(lm=None, max_steps: int = 6, use_locate: bool = True, verify
     if use_locate:
         names = ["grep", "find_def", "read_file", "locate", "edit", "stop"]
         tools["locate"] = t_locate_tool
+    if toolsmith:
+        names = [n for n in names if n != "stop"] + ["author_tool", "reuse_tool", "stop"]
+        tools["author_tool"] = t_author_tool
+        tools["reuse_tool"] = t_reuse_tool
+        no_arg |= {"author_tool", "reuse_tool"}
     if verify:
         # gated OFF by default: docker run --pull=never fails fast on an uncached image, but the
         # controller could still spend real step-budget on a tool that's guaranteed to fail for
@@ -303,7 +351,11 @@ def make_swe_domain(lm=None, max_steps: int = 6, use_locate: bool = True, verify
             av.add("read_file")
         if state.get("open_file"):                 # "no file open; read_file first"
             av.add("edit")
-        if verify and state.get("patch"):          # "no patch to test"
+            if toolsmith:
+                av.add("author_tool")
+                if bank is not None and len(bank):  # nothing to replay until something is banked
+                    av.add("reuse_tool")
+        if verify and (state.get("patch") or state.get("patch_full")):   # "no patch to test"
             av.add("run_tests")
         return av
 
@@ -320,7 +372,7 @@ def make_swe_domain(lm=None, max_steps: int = 6, use_locate: bool = True, verify
             r += 0.05
         if on_gold:
             r += 0.45
-        if state.get("patch"):
+        if state.get("patch") or state.get("patch_full"):
             r += 0.5 if on_gold else 0.05
         if state.get("tests_passed"):
             # dominant term, deliberately: passing the REAL test suite is the only signal here that
@@ -336,6 +388,11 @@ def make_swe_domain(lm=None, max_steps: int = 6, use_locate: bool = True, verify
         return {"repo": row["repo"], "instance_id": row["instance_id"], "goal_text": row["goal"]}
 
     def decision_fn(state):
+        if state.get("patch_full"):
+            p, _ = state["patch_full"]
+            how = ("reusing banked tool " + state["reused_tool"]) if state.get("reused_tool") \
+                else "an edit tool it wrote itself"
+            return f"In {p}, applied {how}"
         if state.get("patch"):
             p, old, new = state["patch"]
             return f"In {p}, replace `{old.strip()[:70]}` with `{new.strip()[:70]}`"
@@ -344,7 +401,9 @@ def make_swe_domain(lm=None, max_steps: int = 6, use_locate: bool = True, verify
     def metrics_fn(state, gold):
         return {"opened": float(bool(state.get("open_file"))),
                 "opened_gold": float(state.get("open_file") == gold),
-                "patched": float(bool(state.get("patch"))),
+                "patched": float(bool(state.get("patch") or state.get("patch_full"))),
+                "authored_tool": float(bool(state.get("authored_code"))),
+                "reused_tool": float(bool(state.get("reused_tool"))),
                 "tests_passed": float(bool(state.get("tests_passed")))}
 
     return Domain("swe", tools, names, arg_fn, reward_fn, init_state, decision_fn, metrics_fn, max_steps,
