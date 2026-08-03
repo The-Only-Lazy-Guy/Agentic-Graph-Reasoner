@@ -75,7 +75,7 @@ class NSTM(nn.Module):
     """
 
     def __init__(self, d_model: int, vocab_size: int, num_slots: int = 4, top_k: int = 2,
-                 d_slot: int = 128):
+                 d_slot: int = 128, action_ids: list | None = None):
         super().__init__()
         self.d_model, self.vocab_size = d_model, vocab_size
         self.num_slots, self.top_k, self.d_slot = num_slots, top_k, d_slot
@@ -88,7 +88,17 @@ class NSTM(nn.Module):
         self.W_g = nn.Linear(d_slot, 1)
         self.slot_gru = nn.GRUCell(d_slot, d_slot)
         self.obs_in = nn.Linear(384, d_slot)          # MiniLM view of a real observation
-        self.W_out = nn.Linear(d_slot, vocab_size, bias=False)
+        # ACTION-RESTRICTED RESIDUAL. The first version emitted a residual over the FULL 151936-token
+        # vocabulary: W_out alone was 128 x 151936 = 19.4M params (97% of the module), it materialised
+        # a full-vocab tensor plus autograd graph per decoded token, and it pushed the run to 6.44 GB
+        # against a 6.0 GB budget. It was also aimed at the wrong thing. The measured failure is not
+        # which CODE tokens get written -- the LM authors correct patches -- it is that the model never
+        # sequences to test(). That is a choice among a handful of action words. So the residual is
+        # scattered onto ONLY the action tokens; the LM writes all content unmodulated.
+        self.action_ids = list(action_ids or [])
+        n_act = max(1, len(self.action_ids))
+        self.register_buffer("act_idx", torch.tensor(self.action_ids or [0], dtype=torch.long))
+        self.W_out = nn.Linear(d_slot, n_act, bias=False)
         nn.init.zeros_(self.W_out.weight)             # PRIOR PRESERVATION: delta_z == 0 at init
 
     def init_slots(self, device, dtype=torch.float32):
@@ -124,7 +134,15 @@ class NSTM(nn.Module):
         ra = F.softmax((rq * self.W_K(new)).sum(-1) / math.sqrt(self.d_slot), dim=-1)
         c = (ra.unsqueeze(-1) * new).sum(1)                       # [1, d_slot]
         g = torch.sigmoid(self.W_g(h.view(1, self.d_slot)))       # [1, 1]
-        return new, g, self.W_out(c), a
+        return new, g, self.W_out(c), a                           # dz is [1, n_action_tokens]
+
+    def scatter_residual(self, logits, g, dz):
+        """Add the gated residual onto the ACTION tokens only, in place of a full-vocab add.
+        Returns logits unchanged when there are no action ids, so this can never silently no-op
+        into something that looks trained."""
+        if not self.action_ids:
+            return logits
+        return logits.index_add(1, self.act_idx, g * dz)
 
 
 # ── the LM decides. every action is decoded text, constrained to what actually exists ─────────────
@@ -213,7 +231,7 @@ class NSTMAgent:
             if self.use_nstm:
                 h = out.hidden_states[-1][:, -1, :].float()
                 slots, g, dz, _ = self.nstm.step(h, slots)
-                logits = logits + g * dz                       # zero at init -> exactly the base LM
+                logits = self.nstm.scatter_residual(logits, g, dz)  # 0 at init -> exactly the base LM
                 gates.append(g.view(-1))
             probs = F.softmax(logits / max(temperature, 1e-6), dim=-1)
             nxt = torch.multinomial(probs, 1) if sample else logits.argmax(-1, keepdim=True)
@@ -234,9 +252,28 @@ def slot_signature(slots) -> np.ndarray:
 
 
 # ── the environment: real repo, real graph, real self-built tools, real verifier ──────────────────
-def build_prompt(issue: str, path: str, src: str, history: list, tools: list, banked: list) -> str:
-    hist = "\n".join(f"  step {i}: {h}" for i, h in enumerate(history[-4:])) or "  (nothing yet)"
+def build_prompt(issue: str, path: str, src: str, history: list, tools: list, banked: list,
+                 have_patch: bool = False) -> str:
+    """SLOTS REPLACE CONTEXT, they do not duplicate it.
+
+    The first version re-sent the issue, the full ~2.6k-char code excerpt and the whole history on
+    EVERY step, so each step re-filled a long KV cache from scratch -- and then added slots on top.
+    That is the inverse of the thesis: NSTM was pure overhead, paying for a second copy of state the
+    prompt was already carrying. Once a patch exists the code excerpt has done its job (the next
+    decision is whether to VERIFY, not what to write), so it is dropped and the recurrent slots carry
+    what mattered. Measured token cost of the excerpt is reported by --run.
+    """
+    hist = "\n".join(f"  step {i}: {h}" for i, h in enumerate(history[-2:])) or "  (nothing yet)"
     bank_txt = "\n".join(f"  - {d}" for d in banked[:3]) or "  (bank empty)"
+    if have_patch:
+        return (f"You are fixing a real bug in {path}.\n\nBUG REPORT:\n{issue[:600]}\n\n"
+                f"WHAT HAS HAPPENED SO FAR:\n{hist}\n\n"
+                f"You ALREADY HAVE a patch that applies and parses. It has NOT been verified.\n"
+                f"Choose ONE action:\n"
+                f"  test()       run the REAL test suite on your current patch\n"
+                f"  author(...)  replace it with a different `def edit(text: str) -> str`\n"
+                f"  stop()       give up\n\n"
+                f"Emit exactly ONE action call and nothing else.")
     # NO ANGLE-BRACKET PLACEHOLDERS. The first version wrote `author(<python>)` as the syntax spec and
     # the 3B copied it literally -- every action parsed to the string "<python>" and all 12 attempts
     # across 3 instances were rejected. A concrete worked example is copied usefully; a placeholder is
@@ -271,12 +308,14 @@ def run_episode(agent: NSTMAgent, row: dict, bank: ToolBank, max_steps: int = 4,
     dev = agent.nstm.W_out.weight.device
     slots = agent.nstm.init_slots(dev)
     state = {"repo": row["repo"], "instance_id": inst}
-    history, logps, sigs = [], [], []
+    history, logps, sigs, ptoks = [], [], [], 0
     tools = ["author", "reuse", "test", "stop"]
     banked = [bank.g.atoms[n].description for n in getattr(bank.g, "atoms", {})][:3]
 
     for step in range(max_steps):
-        prompt = build_prompt(issue, gold, src, history, tools, banked)
+        prompt = build_prompt(issue, gold, src, history, tools, banked,
+                              have_patch=bool(state.get("patch_tool")))
+        ptoks += len(agent.lm.tok(prompt).input_ids)
         text, slots, lp, gate = agent.decode_action(prompt, slots, sample=sample)
         logps += lp
         sigs.append(slot_signature(slots))
@@ -339,14 +378,25 @@ def run_episode(agent: NSTMAgent, row: dict, bank: ToolBank, max_steps: int = 4,
     if state.get("patch_tool") and "tests_passed" not in state:
         ok, _ = t_run_tests(state, None)
         state["tests_passed_unprompted"] = ok
+    state["prompt_tokens"] = ptoks
     return state, logps, sigs
 
 
 def reward(state: dict) -> float:
-    """Verified only. Passing the REAL suite dominates; producing a gated patch is partial credit."""
+    """Verified only. Passing the REAL suite dominates; producing a gated patch is partial credit.
+
+    The +0.3 for ACTUALLY INVOKING the verifier is what makes this trainable at all. Without it every
+    episode authored a patch, none reached test(), and every reward was ~0.2 -- REINFORCE subtracts
+    the mean, so the advantage was ~0 and NSTM received essentially NO GRADIENT across 9 episodes.
+    That run could not have tested the idea either way. Rewarding the act of verifying (not its
+    outcome, which is scored separately and far higher) creates the variance the estimator needs, and
+    it rewards exactly the behaviour that was missing.
+    """
     r = 0.0
     if state.get("patch_tool"):
         r += 0.2
+    if "tests_passed" in state:            # the agent chose to verify -- outcome-independent
+        r += 0.3
     if state.get("tests_passed"):
         r += 1.0
     return r
@@ -382,12 +432,24 @@ def _selftest() -> bool:
         ok &= bool(c)
         print(f"  [{'PASS' if c else 'FAIL'}] {t}{('  - ' + d) if d else ''}")
 
-    n = NSTM(d_model=64, vocab_size=100, num_slots=4, top_k=2, d_slot=32)
+    n = NSTM(d_model=64, vocab_size=100, num_slots=4, top_k=2, d_slot=32, action_ids=[5, 6, 7, 8])
     s = n.init_slots("cpu")
     h = torch.randn(1, 64)
     s2, g, dz, a = n.step(h, s)
     chk("[1] PRIOR PRESERVED: the logit residual is exactly zero at init (W_out zero-init)",
         float(dz.abs().max()) == 0.0, f"max|dz| = {float(dz.abs().max()):.2e}")
+    base = torch.randn(1, 100)
+    chk("[1b] scatter leaves the logits bit-identical at init",
+        torch.equal(n.scatter_residual(base.clone(), g, dz), base))
+    with torch.no_grad():
+        n.W_out.weight.fill_(1.0)
+    s3, g3, dz3, _ = n.step(h, s)
+    out = n.scatter_residual(base.clone(), g3, dz3)
+    touched = (out != base).nonzero()[:, 1].tolist()
+    chk("[1c] a TRAINED residual touches ONLY the action tokens, not the whole vocabulary",
+        touched == [5, 6, 7, 8], f"changed token ids {touched}")
+    chk("[1d] residual is action-sized, not vocab-sized (was 128x151936 = 19.4M params)",
+        n.W_out.weight.shape[0] == 4, f"W_out {tuple(n.W_out.weight.shape)}")
     chk("[2] slots still MOVE at init even though the residual is zero",
         float((s2 - s).abs().max()) > 1e-6)
     chk("[3] write is SPARSE: only top_k slots receive a write",
@@ -412,13 +474,18 @@ def _selftest() -> bool:
     t, _, e = parse_action("delete_everything('/')", ["author", "test", "stop"])
     chk("[7] an unknown tool is rejected outright", t is None and "unknown tool" in e)
 
-    r0, r1 = reward({}), reward({"patch_tool": 1, "tests_passed": True})
+    r_none, r_patch = reward({}), reward({"patch_tool": 1})
+    r_tried = reward({"patch_tool": 1, "tests_passed": False})    # verified, and it FAILED
+    r_pass = reward({"patch_tool": 1, "tests_passed": True})
     chk("[8] reward is verified-only and dominated by the REAL test suite",
-        r0 == 0.0 and r1 == 1.2)
+        r_none == 0.0 and r_patch == 0.2 and r_pass == 1.5 and r_pass > r_tried)
+    chk("[8b] INVOKING the verifier is rewarded even when it fails -- this is the reward VARIANCE "
+        "whose absence gave NSTM ~0 gradient over 9 episodes",
+        r_tried > r_patch, f"patch-only {r_patch} vs verified-but-failed {r_tried}")
 
-    tot = sum(p.numel() for p in NSTM(2048, 151936, d_slot=128).parameters())
-    chk("[9] parameter count is reported honestly (W_out dominates: d_slot x vocab)",
-        tot > 0, f"{tot:,} params on a 3B/151936-vocab LM")
+    tot = sum(p.numel() for p in NSTM(2048, 151936, d_slot=128, action_ids=[1, 2, 3, 4]).parameters())
+    chk("[9] the module is small again now the residual is action-sized, not vocab-sized",
+        tot < 1_000_000, f"{tot:,} params (was 19,907,713 with a full-vocab W_out)")
 
     print(f"\n  ALGO_GRR_NSTM -> {'PASS' if ok else 'FAIL'}")
     return ok
@@ -449,7 +516,13 @@ def main():
     print(f"  VRAM {vram_check('after LM load'):.2f} GB", flush=True)
 
     d_model = lm.model.config.hidden_size
-    nstm = NSTM(d_model, lm.model.config.vocab_size, num_slots=4, top_k=2, d_slot=128).to(lm.device)
+    # the tokens the residual is allowed to touch: the first token of each action word, in the forms
+    # the model actually emits (bare and space-prefixed). Everything else decodes unmodulated.
+    act_ids = sorted({lm.tok(v, add_special_tokens=False).input_ids[0]
+                      for w in ("author", "reuse", "test", "stop") for v in (w, " " + w)})
+    print(f"action tokens the residual may touch: {act_ids}", flush=True)
+    nstm = NSTM(d_model, lm.model.config.vocab_size, num_slots=4, top_k=2, d_slot=128,
+                action_ids=act_ids).to(lm.device)
     use = "no-nstm" not in a.abl
     print(f"NSTM: {sum(p.numel() for p in nstm.parameters()):,} params  active={use}", flush=True)
     agent = NSTMAgent(lm, nstm, use_nstm=use)
@@ -460,10 +533,11 @@ def main():
 
     print(f"\n{'=' * 74}\nEVAL -- every decision is the LM's; NSTM only shifts logits\n{'=' * 74}",
           flush=True)
-    solved, patched, sigs, unprompted = 0, 0, [], 0
+    solved, patched, sigs, unprompted, ptok = 0, 0, [], 0, 0
     for row in rows:
         st, _, sg = run_episode(agent, row, bank, max_steps=a.steps, sample=False, verbose=True)
         sigs += sg[-1:]
+        ptok += st.get("prompt_tokens", 0)
         patched += int(bool(st.get("patch_tool")))
         if st.get("tests_passed"):
             solved += 1
@@ -478,6 +552,8 @@ def main():
     print(f"  REAL SOLVES (agent ran the verifier): {solved}/{len(rows)}")
     print(f"  patch passes when verified for it   : {unprompted}/{len(rows)}   "
           f"[harness-initiated check, NOT an agent decision]")
+    print(f"  PROMPT TOKENS fed to the LM        : {ptok}  ({ptok / max(1, len(rows)):.0f}/instance)"
+          f"   <- the load the slots are supposed to remove")
     print(f"  banked tools  : {len(bank)}")
     if use and len(sigs) > 1:
         M = np.stack(sigs)
