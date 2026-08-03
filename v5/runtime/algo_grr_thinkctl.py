@@ -441,12 +441,43 @@ def train(ctl: ThinkerController, domain: Domain, data: list, epochs: int = 6, l
 
 
 # ── data loaders: real rows only, shaped to Domain.init_state's expectations ───────────────────────
-def _load_swe_rows(n: int) -> list:
-    rows = [r for r in json.loads((Path(_ROOT) / "artifacts" / "swebench_loc_big.json")
-                                   .read_text(encoding="utf-8")) if r["repo"] == "django/django"][:n]
-    random.Random(0).shuffle(rows)
-    return [{"goal": r["problem"], "gold": r["gold"], "repo": r["repo"], "instance_id": r["instance_id"]}
-            for r in rows]
+# held-REPO convention (pytest, sphinx) matches the rest of this project's SWE-bench work
+# (membrane.py's --locate, scripts/loc_thinker_sweep.py) so numbers are comparable across files.
+_HELD_REPOS = ("pytest-dev/pytest", "sphinx-doc/sphinx")
+
+
+def _load_swe_rows(n_per_repo: int = 8, seed: int = 0):
+    """Real, OPEN, multi-repo SWE-bench -- not a django-only slice (django is 668 of 1725 real mined
+    instances; a plain random sample would still be ~39% django). Stratified per-repo sampling so the
+    other 11 repos are actually represented. Returns (train, held_instance, held_repo):
+      - held_instance: unseen ISSUES from repos the controller trained on elsewhere.
+      - held_repo: repos NEVER seen in training at all -- the deployment case, reported even when bad.
+    All real checkouts confirmed present at E:/swebench_src for all 12 repos before this was written."""
+    rows = json.loads((Path(_ROOT) / "artifacts" / "swebench_loc_big.json").read_text(encoding="utf-8"))
+    by_repo: dict = {}
+    for r in rows:
+        by_repo.setdefault(r["repo"], []).append(r)
+    rng = random.Random(seed)
+
+    def mk(r):
+        return {"goal": r["problem"], "gold": r["gold"], "repo": r["repo"], "instance_id": r["instance_id"]}
+
+    held_r = []
+    for repo in _HELD_REPOS:
+        rs = by_repo.get(repo, [])[:]
+        rng.shuffle(rs)
+        held_r += [mk(r) for r in rs[:n_per_repo]]
+
+    pool = []
+    for repo, rs in by_repo.items():
+        if repo in _HELD_REPOS:
+            continue
+        rs = rs[:]
+        rng.shuffle(rs)
+        pool += [mk(r) for r in rs[:n_per_repo]]
+    rng.shuffle(pool)
+    split = int(len(pool) * 0.7)
+    return pool[:split], pool[split:], held_r
 
 
 def _load_qa_rows(n: int) -> list:
@@ -570,12 +601,37 @@ def _selftest() -> bool:
     return ok
 
 
+def _eval_held(ctl, domain, rows, blind, lm, label):
+    import collections
+    tot = collections.Counter()
+    n, spoken_n, faithful = 0, 0, 0
+    for row in rows:
+        st, _, trace = run_episode(ctl, domain, row, blind=blind)
+        for k, v in domain.metrics_fn(st, row["gold"]).items():
+            tot[k] += float(v)
+        n += 1
+        decision = domain.decision_fn(st)
+        if lm is not None and decision:
+            spoken = speak(row["goal"], trace, decision, lm)
+            spoken_n += 1
+            faithful += int(speak_faithful(decision, spoken))
+    n = max(1, n)
+    print(f"\n  {label} ({n} instances, gold NEVER visible during the episode)")
+    for k, v in tot.items():
+        print(f"    {k:<22} {v / n:.3f}")
+    if spoken_n:
+        print(f"    {'LM narration faithful':<22} {faithful / spoken_n:.3f}  (n={spoken_n})")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Thinker as a domain-general controller over real tools.")
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--run", action="store_true")
     ap.add_argument("--domain", choices=["swe", "hotpot"], default="swe")
-    ap.add_argument("--n", type=int, default=40)
+    ap.add_argument("--n", type=int, default=40, help="HotpotQA: total questions.")
+    ap.add_argument("--n-per-repo", type=int, default=8,
+                    help="SWE: real instances sampled per repo (stratified across all 12 open "
+                         "SWE-bench repos, not just django).")
     ap.add_argument("--abl", type=str, default="")
     ap.add_argument("--lm", type=str, default="")
     ap.add_argument("--seed", type=int, default=0)
@@ -591,43 +647,35 @@ def main():
             from v5.runtime.dcpd_latent import WhiteBox
             lm = WhiteBox(a.lm, quant="4bit")
 
+        held_r = []
         if a.domain == "swe":
-            rows = _load_swe_rows(a.n)
+            tr, held, held_r = _load_swe_rows(n_per_repo=a.n_per_repo, seed=a.seed)
             domain = make_swe_domain(lm=lm, use_locate=use_locate)
+            repo_line = (f"repos: {sorted({r['repo'] for r in tr + held})} train/held-I, "
+                        f"{list(_HELD_REPOS)} held-REPO (never trained on)")
         else:
             rows = _load_qa_rows(a.n)
             domain = make_qa_domain()
+            tr, held = rows[: int(len(rows) * 0.7)], rows[int(len(rows) * 0.7):]
+            repo_line = ""
 
-        tr, held = rows[: int(len(rows) * 0.7)], rows[int(len(rows) * 0.7):]
-        print(f"algo_grr_thinkctl: domain={a.domain}  {len(tr)} train / {len(held)} held  "
-              f"blind={blind}  locate={use_locate if a.domain == 'swe' else 'n/a'}  lm={a.lm or 'none'}  "
-              f"seed={a.seed}\n")
-        # unseeded, REINFORCE over ~30 sparse-reward episodes is genuinely seed-sensitive -- one
-        # unlucky init converged to an always-stop policy (0.000 on every metric). Seeding makes runs
+        print(f"algo_grr_thinkctl: domain={a.domain}  {len(tr)} train / {len(held)} held-I / "
+              f"{len(held_r)} held-REPO  blind={blind}  locate={use_locate if a.domain == 'swe' else 'n/a'}"
+              f"  lm={a.lm or 'none'}  seed={a.seed}")
+        if repo_line:
+            print(f"  {repo_line}")
+        print()
+        # unseeded, REINFORCE over sparse-reward episodes is genuinely seed-sensitive -- one unlucky
+        # init converged to an always-stop policy (0.000 on every metric). Seeding makes runs
         # reproducible and comparable across ablations; it does not hide instability, it controls for it.
         torch.manual_seed(a.seed)
         ctl = ThinkerController(n_tool=len(domain.tool_names))
         train(ctl, domain, tr, epochs=a.epochs, blind=blind)
 
-        import collections
-        tot = collections.Counter()
-        n, spoken_n, faithful = 0, 0, 0
-        for row in held:
-            st, _, trace = run_episode(ctl, domain, row, blind=blind)
-            for k, v in domain.metrics_fn(st, row["gold"]).items():
-                tot[k] += float(v)
-            n += 1
-            decision = domain.decision_fn(st)
-            if lm is not None and decision:
-                spoken = speak(row["goal"], trace, decision, lm)
-                spoken_n += 1
-                faithful += int(speak_faithful(decision, spoken))
-        n = max(1, n)
-        print(f"\n  held-out ({n} instances, domain={a.domain}, gold NEVER visible during the episode)")
-        for k, v in tot.items():
-            print(f"    {k:<22} {v / n:.3f}")
-        if spoken_n:
-            print(f"    {'LM narration faithful':<22} {faithful / spoken_n:.3f}  (n={spoken_n})")
+        _eval_held(ctl, domain, held, blind, lm, "held-INSTANCE" if a.domain == "swe" else "held-out")
+        if held_r:
+            _eval_held(ctl, domain, held_r, blind, lm,
+                      "held-REPO (unseen repos entirely -- the deployment case)")
         sys.exit(0)
     ap.print_help()
 
