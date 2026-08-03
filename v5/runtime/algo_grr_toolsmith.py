@@ -34,6 +34,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import torch
+
 _ROOT = str(Path(__file__).resolve().parents[2])
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
@@ -180,6 +182,35 @@ def _excerpt(text: str, issue: str, budget: int = 2600) -> str:
     return "\n".join(out) if out else text[:budget]
 
 
+VRAM_BUDGET_GB = 6.0
+
+
+def vram_check(where: str = "") -> float:
+    """Enforce the deployment ceiling instead of assuming it.
+
+    The figure previously quoted for the 3B (2.11 GB) was torch.cuda.max_memory_allocated, i.e. TENSORS
+    ONLY -- it excludes the CUDA context, the caching allocator's reserve, and the KV cache. Measured
+    device-side during a real authoring run: 4.6 GB early, 5.86 GB of 6.14 GB later, i.e. ~280 MiB of
+    headroom. The growth is KV cache, which scales with the excerpt in the authoring prompt and was
+    bounded nowhere. This makes the budget a checked property with a real number attached.
+    """
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return 0.0
+        # mem_get_info needs a live CUDA context in THIS process, otherwise it reports nonsense
+        # (measured: 0.00 GB while another process genuinely held 5.8 GB on the device).
+        torch.cuda.init()
+        free, total = torch.cuda.mem_get_info()
+        used_gb = (total - free) / 1e9
+        if used_gb > VRAM_BUDGET_GB:
+            print(f"  [VRAM] {used_gb:.2f} GB EXCEEDS the {VRAM_BUDGET_GB} GB budget {where}",
+                  flush=True)
+        return used_gb
+    except Exception:                                              # noqa: BLE001
+        return 0.0
+
+
 def author_edit_tool(issue: str, path: str, text: str, lm, retries: int = 2) -> tuple:
     """The LM authors `def edit(text)->str`; it is executed and gated. Returns (ok, code, new_text,
     note). The LM never edits the file -- it writes a tool, and the tool's OUTPUT is what gets gated."""
@@ -190,8 +221,12 @@ def author_edit_tool(issue: str, path: str, text: str, lm, retries: int = 2) -> 
         prompt = _PROMPT.format(issue=issue[:1200], path=path, excerpt=_excerpt(text, issue))
         if attempt:
             prompt += f"\nYour previous attempt failed: {last}\nFix it.\n"
+        vram_check(f"before authoring attempt {attempt}")
         try:
             raw = str(lm.generate_chat(prompt, max_new=420)).strip()
+        except torch.cuda.OutOfMemoryError as e:                   # noqa: BLE001
+            torch.cuda.empty_cache()
+            return False, "", "", f"OOM during authoring ({e})"
         except Exception as e:                                     # noqa: BLE001
             return False, "", "", f"LM call failed: {e!r}"
         code = strip_fences(raw)

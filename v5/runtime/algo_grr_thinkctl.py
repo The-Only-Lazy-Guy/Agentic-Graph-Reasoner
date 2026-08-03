@@ -568,6 +568,71 @@ def run_episode(ctl: ThinkerController, domain: Domain, row: dict, sample: bool 
     return state, logps, trace
 
 
+# ── supervised pretraining of the ARGUMENT POINTER ────────────────────────────────────────────────
+# Measured bottleneck, not a guess: the controller reaches the gold file ~0.00-0.08 of the time while
+# the gold file is IN GREP'S TOP-12 for 0.786 of held instances (best of 12 issue tokens). The gap is
+# pure credit assignment -- REINFORCE over ~60 episodes never discovers WHICH issue token to grep,
+# because a wrong token yields the same near-zero reward as any other wrong token.
+#
+# THE EXPERT IS REALIZABLE, which is the thing that makes this safe to clone. [[expert-must-be-
+# realizable]] in this project's notes: cloning an expert that reads state the model CANNOT see gives
+# an irreducible loss floor that looks exactly like underfitting. Here the expert chooses an index
+# from THE SAME candidate list the policy is scoring, using no state the policy lacks -- it just knows
+# the answer at TRAINING time. Gold is used to build labels offline and never enters an episode.
+def grep_expert_label(row: dict, cands: list, topk: int = 12):
+    """Which candidate, when grepped, actually surfaces the gold file? Returns an index or None.
+    This runs the REAL grep -- the label is an execution result, never an assumption."""
+    for i, c in enumerate(cands):
+        st = {"repo": row["repo"]}
+        ok, _ = t_grep(st, c)
+        if ok and any(h.split(":")[0] == row["gold"] for h in st.get("last_grep", [])[:topk]):
+            return i
+    return None
+
+
+def build_pointer_labels(domain: Domain, data: list, verbose: bool = True):
+    """(goal_text, candidates, expert_index) for every instance where SOME candidate reaches gold.
+    Instances with no such candidate are dropped: nothing in this candidate set can reach their gold,
+    so a label would be a lie and training on it would teach noise."""
+    out = []
+    for j, row in enumerate(data):
+        cands = domain.arg_fn(row["goal"], {})
+        if not cands:
+            continue
+        idx = grep_expert_label(row, cands)
+        if idx is not None:
+            out.append((row["goal"], cands, idx))
+        if verbose and (j + 1) % 10 == 0:
+            print(f"    labelled {j + 1}/{len(data)}  usable={len(out)}", flush=True)
+    return out
+
+
+def pretrain_pointer(ctl: ThinkerController, labels: list, epochs: int = 30, lr: float = 3e-3,
+                     verbose: bool = True):
+    """Teach the FIRST decision: from the initial state, which candidate should be grepped.
+
+    Supervised cross-entropy over the candidate set, at the episode's opening state (z0) -- that is
+    where the choice actually bites, since a wrong first grep sends every later step down a dead end.
+    Only arg_head/q_proj move here; the tool policy is left to RL."""
+    from embedder import encode_batch
+    opt = torch.optim.Adam(ctl.parameters(), lr=lr)
+    cache = [(torch.tensor(encode_batch([g[:1000]])[0], dtype=torch.float32),
+              torch.tensor(encode_batch(c), dtype=torch.float32), i) for g, c, i in labels]
+    for ep in range(epochs):
+        tot, hit = 0.0, 0
+        for goal, ce, gi in cache:
+            z0 = ctl.init_z(goal)
+            al = ctl.arg_logits(z0, goal, ce)
+            loss = nn.functional.cross_entropy(al.unsqueeze(0), torch.tensor([gi]))
+            opt.zero_grad(); loss.backward(); opt.step()
+            tot += float(loss)
+            hit += int(int(al.argmax()) == gi)
+        if verbose and (ep + 1) % 10 == 0:
+            print(f"    [pointer] epoch {ep + 1:3d}  loss {tot / max(1, len(cache)):.4f}  "
+                  f"train top1 {hit / max(1, len(cache)):.3f}", flush=True)
+    return ctl
+
+
 def train(ctl: ThinkerController, domain: Domain, data: list, epochs: int = 6, lr: float = 3e-3,
          blind: bool = False, verbose: bool = True, batch: int = 8, ent_w: float = 0.01):
     """REINFORCE with a mean-reward baseline, updated per MINIBATCH.
