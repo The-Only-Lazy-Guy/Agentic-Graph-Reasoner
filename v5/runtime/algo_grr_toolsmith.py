@@ -166,9 +166,13 @@ def _excerpt(text: str, issue: str, budget: int = 2600) -> str:
     out, last, size = [], -1, 0
     for i in sorted(keep):
         if i != last + 1:
-            out.append("        ...")
-        seg = f"{i + 1:6d}  {lines[i]}"
-        size += len(seg)
+            out.append("...")
+        # VERBATIM lines, no line-number prefix. Prefixing "  485  " made the dominant failure mode
+        # "tool made no change": the model copied the decorated line into its `old` string, so
+        # text.replace() matched nothing. The whole mechanism depends on `old` being byte-identical to
+        # the file, and leading indentation is part of that -- so the excerpt must not decorate it.
+        seg = lines[i]
+        size += len(seg) + 1
         if size > budget:
             break
         out.append(seg)
@@ -201,6 +205,14 @@ def author_edit_tool(issue: str, path: str, text: str, lm, retries: int = 2) -> 
         good, note = gate_edit(text, res)
         if good:
             return True, code, res, note
+        # "made no change" is almost always a non-matching `old` literal. Say so specifically, and
+        # quote the offending string back -- a bare "no change" gives the model nothing to correct,
+        # and this was the single most common failure (5 of 6 attempts on one instance).
+        if "no change" in note:
+            miss = [m for m in re.findall(r'["\']((?:[^"\'\\]|\\.){12,})["\']', code)
+                    if m not in text][:1]
+            note = (f"the `old` string was not found verbatim in the file: {miss[0][:90]!r}. "
+                    f"Copy it EXACTLY from the file, including leading spaces." if miss else note)
         last = note
     return False, "", "", last
 

@@ -167,6 +167,38 @@ def t_edit(state, arg):
     return True, f"edit applies cleanly to {state['open_file']} and still parses"
 
 
+_CFILE_CACHE: dict = {}
+
+
+def container_file_text(instance_id: str, path: str) -> str:
+    """The file EXACTLY as the container has it, at the instance's base commit.
+
+    This exists because the local checkout at E:/swebench_src is at HEAD while every container is
+    pinned to its instance's base commit, and the gap is not cosmetic: on django__django-11133 the
+    model proposed `        if isinstance(value, bytes):` -- the REAL gold anchor, verified to pass in
+    the container -- and the local pre-filter rejected it as "not in the file verbatim" because HEAD
+    had since changed that line. The harness was throwing away correct fixes. Anything that shows the
+    model code, or checks the model's `old` string, must read from HERE, not from the local clone.
+    """
+    key = (instance_id, path)
+    if key in _CFILE_CACHE:
+        return _CFILE_CACHE[key]
+    img = f"swebench/sweb.eval.x86_64.{instance_id.replace('__', '_1776_')}:latest"
+    try:
+        # binary pipe + explicit utf-8 decode. Letting subprocess decode with the Windows default
+        # (cp1252) crashed on a real source file containing a 0x9d byte, losing an instance outright:
+        # "UnicodeDecodeError: 'charmap' codec can't decode byte 0x9d".
+        r = subprocess.run(["wsl", "-d", os.environ.get("WSL_DISTRO", "UbuntuE"),
+                            "docker", "run", "--rm", "--pull", "never", "--entrypoint", "bash", img,
+                            "-lc", f"cat /testbed/{path}"],
+                           capture_output=True, timeout=300)
+        txt = r.stdout.decode("utf-8", errors="replace") if r.returncode == 0 else ""
+    except Exception:                                              # noqa: BLE001
+        txt = ""
+    _CFILE_CACHE[key] = txt
+    return txt
+
+
 def t_run_tests(state, arg):
     """THE verifier: run the instance's real tests in its SWE-bench container. Everything else in
     this file is navigation; this is the only step that can say the work was right."""
@@ -234,11 +266,14 @@ def t_run_tests(state, arg):
         # --pull=never: fail fast on an uncached image instead of silently pulling several GB. Only a
         # handful of images are cached locally (checked before this was added: 3 django instances) --
         # without this flag, calling this tool on any other instance would trigger a multi-GB download.
+        # decode explicitly as utf-8; the Windows default (cp1252) raises on real test output
+        # containing non-cp1252 bytes and would turn a genuine result into a crash.
         r = subprocess.run(["wsl", "-d", os.environ.get("WSL_DISTRO", "UbuntuE"),
                             "docker", "run", "--rm", "--pull", "never", "--entrypoint", "bash", img,
                             "-lc", script],
-                           capture_output=True, text=True, timeout=900)
-        out = (r.stdout or "") + (r.stderr or "")
+                           capture_output=True, timeout=900)
+        out = (r.stdout.decode("utf-8", errors="replace")
+               + r.stderr.decode("utf-8", errors="replace"))
     except Exception as e:                                     # noqa: BLE001
         return False, f"test run failed to start: {e!r}"
     # exit code is the primary signal now that pipefail makes it trustworthy. The text markers are a
@@ -375,8 +410,9 @@ def _calibrate() -> bool:
                       + f"set -o pipefail && ({cmd}) 2>&1 | tail -25")
             r = _sp.run(["wsl", "-d", os.environ.get("WSL_DISTRO", "UbuntuE"), "docker", "run",
                          "--rm", "--pull", "never", "--entrypoint", "bash", img, "-lc", script],
-                        capture_output=True, text=True, timeout=900)
-            o = (r.stdout or "") + (r.stderr or "")
+                        capture_output=True, timeout=900)
+            o = (r.stdout.decode("utf-8", errors="replace")
+                 + r.stderr.decode("utf-8", errors="replace"))
             pos = (r.returncode == 0) and ((" passed" in o.lower())
                                             or re.search(r"^OK\b", o, re.M) is not None)
         good = (not neg) and pos
