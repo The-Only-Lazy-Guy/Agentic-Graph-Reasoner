@@ -123,8 +123,43 @@ def edit(text: str) -> str:
 """
 
 
-def author_tool(lm, issue: str, before: str, feedback: str = "") -> str:
-    p = PROMPT.format(issue=issue[:900], before=before[:1500])
+ial_PROMPT = """You are fixing a bug by writing a small Python function.
+
+BUG REPORT:
+{issue}
+
+THE CODE THAT MUST CHANGE:
+{before}
+
+Write a function:
+
+def edit(text: str) -> str
+
+It receives the code above and returns it with the bug fixed. Use an exact string replacement:
+copy the line to change VERBATIM from the code above, including its leading indentation.
+Change only what the bug requires.
+
+Output ONLY the function. No markdown fences, no commentary.
+
+Example:
+
+def edit(text: str) -> str:
+    old = "    if isinstance(value, bytes):"
+    new = "    if isinstance(value, (bytes, memoryview)):"
+    return text.replace(old, new, 1)
+"""
+
+
+def author_tool(lm, issue: str, before: str, feedback: str = "", style: str = "param") -> str:
+    """style='param' asks for a REUSABLE pattern; style='literal' asks for an exact replacement.
+
+    The literal arm is the CONTROL that makes the parameterised result interpretable. Asking for a
+    generalising regex is strictly harder than asking for a string replace, so a null in the
+    parameterised arm alone cannot distinguish "tools do not transfer" from "this model cannot write
+    the harder kind of tool at all". Running both on the SAME instances separates them.
+    """
+    tmpl = PROMPT if style == "param" else ial_PROMPT
+    p = tmpl.format(issue=issue[:900], before=before[:1500])
     if feedback:
         p += f"\nYour previous attempt failed: {feedback}\nFix exactly that.\n"
     try:
@@ -155,7 +190,8 @@ def is_parameterised(code: str) -> bool:
 
 
 # ── the experiment: reuse FIRST, author only on miss ─────────────────────────────────────────────
-def run(lm, rows: list, bank: ToolBank, tries: int = 2, verbose: bool = True) -> dict:
+def run(lm, rows: list, bank: ToolBank, tries: int = 2, verbose: bool = True,
+        style: str = "param") -> dict:
     """Stream instances in order. For each: try every banked tool first (ZERO LM calls); only if all
     fail does the LM author a new one. Verified tools are banked. The claim lives or dies on whether
     the replay column stays at zero."""
@@ -185,7 +221,7 @@ def run(lm, rows: list, bank: ToolBank, tries: int = 2, verbose: bool = True) ->
         fb, done = "", False
         for _ in range(tries):
             stats["lm_calls"] += 1
-            code = author_tool(lm, row["problem"], before, fb)
+            code = author_tool(lm, row["problem"], before, fb, style=style)
             good, why = tool_fixes(code, before, after)
             if good:
                 stats["authored"] += 1
@@ -251,6 +287,9 @@ def main():
     ap.add_argument("--n", type=int, default=60)
     ap.add_argument("--lm", type=str, default="Qwen/Qwen2.5-3B-Instruct")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--style", choices=["param", "literal"], default="param",
+                    help="literal = the CONTROL arm: exact string replacement, easier to "
+                         "author but cannot transfer by construction")
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
@@ -262,11 +301,11 @@ def main():
     from v5.runtime.dcpd_latent import WhiteBox
     lm = WhiteBox(a.lm, quant="4bit")
     bank = ToolBank()
-    st = run(lm, rows, bank)
+    st = run(lm, rows, bank, style=a.style)
 
     n = max(1, st["n"])
     print(f"\n{'=' * 74}")
-    print(f"TRANSFER OF SELF-AUTHORED, VERIFIED TOOLS   (n={n}, {a.lm})")
+    print(f"TRANSFER OF SELF-AUTHORED, VERIFIED TOOLS   (n={n}, {a.lm}, style={a.style})")
     print(f"  repaired in total                 : {st['solved']}/{n}")
     print(f"  ...by REPLAY of a banked tool     : {st['replay']}   <- ZERO LM calls")
     print(f"  ...by authoring a new tool        : {st['authored']}")
