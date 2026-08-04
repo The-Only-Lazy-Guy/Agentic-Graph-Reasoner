@@ -56,13 +56,37 @@ class PrefixSlots(nn.Module):
         super().__init__()
         self.n_slots, self.d_slot = n_slots, d_slot
         self.ctx_in = nn.Linear(384, d_slot)
-        self.to_emb = nn.Linear(d_slot, d_model)
+        # NO BIAS on the projection into embedding space. THIS WAS DESTROYING THE EXPERIMENT.
+        # Measured at init: input chunk embeddings are well separated (across-instance cosine 0.0994),
+        # but the prefix vectors coming OUT were collapsed at 0.9170 -- because ||bias|| = 2.27 against
+        # a mean signal norm of 1.09, i.e. the bias was 2.09x the signal and every instance's prefix
+        # was mostly the same vector. With bias removed: 0.5395.
+        # If the prefix barely varies across instances, shuffling the issue CANNOT change much, so the
+        # falsifier reads ~0 BY CONSTRUCTION rather than by finding. Every "instance-specificity is
+        # zero" number from this module is contaminated by that.
+        # This is the THIRD time a bias/collapse in a write path produced a false null here (SupNSTM
+        # write() ran a GRU from zero slots: 0.9960; then the readout could bypass the slots entirely).
+        self.to_emb = nn.Linear(d_slot, d_model, bias=False)
         # the FIXED control: K learned slot vectors with no issue input at all
         self.fixed = nn.Parameter(torch.randn(n_slots, d_slot) * 0.02)
 
     def forward(self, chunk_emb, fixed: bool = False):
-        s = self.fixed if fixed else torch.tanh(self.ctx_in(chunk_emb))
+        # NO tanh. It saturated and cost a second collapse on its own: 0.0994 -> 0.5630 before the
+        # projection had even been applied. A plain linear map preserves the separation the encoder
+        # produced; the LM sees the prefix through its own layer norms anyway.
+        s = self.fixed if fixed else self.ctx_in(chunk_emb)
         return self.to_emb(s)                                   # [K, d_model]
+
+    def separation(self, chunk_embs) -> float:
+        """Across-instance cosine of the PREFIX VECTORS. Call it before trusting any falsifier from
+        this module: if this is ~1.0 the prefix is a constant and the shuffle test cannot detect
+        anything, however the rest of the pipeline behaves."""
+        with torch.no_grad():
+            P = torch.stack([self(torch.as_tensor(e)).flatten() for e in chunk_embs]).float()
+        P = P / (P.norm(dim=1, keepdim=True) + 1e-9)
+        S = (P @ P.T).cpu().numpy()
+        import numpy as _np
+        return float(_np.mean(S[~_np.eye(len(S), dtype=bool)]))
 
 
 def loss_with_prefix(lm, mod, chunk_emb, prompt: str, target: str, arm: str):
@@ -179,12 +203,16 @@ def main():
             Etr = np.stack([embed_chunks(r["issue"], k) for r in tr])
             Eh = np.stack([embed_chunks(r["issue"], k) for r in held])
             a.slots = k
+            # GUARD: if the prefix vectors are near-identical across instances the falsifier cannot
+            # detect anything, whatever the rest of the pipeline does. Printed with every row so a
+            # collapsed channel can never again be reported as 'no instance-specificity'.
+            sep = PrefixSlots(lm.model.config.hidden_size, k).to('cpu').separation(Eh[:8])
             mfk = train("fixed"); fk, _ = evaluate(mfk, "fixed")
             mpk = train("prefix"); pk, _ = evaluate(mpk, "prefix")
             sk, sd = evaluate(mpk, "prefix", shuffle=True)
             rk, _ = evaluate(mpk, "prefix", rand_prefix=True)
             print(f"  {k:>3} {fk:9.4f} {pk:9.4f} {sk:8.4f}+-{sd:.3f} {rk:11.4f} "
-                  f"{sk - pk:15.4f} {rk - pk:9.4f}", flush=True)
+                  f"{sk - pk:15.4f} {rk - pk:9.4f}   prefix-sep {sep:.3f}", flush=True)
         print("\n  P-vs-S is the issue-specific signal (random derangement, K-invariant difficulty).")
         print("  P-vs-R says only that SOME prefix beats a random one -- it is not memory.")
         return

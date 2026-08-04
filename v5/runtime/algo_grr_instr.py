@@ -86,27 +86,115 @@ def write_instruction(lm, r) -> str:
     return out[:200]
 
 
-def build_bank(lm, rows, graph):
+import re as _re
+
+# Reject: backticked spans, ANY underscore-bearing token (`_indices`, `w_pad`, `make_bytes` --
+# a LEADING-underscore name is NOT caught by the naive \w+_\w+, which was a real hole in the first
+# version), dotted attribute paths, and camelCase. All are this-bug identifiers that cannot fire on
+# another bug, so they are exactly the instructions that make a bank untransferable.
+BACKTICK = _re.compile(r"`[^`]+`|\S*_\S*|\w+\.\w+|[a-z]+[A-Z]\w*")
+
+
+def is_generic(ins: str) -> bool:
+    """GENERIC-NESS GATE, applied at BANK time -- the same verifier-gated discipline used for tools.
+    An instruction naming THIS bug's identifiers cannot fire on another bug, which is the tool-transfer
+    failure in prose form. Measured on the first run: 27 of 60 banked instructions embedded specific
+    names (`w_pad`, `indptr`, `_indices`), so nearly half the bank was untransferable by construction."""
+    return not BACKTICK.search(ins or "")
+
+
+def defect_key(r, mode: str) -> str:
+    """What the instruction is INDEXED by.
+
+    CONSTRAINT that decides this: at query time only the ISSUE and the OLD line exist -- `new` is the
+    thing being predicted, so an old->new change-shape key is usable when BANKING and unavailable when
+    QUERYING. The key must therefore be computable from (issue, old) alone.
+
+    mode:
+      issue -- the issue prose (the original, and measured weak: retrieval bought +0.0339 over random)
+      code  -- the OLD LINE, i.e. the code context that needs repairing. Issue text is mostly
+               traceback, repro steps and repo chatter; the defect lives in the line.
+      both  -- code first, then a short issue tail.
+    """
+    if mode == "issue":
+        return r["issue"][:600]
+    if mode == "code":
+        return r["old"][:200]
+    return f"{r['old'][:200]} || {r['issue'][:200]}"
+
+
+def build_bank(lm, rows, graph, key_mode: str = "code", gate: bool = True):
     """Bank each instruction as a real atom in the worlds graph, keyed by the ISSUE embedding -- the
     same AtomGraph the rest of this project uses, not a private dict."""
     from embedder import encode_batch
     from v5.runtime.membrane import Atom
-    kept = []
+    kept, seen_key, n_gated = [], set(), 0
     for i, r in enumerate(rows):
         ins = write_instruction(lm, r)
         if len(ins) < 12:
             continue
-        emb = np.asarray(encode_batch([r["issue"][:600]])[0], dtype=np.float32)
+        if gate and not is_generic(ins):
+            n_gated += 1
+            continue
+        k = defect_key(r, key_mode)
+        if k in seen_key:            # DEDUPE BY KEY: multi-hunk bugs share an issue, so the original
+            continue                 # dedupe on (issue,old,new) still left IDENTICAL keys (cosine 1.0)
+        seen_key.add(k)
+        emb = np.asarray(encode_batch([k])[0], dtype=np.float32)
         graph.add(Atom(name=f"instr::{r['instance_id']}::{i}", code="", kind="instruction",
                        provenance="self-written", description=ins, emb=emb))
         kept.append((r["instance_id"], ins, emb))
-        if (i + 1) % 25 == 0:
-            print(f"    wrote {i+1}/{len(rows)}  banked {len(kept)}", flush=True)
+        if (i + 1) % 50 == 0:
+            print(f"    wrote {i+1}/{len(rows)}  banked {len(kept)}  gated-out {n_gated}", flush=True)
+    print(f"    gate rejected {n_gated} name-specific instructions", flush=True)
     return kept
 
 
-def retrieve(bank, issue_emb, mode: str, rng):
-    """mode: nearest | random. Random is the control that decides whether RETRIEVAL matters at all."""
+def validate_bank(lm, bank, val_rows, graph, min_gain: float = 0.0):
+    """VERIFIER-GATED GRAPH EDITING: keep an instruction only if it MEASURABLY helps.
+
+    This is the loop that was missing, and it is why retrieval looked dead. Nothing ever checked
+    whether a banked instruction was any good: they were written once from a solved bug and never
+    revised, so an instruction that HURTS stayed in the graph forever. Measured directly -- a
+    mismatched instruction took a held bug from CE 1.2719 to 1.8045. If a large share of the bank is
+    harmful, nearest-neighbour retrieval keeps picking harmful entries and the average washes out,
+    which is exactly the +0.01-0.03 signal seen against a random draw.
+
+    So each instruction is APPLIED to a small validation slice and scored by the CE it actually
+    causes, versus no instruction at all. Negative-utility entries are DELETED FROM THE GRAPH. This is
+    the same discipline the rest of this project uses for tools and atoms: writes are gated by real
+    outcomes, never by plausibility. It is also the first time anything here EDITS the graph rather
+    than only appending to it.
+    """
+    base = [ce_on_target(lm, USE_PROMPT_B.format(old=r["old"]), r["new"]) for r in val_rows]
+    kept, dropped = [], 0
+    for j, (iid, ins, emb) in enumerate(bank):
+        gains = []
+        for r, b in zip(val_rows, base):
+            c = ce_on_target(lm, USE_PROMPT_N.format(instr=ins, old=r["old"]), r["new"])
+            gains.append(b - c)                      # positive == the instruction HELPED
+        u = float(np.mean(gains))
+        if u > min_gain:
+            kept.append((iid, ins, emb, u))
+        else:
+            dropped += 1
+            for nm in [k for k, at in graph.atoms.items() if at.description == ins]:
+                graph.atoms.pop(nm, None)            # the graph EDIT: harmful entry removed
+        if (j + 1) % 25 == 0:
+            print(f"    validated {j+1}/{len(bank)}  kept {len(kept)}  pruned {dropped}", flush=True)
+    print(f"    PRUNED {dropped} of {len(bank)} instructions by MEASURED utility "
+          f"(graph now {len(graph.atoms)} atoms)", flush=True)
+    return kept
+
+
+def retrieve(bank, issue_emb, mode: str, rng, k: int = 5):
+    """mode: nearest | random | topk.
+
+    random = uniform over the WHOLE bank -- the weakest control, and the one nearest must beat.
+    topk   = a random draw from the k NEAREST. Separates COARSE topical match from FINE ranking:
+             if nearest ~= topk but both >> random, the graph's membership carries the signal and its
+             ORDERING does not.
+    """
     if not bank:
         return ""
     if mode == "random":
@@ -114,7 +202,11 @@ def retrieve(bank, issue_emb, mode: str, rng):
     M = np.stack([b[2] for b in bank])
     M = M / (np.linalg.norm(M, axis=1, keepdims=True) + 1e-9)
     q = issue_emb / (np.linalg.norm(issue_emb) + 1e-9)
-    return bank[int((M @ q).argmax())][1]
+    sims = M @ q
+    if mode == "topk":
+        idx = list(np.argsort(-sims)[:min(k, len(bank))])
+        return bank[int(idx[rng.randrange(len(idx))])][1]
+    return bank[int(sims.argmax())][1]
 
 
 def ce_on_target(lm, prompt: str, target: str) -> float:
@@ -137,6 +229,17 @@ def main():
     ap.add_argument("--n", type=int, default=400)
     ap.add_argument("--lm", type=str, default="Qwen/Qwen2.5-3B-Instruct")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--key", type=str, default="code", choices=["issue", "code", "both"],
+                    help="what instructions are INDEXED by. issue = the original weak key "
+                         "(+0.0339 over random); code = the OLD LINE, which is where the defect "
+                         "actually lives; both = code + a short issue tail.")
+    ap.add_argument("--prune", action="store_true",
+                    help="VERIFIER-GATED GRAPH EDIT: measure each instruction on a validation "
+                         "slice and DELETE the ones that make CE worse. Nothing here had ever "
+                         "EDITED the graph -- only appended to it.")
+    ap.add_argument("--val", type=int, default=12, help="validation bugs per instruction")
+    ap.add_argument("--no-gate", action="store_true",
+                    help="disable the generic-ness gate (bank name-specific instructions too)")
     a = ap.parse_args()
 
     rows = load_pairs(a.n, seed=a.seed)
@@ -150,28 +253,39 @@ def main():
     graph = AtomGraph()
 
     print("PHASE 1 -- the LM writes its own instructions from SOLVED train bugs", flush=True)
-    bank = build_bank(lm, tr, graph)
+    bank = build_bank(lm, tr, graph, key_mode=a.key, gate=not a.no_gate)
+    if a.prune:
+        # validation slice comes from TRAIN, never from held -- pruning must not see the evaluation
+        # set, or the surviving bank would be selected on the very thing it is later scored against.
+        val = tr[:a.val]
+        print(f"  VALIDATING {len(bank)} instructions on {len(val)} TRAIN bugs "
+              f"(held is never touched)", flush=True)
+        bank = validate_bank(lm, bank, val, graph)
     print(f"  banked {len(bank)} instructions as atoms in the worlds graph "
           f"({len(graph.atoms)} atoms)\n", flush=True)
-    for _, ins, _ in bank[:5]:
-        print(f"    e.g. {ins[:110]}", flush=True)
+    for b in bank[:5]:
+        u = f"  [utility {b[3]:+.3f}]" if len(b) > 3 else ""
+        print(f"    e.g. {b[1][:95]}{u}", flush=True)
 
     from embedder import encode_batch
     print("\nPHASE 2 -- retrieve for HELD bugs the bank has never seen", flush=True)
     rng = random.Random(1234)
-    tot = {"none": 0.0, "random": 0.0, "nearest": 0.0, "oracle": 0.0}
+    per = {"none": [], "random": [], "topk": [], "nearest": [], "oracle": []}
     for i, r in enumerate(held):
-        e = np.asarray(encode_batch([r["issue"][:600]])[0], dtype=np.float32)
-        tot["none"] += ce_on_target(lm, USE_PROMPT_B.format(old=r["old"]), r["new"])
-        for mode in ("random", "nearest"):
+        # QUERY WITH THE SAME KEY the bank was built with -- previously the bank was keyed on the
+        # issue and so was the query, which is why retrieval was matching prose to prose.
+        e = np.asarray(encode_batch([defect_key(r, a.key)])[0], dtype=np.float32)
+        per["none"].append(ce_on_target(lm, USE_PROMPT_B.format(old=r["old"]), r["new"]))
+        for mode in ("random", "topk", "nearest"):
             ins = retrieve(bank, e, mode, rng)
-            tot[mode] += ce_on_target(lm, USE_PROMPT_N.format(instr=ins, old=r["old"]), r["new"])
+            per[mode].append(ce_on_target(lm, USE_PROMPT_N.format(instr=ins, old=r["old"]), r["new"]))
         # ORACLE: an instruction written for THIS bug. Leaks by construction -- a ceiling, not a result.
         oi = write_instruction(lm, r)
-        tot["oracle"] += ce_on_target(lm, USE_PROMPT_N.format(instr=oi or "Fix the bug.",
-                                                              old=r["old"]), r["new"])
+        per["oracle"].append(ce_on_target(lm, USE_PROMPT_N.format(instr=oi or "Fix the bug.",
+                                                                  old=r["old"]), r["new"]))
         if (i + 1) % 20 == 0:
             print(f"    {i+1}/{len(held)}", flush=True)
+    tot = {k: float(np.sum(v)) for k, v in per.items()}
 
     n = max(1, len(held))
     B, R, N, O = (tot["none"] / n, tot["random"] / n, tot["nearest"] / n, tot["oracle"] / n)
@@ -181,8 +295,19 @@ def main():
     print(f"  R random    (a RANDOM banked instruction) CE {R:.4f}   vs none {B - R:+.4f}")
     print(f"  N nearest   (retrieved by similarity)     CE {N:.4f}   vs none {B - N:+.4f}")
     print(f"  O oracle    (written FOR this bug)        CE {O:.4f}   [CEILING, leaks by construction]")
-    print(f"\n  RETRIEVAL SIGNAL  N vs R: {R - N:+.4f} CE")
-    print(f"    -> {'RETRIEVAL WORKS -- the graph is doing something' if R - N > 0.02 else 'retrieval adds NOTHING over a random instruction'}")
+    T = tot["topk"] / n
+    print(f"  T top-5 rnd (random among 5 NEAREST)      CE {T:.4f}   vs none {B - T:+.4f}")
+    # PAIRED BOOTSTRAP -- the evaluation is paired (same bug and target, only the retrieved
+    # instruction differs), so resampling held examples gives a CI directly. Promised on an earlier
+    # run and NOT delivered: that patch silently failed to apply and I quoted +0.0339 with no error
+    # bar at all. Anchors are asserted now so a non-applying patch fails loudly instead of silently.
+    d = np.array(per["random"]) - np.array(per["nearest"])
+    rs = np.random.RandomState(0)
+    boot = np.array([d[rs.randint(0, len(d), len(d))].mean() for _ in range(4000)])
+    lo, hi = np.percentile(boot, [2.5, 97.5])
+    print(f"\n  RETRIEVAL SIGNAL  N vs R: {R - N:+.4f} CE   95% CI [{lo:+.4f}, {hi:+.4f}]")
+    print(f"  ORDERING signal   N vs T: {T - N:+.4f} CE   (does rank-1 beat a draw from the top 5?)")
+    print(f"    -> {'RETRIEVAL WORKS (CI excludes 0)' if lo > 0 else 'NOT SIGNIFICANT -- CI includes 0'}")
     print(f"  headroom if retrieval were perfect (O vs N): {N - O:+.4f}")
     print(f"{'=' * 74}")
 
