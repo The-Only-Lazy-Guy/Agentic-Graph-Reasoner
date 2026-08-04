@@ -40,6 +40,8 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 os.environ.setdefault("HF_HOME", r"E:\cache\hf")
 
+import re
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -116,6 +118,20 @@ class SupNSTM(nn.Module):
         c = (ra.unsqueeze(-1) * new).sum(1)
         g = torch.sigmoid(self.W_g(x.view(1, self.d_slot)))
         return new, g, self.up(self.down(c))
+
+
+def token_f1(pred: str, gold: str) -> float:
+    """Partial credit on the generated line. Exact-match sits at ~0.01 for EVERY arm including
+    full-context, so it is a FLOOR metric here: it cannot reveal a generation gain that exists but is
+    short of character-perfect. F1 over token multisets shows whether the decode is getting closer."""
+    import collections
+    p = collections.Counter(re.findall(r"[\w\.]+|\S", pred or ""))
+    g = collections.Counter(re.findall(r"[\w\.]+|\S", gold or ""))
+    inter = sum((p & g).values())
+    if not inter:
+        return 0.0
+    pr, rc = inter / max(1, sum(p.values())), inter / max(1, sum(g.values()))
+    return 2 * pr * rc / (pr + rc)
 
 
 def prompt_for(arm: str, issue: str, old: str) -> str:
@@ -202,27 +218,41 @@ def main():
     ie_tr = embed([r["issue"][:600] for r in tr])
     ie_h = embed([r["issue"][:600] for r in held])
 
-    def evaluate(arm, nstm, gen: bool = True, gen_cap: int = 120):
-        """CE on every held example; EXACT-MATCH generation on a capped slice (decoding is ~40x the
-        cost of a teacher-forced pass, and the cap is identical across arms so they stay comparable)."""
-        tot, n, em, g_n = 0.0, 0, 0, 0
+    def evaluate(arm, nstm, gen_cap: int = 120, shuffle: bool = False):
+        """CE on every held example; generation on a capped slice (identical cap across arms).
+
+        shuffle=True is THE FALSIFIER: each example is given ANOTHER example's issue embedding. A
+        zero-init residual trained on 1120 examples could simply have learned a generic "python line"
+        prior that helps no matter which issue it saw -- that would be indistinguishable from memory in
+        the headline numbers. If shuffled slots recover just as much, it is a prior, not memory. If
+        they degrade, the slots genuinely carry INSTANCE-SPECIFIC content."""
+        tot, n, em, f1, g_n = 0.0, 0, 0, 0.0, 0
+        idx = list(range(len(held)))
+        if shuffle:
+            rnd = random.Random(1234)
+            idx = idx[:]
+            rnd.shuffle(idx)
+            # guarantee nobody keeps their own issue
+            idx = [idx[(k + 1) % len(idx)] if idx[k] == k else idx[k] for k in range(len(idx))]
         with torch.no_grad():
             for i, r in enumerate(held):
-                e = torch.tensor(ie_h[i], device=lm.device)
+                e = torch.tensor(ie_h[idx[i]], device=lm.device)
                 pr = prompt_for(arm, r["issue"], r["old"])
                 tot += float(teacher_forced_loss(lm, nstm, arm, e, pr, r["new"], train=False)); n += 1
-                if gen and g_n < gen_cap:
+                if g_n < gen_cap:
                     out = generate_line(lm, nstm, arm, e, pr)
-                    em += int(out.strip() == r["new"].strip()); g_n += 1
-        return tot / max(1, n), em / max(1, g_n), g_n
+                    em += int(out.strip() == r["new"].strip())
+                    f1 += token_f1(out, r["new"])
+                    g_n += 1
+        return tot / max(1, n), em / max(1, g_n), f1 / max(1, g_n)
 
     nstm = SupNSTM(lm.model.config.hidden_size, lm.model.config.vocab_size).to(lm.device)
     print(f"SupNSTM: {sum(p.numel() for p in nstm.parameters()):,} params\n")
 
-    res, em = {}, {}
+    res, em, f1 = {}, {}, {}
     for arm in ("full", "truncated"):
-        res[arm], em[arm], gn = evaluate(arm if arm == "full" else "trunc", nstm)
-        print(f"  arm {arm:10s} held CE {res[arm]:.4f}   exact-match {em[arm]:.3f} (n={gn})",
+        res[arm], em[arm], f1[arm] = evaluate(arm if arm == "full" else "trunc", nstm)
+        print(f"  arm {arm:10s} held CE {res[arm]:.4f}   EM {em[arm]:.3f}   token-F1 {f1[arm]:.3f}",
               flush=True)
 
     # arm C: train ONLY the slots to recover what truncation removed
@@ -241,13 +271,15 @@ def main():
             if k % 50 == 0:
                 print(f"    epoch {ep+1} [{k}/{len(tr)}] train CE {run/k:.4f}", flush=True)
         print(f"    epoch {ep+1} done, train CE {run/max(1,k):.4f}", flush=True)
-    res["nstm"], em["nstm"], gn = evaluate("nstm", nstm)
+    res["nstm"], em["nstm"], f1["nstm"] = evaluate("nstm", nstm)
+    res["shuf"], em["shuf"], f1["shuf"] = evaluate("nstm", nstm, shuffle=True)
 
     print(f"\n{'=' * 74}")
     print("SUPERVISED NSTM -- can slots carry context the prompt no longer holds?")
-    print(f"  A full      (issue in prompt)     CE {res['full']:.4f}   exact-match {em['full']:.3f}")
-    print(f"  B truncated (issue GONE)          CE {res['truncated']:.4f}   exact-match {em['truncated']:.3f}")
-    print(f"  C nstm      (issue in SLOTS)      CE {res['nstm']:.4f}   exact-match {em['nstm']:.3f}")
+    print(f"  A full      (issue in prompt)     CE {res['full']:.4f}   EM {em['full']:.3f}   token-F1 {f1['full']:.3f}")
+    print(f"  B truncated (issue GONE)          CE {res['truncated']:.4f}   EM {em['truncated']:.3f}   token-F1 {f1['truncated']:.3f}")
+    print(f"  C nstm      (issue in SLOTS)      CE {res['nstm']:.4f}   EM {em['nstm']:.3f}   token-F1 {f1['nstm']:.3f}")
+    print(f"  D shuffled  (WRONG issue in slots) CE {res['shuf']:.4f}   EM {em['shuf']:.3f}   token-F1 {f1['shuf']:.3f}")
     de = em["nstm"] - em["truncated"]
     print(f"\n  REPAIRS: slots vs truncated {de:+.3f}   (full-context ceiling {em['full']:.3f})")
     gap = res["truncated"] - res["full"]
@@ -256,7 +288,11 @@ def main():
     print(f"  slots recovered         : {rec:+.4f} CE  (B - C)")
     print(f"  fraction of the context the slots carry: "
           f"{(rec / gap if abs(gap) > 1e-6 else 0):.1%}")
-    print(f"  -> {'SLOTS CARRY REAL CONTEXT' if rec > 0.05 * max(gap, 1e-9) and rec > 0.01 else 'slots carry nothing measurable'}")
+    spec = res["shuf"] - res["nstm"]
+    print(f"\n  FALSIFIER -- slots given the WRONG issue: CE {res['shuf']:.4f} vs {res['nstm']:.4f}")
+    print(f"    instance-specific content worth {spec:+.4f} CE")
+    print(f"    -> {'GENUINE MEMORY (wrong issue hurts)' if spec > 0.05 else 'A GENERIC PRIOR, NOT MEMORY (wrong issue is just as good)'}")
+    print(f"  token-F1 generation: B {f1['truncated']:.3f} -> C {f1['nstm']:.3f} (ceiling A {f1['full']:.3f})")
     print(f"{'=' * 74}")
 
 
