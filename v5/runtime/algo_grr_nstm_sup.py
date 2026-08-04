@@ -249,8 +249,7 @@ def main():
     print(f"  B truncated (issue GONE)          CE {res['truncated']:.4f}   exact-match {em['truncated']:.3f}")
     print(f"  C nstm      (issue in SLOTS)      CE {res['nstm']:.4f}   exact-match {em['nstm']:.3f}")
     de = em["nstm"] - em["truncated"]
-    print(f"
-  REPAIRS: slots vs truncated {de:+.3f}   (full-context ceiling {em['full']:.3f})")
+    print(f"\n  REPAIRS: slots vs truncated {de:+.3f}   (full-context ceiling {em['full']:.3f})")
     gap = res["truncated"] - res["full"]
     rec = res["truncated"] - res["nstm"]
     print(f"\n  context is worth        : {gap:+.4f} CE  (B - A)")
