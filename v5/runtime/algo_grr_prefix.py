@@ -94,6 +94,9 @@ def main():
     ap.add_argument("--slots", type=int, default=4)
     ap.add_argument("--lm", type=str, default="Qwen/Qwen2.5-3B-Instruct")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--sweep", type=str, default="",
+                    help="comma-separated slot counts, e.g. 1,4,16,64 -- tests whether "
+                         "instance-specificity is CAPACITY limited")
     a = ap.parse_args()
 
     rows = load_pairs(a.n, seed=a.seed)
@@ -107,10 +110,20 @@ def main():
     Etr = np.stack([embed_chunks(r["issue"], a.slots) for r in tr])
     Eh = np.stack([embed_chunks(r["issue"], a.slots) for r in held])
 
+    # HARD SHUFFLE: pair each held example with its MOST DISSIMILAR issue, not the next one in
+    # order. A cyclic shift leaves the shuffled issue carrying the right TOPIC (these instances come
+    # largely from the same repos), which biases the falsifier toward zero -- the previous +0.0239 is
+    # a LOWER bound for exactly that reason. Pairing by minimum cosine removes topical overlap too,
+    # so what survives is genuinely instance-specific or nothing.
+    _P = Eh.reshape(len(held), -1)
+    _P = _P / (np.linalg.norm(_P, axis=1, keepdims=True) + 1e-9)
+    _SIM = _P @ _P.T
+    HARD = list(np.argmin(_SIM, axis=1))
+
     def evaluate(mod, arm, shuffle=False):
         idx = list(range(len(held)))
         if shuffle:
-            idx = idx[1:] + idx[:1]
+            idx = HARD
         tot = 0.0
         with torch.no_grad():
             for i, r in enumerate(held):
@@ -134,6 +147,29 @@ def main():
                 opt.step(); run += float(l)
             print(f"    [{arm}] epoch {ep+1} train CE {run/len(tr):.4f}", flush=True)
         return mod
+
+    if a.sweep:
+        ks = [int(x) for x in a.sweep.split(",") if x.strip()]
+        base0 = PrefixSlots(lm.model.config.hidden_size, 1).to(lm.device)
+        b0 = evaluate(base0, "trunc")
+        print(f"  B truncated (no prefix) held CE {b0:.4f}\n", flush=True)
+        print(f"  {'K':>4} {'fixed':>8} {'issue':>8} {'hard-shuf':>10} {'instance-specific':>18}")
+        for k in ks:
+            # rebind the ENCLOSING locals -- train()/evaluate() are closures over main's scope and
+            # read these at call time. A previous version wrote globals(), which those closures never
+            # consult, so every K would silently have reused K=4's embeddings.
+            Etr = np.stack([embed_chunks(r["issue"], k) for r in tr])
+            Eh = np.stack([embed_chunks(r["issue"], k) for r in held])
+            _Pk = Eh.reshape(len(held), -1)
+            _Pk = _Pk / (np.linalg.norm(_Pk, axis=1, keepdims=True) + 1e-9)
+            HARD = list(np.argmin(_Pk @ _Pk.T, axis=1))
+            a.slots = k
+            mfk = train("fixed"); fk = evaluate(mfk, "fixed")
+            mpk = train("prefix"); pk = evaluate(mpk, "prefix")
+            sk = evaluate(mpk, "prefix", shuffle=True)
+            print(f"  {k:>4} {fk:8.4f} {pk:8.4f} {sk:10.4f} {sk - pk:18.4f}", flush=True)
+        print("\n  -> if instance-specific RISES with K, the 1.6% at K=4 was a CAPACITY limit")
+        return
 
     base = PrefixSlots(lm.model.config.hidden_size, a.slots).to(lm.device)
     b = evaluate(base, "trunc")
