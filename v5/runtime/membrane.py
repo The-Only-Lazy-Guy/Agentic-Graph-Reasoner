@@ -5920,6 +5920,66 @@ def selftest_locate() -> bool:
     return ok
 
 
+# ==================================================================================================
+# PREFIX SLOTS — context COMPRESSION for the frozen LM. Read the limits before using this.
+# ==================================================================================================
+# WHAT IT IS. K learned vectors, projected into the LM's embedding space and PREPENDED to the prompt,
+# so the model ATTENDS over them like ordinary tokens. They are produced from a MiniLM encoding of
+# context (here: a bug report) that has been REMOVED from the prompt. Implementation and the full
+# experiment live in v5/runtime/algo_grr_prefix.py; this is the deployment entry point.
+#
+# WHAT IT DOES, measured on 1805 deduped real SWE-bench single-line fixes, group-split BY INSTANCE
+# (733 train / 167 held), frozen 4-bit Qwen2.5-3B, only the projection trained:
+#
+#     K    F fixed   P issue   S derange      R rand-vec    P-vs-S     P-vs-R
+#     1     2.2128    1.4553   1.4628+-0.005     1.6604      0.0075     0.2052
+#    16     1.3461    1.2265   1.2310+-0.002     1.3641      0.0045     0.1377
+#    B truncated (frozen, untrained, no prefix): 3.2299
+#
+#   * a trained prefix takes held CE 3.2299 -> 1.2265. That is the useful part: a handful of vectors
+#     substitute for prompt text, so the KV cache and prompt cost shrink.
+#   * P beats R (norm-matched RANDOM vector) by 0.14-0.21, so it genuinely uses the STRUCTURE of real
+#     context embeddings rather than accepting any noise of the right magnitude.
+#
+# WHAT IT DOES NOT DO — and this is the part that must not be misread:
+#   * IT IS NOT MEMORY OF THE SPECIFIC CONTEXT. Handing each held example ANOTHER example's issue
+#     (random derangement, averaged over 5) costs 0.0075 / 0.0045 CE, with derangement spread
+#     +-0.005 / +-0.002 -- i.e. the effect is the size of its own noise. The prefix wants a plausible
+#     context-SHAPED vector, not THIS instance's content.
+#   * So it is a CONTEXT-CONDITIONED ADAPTER, not a working memory. Do not wire it anywhere that
+#     needs per-instance recall; it will look like it works and will not.
+#
+# WHY THE CAUTION IS THIS LOUD. This component produced four confident results in a row that were all
+# withdrawn after a control was added: "96.4% context recovery" (it was a generic prior), "a learned
+# constant" (it was conditioned on the LM's hidden state), "K=1 carries 43% of the issue" (the
+# falsifier paired each example with its most ANTI-CORRELATED partner, whose difficulty decays with K,
+# so the falsifier manufactured the trend), and a KV-cost claim measured against the wrong baseline.
+# Two of those were bugs in the MEASUREMENT, not the model. Every correction came from a control,
+# never from further reasoning.
+#
+# STANDING RULE for anything built on this: report P-vs-S (random derangement, never argmin), a
+# norm-matched random-vector arm, a not-context-conditioned arm, and split by INSTANCE -- row-splitting
+# leaked 64% of issue texts into the held set here. See [[latent-memory-shuffle-falsifier]].
+def prefix_slots(d_model: int, n_slots: int = 16, d_slot: int = 128):
+    """The trained-adapter component described above. Returns an untrained module; training and all
+    four control arms are in algo_grr_prefix.main()."""
+    from v5.runtime.algo_grr_prefix import PrefixSlots
+    return PrefixSlots(d_model, n_slots=n_slots, d_slot=d_slot)
+
+
+def demo_prefix(n: int = 900, slots: int = 16, epochs: int = 1, lm_name: str = "") -> bool:
+    """Run the component with its controls. Delegates rather than re-implementing, so the numbers in
+    the comment above and the numbers this prints can never drift apart."""
+    import subprocess
+    cmd = [sys.executable, "-u", "-m", "v5.runtime.algo_grr_prefix",
+           "--n", str(n), "--epochs", str(epochs), "--sweep", str(slots)]
+    if lm_name:
+        cmd += ["--lm", lm_name]
+    print("PREFIX SLOTS — context compression, NOT per-instance memory (see the comment in this file)")
+    print(f"  delegating to: {' '.join(cmd[2:])}\n", flush=True)
+    return subprocess.run(cmd, cwd=_ROOT).returncode == 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="one real integrated membrane: neural retrieval + TRM + verify + learn")
     ap.add_argument("--reason", action="store_true",
@@ -6035,12 +6095,23 @@ def main():
                          "lex (symbol-uniqueness + basename + path + content, weights fit on TRAIN)")
     ap.add_argument("--abl", type=str, default="",
                     help="--locate ablations, comma separated: no-worlds, no-exec")
+    ap.add_argument("--prefix-slots", action="store_true",
+                    help="CONTEXT COMPRESSION: K learned vectors prepended as embeddings so the frozen "
+                         "LM ATTENDS over them, replacing prompt text (held CE 3.2299 -> 1.2265 at "
+                         "K=16). NOT per-instance memory -- a deranged context costs 0.0045 CE, the "
+                         "size of its own noise. Runs all four control arms; see the comment above "
+                         "demo_prefix() before building on it.")
+    ap.add_argument("--slots", type=int, default=16, help="K for --prefix-slots")
+    ap.add_argument("--epochs", type=int, default=1, help="training epochs for --prefix-slots")
     ap.add_argument("--selftest", action="store_true",
                     help="mechanism selftest for the active mode (currently --locate)")
     ap.add_argument("--dataset", type=str, default="gsm8k", choices=["gsm8k", "math"],
                     help="which cached dataset to stream for --session: gsm8k (default) or math "
                          "(Hendrycks competition math — harder: LaTeX, longer, denser numbers)")
     a = ap.parse_args()
+    if a.prefix_slots:
+        sys.exit(0 if demo_prefix(n=(a.n if a.n != 40 else 900), slots=a.slots,
+                                  epochs=a.epochs, lm_name=a.lm) else 1)
     if a.multihop:
         sys.exit(0 if demo_multihop(n=(a.n if a.n != 40 else 500), lm_name=a.lm,
                                     abl=a.abl, hops=a.hops) else 1)
