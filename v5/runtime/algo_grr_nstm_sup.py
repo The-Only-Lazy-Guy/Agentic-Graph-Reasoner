@@ -50,21 +50,43 @@ import torch.nn.functional as F
 _VER = Path(_ROOT) / "artifacts" / "repair_schemas_verified.json"
 
 
-def load_pairs(n: int = 2000, seed: int = 0):
-    """Real (issue, old_line, new_line) triples from verified single-line SWE-bench fixes."""
+def load_pairs(n: int = 2000, seed: int = 0, group_split: bool = True):
+    """Real (issue, old_line, new_line) triples from verified single-line SWE-bench fixes.
+
+    DEDUPED AND GROUPED. mine_verified_schemas.py emits one row per HUNK and copies the same
+    problem_statement into every row of a multi-hunk instance (up to 68 rows from one instance).
+    Splitting those by ROW put the same issue -- and sometimes the identical (issue, old, new) triple
+    -- on both sides: measured 64% issue-text leakage and 14% exact-duplicate leakage into the n=900
+    held set. Every trained-arm number computed that way is contaminated. Rows are now deduped on the
+    full triple and the caller is given instance_id so the split can be by INSTANCE, never by row.
+    """
     if not _VER.exists():
         raise FileNotFoundError(f"{_VER} missing -- run scripts/mine_verified_schemas.py")
     rows = [r for r in json.loads(_VER.read_text(encoding="utf-8"))["instances"]
             if r["schema"] == "replace_line"]
-    out = []
+    out, seen = [], set()
     for r in rows:
         p = r.get("params") or {}
         o, nw = p.get("old_line", ""), p.get("new_line", "")
-        if o.strip() and nw.strip() and o != nw and len(o) < 200 and len(nw) < 200:
-            out.append({"issue": r["problem"], "old": o, "new": nw,
-                        "instance_id": r["instance_id"]})
+        if not (o.strip() and nw.strip() and o != nw and len(o) < 200 and len(nw) < 200):
+            continue
+        key = (r["problem"], o, nw)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"issue": r["problem"], "old": o, "new": nw, "instance_id": r["instance_id"]})
     random.Random(seed).shuffle(out)
     return out[:n]
+
+
+def group_split(rows, frac: float = 0.8, seed: int = 0):
+    """Split by INSTANCE so no issue text can appear on both sides."""
+    ids = sorted({r["instance_id"] for r in rows})
+    random.Random(seed).shuffle(ids)
+    cut = set(ids[:int(len(ids) * frac)])
+    tr = [r for r in rows if r["instance_id"] in cut]
+    held = [r for r in rows if r["instance_id"] not in cut]
+    return tr, held
 
 
 class SupNSTM(nn.Module):

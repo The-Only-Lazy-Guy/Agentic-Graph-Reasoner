@@ -46,7 +46,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from v5.runtime.algo_grr_nstm_sup import embed_chunks, load_pairs, prompt_for
+from v5.runtime.algo_grr_nstm_sup import embed_chunks, group_split, load_pairs, prompt_for
 
 
 class PrefixSlots(nn.Module):
@@ -100,8 +100,7 @@ def main():
     a = ap.parse_args()
 
     rows = load_pairs(a.n, seed=a.seed)
-    cut = int(len(rows) * 0.8)
-    tr, held = rows[:cut], rows[cut:]
+    tr, held = group_split(rows, seed=a.seed)   # by INSTANCE: row-splitting leaked 64% of issues
     print(f"{len(rows)} real single-line SWE-bench fixes | train {len(tr)} held {len(held)} | "
           f"K={a.slots} slots\n", flush=True)
     torch.manual_seed(a.seed)
@@ -110,27 +109,48 @@ def main():
     Etr = np.stack([embed_chunks(r["issue"], a.slots) for r in tr])
     Eh = np.stack([embed_chunks(r["issue"], a.slots) for r in held])
 
-    # HARD SHUFFLE: pair each held example with its MOST DISSIMILAR issue, not the next one in
-    # order. A cyclic shift leaves the shuffled issue carrying the right TOPIC (these instances come
-    # largely from the same repos), which biases the falsifier toward zero -- the previous +0.0239 is
-    # a LOWER bound for exactly that reason. Pairing by minimum cosine removes topical overlap too,
-    # so what survives is genuinely instance-specific or nothing.
-    _P = Eh.reshape(len(held), -1)
-    _P = _P / (np.linalg.norm(_P, axis=1, keepdims=True) + 1e-9)
-    _SIM = _P @ _P.T
-    HARD = list(np.argmin(_SIM, axis=1))
+    # FALSIFIER, REBUILT. The previous version paired each held example with its MOST
+    # ANTI-CORRELATED issue (np.argmin over the cosine matrix). That is not "a wrong issue" -- it is
+    # the negation of the useful direction, and worse, its difficulty is a FUNCTION OF K: the
+    # anti-correlation gap decayed 0.221 -> 0.045 from K=1 to K=64 by concentration of measure, so the
+    # falsifier manufactured the very K-trend it was meant to test. Switching pairing rules alone moved
+    # the same measurement 0.0239 -> 0.6461 (27x), which was the tell I missed.
+    # Now: average over several RANDOM DERANGEMENTS (no fixed point), whose difficulty is K-invariant,
+    # and report the spread.
+    def derangements(nheld, reps, rng):
+        outs = []
+        for _ in range(reps):
+            while True:
+                perm = list(range(nheld))
+                rng.shuffle(perm)
+                if all(perm[i] != i for i in range(nheld)):
+                    outs.append(perm)
+                    break
+        return outs
 
-    def evaluate(mod, arm, shuffle=False):
-        idx = list(range(len(held)))
-        if shuffle:
-            idx = HARD
-        tot = 0.0
-        with torch.no_grad():
-            for i, r in enumerate(held):
-                e = torch.tensor(Eh[idx[i]], device=lm.device)
-                tot += float(loss_with_prefix(lm, mod, e, prompt_for("trunc", r["issue"], r["old"]),
-                                              r["new"], arm))
-        return tot / max(1, len(held))
+    def evaluate(mod, arm, shuffle=False, reps: int = 5, rand_prefix=False):
+        """rand_prefix: feed a NORM-MATCHED RANDOM vector instead of any issue. Separates 'this
+        channel is sensitive to perturbation' from 'this channel carries the issue' -- without it, a
+        degraded shuffled arm proves only that the prefix matters, not that the ISSUE does."""
+        rng = random.Random(4242)
+        perms = derangements(len(held), reps, rng) if shuffle else [list(range(len(held)))]
+        vals = []
+        for perm in perms:
+            tot = 0.0
+            with torch.no_grad():
+                for i, r in enumerate(held):
+                    if rand_prefix:
+                        src = torch.randn_like(torch.tensor(Eh[i]))
+                        src = src / src.norm(dim=-1, keepdim=True) * float(
+                            torch.tensor(Eh[i]).norm(dim=-1, keepdim=True).mean())
+                        e = src.to(lm.device)
+                    else:
+                        e = torch.tensor(Eh[perm[i]], device=lm.device)
+                    tot += float(loss_with_prefix(lm, mod, e,
+                                                  prompt_for("trunc", r["issue"], r["old"]),
+                                                  r["new"], arm))
+            vals.append(tot / max(1, len(held)))
+        return float(np.mean(vals)), float(np.std(vals))
 
     def train(arm):
         torch.manual_seed(a.seed)
@@ -151,28 +171,26 @@ def main():
     if a.sweep:
         ks = [int(x) for x in a.sweep.split(",") if x.strip()]
         base0 = PrefixSlots(lm.model.config.hidden_size, 1).to(lm.device)
-        b0 = evaluate(base0, "trunc")
-        print(f"  B truncated (no prefix) held CE {b0:.4f}\n", flush=True)
-        print(f"  {'K':>4} {'fixed':>8} {'issue':>8} {'hard-shuf':>10} {'instance-specific':>18}")
+        b0, _ = evaluate(base0, "trunc")
+        print(f"  B truncated (no prefix, no training) held CE {b0:.4f}\n", flush=True)
+        print(f"  {'K':>3} {'F fixed':>9} {'P issue':>9} {'S derange':>11} {'R rand-vec':>11} "
+              f"{'P-vs-S (issue)':>15} {'P-vs-R':>9}")
         for k in ks:
-            # rebind the ENCLOSING locals -- train()/evaluate() are closures over main's scope and
-            # read these at call time. A previous version wrote globals(), which those closures never
-            # consult, so every K would silently have reused K=4's embeddings.
             Etr = np.stack([embed_chunks(r["issue"], k) for r in tr])
             Eh = np.stack([embed_chunks(r["issue"], k) for r in held])
-            _Pk = Eh.reshape(len(held), -1)
-            _Pk = _Pk / (np.linalg.norm(_Pk, axis=1, keepdims=True) + 1e-9)
-            HARD = list(np.argmin(_Pk @ _Pk.T, axis=1))
             a.slots = k
-            mfk = train("fixed"); fk = evaluate(mfk, "fixed")
-            mpk = train("prefix"); pk = evaluate(mpk, "prefix")
-            sk = evaluate(mpk, "prefix", shuffle=True)
-            print(f"  {k:>4} {fk:8.4f} {pk:8.4f} {sk:10.4f} {sk - pk:18.4f}", flush=True)
-        print("\n  -> if instance-specific RISES with K, the 1.6% at K=4 was a CAPACITY limit")
+            mfk = train("fixed"); fk, _ = evaluate(mfk, "fixed")
+            mpk = train("prefix"); pk, _ = evaluate(mpk, "prefix")
+            sk, sd = evaluate(mpk, "prefix", shuffle=True)
+            rk, _ = evaluate(mpk, "prefix", rand_prefix=True)
+            print(f"  {k:>3} {fk:9.4f} {pk:9.4f} {sk:8.4f}+-{sd:.3f} {rk:11.4f} "
+                  f"{sk - pk:15.4f} {rk - pk:9.4f}", flush=True)
+        print("\n  P-vs-S is the issue-specific signal (random derangement, K-invariant difficulty).")
+        print("  P-vs-R says only that SOME prefix beats a random one -- it is not memory.")
         return
 
     base = PrefixSlots(lm.model.config.hidden_size, a.slots).to(lm.device)
-    b = evaluate(base, "trunc")
+    b, _ = evaluate(base, "trunc")
     print(f"  B truncated (no prefix)          held CE {b:.4f}\n", flush=True)
 
     mf = train("fixed")
