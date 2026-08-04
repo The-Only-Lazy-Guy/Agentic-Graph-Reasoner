@@ -87,7 +87,14 @@ class SupNSTM(nn.Module):
         self.gru = nn.GRUCell(d_slot, d_slot)
         self.down = nn.Linear(d_slot, rank, bias=False)
         self.up = nn.Linear(rank, vocab, bias=False)
-        nn.init.zeros_(self.up.weight)          # PRIOR PRESERVATION: residual == 0 at init
+        nn.init.zeros_(self.up.weight)
+        # BIAS-ONLY control: a learned constant residual with NO issue input, identical rank and
+        # output path. Measured need for it: after training, the slot residual was a CONSTANT vector
+        # (|dz|=52.7, across-issue cosine 1.0000, std 0.001). A constant is worth ~1.66 CE here --
+        # MORE than the issue's 1.49 -- because the truncated prompt's real deficit is FORMAT
+        # calibration, not missing information. Without this arm, that constant is indistinguishable
+        # from memory in the headline number, which is exactly how 111% "recovery" happened.
+        self.bias_only = nn.Parameter(torch.zeros(rank))          # PRIOR PRESERVATION: residual == 0 at init
 
     def init_slots(self, device):
         return torch.zeros(1, self.num_slots, self.d_slot, device=device)
@@ -101,14 +108,49 @@ class SupNSTM(nn.Module):
         return F.softmax(m, -1)
 
     def write(self, slots, emb):
-        """Fold the ISSUE embedding into the slots before decoding begins."""
-        v = torch.tanh(self.ctx_in(emb)).view(1, 1, self.d_slot)
-        a = self._sparse((self.W_Q(v) * self.W_K(slots)).sum(-1) / math.sqrt(self.d_slot))
-        u = a.unsqueeze(-1) * self.W_V(v)
-        B, K, D = slots.shape
-        return self.gru(u.reshape(B * K, D), slots.reshape(B * K, D)).reshape(B, K, D)
+        """Write the ISSUE into the slots. DIRECT, not a GRU step from zeros.
 
-    def step(self, h, slots):
+        THE BUG THIS REPLACES, and it invalidated the previous null outright: write() was called on
+        ZERO-initialised slots, so the GRU's hidden state was 0 and its output was dominated by its
+        BIAS terms -- identical for every input. Measured directly: issue embeddings are well separated
+        (across-instance cosine 0.1547) but the slots that came out were 0.9960, i.e. collapsed BEFORE
+        decoding, before training, before anything the experiment was supposed to measure. The
+        "generic prior, not memory" verdict was therefore a statement about a broken write path, not
+        about slot memory.
+
+        `emb` is [K, 384] -- one embedding PER SLOT, from K chunks of the issue, so a ~168-token issue
+        is no longer squeezed through a single mean-pooled vector. That is the second half of the fix:
+        the channel was both broken and far too narrow.
+        """
+        if emb.dim() == 1:
+            emb = emb.unsqueeze(0).expand(self.num_slots, -1)
+        return torch.tanh(self.ctx_in(emb)).unsqueeze(0)          # [1, K, d_slot]
+
+    def step_strict(self, h, slots):
+        """STRICT readout: the residual's CONTENT comes from the slots alone.
+
+        Why this exists. In the mixed version below, `u = a * W_V(x)` is derived from the LM's hidden
+        state h, and `new = gru(u, slots)` folds it into what the readout sees -- so the residual can
+        (and did) carry h-information without using the slots at all. The two controls proved exactly
+        that: shuffling the ISSUE cost 0.0001 CE (slots unused) while removing the h-dependence cost
+        1.0813 CE (h doing all the work). The module had learned a decoding-state-conditioned adapter,
+        not memory, and no amount of fixing the WRITE path could change that because the READOUT could
+        bypass the slots entirely.
+
+        Here h may only choose WHICH slot to read (a legitimate attention query); the value returned is
+        a convex combination of SLOT VECTORS. If the slots are constant across instances, dz is
+        constant, so the task cannot be solved through this channel without genuinely using the issue.
+        """
+        x = torch.tanh(self.h_in(h)).view(1, 1, self.d_slot)
+        ra = F.softmax((self.W_Q(x) * self.W_K(slots)).sum(-1) / math.sqrt(self.d_slot), -1)
+        c = (ra.unsqueeze(-1) * slots).sum(1)                      # CONTENT is slots only
+        g = torch.sigmoid(self.W_g(x.view(1, self.d_slot)))
+        return slots, g, self.up(self.down(c))
+
+    def step(self, h, slots, bias_only: bool = False):
+        if bias_only:
+            g = torch.sigmoid(self.W_g(torch.tanh(self.h_in(h)).view(1, self.d_slot)))
+            return slots, g, self.up(self.bias_only).view(1, -1)
         x = torch.tanh(self.h_in(h)).view(1, 1, self.d_slot)
         a = self._sparse((self.W_Q(x) * self.W_K(slots)).sum(-1) / math.sqrt(self.d_slot))
         u = a.unsqueeze(-1) * self.W_V(x)
@@ -154,12 +196,15 @@ def teacher_forced_loss(lm, nstm, arm, issue_emb, prompt: str, target: str, trai
     with torch.no_grad():
         out = lm.model(full, output_hidden_states=True)
     logits = out.logits[0, ids.shape[1] - 1: full.shape[1] - 1, :].float()   # predict each target tok
-    if arm == "nstm":
+    if arm in ("nstm", "bias", "strict"):
         h = out.hidden_states[-1][0, ids.shape[1] - 1: full.shape[1] - 1, :].float()
         slots = nstm.write(nstm.init_slots(lm.device), issue_emb)
         res = []
         for t in range(h.shape[0]):
-            slots, g, dz = nstm.step(h[t:t + 1], slots)
+            if arm == "strict":
+                slots, g, dz = nstm.step_strict(h[t:t + 1], slots)
+            else:
+                slots, g, dz = nstm.step(h[t:t + 1], slots, bias_only=(arm == 'bias'))
             res.append(g * dz)
         logits = logits + torch.cat(res, 0)
     return F.cross_entropy(logits, tgt[0])
@@ -175,14 +220,15 @@ def generate_line(lm, nstm, arm, issue_emb, prompt: str, max_new: int = 48) -> s
     ids = tok.apply_chat_template([{"role": "user", "content": prompt}],
                                   add_generation_prompt=True, return_tensors="pt")
     ids = (ids if torch.is_tensor(ids) else ids["input_ids"]).to(lm.device)
-    slots = nstm.write(nstm.init_slots(lm.device), issue_emb) if arm == "nstm" else None
+    slots = nstm.write(nstm.init_slots(lm.device), issue_emb) if arm in ("nstm", "bias") else None
     start, past, cur = ids.shape[1], None, ids
     for _ in range(max_new):
         out = lm.model(cur, past_key_values=past, use_cache=True, output_hidden_states=True)
         past = out.past_key_values
         logits = out.logits[:, -1, :].float()
-        if arm == "nstm":
-            slots, g, dz = nstm.step(out.hidden_states[-1][:, -1, :].float(), slots)
+        if arm in ("nstm", "bias"):
+            slots, g, dz = nstm.step(out.hidden_states[-1][:, -1, :].float(), slots,
+                                     bias_only=(arm == 'bias'))
             logits = logits + g * dz
         nxt = logits.argmax(-1, keepdim=True)
         ids = torch.cat([ids, nxt], 1)
@@ -195,6 +241,21 @@ def generate_line(lm, nstm, arm, issue_emb, prompt: str, max_new: int = 48) -> s
 def embed(texts):
     from embedder import encode_batch
     return np.asarray(encode_batch(texts), dtype=np.float32)
+
+
+def embed_chunks(issue: str, k: int = 4, span: int = 700) -> np.ndarray:
+    """K embeddings of K CHUNKS of the issue -> [k, 384], one per slot.
+
+    The issue occupies ~168 prompt tokens in arm A; arm C previously replaced all of it with ONE
+    mean-pooled 384-d vector. Mean pooling a long issue destroys most of what distinguishes it, so the
+    slot channel was starved even before the write bug. Chunking gives the memory k independent views
+    of different parts of the text instead of one average of all of it."""
+    t = (issue or "")[:span]
+    if not t.strip():
+        t = "empty"
+    n = max(1, len(t) // k)
+    parts = [t[i * n:(i + 1) * n] or t for i in range(k)]
+    return embed(parts)
 
 
 def main():
@@ -213,10 +274,12 @@ def main():
     tr, held = rows[:cut], rows[cut:]
     print(f"{len(rows)} real single-line SWE-bench fixes  |  train {len(tr)}  held {len(held)}\n")
     torch.manual_seed(a.seed)
+    nstm_slots = 4
     from v5.runtime.dcpd_latent import WhiteBox
     lm = WhiteBox(a.lm, quant="4bit")
-    ie_tr = embed([r["issue"][:600] for r in tr])
-    ie_h = embed([r["issue"][:600] for r in held])
+    # [n, K, 384]: K chunk-views of each issue, one per slot
+    ie_tr = np.stack([embed_chunks(r["issue"], nstm_slots) for r in tr])
+    ie_h = np.stack([embed_chunks(r["issue"], nstm_slots) for r in held])
 
     def evaluate(arm, nstm, gen_cap: int = 120, shuffle: bool = False):
         """CE on every held example; generation on a capped slice (identical cap across arms).
