@@ -124,6 +124,30 @@ class StateTracker(nn.Module):
         return self.residual(h, Z), Z
 
     @torch.no_grad()
+    def trajectory_separation(self, states, bins: int = 10):
+        """Across-instance cosine AT EACH POINT IN TIME, not just at the end.
+
+        The endpoint-only guard was measuring the wrong quantity and nearly cost another false
+        conclusion: it read 1.0000 (collapsed) while the tracked arm still beat the h-independent
+        control by 0.0701 -- which is impossible if the state were constant everywhere. States are
+        resampled onto `bins` RELATIVE positions so sequences of different length can be compared at
+        matched fractions of their trajectory.
+
+        Returns (per_bin_cosine, mean_over_time, max_over_time)."""
+        P = []
+        for z in states:
+            T = z.shape[0]
+            idx = [min(T - 1, int(round(f * (T - 1)))) for f in np.linspace(0, 1, bins)]
+            P.append(z[idx].float())
+        M = torch.stack(P)                                   # [N, bins, d_state]
+        M = M / (M.norm(dim=-1, keepdim=True) + 1e-9)
+        per_bin = []
+        for b in range(bins):
+            S = (M[:, b] @ M[:, b].T).cpu().numpy()
+            per_bin.append(float(np.mean(S[~np.eye(len(S), dtype=bool)])))
+        return per_bin, float(np.mean(per_bin)), float(np.max(per_bin))
+
+    @torch.no_grad()
     def separation(self, states) -> float:
         """Across-instance cosine of the FINAL reasoning state. Print this every run: if it is ~1.0
         the state is a constant, the falsifier cannot detect anything, and a 'no effect' result says
@@ -134,8 +158,20 @@ class StateTracker(nn.Module):
         return float(np.mean(S[~np.eye(len(S), dtype=bool)]))
 
 
+def variance_penalty(Z, eps: float = 1e-4, target_std: float = 1.0):
+    """VICReg variance term, on the STATE TRAJECTORY.
+
+    Deliberately NOT "maximize diversity": that would push states apart for its own sake and destroy
+    exactly the task-relevant structure it is meant to protect. This only penalises a dimension whose
+    standard deviation has fallen BELOW a floor -- i.e. it forbids collapse without dictating what the
+    latent should encode. Dimensions already carrying variance are untouched (hinge at target_std).
+    """
+    std = torch.sqrt(Z.float().var(dim=0) + eps)
+    return torch.mean(F.relu(target_std - std))
+
+
 def run_with_tracker(lm, tracker, prompt: str, target: str, mode: str, layer: int = -8,
-                     ext_Z=None):
+                     ext_Z=None, ext_h=None):
     """One teacher-forced pass with the tracker hooked into a mid-stack decoder layer.
 
     Single pass: the hook receives [B, T, d] for the whole sequence and runs the causal scan inside
@@ -151,10 +187,27 @@ def run_with_tracker(lm, tracker, prompt: str, target: str, mode: str, layer: in
 
     grab = {}
 
+    def capture_hook(_m, _i, out):
+        hs = out[0] if isinstance(out, tuple) else out
+        grab["h"] = hs[0].float().detach()
+        return out
+
     def hook(_mod, _inp, out):
         hs = out[0] if isinstance(out, tuple) else out
         h = hs[0].float()                                  # [T, d]
-        d, Z = tracker(h, mode=mode, ext_Z=ext_Z)
+        # H-PERMUTATION CONTROL: build the state from ANOTHER example's hidden trajectory, then add
+        # the residual to THIS example's hidden states. Everything else is identical. If CE barely
+        # moves, the tracker is not really conditioning on the hidden state and the gain is just
+        # "a dynamic latent exists"; if it collapses, the gain genuinely depends on tracking the
+        # CORRECT trajectory. This tests the READ path, which the shuffled-Z arm does not.
+        src = h
+        if mode == "hperm" and ext_h is not None:
+            src = ext_h[: h.shape[0]] if ext_h.shape[0] >= h.shape[0] else torch.cat(
+                [ext_h, ext_h[-1:].expand(h.shape[0] - ext_h.shape[0], -1)], 0)
+        d, Z = tracker(src if mode == "hperm" else h, mode=("track" if mode == "hperm" else mode),
+                       ext_Z=ext_Z)
+        if mode == "hperm":
+            d = tracker.residual(h, tracker.scan(src))     # residual applied to THIS example's h
         grab["Z"] = Z
         hs2 = hs.clone()
         hs2[0] = (h + d).to(hs.dtype)
@@ -285,12 +338,39 @@ def main():
         print(f"    epoch {ep+1} done  train CE {run/max(1,len(tr_rows)):.4f}", flush=True)
 
     # collect held states first -- needed for the shuffle falsifier and the separation guard
+    # capture each held example's HIDDEN TRAJECTORY at the hooked layer, for the h-permutation
+    # control. Captured with the tracker inactive so it is the LM's own unmodified trajectory.
+    a_layer = a.layer
+    a_layer = a.layer
+    Hs = []
+    with torch.no_grad():
+        for r in held:
+            tokz = lm.tok
+            idz = tokz.apply_chat_template([{"role": "user", "content": prompt_of(r)}],
+                                           add_generation_prompt=True, return_tensors="pt")
+            idz = (idz if torch.is_tensor(idz) else idz["input_ids"]).to(lm.device)
+            tg = tokz(r["new"], return_tensors="pt", add_special_tokens=False).input_ids.to(lm.device)
+            box = {}
+
+            def cap(_m, _i, out, _b=box):
+                hh = out[0] if isinstance(out, tuple) else out
+                _b["h"] = hh[0].float().detach()
+                return out
+
+            hd = lm.model.model.layers[a_layer].register_forward_hook(cap)
+            try:
+                lm.model(torch.cat([idz, tg], 1))
+            finally:
+                hd.remove()
+            Hs.append(box["h"])
+
     ce_t, states = [], []
     with torch.no_grad():
         for r in held:
             l, Z = run_with_tracker(lm, tracker, prompt_of(r), r["new"], "track", a.layer)
             ce_t.append(float(l)); states.append(Z)
     sep = tracker.separation(states)
+    per_bin, sep_mean, sep_max = tracker.trajectory_separation(states)
 
     perm = list(range(len(held)))
     rng = random.Random(4242)
@@ -298,7 +378,7 @@ def main():
         rng.shuffle(perm)
         if all(perm[i] != i for i in range(len(perm))):
             break
-    ce_s, ce_f = [], []
+    ce_s, ce_f, ce_hp = [], [], []
     with torch.no_grad():
         for i, r in enumerate(held):
             l, _ = run_with_tracker(lm, tracker, prompt_of(r), r["new"], "ext", a.layer,
@@ -306,8 +386,22 @@ def main():
             ce_s.append(float(l))
             l2, _ = run_with_tracker(lm, tracker, prompt_of(r), r["new"], "fixed", a.layer)
             ce_f.append(float(l2))
+            # THE DECISIVE CONTROL: state built from ANOTHER example's hidden trajectory, residual
+            # applied to THIS example's hidden states. Tests the READ path, not just the state value.
+            l3, _ = run_with_tracker(lm, tracker, prompt_of(r), r["new"], "hperm", a.layer,
+                                     ext_h=Hs[perm[i]])
+            ce_hp.append(float(l3))
 
     T, S, Fx = float(np.mean(ce_t)), float(np.mean(ce_s)), float(np.mean(ce_f))
+    HP = float(np.mean(ce_hp))
+    dh = np.array(ce_hp) - np.array(ce_t)
+    # BUG FIXED: RandomState(1) was constructed INSIDE the comprehension, so all 4000 draws
+    # were identical -> zero-variance bootstrap -> degenerate CI [+0.0013, +0.0013], which
+    # printed 'the tracker genuinely USES the hidden trajectory' for an effect of +0.0011.
+    # A CI whose width is 0 is never a result; seed the generator ONCE, outside the loop.
+    _rsh = np.random.RandomState(1)
+    bh = np.array([dh[_rsh.randint(0, len(dh), len(dh))].mean() for _ in range(4000)])
+    hlo, hhi = np.percentile(bh, [2.5, 97.5])
     d = np.array(ce_s) - np.array(ce_t)
     rs = np.random.RandomState(0)
     boot = np.array([d[rs.randint(0, len(d), len(d))].mean() for _ in range(4000)])
@@ -321,6 +415,14 @@ def main():
     print(f"  S  shuffled state (ANOTHER run)   CE {S:.4f}")
     print(f"\n  STATE-SPECIFIC SIGNAL  S vs T: {S - T:+.4f} CE   95% CI [{lo:+.4f}, {hi:+.4f}]")
     print(f"  h-CONDITIONING         Fx vs T: {Fx - T:+.4f} CE")
+    print(f"  H-PERMUTED (tracker reads ANOTHER example's h) CE {HP:.4f}")
+    print(f"  READ-PATH SIGNAL      HP vs T: {HP - T:+.4f} CE   95% CI [{hlo:+.4f}, {hhi:+.4f}]")
+    print(f"    -> {'the tracker genuinely USES the hidden trajectory' if hlo > 0 else 'the tracker is NOT using the hidden state meaningfully'}")
+    print(f"\n  TRAJECTORY SEPARATION across instances, by relative position:")
+    print("    " + "  ".join(f"{c:.2f}" for c in per_bin))
+    print(f"    t=0 -> t=end   mean {sep_mean:.4f}   max {sep_max:.4f}")
+    print(f"    -> {'collapse is ONLY at the end' if per_bin[0] < 0.9 <= per_bin[-1] else ('collapsed THROUGHOUT' if sep_mean > 0.99 else 'state stays distinct along the trajectory')}")
+    print(f"  (endpoint-only guard, kept for comparison: {sep:.4f})")
     print(f"  GUARD across-instance state cosine: {sep:.4f} "
           f"{'<-- COLLAPSED, falsifier is meaningless' if sep > 0.99 else '(state varies, test is valid)'}")
     print(f"    -> {'STATE IS LOAD-BEARING (CI excludes 0)' if lo > 0 else 'NOT SIGNIFICANT -- CI includes 0'}")
