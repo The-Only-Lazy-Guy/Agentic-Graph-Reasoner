@@ -200,8 +200,11 @@ class NSTMAgent:
     """Frozen LM + NSTM. The LM emits actions; NSTM shifts its logits; real tools execute; real
     observations return; the verifier decides. Only NSTM has gradients."""
 
-    def __init__(self, lm, nstm: NSTM, use_nstm: bool = True):
+    def __init__(self, lm, nstm: NSTM, use_nstm: bool = True, decision_tokens: int = 4):
         self.lm, self.nstm, self.use_nstm = lm, nstm, use_nstm
+        # how many opening tokens count as "the decision". The action word is the first token or two
+        # ("test", " author"); 4 covers the word plus its opening paren without reaching into code.
+        self.decision_tokens = decision_tokens
 
     @torch.no_grad()
     def _encode_obs(self, text: str):
@@ -223,19 +226,28 @@ class NSTMAgent:
         # tripped the 6.0 GB budget check. Feeding one token at a time against past_key_values keeps
         # the per-step cost flat.
         past, cur = None, ids
-        for _ in range(max_new):
+        for step_i in range(max_new):
             with torch.no_grad():
                 out = model(cur, past_key_values=past, use_cache=True, output_hidden_states=True)
             past = out.past_key_values
             logits = out.logits[:, -1, :].float()
-            if self.use_nstm:
+            # REAL BUG, FIXED: the residual used to be applied at EVERY decoded token. The action word
+            # is chosen at the FIRST token(s); everything after it is Python source. So a trained
+            # residual boosting the tokens "test"/"author"/"stop" was injecting those biases into the
+            # middle of generated CODE -- corrupting content while only the opening position was ever a
+            # decision. The slots now steer the DECISION and leave the writing alone, which is what
+            # "the thinker decides, the LM writes" was supposed to mean.
+            steering = self.use_nstm and step_i < self.decision_tokens
+            if steering:
                 h = out.hidden_states[-1][:, -1, :].float()
                 slots, g, dz, _ = self.nstm.step(h, slots)
-                logits = self.nstm.scatter_residual(logits, g, dz)  # 0 at init -> exactly the base LM
+                logits = self.nstm.scatter_residual(logits, g, dz)   # 0 at init -> exact base LM
                 gates.append(g.view(-1))
             probs = F.softmax(logits / max(temperature, 1e-6), dim=-1)
             nxt = torch.multinomial(probs, 1) if sample else logits.argmax(-1, keepdim=True)
-            if self.use_nstm:
+            if steering:
+                # gradient exists only where the residual was applied, so only those positions carry a
+                # score-function term. Collecting logps for unsteered tokens would add pure variance.
                 logps.append(torch.log(probs.gather(-1, nxt).clamp_min(1e-9)).view(-1))
             ids = torch.cat([ids, nxt], 1)
             cur = nxt
