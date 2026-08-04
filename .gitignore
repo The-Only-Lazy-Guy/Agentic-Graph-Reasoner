@@ -97,3 +97,4 @@ artifacts/swebench_tests.json
 
 # gold-hunk extraction (regenerable: python scripts/prep_gold_hunks.py)
 artifacts/swebench_gold_hunks.json
+artifacts/repair_schemas.json
