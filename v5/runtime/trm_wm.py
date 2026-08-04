@@ -2554,7 +2554,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             ds_weight: float = 0.0, conv_weight: float = 0.05, gate_reg_weight: float = 0.05,
             adaptive_t: bool = False, ponder_weight: float = 0.0,
             slot_gate: bool = False, slot_theta0: float = 0.0,
-            slot_w_inh: float = 0.5, slot_t: int = 3):
+            slot_w_inh: float = 0.5, slot_t: int = 3, derange: bool = True):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
@@ -2939,6 +2939,43 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 prompt_ids[text], text, code, make_tests(code_expr, atoms_needed))
                for text, atoms_needed, code, code_expr in held_tasks]
 
+    # ============================================================================================
+    # DERANGEMENT FALSIFIER -- the control this experiment has never had.
+    #
+    # `ablated` sets _slots=None, so _mk_hook returns early and the adapter is bypassed entirely -- it is
+    # the BASE LM, not a gate-zeroed adapter (the older "gate ablated" wording in this file is loose).
+    # It therefore answers exactly one question: does the adapter do ANYTHING.
+    # It cannot separate "the LM reads THESE slots" from "the presence of any slots unlocks a mode in
+    # which atom names get emitted at all" -- and on the synthetic domain the ablated baseline is 0/16
+    # BY CONSTRUCTION (build_prompt is called without inner/outer, so hint="" and the base LM has never
+    # been shown the atom names). A control that cannot fail is not evidence, which is why the whole
+    # 13-15/16 headline is undecided. Corroborating: the across-task slot cosine added later in this
+    # same loop caught a checkpoint scoring 15/16 sitting at slot_cos 1.000000, and on swe-action --
+    # the one domain with a non-zero ablated baseline -- held WM measured 0/16 against ablated 3/16.
+    #
+    # The deranged arm hands held task i the working memory refined for held task perm(i). Same prompt,
+    # same tests, same gate, same greedy decode; ONLY the content of working memory is wrong.
+    #     WM - deranged      = instance-specific signal  (does it matter WHICH atoms are in memory?)
+    #     deranged - ablated = format/mode effect        (does the mere PRESENCE of slots matter?)
+    #
+    # Random derangement, never argmin: pairing each item with its most anti-correlated partner
+    # manufactured an entire K-trend in algo_grr_prefix (algo_grr_contrast.py, bug #4). held_ex is never
+    # shuffled, so one fixed permutation stays consistent across every eval checkpoint.
+    # ============================================================================================
+    derange_perm: list = []
+    if derange and len(held_ex) >= 2:
+        derange_perm = list(range(len(held_ex)))
+        _drng = random.Random(4242)
+        for _ in range(1000):
+            _drng.shuffle(derange_perm)
+            if all(derange_perm[i] != i for i in range(len(derange_perm))):
+                break
+        else:                       # never observed; a cyclic shift is a derangement by construction
+            derange_perm = [(i + 1) % len(held_ex) for i in range(len(held_ex))]
+        print(f"  derangement falsifier ON: {len(held_ex)} held tasks each generated a THIRD time with "
+              f"another held task's slots (no fixed points). Costs 1 extra generate() per held task per "
+              f"eval checkpoint; changes no existing arm.")
+
     print(f"  Training the adapter + WMReasoner ({epochs} epochs, {len(train_ex)} pairs; "
           f"real-close loop: refine -> LM -> verify)...")
     if batch_size > 1:
@@ -2947,6 +2984,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     best_held = 0.0
     eval_every = max(1, epochs // 8)
     last_dump = None
+    # Pre-bound so the final report below is readable even if no eval checkpoint ever ran (epochs=0).
+    held_ok, ablated_ok, deranged_ok, der_dump, slot_cos_val = 0, 0, 0, [], None
     pad_id = wb.tok.pad_token_id or 0
     # SELF-CRITIQUE data collection (co-evolutionary arms-race idea, stage 1): every eval checkpoint runs
     # real generate()+verify() on held_ex (free byproduct) AND, now, ALSO on train_ex (a small deliberate
@@ -3139,6 +3178,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         if ep % eval_every == 0 or ep == epochs - 1:
             R.eval()
             held_ok, ablated_ok, reground_ok_count, reground_evicted_ok_count = 0, 0, 0, 0
+            deranged_ok, der_dump = 0, []          # falsifier arm; stays 0/[] when --no-derange
             held_slots = []
             dump = []
             if ep == 0:
@@ -3234,6 +3274,32 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                         reground_evicted_ok_count += int(reground_evicted_ok)
                         dump[-1] = dump[-1] + (reground_evicted_text, reground_evicted_ok)
 
+            # DERANGED ARM. Runs as its OWN pass after the loop above, deliberately:
+            #   * that loop stays byte-untouched, so held/ablated/reground cannot move;
+            #   * held_slots is already fully populated, so perm(i) can index a slot set computed by the
+            #     real refiner -- no second hierarchical_refine() call, no chance of a different code path
+            #     producing the deranged slots than produced the real ones;
+            #   * generation here is greedy (do_sample=False), so it consumes no RNG and cannot perturb
+            #     anything downstream.
+            # NOT appended to critic_examples and NOT passed to growth.update(): these generations are
+            # off-task by construction, so banking them as graph nodes or labelling critic trajectories
+            # with them would poison the long-term memory and the critic with deliberate nonsense.
+            # Results are kept in their own list rather than appended to `dump`, whose tuples are unpacked
+            # POSITIONALLY downstream (d[7]/d[8] reground, d[9]/d[10] evicted).
+            if derange_perm and len(held_slots) == len(held_ex):
+                for i, hx in enumerate(held_ex):
+                    pids_i, tests_i = hx[3], hx[6]
+                    with torch.no_grad():
+                        R.set_slots_direct(held_slots[derange_perm[i]])
+                        out = wb.model.generate(pids_i, max_new_tokens=eff_max_new_tokens,
+                                                do_sample=False, pad_token_id=wb.tok.eos_token_id)
+                        code_der = wb.tok.decode(out[0][pids_i.shape[-1]:],
+                                                 skip_special_tokens=True).strip()
+                    R.clear()
+                    der_ok = verify(code_der, tests_i)
+                    deranged_ok += int(der_ok)
+                    der_dump.append((code_der, der_ok))
+
             # CO-TRAINING data (stage 1)
             # cotrain_samples caps how many train tasks get a real generate() here. This loop was measured
             # as ~43% of total eval-checkpoint cost (a full generate() over EVERY train task, at EVERY
@@ -3279,13 +3345,41 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             # reads ~1.000 the trm is emitting the same vector for every task and any held-out gain is a
             # constant format/mode effect, not retrieved memory. It went unmeasured for this codebase's
             # whole history; a checkpoint scoring 15/16 turned out to sit at 1.000000.
-            slot_cos_str = ""
+            slot_cos_str, slot_cos_val = "", None
             if held_slots:
                 _S = torch.stack([s_.flatten().float() for s_ in held_slots])
                 _S = _S / _S.norm(dim=-1, keepdim=True).clamp_min(1e-12)
                 _C = _S @ _S.T
                 _off = _C[~torch.eye(len(_S), dtype=torch.bool, device=_C.device)]
-                slot_cos_str = f"  slot_cos {_off.mean():.4f}"
+                slot_cos_val = float(_off.mean())
+                slot_cos_str = f"  slot_cos {slot_cos_val:.4f}"
+
+            # APPARATUS CROSS-CHECK, free, and the reason the two numbers are printed together.
+            # Greedy decode + identical slots => bitwise identical output. So the deranged arm and
+            # slot_cos are two views of one fact and they MUST agree:
+            #   slot_cos ~ 1 (collapsed slots) yet deranged output differs  -> the difference is NOT
+            #       coming from the slot path; the arm is not measuring what it claims. Hard flag.
+            #   slot_cos well below 1 yet EVERY deranged output is identical -> slots vary but the LM is
+            #       invariant to them, i.e. the channel is open and unused. Different finding, same value.
+            # This is the class of bug (measurement apparatus, not model) that faked three results on
+            # 08-04/08-05; it is cheaper to assert it than to re-derive it from a surprising number.
+            deranged_str, der_note = "", ""
+            if der_dump:
+                deranged_str = f"  deranged {deranged_ok}/{len(held_ex)}"
+                n_diff = sum(1 for i, (c_, _o) in enumerate(der_dump) if c_ != dump[i][2])
+                # 0.9999 is deliberately STRICT for the hard flag: "identical slots => identical greedy
+                # text" only holds at (near) numerical identity, so a looser bar would fire spuriously.
+                # 0.99 is the separate, looser bar for "collapsed enough that the derangement cannot
+                # tell you anything" -- the distilgpt2 plumbing run sat at 0.999659, which is inside
+                # that band and outside the strict one.
+                if slot_cos_val is not None and slot_cos_val > 0.9999 and n_diff:
+                    der_note = (f"  [!! APPARATUS: slot_cos~1 but {n_diff}/{len(der_dump)} deranged "
+                                f"outputs DIFFER -- identical slots cannot give different greedy text]")
+                elif slot_cos_val is not None and slot_cos_val > 0.99:
+                    der_note = (f"  [slots ~COLLAPSED (slot_cos {slot_cos_val:.4f}): deranged and real "
+                                f"memory are near-identical inputs, so this arm cannot be informative]")
+                elif slot_cos_val is not None and n_diff == 0:
+                    der_note = "  [slots vary across tasks, LM output invariant to them: channel unused]"
             nsteps_str = ""
             _enst = getattr(R, '_eval_nsteps', [])
             if _enst:
@@ -3295,8 +3389,9 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                             if (R.top_trm is not None or merged) else "")
             evicted_str = (f"  reground_evicted {reground_evicted_ok_count}/{len(held_ex)}"
                           if evict_window is not None else "")
-            print(f"  held WM {held_ok}/{len(held_ex)}  ablated {ablated_ok}/{len(held_ex)}{reground_str}"
-                  f"{evicted_str}{slot_cos_str}{nsteps_str}  {inst_str}", flush=True)
+            print(f"  held WM {held_ok}/{len(held_ex)}  ablated {ablated_ok}/{len(held_ex)}"
+                  f"{deranged_str}{reground_str}"
+                  f"{evicted_str}{slot_cos_str}{nsteps_str}  {inst_str}{der_note}", flush=True)
             if len(held_ex) <= 8:
                 for d in dump:
                     t, tc, wm_code, wm_ok, abl_code, abl_ok, instab = d[:7]
@@ -3328,6 +3423,53 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     print(f"\n  Best held-out: {best_held}/{len(held_ex)}  (gate ablated = {ablated_ok} baseline)")
     verdict = "PROVEN" if best_held > ablated_ok else "PARTIAL"
     print(f"  => {verdict}: working memory {'improves' if best_held > ablated_ok else 'does not improve'} held-out composition on {lm_name}")
+
+    # ============================================================================================
+    # THE FALSIFIER REPORT. Deliberately separate from the line above, which compares a running MAX
+    # (best_held, over all checkpoints) against a LAST-checkpoint ablated count -- fine as a headline,
+    # useless as a control. Everything below is from ONE checkpoint (the final one), so the three arms
+    # are apples to apples.
+    # ============================================================================================
+    if der_dump:
+        N = len(held_ex)
+        specific = held_ok - deranged_ok          # does it matter WHICH atoms are in memory
+        modal = deranged_ok - ablated_ok          # does the mere PRESENCE of slots matter
+        print(f"\n  {'=' * 72}")
+        print(f"  DERANGEMENT FALSIFIER   (final checkpoint, held {N}, one fixed derangement)")
+        print(f"    WM        (own slots)        {held_ok}/{N}")
+        print(f"    DERANGED  (another task's)   {deranged_ok}/{N}")
+        print(f"    ABLATED   (no slots at all)  {ablated_ok}/{N}")
+        print(f"    instance-specific  WM - deranged      = {specific:+d}/{N}")
+        print(f"    format/mode effect deranged - ablated = {modal:+d}/{N}")
+        if slot_cos_val is not None:
+            print(f"    across-task slot cosine               = {slot_cos_val:.6f}")
+        # VACUOUS-RUN GUARD. Caught by the distilgpt2 plumbing run, which scored 0/0/0 and printed
+        # "FALSIFIED" off specific <= 0 -- but 0-0=0 is an ABSENCE of measurement, not a falsification.
+        # A falsifier that "fires" when nothing was solved would hand back exactly the kind of confident
+        # null this project has already been burned by three times.
+        if held_ok == 0:
+            msg = ("VACUOUS: the WM arm solved NOTHING, so all three arms are 0 and no comparison "
+                   "between them carries information. This says nothing about the channel -- fix the "
+                   "run (model, epochs, task difficulty) before reading any verdict here.")
+        elif specific > 0 and specific >= modal:
+            msg = ("REAL: most of the gain needs the RIGHT working memory, not merely some working "
+                   "memory. This is the first arm in this codebase that could have falsified the "
+                   "13-15/16 headline and did not.")
+        elif specific > 0:
+            msg = (f"MIXED: the content matters ({specific:+d}) but the larger share is a format/mode "
+                   f"effect ({modal:+d}) that ANY slots unlock. Report both; the headline overstates.")
+        else:
+            msg = ("FALSIFIED: another task's working memory scores at or above the real one. The gain "
+                   "is a format/mode effect, not retrieved memory -- the same shape as the adapter "
+                   "shortcut in algo_grr_contrast.py. Do not build on this channel under CE.")
+        print(f"    -> {msg}")
+        print(f"  {'=' * 72}")
+        print(f"  CAVEAT, stated up front: N={N} and ONE derangement. A {N}-item pass rate has a wide "
+              f"binomial interval; treat a gap of 1-2 as noise. Multiple permutations and a bootstrap "
+              f"are required before this number is quotable.")
+    elif derange:
+        print(f"\n  [derangement falsifier did not run: needs >=2 held tasks and a completed eval "
+              f"checkpoint; held={len(held_ex)}]")
 
     # SELF-CRITIQUE: train + report on the (trajectory, real-verify-outcome) pairs collected as a free
     # byproduct of eval above. Held-out split within this set (not the SAME split as train/held composition
@@ -3719,6 +3861,14 @@ def main():
                          "alongside held/ablated/reground in the eval output -- same task/slots/verify(), "
                          "only evict_window differs, so the pass-rate gap (if any) isolates eviction's real "
                          "cost, not a confound with use_kv_cache itself.")
+    ap.add_argument("--no-derange", action="store_false", dest="derange",
+                    help="--run: SKIP the derangement falsifier (on by default). The falsifier generates "
+                         "each held task a third time using ANOTHER held task's working memory, which is "
+                         "the only arm that separates 'the LM reads THESE slots' from 'any slots unlock a "
+                         "mode where atom names appear'. `ablated` cannot do that: on the synthetic domain "
+                         "its baseline is 0/16 by construction. Costs one extra greedy generate() per held "
+                         "task per eval checkpoint and changes no existing arm, so pass this only when you "
+                         "are deliberately trading the control away for wall clock.")
     a = ap.parse_args()
     if a.probe:
         probe_real(a.lm, a.quant, a.words, a.steps)
@@ -3743,7 +3893,7 @@ def main():
                  ds_weight=a.ds_weight, conv_weight=a.conv_weight, gate_reg_weight=a.gate_reg_weight,
                  adaptive_t=a.adaptive_t, ponder_weight=a.ponder_weight,
                  slot_gate=a.slot_gate, slot_theta0=a.slot_theta0,
-                 slot_w_inh=a.slot_w_inh, slot_t=a.slot_t)
+                 slot_w_inh=a.slot_w_inh, slot_t=a.slot_t, derange=a.derange)
     else:
         selftest()
 
