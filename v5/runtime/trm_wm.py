@@ -2554,7 +2554,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             ds_weight: float = 0.0, conv_weight: float = 0.05, gate_reg_weight: float = 0.05,
             adaptive_t: bool = False, ponder_weight: float = 0.0,
             slot_gate: bool = False, slot_theta0: float = 0.0,
-            slot_w_inh: float = 0.5, slot_t: int = 3, derange: bool = True):
+            slot_w_inh: float = 0.5, slot_t: int = 3, derange: bool = True,
+            n_derange: int = 5):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
@@ -2962,19 +2963,27 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     # manufactured an entire K-trend in algo_grr_prefix (algo_grr_contrast.py, bug #4). held_ex is never
     # shuffled, so one fixed permutation stays consistent across every eval checkpoint.
     # ============================================================================================
-    derange_perm: list = []
+    derange_perms: list = []
     if derange and len(held_ex) >= 2:
-        derange_perm = list(range(len(held_ex)))
         _drng = random.Random(4242)
-        for _ in range(1000):
-            _drng.shuffle(derange_perm)
-            if all(derange_perm[i] != i for i in range(len(derange_perm))):
-                break
-        else:                       # never observed; a cyclic shift is a derangement by construction
-            derange_perm = [(i + 1) % len(held_ex) for i in range(len(held_ex))]
-        print(f"  derangement falsifier ON: {len(held_ex)} held tasks each generated a THIRD time with "
-              f"another held task's slots (no fixed points). Costs 1 extra generate() per held task per "
-              f"eval checkpoint; changes no existing arm.")
+        _nh = len(held_ex)
+        for _k in range(max(1, n_derange)):
+            _p = list(range(_nh))
+            for _ in range(1000):
+                _drng.shuffle(_p)
+                if all(_p[i] != i for i in range(_nh)):
+                    break
+            else:
+                # Cyclic shift by a NON-ZERO offset mod _nh. A plain (i+1+_k) would wrap to offset 0
+                # at _k == _nh-1 and silently reintroduce fixed points -- the one thing this arm may
+                # never have.
+                _off = 1 + (_k % max(1, _nh - 1))
+                _p = [(i + _off) % _nh for i in range(_nh)]
+            derange_perms.append(_p)
+        print(f"  derangement falsifier ON: {_nh} held tasks, {len(derange_perms)} independent "
+              f"derangements (no fixed points). GENERATION uses derangement 0 (1 extra generate() per "
+              f"held task per checkpoint); the CE readout uses all {len(derange_perms)} (forward passes "
+              f"only). Changes no existing arm.")
 
     print(f"  Training the adapter + WMReasoner ({epochs} epochs, {len(train_ex)} pairs; "
           f"real-close loop: refine -> LM -> verify)...")
@@ -2986,6 +2995,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     last_dump = None
     # Pre-bound so the final report below is readable even if no eval checkpoint ever ran (epochs=0).
     held_ok, ablated_ok, deranged_ok, der_dump, slot_cos_val = 0, 0, 0, [], None
+    ce_wm, ce_abl, ce_der = [], [], []
     pad_id = wb.tok.pad_token_id or 0
     # SELF-CRITIQUE data collection (co-evolutionary arms-race idea, stage 1): every eval checkpoint runs
     # real generate()+verify() on held_ex (free byproduct) AND, now, ALSO on train_ex (a small deliberate
@@ -3179,6 +3189,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             R.eval()
             held_ok, ablated_ok, reground_ok_count, reground_evicted_ok_count = 0, 0, 0, 0
             deranged_ok, der_dump = 0, []          # falsifier arm; stays 0/[] when --no-derange
+            ce_wm, ce_abl, ce_der = [], [], []     # per-example CE, kept per-example so it can bootstrap
             held_slots = []
             dump = []
             if ep == 0:
@@ -3286,11 +3297,11 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             # with them would poison the long-term memory and the critic with deliberate nonsense.
             # Results are kept in their own list rather than appended to `dump`, whose tuples are unpacked
             # POSITIONALLY downstream (d[7]/d[8] reground, d[9]/d[10] evicted).
-            if derange_perm and len(held_slots) == len(held_ex):
+            if derange_perms and len(held_slots) == len(held_ex):
                 for i, hx in enumerate(held_ex):
                     pids_i, tests_i = hx[3], hx[6]
                     with torch.no_grad():
-                        R.set_slots_direct(held_slots[derange_perm[i]])
+                        R.set_slots_direct(held_slots[derange_perms[0][i]])
                         out = wb.model.generate(pids_i, max_new_tokens=eff_max_new_tokens,
                                                 do_sample=False, pad_token_id=wb.tok.eos_token_id)
                         code_der = wb.tok.decode(out[0][pids_i.shape[-1]:],
@@ -3299,6 +3310,49 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                     der_ok = verify(code_der, tests_i)
                     deranged_ok += int(der_ok)
                     der_dump.append((code_der, der_ok))
+
+                # ============================================================================
+                # CE READOUT -- the metric that has actually resolved things in this project.
+                #
+                # A 16-item pass rate cannot see the effect sizes at stake here. The whole
+                # adapter-shortcut result is stated in nats (instance-specific 0.0011-0.0075 under
+                # CE vs 0.3474 under contrastive supervision), and a binomial on N=16 has a
+                # confidence interval wider than that entire range. Teacher-forced CE on the SAME
+                # three arms is continuous, needs one forward pass instead of a generation, and
+                # lands on the same scale as the finding it is testing.
+                #
+                #   CE(deranged) - CE(WM)      = instance-specific signal  (nats)
+                #   CE(ablated)  - CE(deranged) = format/mode effect       (nats)
+                #
+                # Generation stays at ONE derangement (it is the expensive arm); CE averages over
+                # all of them per example, so the deranged estimate is not a single draw.
+                # ============================================================================
+                def _held_ce(p_i, t_i, slots_or_none) -> float:
+                    """Teacher-forced CE of this task's target under a given working memory."""
+                    if slots_or_none is None:
+                        R.clear()                     # ablated == adapter bypassed, see _mk_hook
+                    else:
+                        R.set_slots_direct(slots_or_none)
+                    with torch.no_grad():
+                        o = wb.model(
+                            input_ids=torch.cat([p_i, t_i], dim=-1),
+                            labels=torch.cat([torch.full_like(p_i, -100), t_i], dim=-1))
+                    R.clear()
+                    return float(o.loss)
+
+                _eos = torch.tensor([[wb.tok.eos_token_id]], device=wb.device)
+                for i, hx in enumerate(held_ex):
+                    p_i, tgt_i = hx[3], hx[5]
+                    # Target tokenized EXACTLY as the training loop builds tids, so the CE reported
+                    # here is the same quantity the model was trained on -- a different tokenization
+                    # would make these numbers incomparable to lm_loss without saying so.
+                    body = tgt_i.split(": ", 1)[1] if ": " in tgt_i else tgt_i
+                    t_i = wb.tok(" " + body, return_tensors="pt").input_ids.to(wb.device)
+                    t_i = torch.cat([t_i, _eos], dim=-1)
+                    ce_wm.append(_held_ce(p_i, t_i, held_slots[i]))
+                    ce_abl.append(_held_ce(p_i, t_i, None))
+                    ce_der.append(float(np.mean([
+                        _held_ce(p_i, t_i, held_slots[pm[i]]) for pm in derange_perms])))
 
             # CO-TRAINING data (stage 1)
             # cotrain_samples caps how many train tasks get a real generate() here. This loop was measured
@@ -3443,6 +3497,60 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         print(f"    format/mode effect deranged - ablated = {modal:+d}/{N}")
         if slot_cos_val is not None:
             print(f"    across-task slot cosine               = {slot_cos_val:.6f}")
+
+        # ---- CE readout, bootstrapped. This is the quotable number; the pass counts above are not. ----
+        if ce_wm and len(ce_wm) == len(ce_der) == len(ce_abl):
+            a_wm, a_der, a_abl = np.array(ce_wm), np.array(ce_der), np.array(ce_abl)
+            d_spec = a_der - a_wm            # >0 => the RIGHT memory lowers CE vs a wrong one
+            d_modal = a_abl - a_der          # >0 => having ANY memory lowers CE vs none
+            # PAIRED bootstrap over EXAMPLES. RandomState is constructed ONCE, outside the
+            # comprehension: building it inside made all 4000 resamples identical and printed a
+            # zero-width CI for an effect of +0.0011 (algo_grr_contrast.py, bug #6).
+            rs = np.random.RandomState(0)
+            idx = [rs.randint(0, len(a_wm), len(a_wm)) for _ in range(4000)]
+            bs = np.array([d_spec[j].mean() for j in idx])
+            bm = np.array([d_modal[j].mean() for j in idx])
+            s_lo, s_hi = np.percentile(bs, [2.5, 97.5])
+            m_lo, m_hi = np.percentile(bm, [2.5, 97.5])
+            print(f"\n    teacher-forced CE, nats (lower = better), {len(derange_perms)} derangements")
+            print(f"      CE  WM                              {a_wm.mean():.4f}")
+            print(f"      CE  DERANGED                        {a_der.mean():.4f}")
+            print(f"      CE  ABLATED                         {a_abl.mean():.4f}")
+            print(f"      instance-specific  der - WM         {d_spec.mean():+.4f}  "
+                  f"95% CI [{s_lo:+.4f}, {s_hi:+.4f}]")
+            print(f"      format/mode effect  abl - der       {d_modal.mean():+.4f}  "
+                  f"95% CI [{m_lo:+.4f}, {m_hi:+.4f}]")
+            # MAGNITUDE, not just significance. A paired bootstrap over enough examples will exclude 0
+            # for an arbitrarily tiny bias, so "CI excludes 0" is NOT a result on its own -- the first
+            # version of this block printed "CONFIRMS a real instance-specific channel" for +0.0043
+            # nats, a number sitting inside the 0.0011-0.0075 band this project already documents AS
+            # the adapter-shortcut null. The two things that decide it are the SCALE (against that
+            # band and against the 0.3474 contrastive positive control) and the RATIO against the
+            # format/mode effect, which is what "instance-independent adapter" means quantitatively.
+            NULL_BAND_HI = 0.0075     # algo_grr_contrast.py: CE-trained instance-specific ceiling
+            ratio = float(d_modal.mean() / d_spec.mean()) if d_spec.mean() > 1e-9 else float("inf")
+            print(f"      modal / specific ratio              {ratio:>8.1f}x   "
+                  f"[>50x = instance-independent adapter]")
+            if s_hi < 0:
+                ce_msg = ("SIGN ERROR: the WRONG memory scores BETTER than the right one. Not a weak "
+                          "effect -- check the perm indexing and slot/example alignment before "
+                          "interpreting anything else in this run.")
+            elif s_lo <= 0:
+                ce_msg = (f"NO instance-specific signal (CI includes 0), with {d_modal.mean():+.4f} nats "
+                          f"of format/mode effect present. Adapter-shortcut shape: the adapter helps, "
+                          f"the CONTENT of memory does not.")
+            elif d_spec.mean() <= NULL_BAND_HI or ratio > 50:
+                ce_msg = (f"ADAPTER SHORTCUT, not memory. The CI excludes 0, but {d_spec.mean():+.4f} nats "
+                          f"is inside the documented CE null band (<={NULL_BAND_HI}) and/or the format "
+                          f"effect is {ratio:.0f}x larger. This is the SAME signature as the three "
+                          f"interfaces in algo_grr_contrast.py (250-950x). Significance without "
+                          f"magnitude is not a channel.")
+            else:
+                ce_msg = (f"REAL instance-specific channel: {d_spec.mean():+.4f} nats, CI excludes 0, "
+                          f"above the {NULL_BAND_HI} null band, and only {ratio:.0f}x smaller than the "
+                          f"format effect. First result in this codebase to clear all three bars. "
+                          f"Reference points: 0.0011-0.0075 CE null, 0.3474 contrastive control.")
+            print(f"      -> {ce_msg}")
         # VACUOUS-RUN GUARD. Caught by the distilgpt2 plumbing run, which scored 0/0/0 and printed
         # "FALSIFIED" off specific <= 0 -- but 0-0=0 is an ABSENCE of measurement, not a falsification.
         # A falsifier that "fires" when nothing was solved would hand back exactly the kind of confident
@@ -3869,6 +3977,12 @@ def main():
                          "its baseline is 0/16 by construction. Costs one extra greedy generate() per held "
                          "task per eval checkpoint and changes no existing arm, so pass this only when you "
                          "are deliberately trading the control away for wall clock.")
+    ap.add_argument("--n-derange", type=int, default=5,
+                    help="--run: how many independent derangements the CE readout averages over "
+                         "(default 5). GENERATION always uses derangement 0 only, so this costs "
+                         "forward passes, not generations. More derangements make the deranged arm an "
+                         "average rather than a single draw; a 16-item pass rate cannot resolve the "
+                         "effect sizes this experiment is about, which is why CE is the quotable number.")
     a = ap.parse_args()
     if a.probe:
         probe_real(a.lm, a.quant, a.words, a.steps)
@@ -3893,7 +4007,8 @@ def main():
                  ds_weight=a.ds_weight, conv_weight=a.conv_weight, gate_reg_weight=a.gate_reg_weight,
                  adaptive_t=a.adaptive_t, ponder_weight=a.ponder_weight,
                  slot_gate=a.slot_gate, slot_theta0=a.slot_theta0,
-                 slot_w_inh=a.slot_w_inh, slot_t=a.slot_t, derange=a.derange)
+                 slot_w_inh=a.slot_w_inh, slot_t=a.slot_t, derange=a.derange,
+                 n_derange=a.n_derange)
     else:
         selftest()
 
