@@ -3421,14 +3421,24 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             if der_dump:
                 deranged_str = f"  deranged {deranged_ok}/{len(held_ex)}"
                 n_diff = sum(1 for i, (c_, _o) in enumerate(der_dump) if c_ != dump[i][2])
-                # 0.9999 is deliberately STRICT for the hard flag: "identical slots => identical greedy
-                # text" only holds at (near) numerical identity, so a looser bar would fire spuriously.
-                # 0.99 is the separate, looser bar for "collapsed enough that the derangement cannot
-                # tell you anything" -- the distilgpt2 plumbing run sat at 0.999659, which is inside
-                # that band and outside the strict one.
-                if slot_cos_val is not None and slot_cos_val > 0.9999 and n_diff:
-                    der_note = (f"  [!! APPARATUS: slot_cos~1 but {n_diff}/{len(der_dump)} deranged "
-                                f"outputs DIFFER -- identical slots cannot give different greedy text]")
+                # The hard flag tests ACTUAL PER-EXAMPLE TENSOR IDENTITY, not a cosine threshold.
+                # The first version keyed it on slot_cos > 0.9999 and produced FALSE ALARMS on the real
+                # 3B run: a mean cosine of 0.99995 prints as "1.0000" and clears that bar while the
+                # slots still genuinely differ, and greedy decode flips readily on a near-tie. Only
+                # "these two slot tensors are allclose YET the greedy text differs" is actually
+                # impossible, so that is what gets flagged. Cosine stays the COLLAPSE diagnostic below,
+                # which is all it was ever able to support.
+                n_ident_diff = 0
+                if len(held_slots) == len(held_ex):
+                    for i, (c_, _o) in enumerate(der_dump):
+                        same_slots = torch.allclose(held_slots[derange_perms[0][i]].float(),
+                                                    held_slots[i].float(), atol=1e-6, rtol=1e-5)
+                        if same_slots and c_ != dump[i][2]:
+                            n_ident_diff += 1
+                if n_ident_diff:
+                    der_note = (f"  [!! APPARATUS: {n_ident_diff}/{len(der_dump)} examples have "
+                                f"ALLCLOSE slots yet DIFFERENT greedy text -- impossible via the slot "
+                                f"path, so something else is moving the output]")
                 elif slot_cos_val is not None and slot_cos_val > 0.99:
                     der_note = (f"  [slots ~COLLAPSED (slot_cos {slot_cos_val:.4f}): deranged and real "
                                 f"memory are near-identical inputs, so this arm cannot be informative]")
