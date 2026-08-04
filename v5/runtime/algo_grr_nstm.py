@@ -253,7 +253,7 @@ def slot_signature(slots) -> np.ndarray:
 
 # ── the environment: real repo, real graph, real self-built tools, real verifier ──────────────────
 def build_prompt(issue: str, path: str, src: str, history: list, tools: list, banked: list,
-                 have_patch: bool = False) -> str:
+                 have_patch: bool = False, short: bool = False) -> str:
     """SLOTS REPLACE CONTEXT, they do not duplicate it.
 
     The first version re-sent the issue, the full ~2.6k-char code excerpt and the whole history on
@@ -263,12 +263,20 @@ def build_prompt(issue: str, path: str, src: str, history: list, tools: list, ba
     decision is whether to VERIFY, not what to write), so it is dropped and the recurrent slots carry
     what mattered. Measured token cost of the excerpt is reported by --run.
     """
-    hist = "\n".join(f"  step {i}: {h}" for i, h in enumerate(history[-2:])) or "  (nothing yet)"
+    # SHORT CONTEXT: the KV-cache test. The full observation (a real traceback can be 700+ chars) is
+    # still written into the SLOTS at every step; the PROMPT gets a 90-char stub. If the slots are
+    # genuinely carrying short-term memory, behaviour should survive the prompt losing it -- that is
+    # the thesis, stated as a measurable: same solves, materially fewer prompt tokens.
+    keep = 90 if short else 400
+    hist = "\n".join(f"  step {i}: {h[:keep]}" for i, h in enumerate(history[-1 if short else -2:])) \
+        or "  (nothing yet)"
     bank_txt = "\n".join(f"  - {d}" for d in banked[:3]) or "  (bank empty)"
     if have_patch:
-        return (f"You are fixing a real bug in {path}.\n\nBUG REPORT:\n{issue[:600]}\n\n"
+        return (f"You are fixing a real bug in {path}.\n\nBUG REPORT:\n{issue[:200 if short else 600]}\n\n"
                 f"WHAT HAS HAPPENED SO FAR:\n{hist}\n\n"
-                f"You ALREADY HAVE a patch that applies and parses. It has NOT been verified.\n"
+                f"You ALREADY HAVE a patch that applies and parses.\n"
+                f"If it has not been verified, verify it. If it was verified and FAILED, the patch is\n"
+                f"wrong -- write a DIFFERENT one; re-running the same test cannot change the result.\n"
                 f"Choose ONE action:\n"
                 f"  test()       run the REAL test suite on your current patch\n"
                 f"  author(...)  replace it with a different `def edit(text: str) -> str`\n"
@@ -299,7 +307,7 @@ def build_prompt(issue: str, path: str, src: str, history: list, tools: list, ba
 
 
 def run_episode(agent: NSTMAgent, row: dict, bank: ToolBank, max_steps: int = 4,
-                sample: bool = True, verbose: bool = False):
+                sample: bool = True, verbose: bool = False, short_ctx: bool = False):
     """One real trajectory. Every decision is the LM's decoded text; every observation is real."""
     inst, gold, issue = row["instance_id"], row["gold"], row["problem"]
     src = container_file_text(inst, gold)
@@ -314,7 +322,7 @@ def run_episode(agent: NSTMAgent, row: dict, bank: ToolBank, max_steps: int = 4,
 
     for step in range(max_steps):
         prompt = build_prompt(issue, gold, src, history, tools, banked,
-                              have_patch=bool(state.get("patch_tool")))
+                              have_patch=bool(state.get("patch_tool")), short=short_ctx)
         ptoks += len(agent.lm.tok(prompt).input_ids)
         text, slots, lp, gate = agent.decode_action(prompt, slots, sample=sample)
         logps += lp
@@ -338,6 +346,14 @@ def run_episode(agent: NSTMAgent, row: dict, bank: ToolBank, max_steps: int = 4,
                     if not good:
                         obs = f"GATE REJECTED: {note[:200]}"
                     else:
+                        prev = state.get("authored_code")
+                        # a REVISION only counts if a real verification already failed AND the new
+                        # tool is actually different -- re-submitting the same code after a failure
+                        # is not revision, and must not be paid as if it were.
+                        if state.get("last_test_failed") and prev is not None and code != prev:
+                            state["revisions_after_failure"] = state.get("revisions_after_failure", 0) + 1
+                            state.pop("tests_passed", None)      # the new patch is unverified again
+                            state["last_test_failed"] = False
                         state["patch_tool"] = (gold, code)
                         state["authored_code"] = code
                         obs = f"OK: tool applies and parses ({note}). You can now call test()."
@@ -354,9 +370,18 @@ def run_episode(agent: NSTMAgent, row: dict, bank: ToolBank, max_steps: int = 4,
         elif tool == "test":
             if not state.get("patch_tool"):
                 obs = "REJECTED: no patch yet -- author() or reuse() first"
+            elif state.get("tested_code") == state.get("authored_code"):
+                # the SAME patch was already verified. Re-running is pure waste and was the observed
+                # failure on django-11999 (test -> FAIL -> test -> test -> test). Charged for, and not
+                # re-executed, so the model cannot burn its budget on a foregone conclusion.
+                state["redundant_tests"] = state.get("redundant_tests", 0) + 1
+                obs = ("REJECTED: this exact patch was already tested and it FAILED. Re-running it "
+                       "cannot change the result -- author() a DIFFERENT fix.")
             else:
                 ok, out = t_run_tests(state, None)
                 state["tests_passed"] = ok
+                state["tested_code"] = state.get("authored_code")
+                state["last_test_failed"] = not ok
                 tail = " | ".join([l for l in out.strip().splitlines() if l.strip()][-6:])
                 obs = ("PASS: the real test suite passed." if ok
                        else f"FAIL: the real test suite still fails. Output:\n{tail[:700]}")
@@ -399,17 +424,27 @@ def reward(state: dict) -> float:
         r += 0.3
     if state.get("tests_passed"):
         r += 1.0
+    # THE TERM THAT GIVES INSTANCE-SPECIFIC MEMORY SOMETHING TO BUY. Diagnosed directly: the slots
+    # tracked the PHASE, not the instance (across-instance cosine 0.986 at step 0, 0.996 at step 1,
+    # while step-to-step movement was a real 0.87-0.90). That is CORRECT for a fixed author->test
+    # sequence -- nothing about which instance it is should change the action, so nothing rewarded
+    # distinguishing them and the collapse was the right answer to the wrong question.
+    # Revising AFTER a real failure is different: what to write next depends on THIS instance's
+    # traceback. Rewarding it, and charging for a repeated identical verification, is what makes
+    # per-instance state load-bearing rather than decorative.
+    r += 0.4 * float(state.get("revisions_after_failure", 0))
+    r -= 0.2 * float(state.get("redundant_tests", 0))
     return r
 
 
 def train(agent: NSTMAgent, rows: list, bank: ToolBank, epochs: int = 3, lr: float = 1e-4,
-          verbose: bool = True):
+          verbose: bool = True, short_ctx: bool = False):
     """REINFORCE with a mean baseline, on NSTM parameters ONLY. No loss touches the LM."""
     opt = torch.optim.Adam(agent.nstm.parameters(), lr=lr)
     for ep in range(epochs):
         recs = []
         for row in rows:
-            st, lp, _ = run_episode(agent, row, bank, sample=True)
+            st, lp, _ = run_episode(agent, row, bank, sample=True, short_ctx=short_ctx)
             recs.append((reward(st), lp))
         live = [(r, lp) for r, lp in recs if lp]
         base = sum(r for r, _ in live) / max(1, len(live))
@@ -483,6 +518,19 @@ def _selftest() -> bool:
         "whose absence gave NSTM ~0 gradient over 9 episodes",
         r_tried > r_patch, f"patch-only {r_patch} vs verified-but-failed {r_tried}")
 
+    rev = reward({"patch_tool": 1, "tests_passed": False, "revisions_after_failure": 1})
+    red = reward({"patch_tool": 1, "tests_passed": False, "redundant_tests": 2})
+    chk("[8c] revising after a REAL failure pays; re-running the same test is charged for. "
+        "This is what gives per-instance memory something to buy",
+        rev > r_tried and red < r_tried, f"revise {rev:.2f} | plain {r_tried:.2f} | redundant {red:.2f}")
+
+    long_p = build_prompt("issue text " * 60, "a.py", "src", ["obs " * 200], ["author"], [],
+                          have_patch=True, short=False)
+    short_p = build_prompt("issue text " * 60, "a.py", "src", ["obs " * 200], ["author"], [],
+                           have_patch=True, short=True)
+    chk("[8d] --ctx short really shrinks the prompt (the KV-cache claim, measured not assumed)",
+        len(short_p) < len(long_p) * 0.6, f"{len(long_p)} -> {len(short_p)} chars")
+
     tot = sum(p.numel() for p in NSTM(2048, 151936, d_slot=128, action_ids=[1, 2, 3, 4]).parameters())
     chk("[9] the module is small again now the residual is action-sized, not vocab-sized",
         tot < 1_000_000, f"{tot:,} params (was 19,907,713 with a full-vocab W_out)")
@@ -499,6 +547,8 @@ def main():
     ap.add_argument("--epochs", type=int, default=3)
     ap.add_argument("--steps", type=int, default=4)
     ap.add_argument("--abl", type=str, default="", help="no-nstm = the exact frozen-LM incumbent")
+    ap.add_argument("--ctx", choices=["full", "short"], default="full",
+                    help="short = the failure text goes ONLY into the slots, not the prompt")
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args()
     if a.selftest:
@@ -524,18 +574,21 @@ def main():
     nstm = NSTM(d_model, lm.model.config.vocab_size, num_slots=4, top_k=2, d_slot=128,
                 action_ids=act_ids).to(lm.device)
     use = "no-nstm" not in a.abl
-    print(f"NSTM: {sum(p.numel() for p in nstm.parameters()):,} params  active={use}", flush=True)
+    print(f"NSTM: {sum(p.numel() for p in nstm.parameters()):,} params  active={use}  ctx={a.ctx}",
+          flush=True)
     agent = NSTMAgent(lm, nstm, use_nstm=use)
     bank = ToolBank()
 
+    short = a.ctx == "short"
     if use:
-        train(agent, rows, bank, epochs=a.epochs)
+        train(agent, rows, bank, epochs=a.epochs, short_ctx=short)
 
     print(f"\n{'=' * 74}\nEVAL -- every decision is the LM's; NSTM only shifts logits\n{'=' * 74}",
           flush=True)
     solved, patched, sigs, unprompted, ptok = 0, 0, [], 0, 0
     for row in rows:
-        st, _, sg = run_episode(agent, row, bank, max_steps=a.steps, sample=False, verbose=True)
+        st, _, sg = run_episode(agent, row, bank, max_steps=a.steps, sample=False, verbose=True,
+                                short_ctx=short)
         sigs += sg[-1:]
         ptok += st.get("prompt_tokens", 0)
         patched += int(bool(st.get("patch_tool")))
