@@ -379,11 +379,21 @@ class SlotDIMv2(nn.Module):
             lam = torch.sigmoid(self.W_f[i](x))                # (T,d) selective decay
             v = nn.functional.silu(self.W_v[i](x))             # (T,d) candidate writes
             w = A.unsqueeze(-1) * gate.unsqueeze(-1) * v.unsqueeze(1)   # (T,ks,d)
-            keep = lam.unsqueeze(1)                            # (T,1,d)
-            wd, kd = w.double(), keep.double()                 # fp64 scan, per the notebook
-            K = torch.exp(torch.cumsum(torch.log(kd.clamp(min=1e-6)), dim=0))
-            b = (1.0 - kd) * wd
-            M_seq = (K * (M0.double().unsqueeze(0) + torch.cumsum(b / K, dim=0))).float()
+            # LOG-SPACE EXACT SCAN -- no 1/K division anywhere.
+            # The first port of this used the notebook's fp64 closed form, M = K*(M0 + cumsum(b/K)).
+            # That form's gradient runs through d(1/K)/dkeep ~ -1/K^2, which explodes: at T=128 with
+            # keep~0.9, K ~ 1e-6 and 1/K ~ 1e6, and the user hit NaN loss from AddmmBackward0 in W_f
+            # on exactly this path. fp64 only postpones it. The recurrence form
+            # M_t = keep*M_{t-1} + b_t has bounded gradients (products of keep <= 1); this log-space
+            # rewrite keeps the closed form's parallelism while inheriting that boundedness, because
+            # exp(logb - logK) never materialises 1/K as a value the backward pass differentiates
+            # through. keep is additionally clamped to [0.7, 1.0] to bound logK over the window.
+            keep = lam.unsqueeze(1).clamp(min=0.7, max=1.0)    # (T,1,d)
+            b = (1.0 - keep) * w                               # (T,ks,d)
+            logK = torch.cumsum(torch.log(keep.clamp(min=1e-3)), dim=0)
+            logb = torch.log(b.abs().clamp(min=1e-12))
+            S = torch.cumsum(torch.sign(b) * torch.exp(logb - logK), dim=0)
+            M_seq = torch.exp(logK) * (M0.unsqueeze(0) + S)
             outs.append(M_seq[-1])                             # FINAL slot state (ks,d)
         return torch.cat(outs, 0)                              # (k,d)
 
