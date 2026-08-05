@@ -226,6 +226,33 @@ class SlotDIM(nn.Module):
     On the notebook's char-LM this beat causal attention at equal depth (final CE 0.372 vs 0.573,
     min 0.306 vs 0.491) at O(N*k) instead of O(N^2).
 
+    FIRST REAL RESULT (Qwen2.5-3B 4-bit, 12 epochs, n-train 48, held 16, --slotdim 8 with
+    --trm-no-bias --no-proj-bias --contrast-weight 0.5):
+                                    every previous arm        SlotDIM
+        instance-specific (nats)    +0.0009 .. +0.0032        +0.0803
+        modal/specific ratio        2278x .. 8378x            91.3x
+        slot_cos                    0.999999 .. 1.000000      0.893153
+        ct (train)                  pinned at ln(16)=2.7726   3.076 -> 0.730
+        WM / DERANGED               5/4, 6/6, 7/8             7/16 / 6/16
+    The effect is 25-90x larger and the format-to-content ratio 25-90x smaller, and it is the
+    first signal on this module ABOVE the 0.0075 CE null band (by >10x). ct falling through its
+    chance floor is the direct evidence that the contraction was the blocker: the same objective
+    could not move at all while the TRM recursion produced the slots.
+
+    NOT YET A WIN, stated as loudly: the CI is [-0.0224, +0.1901] and INCLUDES 0, and 91.3x is
+    still above the 50x instance-independent-adapter bar. At held=16 the interval half-width is
+    ~0.11 against an effect of 0.08, so this run cannot resolve its own headline. The binding
+    constraint is N, not the mechanism -- the CE readout is forward-passes only, so held=48-64
+    is cheap and is the next thing to run.
+
+    KNOWN OMISSIONS from the notebook block, dropped to isolate the mechanism and NOT tested:
+    the FFN (y = y + ffn(y)), the causal cumulative scan, the broadcast read + LayerNorm
+    residual, and block stacking. Without the FFN the slots are strictly linear combinations of
+    input features gated by sensitivity, so they can SELECT impactful atoms but not COMPOSE
+    them; with a single application this is derivative-based pooling, not iterative routing.
+    slot_cos plateauing at ~0.95 during training rather than continuing down is what that
+    limitation looks like.
+
     HONEST NOTE ON THE REGIME. Probed at INIT on random vectors, this shows a tension in our setting:
     with few write events instances separate but the k slots receive near-identical content, and with
     many writes the slots differentiate while instances converge (the accumulator regresses to its
@@ -3174,8 +3201,9 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     ]
     if contrast_head is not None:
         _groups.append({"params": list(contrast_head.parameters()), "weight_decay": 1e-4})
-    if getattr(R, "slotdim", None) is not None:
-        _groups.append({"params": list(R.slotdim.parameters()), "weight_decay": 1e-4})
+    # NOTE: no separate group for R.slotdim. Assigning it to R registers it as a SUBMODULE, so its
+    # parameters are already inside R.parameters() and therefore already in other_params above.
+    # Adding them again raised "some parameters appear in more than one parameter group".
     opt = torch.optim.Adam(_groups, lr=1e-3)
     # GATE WARM-START. 0.8 (tanh~0.66) means the adapter injects strongly from step 0, through projections
     # that are still RANDOMLY initialized. That was harmless on synthetic composition, where the ablated
