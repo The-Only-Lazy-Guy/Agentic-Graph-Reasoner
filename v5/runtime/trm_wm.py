@@ -2917,6 +2917,36 @@ def _seed_atoms() -> tuple[dict, dict]:
     return descs, codes
 
 
+_OPAQUE_TOKENS = ["qx7", "vk2", "zn9", "hb4", "tm6", "pj1", "wd8", "rc5", "gf3", "ly0"]
+
+
+def _opaquify(descs: dict, codes: dict):
+    """Rename every atom to a NON-SEMANTIC token, keeping its English description intact.
+
+    THIS IS THE FIX FOR THE EXPERIMENT'S CENTRAL FLAW. With the shipped names the task text is
+    generated from phrases describing exactly the operation the atom is named after -- "the square
+    of the nth Fibonacci number" -> square(fibonacci(n)) -- so the LM can write the answer straight
+    from the prompt and never consult working memory. Observed in a real run:
+
+        target : def task(n): return square(fibonacci(n))
+        WM     : def task(n): return fibonacci(n)**2   <- PASSED, using neither composed atom
+
+    verify() is behavioural, so that counts as success. When the task is solvable from the prompt,
+    WM and DERANGED CANNOT differ and the derangement arm has nothing to detect -- every
+    "instance-specific" number measured on this task, including the +0.1350 reported earlier, was
+    measuring prompt-format compliance rather than memory.
+
+    Renaming breaks that path. The description still says WHAT to compute, so the task stays
+    well-posed; only working memory can say WHICH identifier implements it, and a deranged slot
+    table supplies provably wrong names.
+    """
+    old = list(descs.keys())
+    mapping = {o: f"op_{_OPAQUE_TOKENS[i % len(_OPAQUE_TOKENS)]}" for i, o in enumerate(old)}
+    nd = {mapping[o]: descs[o] for o in old}
+    nc = {mapping[o]: codes[o].replace(f"def {o}(", f"def {mapping[o]}(", 1) for o in old}
+    return nd, nc, mapping
+
+
 def _compose_tasks_real(n_train: int = 48, n_held: int = 16, seed: int = 0):
     """(task_text, atoms_needed, target_code_template) for training and held-out.
 
@@ -3027,7 +3057,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             slotdim_depth: int = 1, slotdim_no_ffn: bool = False,
             slotdim_heads: int = 0, couple_frac: list | None = None,
             delta_scale: float = 0.3, delta_mode: str = "rescale",
-            eval_every_arg: int = 0):
+            eval_every_arg: int = 0, opaque_atoms: bool = False,
+            code_prompt: bool = False):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
@@ -3157,6 +3188,12 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                              f"to ground in -- run --grow-cot (math-cot) or --swe-docs-path (swe-action) "
                              f"at least once first)")
         descs, codes = _seed_atoms()
+        if opaque_atoms:
+            descs, codes, _amap = _opaquify(descs, codes)
+            print(f"  OPAQUE ATOMS ON: names renamed to non-semantic tokens "
+                  f"({', '.join(list(descs)[:3])}, ...). The description still says WHAT to compute; "
+                  f"only working memory can say WHICH name implements it, so the prompt no longer "
+                  f"contains a complete solution path.", flush=True)
         atom_names = list(descs.keys())
         # NATIVE-SPACE injection (probe-C-validated): embed each atom's description via the LM's OWN embedding
         # table, not MiniLM + an untrained proj_atom bridge -- that bridge is exactly what probe B showed
@@ -3398,6 +3435,14 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             hint = f"# return: {outer_name}({inner_name}(n))\n"
         else:
             hint = ""
+        if code_prompt:
+            # The shipped prompt ENDS in "Explanation:", i.e. it asks for PROSE, while the target is
+            # a bare " return {expr}" fragment. So the ablated arm scores 0 by OBEYING the
+            # instruction it was given, and the adapter's entire measured gain is "ignore
+            # Explanation: and emit code" -- format compliance, not memory. Ending at "return "
+            # makes the continuation BE the target, so ablated finally measures capability.
+            return wb.tok(f"{hint}# {task_text}\ndef task(n):\n    return ",
+                          return_tensors="pt").input_ids.to(wb.device)
         return wb.tok(f"{hint}Explain your reasoning. Then write function task(n):\n# {task_text}\nExplanation:\n",
                       return_tensors="pt").input_ids.to(wb.device)
 
@@ -4654,6 +4699,18 @@ def main():
                          "0.8072 in ONE step, which is why every write-side fix failed. DIM asks how "
                          "violently an input perturbs the system rather than how similar two tokens "
                          "are, and accumulates rather than re-transforming. Try 8.")
+    ap.add_argument("--opaque-atoms", action="store_true", dest="opaque_atoms",
+                    help="rename atoms to non-semantic tokens (op_qx7, ...) while keeping their "
+                         "English descriptions. Without this the task text describes exactly the "
+                         "operation each atom is named after, so the LM writes the answer from the "
+                         "PROMPT and never consults memory -- observed: target square(fibonacci(n)), "
+                         "generated fibonacci(n)**2, PASSED. When the prompt holds a full solution "
+                         "path, WM and DERANGED cannot differ and the falsifier detects nothing.")
+    ap.add_argument("--code-prompt", action="store_true", dest="code_prompt",
+                    help="end the prompt at 'def task(n): return ' instead of 'Explanation:'. The "
+                         "shipped prompt asks for PROSE while the target is a bare return fragment, "
+                         "so ablated scores 0 by obeying its instruction and the adapter's whole gain "
+                         "is 'emit code instead of prose'.")
     ap.add_argument("--eval-every", type=int, default=0, dest="eval_every_arg",
                     help="epochs between eval checkpoints (0 = the old epochs//8). Eval, not "
                          "training, dominates wall clock: at held=32 each checkpoint is ~96 generate() "
@@ -4760,7 +4817,8 @@ def main():
                  slotdim_no_ffn=a.slotdim_no_ffn, slotdim_heads=a.slotdim_heads,
                  couple_frac=[float(f) for f in a.couple_frac.split(",") if f.strip()],
                  delta_scale=a.delta_scale, delta_mode=a.delta_mode,
-                 eval_every_arg=a.eval_every_arg)
+                 eval_every_arg=a.eval_every_arg, opaque_atoms=a.opaque_atoms,
+                 code_prompt=a.code_prompt)
     else:
         selftest()
 
