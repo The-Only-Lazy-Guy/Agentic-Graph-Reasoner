@@ -278,9 +278,57 @@ def cpc_loss(head, Z, H, bank, idx: int, bins: int, delta: int, n_neg: int, rng,
         s = head.score(Zb[b], cand[order])
         terms.append(F.cross_entropy(s.unsqueeze(0), torch.tensor([j], device=s.device)))
         if collect is not None:
-            collect.append((int(s.argmax()) == j, cand.shape[0]))
+            # idx is recorded so the caller can bootstrap over INSTANCES. The anchors inside one
+            # instance are ~6 correlated observations of the same trajectory; resampling anchors
+            # treats them as independent and returns an interval that is too narrow. Same
+            # split-by-instance discipline this project applies to train/held, applied to the
+            # statistics.
+            collect.append((int(s.argmax()) == j, cand.shape[0], idx))
     bank.add(idx, Hb)
     return torch.stack(terms).mean() if terms else None
+
+
+def probe_cpc(states_tr, Hs_tr, states_hd, Hs_hd, d_state, d_model, bins, delta, negs,
+              seed: int = 0, steps: int = 600, lr: float = 3e-3, device="cpu"):
+    """Train a FRESH CPCHead on the FROZEN tracker's states and score HELD instances.
+
+    Why every arm goes through this instead of reading the training head:
+      * --cpc-weight 0 builds no head at all, so the control would otherwise report no CPC number
+        and there would be nothing to compare the treatment against.
+      * in the CPC arm the head CO-TRAINED with the tracker, which is not a neutral readout -- part
+        of the accuracy could live in the head rather than in the state.
+    A fresh probe on detached states asks one question of both arms in the same words: how
+    instance-specific is this state, regardless of how it got that way. The tracker cannot learn
+    from this -- states arrive already detached.
+
+    Returns (per-instance accuracy array, n_anchors).
+    """
+    torch.manual_seed(seed)
+    rng = random.Random(seed)
+    head = CPCHead(d_state, d_model).to(device)
+    opt = torch.optim.Adam(head.parameters(), lr=lr)
+    bank = FutureBank(bins, cap=max(64, len(Hs_tr)))
+    for i, H in enumerate(Hs_tr):
+        bank.add(i, resample_bins(H, bins))
+    for _ in range(steps):
+        i = rng.randrange(len(states_tr))
+        loss = cpc_loss(head, states_tr[i].detach(), Hs_tr[i].detach(), bank, i,
+                        bins, delta, negs, rng)
+        if loss is None:
+            continue
+        opt.zero_grad(); loss.backward(); opt.step()
+
+    hbank = FutureBank(bins, cap=max(64, len(Hs_hd)))
+    for i, H in enumerate(Hs_hd):
+        hbank.add(i, resample_bins(H, bins))
+    hits, hrng = [], random.Random(999)
+    with torch.no_grad():
+        for i in range(len(states_hd)):
+            cpc_loss(head, states_hd[i], Hs_hd[i], hbank, i, bins, delta, negs, hrng, collect=hits)
+    by_inst: dict = {}
+    for h_, _, ix in hits:
+        by_inst.setdefault(ix, []).append(1.0 if h_ else 0.0)
+    return np.array([float(np.mean(v)) for v in by_inst.values()]), len(hits)
 
 
 def variance_penalty(Z, eps: float = 1e-4, target_std: float = 1.0):
@@ -536,6 +584,15 @@ def main():
         for r in held:
             l, Z = run_with_tracker(lm, tracker, prompt_of(r), r["new"], "track", a.layer)
             ce_t.append(float(l)); states.append(Z)
+
+    # TRAIN states + hidden trajectories, for the post-hoc probe. Collected with the tracker frozen
+    # and under no_grad: this is a readout, never a second training signal.
+    states_tr, Hs_tr = [], []
+    with torch.no_grad():
+        for r in tr_rows:
+            _l, Zt, Ht = run_with_tracker(lm, tracker, prompt_of(r), r["new"], "track", a.layer,
+                                          return_h=True)
+            states_tr.append(Zt); Hs_tr.append(Ht)
     sep = tracker.separation(states)
     per_bin, sep_mean, sep_max = tracker.trajectory_separation(states)
 
@@ -603,33 +660,45 @@ def main():
     # instance-specific -- that would still be the result the NEXT STEP asks for, because it would
     # show an objective that CE cannot reach. Reporting them together is the whole point.
     # ------------------------------------------------------------------------------------------
-    if head is not None:
-        hbank = FutureBank(a.cpc_bins, cap=max(64, len(held)))
-        for i2, Hh in enumerate(Hs):
-            hbank.add(i2, resample_bins(Hh, a.cpc_bins))
-        hits, hrng = [], random.Random(999)
-        with torch.no_grad():
-            for i2, (Zh, Hh) in enumerate(zip(states, Hs)):
-                cpc_loss(head, Zh, Hh, hbank, i2, a.cpc_bins, a.cpc_delta, a.cpc_negs, hrng,
-                         collect=hits)
-        if hits:
-            acc = np.array([1.0 if h_ else 0.0 for h_, _ in hits])
+    # Runs for EVERY arm, including --cpc-weight 0, via a FRESH head on the frozen tracker's
+    # detached states -- so the control has a comparable number and the treatment's number does not
+    # come from a head that co-trained with the thing it is measuring.
+    if states_tr and Hs_tr:
+        inst_means, n_anchors = probe_cpc(
+            states_tr, Hs_tr, states, Hs, tracker.d_state, d_model,
+            a.cpc_bins, a.cpc_delta, a.cpc_negs, seed=a.seed, device=lm.device)
+        if len(inst_means):
             chance = 1.0 / (a.cpc_negs + 1)
+            acc = inst_means
+            # BOOTSTRAP OVER INSTANCES, not anchors. Each held instance contributes ~(bins-delta)
+            # anchors from ONE trajectory, so they are correlated; resampling anchors would treat
+            # them as independent and report an interval narrower than the data supports.
+            # probe_cpc already returns per-INSTANCE means for exactly this reason.
             _rsc = np.random.RandomState(2)
-            bc = np.array([acc[_rsc.randint(0, len(acc), len(acc))].mean() for _ in range(4000)])
+            bc = np.array([inst_means[_rsc.randint(0, len(inst_means), len(inst_means))].mean()
+                           for _ in range(4000)])
             clo, chi = np.percentile(bc, [2.5, 97.5])
+            ratio = acc.mean() / chance if chance > 0 else float("inf")
             print(f"\n  HELD-OUT CPC  (can z_t pick its OWN future among {a.cpc_negs + 1}?)")
             print(f"    chance                          {chance:.4f}")
-            print(f"    accuracy                        {acc.mean():.4f}   "
-                  f"95% CI [{clo:.4f}, {chi:.4f}]   n={len(acc)} anchors")
+            # Mean of PER-INSTANCE means: every held instance counts once, regardless of how many
+            # anchors its trajectory happened to yield. That is the estimator the instance-level CI
+            # below is an interval for; the raw anchor mean would silently weight long instances more.
+            print(f"    accuracy                        {acc.mean():.4f}   ({ratio:.2f}x chance)")
+            print(f"    95% CI (bootstrap over {len(inst_means)} INSTANCES, not the "
+                  f"{n_anchors} correlated anchors)  [{clo:.4f}, {chi:.4f}]")
             if clo > chance:
-                print(f"    -> THE LOSS WORKS DURING GENERATION: the state is instance-specific at "
-                      f"matched relative positions, which CE never achieved on this interface "
-                      f"(0.0011-0.0075 across three interfaces).")
+                print(f"    -> ABOVE CHANCE at the instance level: the generation-time state carries "
+                      f"instance-specific information. For scale, the STATIC positive control in "
+                      f"algo_grr_contrast.py reached 0.4731 vs 0.1250 chance (3.8x); this is "
+                      f"{ratio:.2f}x. CE on this same interface reached 0.0011-0.0075 nats.")
             else:
-                print(f"    -> AT CHANCE: contrastive supervision did NOT make the generation-time "
-                      f"state instance-specific here. Check trajectory separation above before "
-                      f"blaming the objective -- a collapsed state cannot be read by any head.")
+                print(f"    -> NOT ABOVE CHANCE once the CI is computed over instances. Check "
+                      f"trajectory separation above before blaming the objective -- a collapsed "
+                      f"state cannot be read by any head.")
+            print(f"    NOTE: this measures the STATE, not the LM. A state can be instance-specific "
+                  f"and still not lower CE; read this together with the CE arms above, and against "
+                  f"the --cpc-weight 0 control run, never alone.")
     print(f"{'=' * 74}")
 
 
