@@ -207,6 +207,57 @@ class GatedCrossAttn(nn.Module):
 # ================================================================================================
 # SpikingSlotGate — LIF dynamics over the K working-memory slots, gating what reaches the LM
 # ================================================================================================
+class SlotDIM(nn.Module):
+    """Differential Impact Mechanism slot memory (user's dim_vs_attention_test.ipynb).
+
+    Replaces the TRM's slot production. The TRM evolves slots by repeatedly applying a shared
+    f_mlp(LayerNorm(.)), which MEASURES as a contraction: two slots seeded from genuinely different
+    atoms (cos 0.0951) converge to 0.8072 after ONE step and 0.9157 by step 8. Residual connections
+    do not fix it (0.7798). That is why every write-side intervention failed -- removing all biases,
+    conv_weight 0, the per-step contrastive term, atom-seeded slots -- the forward pass destroyed
+    instance information faster than any objective could install it.
+
+    DIM asks a different question. Attention asks "how similar is A to B" via QK^T; DIM asks "how
+    violently does this input perturb the system", via the closed-form derivative of the interaction
+    state. Slots are then an ACCUMULATOR of input-derived features rather than a recurrently
+    transformed latent -- an accumulator is not a contraction -- and a softmax over slots makes them
+    COMPETE for each write, which is the thing the TRM had nothing playing the role of.
+
+    On the notebook's char-LM this beat causal attention at equal depth (final CE 0.372 vs 0.573,
+    min 0.306 vs 0.491) at O(N*k) instead of O(N^2).
+
+    HONEST NOTE ON THE REGIME. Probed at INIT on random vectors, this shows a tension in our setting:
+    with few write events instances separate but the k slots receive near-identical content, and with
+    many writes the slots differentiate while instances converge (the accumulator regresses to its
+    mean). Those probes are NOT being treated as decisive, because init-time separation already
+    mispredicted trained behaviour once this session badly enough to require retracting 644343c. The
+    notebook's number is a TRAINED end-to-end result; this gets trained and judged by the derangement
+    arm and the CE ratio, not by a probe.
+    """
+
+    def __init__(self, d: int, k: int = 8):
+        super().__init__()
+        self.k = k
+        self.M0 = nn.Parameter(torch.randn(k, d) * 0.02)
+        self.W_v = nn.Linear(d, d, bias=False)      # no bias: see this file's bias/signal audit
+        self.W_read = nn.Linear(d, d, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x [T, d] write events (task + retrieved atoms) -> slot memory [k, d]."""
+        if x.dim() == 1:
+            x = x.unsqueeze(0)
+        M0 = self.M0.unsqueeze(0)                             # (1,k,d)
+        Z = x.unsqueeze(0) @ M0.transpose(-2, -1)             # (1,T,k) interaction state
+        sig = torch.sigmoid(Z)
+        obs = sig * (1.0 + Z * (1.0 - sig))                   # closed-form SiLU derivative
+        A = torch.softmax(obs, dim=-1)                        # slots COMPETE for each write
+        v = nn.functional.silu(self.W_v(x)).unsqueeze(0)                  # (1,T,d) candidate writes
+        P = (A.unsqueeze(-1) * v.unsqueeze(2)).sum(1)         # (1,k,d) accumulate
+        cnt = A.sum(1).clamp(min=1e-6).unsqueeze(-1)
+        M = M0 + P / cnt
+        return self.W_read(M.squeeze(0))                      # (k,d)
+
+
 class SlotContrast(nn.Module):
     """A PER-RECURSION-STEP contrastive objective on the working-memory latents.
 
@@ -428,6 +479,7 @@ class WMReasoner(nn.Module):
         self._slots_v = None
         # False => the original free-latent behaviour, bit-identical. See _refine_atom_slots.
         self.atom_slots = False
+        self.slotdim = None          # set by run_real when --slotdim is passed
 
         # Deep supervision: map y_t [d] → d_lm for MSE against native_text_embedding targets
         self.ds_proj = nn.Linear(trm.d, d_lm)
@@ -546,6 +598,31 @@ class WMReasoner(nn.Module):
             slots = slots * (w / w.max().clamp(min=1e-6)).unsqueeze(-1)
         return slots
 
+    def _refine_slotdim(self, task_emb: torch.Tensor, atom_embs: torch.Tensor,
+                        track_deltas: bool = False):
+        """Slots produced by the DIM accumulator instead of the TRM's recursion.
+
+        Write events are the task embedding plus each retrieved atom, projected into the TRM's space
+        with the SAME projections the TRM uses, so the only thing that differs from the other paths is
+        HOW the slot table is formed. There is no recursion here by design -- the recursion is the
+        measured contraction (0.0951 -> 0.8072 in one step) -- so `states` is the slot state repeated
+        T times, which makes conv_loss exactly 0 (there is no step-to-step change to penalise) and
+        leaves the per-step contrastive term operating on the real slot content.
+        """
+        writes = [self.trm.task_proj(task_emb)]
+        for k in range(int(atom_embs.shape[0])):
+            writes.append(self.trm.atom_proj(atom_embs[k]))
+        X = torch.stack(writes)                                # [1+K, d]
+        M = self.slotdim(X)                                    # [k_slots, d]
+        slots = self.proj_y(M)                                 # [k_slots, d_lm]
+        self._slots = slots
+        self._halt_weights, self._n_steps = None, None
+        pooled = M.mean(0)
+        states = [pooled for _ in range(self.T)]
+        if track_deltas:
+            return slots, states, [0.0], [s_.detach() for s_ in slots]
+        return slots, states
+
     def _refine_atom_slots(self, task_emb: torch.Tensor, atom_embs: torch.Tensor,
                            track_deltas: bool = False):
         """K SLOTS, ONE PER RETRIEVED ATOM, refined over T recursion steps.
@@ -607,6 +684,8 @@ class WMReasoner(nn.Module):
         input (e.g. native_text_embedding's 2560-d vectors on Qwen3-4B) is an immediate shape error.
         membrane.py's WM path really did pass those, and it crashed on the first call -- nothing had ever
         constructed a Membrane(wb=..., wm=...) so it was never executed. Inputs here are MiniLM."""
+        if getattr(self, "slotdim", None) is not None:
+            return self._refine_slotdim(task_emb, atom_embs, track_deltas=track_deltas)
         if getattr(self, "atom_slots", False):
             return self._refine_atom_slots(task_emb, atom_embs, track_deltas=track_deltas)
         if self.trm.adaptive:
@@ -2788,7 +2867,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             slot_w_inh: float = 0.5, slot_t: int = 3, derange: bool = True,
             n_derange: int = 5, contrast_weight: float = 0.0, contrast_negs: int = 15,
             no_proj_bias: bool = False, trm_no_bias: bool = False,
-            atom_slots: bool = False):
+            atom_slots: bool = False, slotdim_k: int = 0):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
@@ -3031,6 +3110,12 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     # checkpoint is unaffected.
     # ATOM-INITIALIZED SLOTS: the design in this file's header, finally built. See
     # WMReasoner._refine_atom_slots for the measurements that show what ran instead.
+    if slotdim_k > 0:
+        R.slotdim = SlotDIM(R.trm.d, k=slotdim_k).to(wb.device)
+        print(f"  SLOTDIM ON: slots are a DIM accumulator over {slotdim_k} competing banks, written "
+              f"by the task + each retrieved atom -- replacing the TRM recursion, which measures as a "
+              f"contraction (two distinct seeds -> cos 0.8072 after ONE step).", flush=True)
+
     if atom_slots:
         R.atom_slots = True
         print(f"  ATOM-INITIALIZED SLOTS ON: the slot table is now K vectors, one SEEDED FROM EACH "
@@ -3089,6 +3174,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     ]
     if contrast_head is not None:
         _groups.append({"params": list(contrast_head.parameters()), "weight_decay": 1e-4})
+    if getattr(R, "slotdim", None) is not None:
+        _groups.append({"params": list(R.slotdim.parameters()), "weight_decay": 1e-4})
     opt = torch.optim.Adam(_groups, lr=1e-3)
     # GATE WARM-START. 0.8 (tanh~0.66) means the adapter injects strongly from step 0, through projections
     # that are still RANDOMLY initialized. That was harmless on synthetic composition, where the ablated
@@ -4356,6 +4443,13 @@ def main():
                          "its baseline is 0/16 by construction. Costs one extra greedy generate() per held "
                          "task per eval checkpoint and changes no existing arm, so pass this only when you "
                          "are deliberately trading the control away for wall clock.")
+    ap.add_argument("--slotdim", type=int, default=0, dest="slotdim_k",
+                    help="use a Differential Impact Mechanism accumulator with this many competing "
+                         "slot banks INSTEAD of the TRM recursion (0 = off). The recursion measures "
+                         "as a contraction: two slots seeded from different atoms go cos 0.0951 -> "
+                         "0.8072 in ONE step, which is why every write-side fix failed. DIM asks how "
+                         "violently an input perturbs the system rather than how similar two tokens "
+                         "are, and accumulates rather than re-transforming. Try 8.")
     ap.add_argument("--atom-slots", action="store_true", dest="atom_slots",
                     help="build the working memory as K slots, each SEEDED FROM ONE RETRIEVED ATOM and "
                          "refined over T steps -- the design this file's header has always described "
@@ -4426,7 +4520,7 @@ def main():
                  slot_w_inh=a.slot_w_inh, slot_t=a.slot_t, derange=a.derange,
                  n_derange=a.n_derange, contrast_weight=a.contrast_weight,
                  contrast_negs=a.contrast_negs, no_proj_bias=a.no_proj_bias,
-                 trm_no_bias=a.trm_no_bias, atom_slots=a.atom_slots)
+                 trm_no_bias=a.trm_no_bias, atom_slots=a.atom_slots, slotdim_k=a.slotdim_k)
     else:
         selftest()
 
