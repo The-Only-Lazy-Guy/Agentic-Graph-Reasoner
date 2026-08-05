@@ -226,8 +226,20 @@ class SlotDIM(nn.Module):
     On the notebook's char-LM this beat causal attention at equal depth (final CE 0.372 vs 0.573,
     min 0.306 vs 0.491) at O(N*k) instead of O(N^2).
 
+    REPRODUCIBILITY: the result below was measured with NO FFN and depth 1, which was the only
+    form SlotDIM had at the time. The FFN is now ON by default, so reproducing that exact number
+    requires --slotdim-no-ffn.
+
+    STACKING CONTRACTS WITHOUT THE FFN -- measured at init, across-instance slot cosine:
+        depth 1/2/3, ffn OFF:  0.1246 -> 0.4542 -> 0.8983   <- the TRM's failure mode, again
+        depth 1/2/3, ffn ON :  0.0539 -> 0.0236 -> 0.0175   <- no contraction
+    So the FFN is not boilerplate; it is what makes depth safe. Its cost at init is that the k
+    slots move toward each other (0.941 -> 0.995 at depth 2). Neither setting gives both
+    properties at init -- and init probes have mispredicted trained behaviour repeatedly here,
+    so this is a reason to RUN the arms, not to pick one from the table.
+
     FIRST REAL RESULT (Qwen2.5-3B 4-bit, 12 epochs, n-train 48, held 16, --slotdim 8 with
-    --trm-no-bias --no-proj-bias --contrast-weight 0.5):
+    --trm-no-bias --no-proj-bias --contrast-weight 0.5, NO FFN, depth 1):
                                     every previous arm        SlotDIM
         instance-specific (nats)    +0.0009 .. +0.0032        +0.0803
         modal/specific ratio        2278x .. 8378x            91.3x
@@ -262,27 +274,53 @@ class SlotDIM(nn.Module):
     arm and the CE ratio, not by a probe.
     """
 
-    def __init__(self, d: int, k: int = 8):
+    def __init__(self, d: int, k: int = 8, depth: int = 1, ffn: bool = True):
         super().__init__()
-        self.k = k
+        self.k, self.depth = k, max(1, depth)
         self.M0 = nn.Parameter(torch.randn(k, d) * 0.02)
-        self.W_v = nn.Linear(d, d, bias=False)      # no bias: see this file's bias/signal audit
+        self.W_v = nn.ModuleList([nn.Linear(d, d, bias=False) for _ in range(self.depth)])
         self.W_read = nn.Linear(d, d, bias=False)
+        # FFN + LayerNorm, restored from the notebook block. Dropping them was an untested
+        # omission, and it is the load-bearing one: without a non-linearity INSIDE the slot path
+        # the slots are strictly linear combinations of input features gated by the sensitivity
+        # scores, so they can SELECT impactful atoms but never COMPOSE them into a higher-order
+        # relation. slot_cos plateauing at ~0.95 mid-training instead of continuing down is what
+        # that ceiling looks like from outside.
+        self.ln = nn.ModuleList([nn.LayerNorm(d) for _ in range(self.depth)]) if ffn else None
+        self.ffn = nn.ModuleList([
+            nn.Sequential(nn.Linear(d, 4 * d), nn.GELU(), nn.Linear(4 * d, d))
+            for _ in range(self.depth)]) if ffn else None
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """x [T, d] write events (task + retrieved atoms) -> slot memory [k, d]."""
-        if x.dim() == 1:
-            x = x.unsqueeze(0)
+    def _write(self, x: torch.Tensor, i: int) -> torch.Tensor:
+        """One DIM write pass: x [T,d] -> slot memory [k,d]."""
         M0 = self.M0.unsqueeze(0)                             # (1,k,d)
         Z = x.unsqueeze(0) @ M0.transpose(-2, -1)             # (1,T,k) interaction state
         sig = torch.sigmoid(Z)
         obs = sig * (1.0 + Z * (1.0 - sig))                   # closed-form SiLU derivative
         A = torch.softmax(obs, dim=-1)                        # slots COMPETE for each write
-        v = nn.functional.silu(self.W_v(x)).unsqueeze(0)                  # (1,T,d) candidate writes
+        v = nn.functional.silu(self.W_v[i](x)).unsqueeze(0)   # (1,T,d) candidate writes
         P = (A.unsqueeze(-1) * v.unsqueeze(2)).sum(1)         # (1,k,d) accumulate
         cnt = A.sum(1).clamp(min=1e-6).unsqueeze(-1)
-        M = M0 + P / cnt
-        return self.W_read(M.squeeze(0))                      # (k,d)
+        return (M0 + P / cnt).squeeze(0)                      # (k,d)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x [T, d] write events (task + retrieved atoms) -> slot memory [k, d].
+
+        depth > 1 re-runs the write with the SLOT TABLE as the new write events, so slots refine
+        against each other instead of only pooling the inputs once. A single pass is
+        derivative-based pooling; iterative routing is what lets a slot resolve a relation that
+        spans two atoms rather than just naming the most impactful one.
+        """
+        if x.dim() == 1:
+            x = x.unsqueeze(0)
+        cur = x
+        for i in range(self.depth):
+            M = self._write(cur, i)
+            if self.ffn is not None:
+                M = self.ln[i](M)
+                M = M + self.ffn[i](M)                        # residual FFN, per the notebook block
+            cur = M                                           # next pass writes FROM the slots
+        return self.W_read(cur)                               # (k,d)
 
 
 class SlotContrast(nn.Module):
@@ -2894,7 +2932,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             slot_w_inh: float = 0.5, slot_t: int = 3, derange: bool = True,
             n_derange: int = 5, contrast_weight: float = 0.0, contrast_negs: int = 15,
             no_proj_bias: bool = False, trm_no_bias: bool = False,
-            atom_slots: bool = False, slotdim_k: int = 0):
+            atom_slots: bool = False, slotdim_k: int = 0,
+            slotdim_depth: int = 1, slotdim_no_ffn: bool = False):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
@@ -3138,10 +3177,12 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     # ATOM-INITIALIZED SLOTS: the design in this file's header, finally built. See
     # WMReasoner._refine_atom_slots for the measurements that show what ran instead.
     if slotdim_k > 0:
-        R.slotdim = SlotDIM(R.trm.d, k=slotdim_k).to(wb.device)
-        print(f"  SLOTDIM ON: slots are a DIM accumulator over {slotdim_k} competing banks, written "
-              f"by the task + each retrieved atom -- replacing the TRM recursion, which measures as a "
-              f"contraction (two distinct seeds -> cos 0.8072 after ONE step).", flush=True)
+        R.slotdim = SlotDIM(R.trm.d, k=slotdim_k, depth=slotdim_depth,
+                            ffn=not slotdim_no_ffn).to(wb.device)
+        print(f"  SLOTDIM ON: {slotdim_k} competing banks, depth {slotdim_depth}, "
+              f"FFN {'OFF (ablated)' if slotdim_no_ffn else 'ON'} -- replacing the TRM recursion, "
+              f"which measures as a contraction (two distinct seeds -> cos 0.8072 after ONE step).",
+              flush=True)
 
     if atom_slots:
         R.atom_slots = True
@@ -4478,6 +4519,15 @@ def main():
                          "0.8072 in ONE step, which is why every write-side fix failed. DIM asks how "
                          "violently an input perturbs the system rather than how similar two tokens "
                          "are, and accumulates rather than re-transforming. Try 8.")
+    ap.add_argument("--slotdim-depth", type=int, default=1, dest="slotdim_depth",
+                    help="stack this many DIM write passes; pass i+1 writes FROM pass i's slot table. "
+                         "depth 1 is derivative-based POOLING (grabs the most impactful atoms); "
+                         "stacking is what lets slots refine against each other and resolve a relation "
+                         "spanning two atoms. Try 2.")
+    ap.add_argument("--slotdim-no-ffn", action="store_true", dest="slotdim_no_ffn",
+                    help="ABLATE the per-pass LayerNorm+FFN inside SlotDIM (default: present). Without "
+                         "it the slots are strictly linear combinations of input features gated by the "
+                         "sensitivity scores -- able to SELECT impactful atoms, never to COMPOSE them.")
     ap.add_argument("--atom-slots", action="store_true", dest="atom_slots",
                     help="build the working memory as K slots, each SEEDED FROM ONE RETRIEVED ATOM and "
                          "refined over T steps -- the design this file's header has always described "
@@ -4548,7 +4598,8 @@ def main():
                  slot_w_inh=a.slot_w_inh, slot_t=a.slot_t, derange=a.derange,
                  n_derange=a.n_derange, contrast_weight=a.contrast_weight,
                  contrast_negs=a.contrast_negs, no_proj_bias=a.no_proj_bias,
-                 trm_no_bias=a.trm_no_bias, atom_slots=a.atom_slots, slotdim_k=a.slotdim_k)
+                 trm_no_bias=a.trm_no_bias, atom_slots=a.atom_slots, slotdim_k=a.slotdim_k, slotdim_depth=a.slotdim_depth,
+                 slotdim_no_ffn=a.slotdim_no_ffn)
     else:
         selftest()
 
