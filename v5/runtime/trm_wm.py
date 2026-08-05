@@ -31,6 +31,37 @@ this tree and a fix restoring slot variance invalidates the premise; the gate cl
 +1.43, outside the 0.1-0.25 band documented at the gate_max clamp below; Qwen2.5-3B, not
 the Qwen3-4B the headline used; one seed.
 
+2026-08-05 (later) -- THE PER-STEP CONTRASTIVE FIX DOES **NOT** TRANSFER HERE. Matched A/B,
+40 epochs, Qwen2.5-3B 4-bit, n-train 48, held 16, identical code, only --contrast-weight differs:
+
+                        contrast 0          contrast 0.5
+  per_step slot cos     1.000 x4            1.000 x4        <- still fully collapsed
+  slot_cos              0.996172            0.999999        <- WORSE
+  WM / DERANGED         5/16 / 4/16         6/16 / 6/16
+  CE der - WM           +0.0032             -0.0004
+  modal/specific ratio  2278x               inf
+  ct (train)            n/a                 3.019 -> 2.803
+
+ct sat at its CHANCE FLOOR the whole run: ln(16) = 2.7726. The loss is behaving exactly as
+designed -- a collapsed y_t gives every anchor an identical query, so it pins at log(1+K) -- it
+is correctly REPORTING collapse without ESCAPING it. Contrast this with algo_grr_state.py, where
+the same objective took separation 1.0000 -> 0.3881 and a probe 1.03x -> 2.92x chance.
+
+WHY IT DIFFERS, measured not guessed (rule 10: check the write path before judging the idea):
+  gradient from ct reaches 22/22 TRM parameters -- the channel is NOT dead
+  y_t   across-task cosine AT INIT   0.8889     (state tracker's z: 0.7643)
+  slots across-task cosine AT INIT   0.9576
+  ||proj_y.bias|| / ||W@y||          1.280
+proj_y maps y_t to the slots the LM attends, and its BIAS is a constant added to every slot of
+every task -- the adapter shortcut expressed as a parameter. Zeroing it moves slots 0.9579 ->
+0.8949 at init, i.e. it recovers exactly the gap down to y_t and no further. So the bias is A
+constant, not THE cause: y_t is already at 0.889 before training and the contrastive term starts
+inside a nearly-collapsed basin where lm_loss outweighs it. --no-proj-bias added for the next A/B.
+
+The honest reading: "add a per-step auxiliary objective" is necessary (algo_grr_state proves it
+moves the number) but NOT sufficient. Where the latent is already near-collapsed at init and the
+write projection adds a large constant, the objective gets gradient and still loses.
+
 THIS IS NOT NEW INFORMATION. algo_grr_contrast.py already lists "latent MEMORY of the
 instance under CE -- 8 attempts, 3 interfaces, all ~0" under DO NOT REBUILD WITHOUT NEW
 EVIDENCE. This run is attempt 9 on interface 4, under CE, and it agrees. Read that file's
@@ -2701,7 +2732,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             adaptive_t: bool = False, ponder_weight: float = 0.0,
             slot_gate: bool = False, slot_theta0: float = 0.0,
             slot_w_inh: float = 0.5, slot_t: int = 3, derange: bool = True,
-            n_derange: int = 5, contrast_weight: float = 0.0, contrast_negs: int = 15):
+            n_derange: int = 5, contrast_weight: float = 0.0, contrast_negs: int = 15,
+            no_proj_bias: bool = False):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
@@ -2901,6 +2933,21 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     # existing runs reproduce exactly. See SlotContrast's docstring for why this term exists: the
     # only per-step force on y_t was conv_loss, which rewards NOT changing, and ds_weight defaults
     # to 0, so collapse was the optimum rather than a training failure.
+    # PROJ_Y BIAS. proj_y maps y_t -> the slots the LM actually attends, and its bias is a CONSTANT
+    # added to every slot of every task -- an instance-independent component built into the
+    # architecture, which is the adapter shortcut expressed as a parameter. Measured at init on this
+    # exact module: ||bias|| / ||W@y|| = 1.280, y_t across-task cosine 0.8889 -> slots 0.9576. The
+    # state tracker's write projection is bias=False on purpose ("a bias 2.09x the signal collapsed
+    # prefix separation to 0.9170"), and that is the module where the same contrastive objective
+    # DID work. Zeroing + freezing rather than changing the layer shape keeps every existing
+    # checkpoint loadable.
+    if no_proj_bias:
+        with torch.no_grad():
+            R.proj_y.bias.zero_()
+        R.proj_y.bias.requires_grad_(False)
+        print(f"  proj_y bias ZEROED and FROZEN: the slots the LM sees no longer carry a constant "
+              f"offset (measured 1.28x the instance-varying signal at init).", flush=True)
+
     contrast_head = (SlotContrast(R.trm.d).to(wb.device) if contrast_weight > 0 else None)
     contrast_rng = random.Random(0)
     tgt_emb_of: dict = {}
@@ -4191,6 +4238,14 @@ def main():
                          "its baseline is 0/16 by construction. Costs one extra greedy generate() per held "
                          "task per eval checkpoint and changes no existing arm, so pass this only when you "
                          "are deliberately trading the control away for wall clock.")
+    ap.add_argument("--no-proj-bias", action="store_true", dest="no_proj_bias",
+                    help="zero and freeze proj_y.bias. proj_y maps y_t to the slots the LM attends, "
+                         "and its bias is a CONSTANT added to every slot of every task -- an "
+                         "instance-independent component built into the architecture. Measured at "
+                         "init: ||bias||/||W@y|| = 1.280, taking y_t cosine 0.8889 -> slots 0.9576. "
+                         "The one module where the same per-step contrastive objective DID work "
+                         "(algo_grr_state.py) has bias=False on its write projection for exactly "
+                         "this reason. Pair with --contrast-weight.")
     ap.add_argument("--contrast-weight", type=float, default=0.0, dest="contrast_weight",
                     help="weight on the PER-RECURSION-STEP contrastive objective (SlotContrast). "
                          "0 (default) = off, reproducing prior runs exactly. THIS IS THE TERM THE "
@@ -4236,7 +4291,7 @@ def main():
                  slot_gate=a.slot_gate, slot_theta0=a.slot_theta0,
                  slot_w_inh=a.slot_w_inh, slot_t=a.slot_t, derange=a.derange,
                  n_derange=a.n_derange, contrast_weight=a.contrast_weight,
-                 contrast_negs=a.contrast_negs)
+                 contrast_negs=a.contrast_negs, no_proj_bias=a.no_proj_bias)
     else:
         selftest()
 
