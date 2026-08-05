@@ -2733,7 +2733,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             slot_gate: bool = False, slot_theta0: float = 0.0,
             slot_w_inh: float = 0.5, slot_t: int = 3, derange: bool = True,
             n_derange: int = 5, contrast_weight: float = 0.0, contrast_negs: int = 15,
-            no_proj_bias: bool = False):
+            no_proj_bias: bool = False, trm_no_bias: bool = False):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
@@ -2941,6 +2941,35 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     # prefix separation to 0.9170"), and that is the module where the same contrastive objective
     # DID work. Zeroing + freezing rather than changing the layer shape keeps every existing
     # checkpoint loadable.
+    # TRM BIASES. THE ROOT CAUSE of the slot collapse, measured on this exact module across 3 seeds:
+    #     shipped                y_t across-instance cosine 0.8911 0.8964 0.8680  (mean 0.8851)
+    #     input projections only 0.8307 0.8548 0.8383                             (mean 0.8413)
+    #     ALL biases zeroed      0.3270 0.4044 0.3619                             (mean 0.3644)
+    # Every nn.Linear here uses PyTorch's default bias init, which is sized for inputs with unit
+    # VARIANCE PER DIMENSION. This model runs on L2-normalized MiniLM embeddings (each of 384 dims
+    # ~1/sqrt(384) ~ 0.05) and small internal activations, so at every stage the bias is comparable
+    # to or LARGER than the instance-varying signal:
+    #     task_proj / atom_proj   ||b||/||Wx|| = 0.993 / 0.991  -> cos 0.001 becomes 0.499
+    #     proj_y(y0) at cycle 0   ||bias|| 0.5644 vs ||x|| 0.4683 -> pre-activation cos 0.578
+    #     y_head                  0.60 -> 0.836
+    # Each bias is a per-instance CONSTANT, i.e. the adapter shortcut compiled into the architecture
+    # at seven separate places. For calibration: algo_grr_state.py's z starts at 0.7643 and its
+    # contrastive run ESCAPED collapse; a bias-free TRM starts at 0.36, well inside that regime.
+    # Zeroed and frozen after construction so algo_trm.py is untouched and every other consumer and
+    # checkpoint is unaffected.
+    if trm_no_bias:
+        _nz = 0
+        with torch.no_grad():
+            for _mod in R.trm.modules():
+                if isinstance(_mod, nn.Linear) and _mod.bias is not None:
+                    _mod.bias.zero_(); _mod.bias.requires_grad_(False); _nz += 1
+            for _p in (getattr(R.trm.cross_attn, "in_proj_bias", None),
+                       getattr(R.trm.cross_attn.out_proj, "bias", None)):
+                if _p is not None:
+                    _p.zero_(); _p.requires_grad_(False); _nz += 1
+        print(f"  TRM biases ZEROED and FROZEN ({_nz} tensors): measured to take y_t across-instance "
+              f"cosine 0.885 -> 0.364 at init, across 3 seeds.", flush=True)
+
     if no_proj_bias:
         with torch.no_grad():
             R.proj_y.bias.zero_()
@@ -3433,6 +3462,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             R.eval()
             held_ok, ablated_ok, reground_ok_count, reground_evicted_ok_count = 0, 0, 0, 0
             deranged_ok, der_dump = 0, []          # falsifier arm; stays 0/[] when --no-derange
+            held_yt = []                           # pre-projection latents, see below
             ce_wm, ce_abl, ce_der = [], [], []     # per-example CE, kept per-example so it can bootstrap
             held_slots = []
             dump = []
@@ -3451,6 +3481,10 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 slots, wm_states, wm_deltas, wm_raw, _top_state, _top_resume = R.hierarchical_refine(
                     task_emb, held_mini_embs, track_deltas=True)
                 held_slots.append(slots.detach())
+                # y_t BEFORE proj_y. slot_cos measures proj_y(y_t), so a collapsed slot table cannot
+                # distinguish "the TRM emits a constant" from "the TRM varies and the projection
+                # compresses it". Those need opposite fixes, and only this pair separates them.
+                held_yt.append(torch.stack([q.detach() for q in wm_states]))
                 if R._n_steps is not None:
                     held_slots_nsteps = getattr(R, '_eval_nsteps', [])
                     held_slots_nsteps.append(float(R._n_steps.detach()))
@@ -3658,6 +3692,9 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 _ps = per_step_slot_cosine(held_slots)
                 if _ps:
                     slot_cos_str += "  per_step[" + " ".join(f"{c:.3f}" for c in _ps) + "]"
+                _py = per_step_slot_cosine(held_yt)
+                if _py:
+                    slot_cos_str += "  y_t[" + " ".join(f"{c:.3f}" for c in _py) + "]"
 
             # APPARATUS CROSS-CHECK, free, and the reason the two numbers are printed together.
             # Greedy decode + identical slots => bitwise identical output. So the deranged arm and
@@ -4238,6 +4275,14 @@ def main():
                          "its baseline is 0/16 by construction. Costs one extra greedy generate() per held "
                          "task per eval checkpoint and changes no existing arm, so pass this only when you "
                          "are deliberately trading the control away for wall clock.")
+    ap.add_argument("--trm-no-bias", action="store_true", dest="trm_no_bias",
+                    help="zero and freeze EVERY bias inside the TRM. This is the measured ROOT CAUSE "
+                         "of the slot collapse: PyTorch's default nn.Linear bias init is sized for "
+                         "unit-variance-per-dimension inputs, but this model runs on L2-normalized "
+                         "MiniLM embeddings, so each bias is a per-instance CONSTANT comparable to or "
+                         "larger than the signal (task_proj/atom_proj ||b||/||Wx|| = 0.99). Measured "
+                         "across 3 seeds: y_t across-instance cosine 0.885 -> 0.364. Pair with "
+                         "--contrast-weight, which cannot escape a collapse it starts inside.")
     ap.add_argument("--no-proj-bias", action="store_true", dest="no_proj_bias",
                     help="zero and freeze proj_y.bias. proj_y maps y_t to the slots the LM attends, "
                          "and its bias is a CONSTANT added to every slot of every task -- an "
@@ -4291,7 +4336,8 @@ def main():
                  slot_gate=a.slot_gate, slot_theta0=a.slot_theta0,
                  slot_w_inh=a.slot_w_inh, slot_t=a.slot_t, derange=a.derange,
                  n_derange=a.n_derange, contrast_weight=a.contrast_weight,
-                 contrast_negs=a.contrast_negs, no_proj_bias=a.no_proj_bias)
+                 contrast_negs=a.contrast_negs, no_proj_bias=a.no_proj_bias,
+                 trm_no_bias=a.trm_no_bias)
     else:
         selftest()
 
