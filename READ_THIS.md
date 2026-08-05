@@ -4,78 +4,7 @@
 > Updated each working session. Branch: fix/swe-slot-plan-gate-real-file. (Older sessions below the ═══ line.)
 
 ═══════════════════════════════════════════════════════════════════════════════════════════════
-## LATEST SESSION (2026-08-05) — THE TRM-WM "PROVEN" RESULT IS FALSIFIED. Derangement + CE arms, real 3B.
-═══════════════════════════════════════════════════════════════════════════════════════════════
-
-`python -m v5.runtime.trm_wm --run --lm Qwen/Qwen2.5-3B-Instruct --quant 4bit --epochs 40
- --n-train 48 --n-held 16 --cotrain-samples 0`   (local, RTX 4050 6GB, 4-bit, exit 0)
-
-THE HEADLINE VERDICT AND THE FALSIFIER DISAGREE, IN THE SAME RUN:
-
-    Best held-out: 7/16  (gate ablated = 0 baseline)
-    => PROVEN: working memory improves held-out composition     <- the OLD logic
-    => FALSIFIED: another task's working memory scores at or ABOVE the real one   <- the new arm
-
-    WM        (own slots)        7/16
-    DERANGED  (another task's)   8/16      <- BEATS the real memory
-    ABLATED   (no slots at all)  0/16
-
-    teacher-forced CE, nats (5 derangements, paired bootstrap over examples)
-      CE  WM                          0.2820
-      CE  DERANGED                    0.2828
-      CE  ABLATED                     7.6788
-      instance-specific  der - WM     +0.0009   95% CI [-0.0056, +0.0065]   <- SPANS ZERO
-      format/mode effect abl - der    +7.3960   95% CI [+6.8445, +7.9882]
-      modal / specific ratio          8378.5x
-
-8378x is the largest adapter-shortcut ratio recorded in this project (prior range 250-950x,
-algo_grr_contrast.py). DERANGED >= WM at 9 of 9 eval checkpoints — 0/0, 4/4, 2/2, 7/7, 6/6,
-5/6, 3/3, 3/3, 7/8. Not a marginal call.
-
-WHY ablated=0/16 was never evidence, now visible in the generations rather than argued:
-  ablated does not write WRONG code, it writes PROSE --
-      "def task(n): The function `task(n)` calculates the digit sum of the number of 1-bits..."
-  So 0/16 measures OUTPUT FORMAT, not memory. The adapter's 7.4 nats buys "emit
-  `return f(g(n))`". That is a task-independent transform, which is exactly why deranging it
-  costs nothing.
-
-WHERE THE ATOM NAMES ACTUALLY COME FROM -- the prompt, not the slots. Every WM failure is an
-English paraphrase of the description that is already in the prompt:
-      target  num_divisors(fibonacci(n))    WM  count_divisors(fibonacci(n))
-      target  reverse_digits(sum_to_n(n))   WM  digit_reverse(sum_to_n(n))
-The LM is guessing plausible identifiers from the task text. Nothing is being read out of
-working memory.
-
-CONFOUNDS, STATED UP FRONT (this run does NOT settle whether the channel COULD work):
-  * slot_cos sat at 0.9856-1.0000 the whole run. The slot-collapse bug is present in this
-    tree, so deranged and real memory are near-identical INPUTS. A fix that restores slot
-    variance invalidates this run's premise and it must be re-run.
-  * gate climbed to +1.43, far outside the 0.1-0.25 usable band documented at trm_wm.py:3113
-    (gate_max defaults to 0 = clamp disabled).
-  * Qwen2.5-3B-Instruct, NOT the Qwen3-4B the 13-15/16 headline was measured on. One seed.
-
-WHAT IS SETTLED: the "PROVEN" verdict in this file is produced by a control that cannot fail
-(`ablated` sets _slots=None -> _mk_hook returns early -> base LM; and build_prompt is called
-without inner/outer so the prompt never carries atom names). Any future WM claim must report
-the deranged arm and the CE ratio, not a pass count against ablated.
-
-BUG FOUND IN MY OWN INSTRUMENTATION THIS SESSION (both caught by running it, not by reading):
-  1. all-arms-0 printed "FALSIFIED". 0-0=0 is an absence of measurement -> now VACUOUS.
-  2. +0.0043 nats with a CI excluding 0 printed "CONFIRMS a real channel" while the format
-     effect was 208x larger. A paired bootstrap excludes 0 for an arbitrarily small bias, so
-     significance alone is not a result -> verdict now needs CI>0 AND effect above the 0.0075
-     null band AND ratio under 50x.
-  3. the apparatus flag keyed on slot_cos>0.9999 false-alarmed twice on this run (mean cosine
-     0.99995 prints "1.0000" but the slots genuinely differ; greedy flips on a near-tie). Now
-     keyed on per-example torch.allclose of the actual slot tensors, which is the only version
-     that is genuinely impossible.
-
-FILES: v5/runtime/trm_wm.py (1e40961, 1f57b76, + this session's flag fix). 41/41 logic checks.
-NEXT: re-run with the slot fix applied; if slot_cos drops and the ratio stays >50x, the channel
-is dead under CE and the loss is the lever (algo_grr_contrast.py's contrastive positive control).
-
-═══════════════════════════════════════════════════════════════════════════════════════════════
-## PREVIOUS SESSION (2026-07-21 v6.5) — WIRING AUDIT + FIX: the v6.2/v6.3 upgrades were ISLANDS, now wired to MembraneV2
+## LATEST SESSION (2026-07-21 v6.5) — WIRING AUDIT + FIX: the v6.2/v6.3 upgrades were ISLANDS, now wired to MembraneV2
 ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 **One line:** flowchart + wiring audit found the v6.2/v6.3 upgrades (ReflexiveEditor, SpreadingActivation,

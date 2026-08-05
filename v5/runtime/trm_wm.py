@@ -1,5 +1,41 @@
 """trm_wm.py — the TRM as a REAL reasoner COUPLED to the frozen LM (design (b)), with a WORKING MEMORY.
 
+=====================================================================================
+2026-08-05 — THE 13-15/16 HEADLINE IS FALSIFIED. Read this before using anything below.
+=====================================================================================
+Qwen2.5-3B-Instruct 4-bit, 40 epochs, n-train 48, n-held 16, local RTX 4050. ONE run
+prints both verdicts, because the old one is computed against a control that cannot fail:
+
+    Best held-out 7/16 (ablated 0)  => PROVEN          <- the old logic
+    WM 7/16   DERANGED 8/16   ABLATED 0/16 => FALSIFIED <- the derangement arm
+
+    CE  WM 0.2820   DERANGED 0.2828   ABLATED 7.6788
+    instance-specific  der - WM   +0.0009  95% CI [-0.0056, +0.0065]   SPANS ZERO
+    format/mode effect abl - der  +7.3960  95% CI [+6.8445, +7.9882]
+    modal / specific ratio        8378x
+
+DERANGED >= WM at 9 of 9 checkpoints. `ablated` sets _slots=None so _mk_hook returns
+early (it is the BASE LM), and build_prompt is called without inner/outer so the prompt
+never carries atom names -- 0/16 is true BY CONSTRUCTION.
+
+The mechanism is visible in the generations, not inferred. Ablated does not emit wrong
+code, it emits PROSE ("def task(n): The function `task(n)` calculates the digit sum
+of..."), so 0/16 measured OUTPUT FORMAT. Format is task-independent, which is exactly
+why deranging costs nothing. And every WM failure paraphrases the description already in
+the prompt (num_divisors -> count_divisors, reverse_digits -> digit_reverse): the atom
+names come from the prompt text, never from the slots.
+
+CONFOUNDS (this run does NOT show the channel could not work, only that it does not
+here): slot_cos sat at 0.9856-1.0000 all run, so the slot-collapse bug is present in
+this tree and a fix restoring slot variance invalidates the premise; the gate climbed to
++1.43, outside the 0.1-0.25 band documented at the gate_max clamp below; Qwen2.5-3B, not
+the Qwen3-4B the headline used; one seed.
+
+THIS IS NOT NEW INFORMATION. algo_grr_contrast.py already lists "latent MEMORY of the
+instance under CE -- 8 attempts, 3 interfaces, all ~0" under DO NOT REBUILD WITHOUT NEW
+EVIDENCE. This run is attempt 9 on interface 4, under CE, and it agrees. Read that file's
+NEXT STEP before adding a tenth: the open question is the LOSS, not the architecture.
+
 The prior TRM was a ranker: it reordered atoms and never touched the LM. This wires it into the LM's
 computation so its reasoning actually MODULATES generation.
 
