@@ -52,6 +52,34 @@ Three bugs in that synthetic harness, each of which looked exactly like a null:
 Real trajectories are autocorrelated within an instance; that persistence is what makes predicting
 the future a statement about WHICH instance this is.
 
+RESULT (2026-08-05, Qwen2.5-3B 4-bit, n=400, 2 epochs, held 75 BY INSTANCE, one seed).
+Matched A/B, identical code, only --cpc-weight differs:
+
+                          CE-only (weight 0)      + per-step CPC (weight 1)
+  trajectory separation   1.00 x10, mean 1.0000   1.00 .50 .28 .22 .25 .23 .24 .25 .36 .54
+                          COLLAPSED THROUGHOUT    mean 0.3881
+  held CPC accuracy       0.0644  (1.03x chance)  0.1822  (2.92x chance)
+  CPC 95% CI (instances)  [0.0422, 0.0889]        [0.1489, 0.2200]
+  S - T  (state-specific) +0.0020                 +0.0022   CI includes 0
+  Fx - T (h-conditioning) +0.0510                 +0.0029
+  CE     T                1.0524                  1.0651
+
+WHAT THIS SETTLES: an auxiliary objective PER RECURSION/TIME STEP is what stops the collapse.
+Without one the state is a literal constant (1.0000 at every relative position) and a probe reads
+it at chance. With one it is instance-specific at 2.92x chance with a non-overlapping CI. The same
+root cause holds in trm_wm.py, where the only per-step force on y_t was conv_loss -- which
+penalizes ||y_t+1 - y_t|| and so rewards NOT CHANGING -- while ds_weight defaulted to 0.
+
+WHAT THIS DOES NOT SETTLE, and the honest half: the LM still does not READ the state. S - T stays
+at +0.0022 with a CI including 0, and h-conditioning got WORSE (+0.0510 -> +0.0029) -- the
+contrastive term pulls the state toward identifying the instance and away from helping the LM.
+Two separate problems; this fixes the representation, not the read path.
+
+CAVEAT ON THE 2.92x: z = GRU(read(h)) and the CPC target is future h, which is autocorrelated
+within an instance, so some of this is z passing h through rather than abstracting a reasoning
+state. The control being CONSTANT is what makes the delta meaningful; the absolute number is not
+yet evidence that anything is being "tracked". One seed, one LM, one task family.
+
 EVERY GUARD IN THIS FILE EXISTS BECAUSE SOMETHING WENT WRONG TODAY:
   * PRIOR PRESERVATION -- out_proj is zero-init, so an untrained tracker is EXACTLY the frozen LM and
     arm B is a true incumbent rather than an approximation.
