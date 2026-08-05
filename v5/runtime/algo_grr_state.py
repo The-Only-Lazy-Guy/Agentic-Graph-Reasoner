@@ -23,6 +23,35 @@ manifold. The LM was being handed inputs from a region its weights have never pr
 never injects into embedding space at all: it reads real activations and adds a residual to real
 activations, so everything stays where the LM's weights were trained.
 
+2026-08-05 -- CPC ADDED. This is algo_grr_contrast.py's NEXT STEP, not a new architecture.
+    "Stop the architecture search. The open question is the LOSS ... The untested step is whether a
+     contrastive or mutual-information objective also works when the latent must be used DURING
+     generation (the state tracker's setting), where CE currently drives it to a positional prior."
+z_t at relative bin b must score THIS instance's h at bin b+delta above other instances' h at the
+SAME bin (InfoNCE). Run the CE-only control with --cpc-weight 0, which is a strict no-op.
+
+Why this objective and not another regulariser:
+  * A COLLAPSED z CANNOT MINIMIZE IT. A constant query ranks the candidate futures identically for
+    every anchor while the positive moves, so it is right only by luck. Separation stops being
+    something you check afterwards and becomes the thing being optimized.
+  * A POSITIONAL PRIOR -- exactly what CE drives this tracker to -- is at chance BY CONSTRUCTION,
+    because every candidate shares the format, the length and the positional profile.
+Both verified on synthetic data before spending a GPU (held-out, 16-way, chance 0.0625):
+    instance-carrying z            0.4417
+    positional prior               0.0750   <- at chance, as the argument requires
+    random per-instance TAG        1.0000 on TRAIN instances, 0.0583 on HELD
+That last line is the guard that matters: CPC on SEEN instances is solvable by memorizing an
+arbitrary identifier, so ONLY held-out accuracy separates "the state is about this instance's
+trajectory" from "the state is a unique label". group_split already splits BY INSTANCE.
+
+Three bugs in that synthetic harness, each of which looked exactly like a null:
+  1. z passed as a single vector, not a [T, d] trajectory -> shape error, not a result.
+  2. train and held were the same instances -> a meaningless random tag scored 1.0000.
+  3. independent randn per bin -> the future was INDEPENDENT of the present, so the task was
+     impossible by construction and even the positive control read 0.0667 (i.e. chance).
+Real trajectories are autocorrelated within an instance; that persistence is what makes predicting
+the future a statement about WHICH instance this is.
+
 EVERY GUARD IN THIS FILE EXISTS BECAUSE SOMETHING WENT WRONG TODAY:
   * PRIOR PRESERVATION -- out_proj is zero-init, so an untrained tracker is EXACTLY the frozen LM and
     arm B is a true incumbent rather than an approximation.
@@ -158,6 +187,102 @@ class StateTracker(nn.Module):
         return float(np.mean(S[~np.eye(len(S), dtype=bool)]))
 
 
+def resample_bins(x, bins: int):
+    """[T, d] -> [bins, d] at matched RELATIVE positions.
+
+    Same idiom trajectory_separation() already uses, and for the same reason: instances have
+    different lengths, so "position t" is not comparable across them while "40% of the way through"
+    is. Contrasting at mismatched positions would let length alone separate the candidates.
+    """
+    T = x.shape[0]
+    idx = [min(T - 1, int(round(f * (T - 1)))) for f in np.linspace(0, 1, bins)]
+    return x[idx]
+
+
+class CPCHead(nn.Module):
+    """z_t must score THIS instance's future above other instances' futures at the SAME relative
+    position (Contrastive Predictive Coding).
+
+    THIS IS THE POINT OF THE WHOLE FILE'S NEXT STEP. Under next-token CE a generic prior helps every
+    example while memory helps one, so gradient descent takes the prior -- measured at 250-950x
+    across three interfaces (algo_grr_contrast.py). Under THIS loss a prior scores at CHANCE BY
+    CONSTRUCTION: every candidate future shares the format, the length, and the positional profile,
+    so the only way to pick the right one is to encode which instance this is.
+
+    Two properties worth stating because they are why this is not just another architecture:
+      * A COLLAPSED z CANNOT MINIMIZE IT. If z_t is constant, every candidate gets the same score and
+        the loss sits at log(1+K) forever. The separation guard and the objective become the same
+        quantity, instead of separation being something you check afterwards and discover too late.
+      * NO BIAS on either projection. A bias 2.09x the signal collapsed separation to 0.9170 in the
+        prefix module, and the same class of failure appeared three times in one session.
+    """
+
+    def __init__(self, d_state: int, d_model: int):
+        super().__init__()
+        self.pred = nn.Linear(d_state, d_state, bias=False)   # z_t -> predicted future
+        self.enc = nn.Linear(d_model, d_state, bias=False)    # true future -> the same space
+        self.scale = nn.Parameter(torch.tensor(10.0))
+
+    def score(self, z, futures):
+        """z [d_state]; futures [M, d_model] -> logits [M]."""
+        q = F.normalize(self.pred(z), dim=-1)
+        k = F.normalize(self.enc(futures), dim=-1)
+        return self.scale * (k @ q)
+
+
+class FutureBank:
+    """Detached futures from RECENT OTHER instances, kept PER RELATIVE POSITION.
+
+    Negatives are always drawn at the same point in the trajectory as the positive, so relative
+    position carries no information and cannot be the thing the head learns. Entries are tagged with
+    their instance index and the current instance is filtered out on every draw -- without that, a
+    second epoch would happily hand back this same instance's own future as a "negative", which is a
+    silent false negative that would cap the achievable accuracy for reasons having nothing to do
+    with the model.
+    """
+
+    def __init__(self, bins: int, cap: int = 64):
+        from collections import deque
+        self.q = [deque(maxlen=cap) for _ in range(bins)]
+
+    def add(self, idx: int, Hb):
+        for b in range(len(self.q)):
+            self.q[b].append((idx, Hb[b].detach()))
+
+    def negatives(self, b: int, k: int, rng, exclude: int):
+        pool = [v for (i, v) in self.q[b] if i != exclude]
+        if len(pool) < 2:
+            return None
+        picks = rng.sample(range(len(pool)), min(k, len(pool)))
+        return torch.stack([pool[i] for i in picks])
+
+
+def cpc_loss(head, Z, H, bank, idx: int, bins: int, delta: int, n_neg: int, rng,
+             collect=None):
+    """InfoNCE: z at relative bin b must pick this instance's h at bin b+delta out of a candidate set
+    drawn from other instances at that same bin. Returns None until the bank has enough entries.
+
+    The positive is placed at a RANDOM index in the candidate list, per this project's standing
+    practice -- a fixed slot would let position carry the answer.
+    """
+    Zb, Hb = resample_bins(Z, bins), resample_bins(H, bins)
+    terms = []
+    for b in range(bins - delta):
+        negs = bank.negatives(b + delta, n_neg, rng, exclude=idx)
+        if negs is None:
+            continue
+        cand = torch.cat([Hb[b + delta].unsqueeze(0), negs], 0)
+        j = rng.randrange(cand.shape[0])
+        order = list(range(cand.shape[0]))
+        order[0], order[j] = order[j], order[0]
+        s = head.score(Zb[b], cand[order])
+        terms.append(F.cross_entropy(s.unsqueeze(0), torch.tensor([j], device=s.device)))
+        if collect is not None:
+            collect.append((int(s.argmax()) == j, cand.shape[0]))
+    bank.add(idx, Hb)
+    return torch.stack(terms).mean() if terms else None
+
+
 def variance_penalty(Z, eps: float = 1e-4, target_std: float = 1.0):
     """VICReg variance term, on the STATE TRAJECTORY.
 
@@ -171,7 +296,7 @@ def variance_penalty(Z, eps: float = 1e-4, target_std: float = 1.0):
 
 
 def run_with_tracker(lm, tracker, prompt: str, target: str, mode: str, layer: int = -8,
-                     ext_Z=None, ext_h=None):
+                     ext_Z=None, ext_h=None, return_h: bool = False):
     """One teacher-forced pass with the tracker hooked into a mid-stack decoder layer.
 
     Single pass: the hook receives [B, T, d] for the whole sequence and runs the causal scan inside
@@ -209,6 +334,11 @@ def run_with_tracker(lm, tracker, prompt: str, target: str, mode: str, layer: in
         if mode == "hperm":
             d = tracker.residual(h, tracker.scan(src))     # residual applied to THIS example's h
         grab["Z"] = Z
+        # DETACHED on purpose: this layer's own unmodified trajectory is the CPC prediction TARGET,
+        # and a target the loss can move is not a target. (The LM is frozen so no parameter could
+        # change anyway, but detaching also stops the backward pass walking the whole stack for
+        # gradients that are discarded.)
+        grab["h"] = h.detach()
         hs2 = hs.clone()
         hs2[0] = (h + d).to(hs.dtype)
         return (hs2,) + tuple(out[1:]) if isinstance(out, tuple) else hs2
@@ -220,7 +350,10 @@ def run_with_tracker(lm, tracker, prompt: str, target: str, mode: str, layer: in
     finally:
         hnd.remove()
     lo = out.logits[0, ids.shape[1] - 1: full.shape[1] - 1, :].float()
-    return F.cross_entropy(lo, tgt[0]), grab.get("Z")
+    ce = F.cross_entropy(lo, tgt[0])
+    if return_h:
+        return ce, grab.get("Z"), grab.get("h")
+    return ce, grab.get("Z")
 
 
 def baseline_ce(lm, prompt: str, target: str) -> float:
@@ -299,6 +432,18 @@ def main():
     ap.add_argument("--cap", type=float, default=0.15)
     ap.add_argument("--lm", type=str, default="Qwen/Qwen2.5-3B-Instruct")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--cpc-weight", type=float, default=1.0, dest="cpc_weight",
+                    help="weight on the CPC (InfoNCE) term. 0 = the CE-ONLY arm, a strict no-op that "
+                         "reproduces this file's previous behaviour exactly -- that is the control "
+                         "this experiment is against, so run both.")
+    ap.add_argument("--cpc-bins", type=int, default=8, dest="cpc_bins",
+                    help="relative positions the trajectory is resampled onto; contrasting happens at "
+                         "MATCHED bins so length cannot separate the candidates")
+    ap.add_argument("--cpc-delta", type=int, default=2, dest="cpc_delta",
+                    help="how far ahead (in bins) z_t must predict")
+    ap.add_argument("--cpc-negs", type=int, default=15, dest="cpc_negs",
+                    help="negatives per anchor, drawn from OTHER instances at the same bin "
+                         "(15 -> 16-way -> chance 0.0625)")
     a = ap.parse_args()
 
     torch.manual_seed(a.seed); random.seed(a.seed)
@@ -325,17 +470,39 @@ def main():
     B = float(np.mean([baseline_ce(lm, prompt_of(r), r["new"]) for r in held]))
     print(f"  B baseline (frozen LM, no tracker)  CE {B:.4f}\n", flush=True)
 
-    opt = torch.optim.Adam(tracker.parameters(), lr=3e-4)
+    # CPC: the LOSS experiment algo_grr_contrast.py's NEXT STEP names. --cpc-weight 0 makes every
+    # line below a strict no-op (head unused, bank never read, loss == the original CE), so the
+    # CE-only arm this file already measured is reproduced exactly rather than approximately.
+    head = CPCHead(tracker.d_state, d_model).to(lm.device) if a.cpc_weight > 0 else None
+    bank = FutureBank(a.cpc_bins) if a.cpc_weight > 0 else None
+    crng = random.Random(a.seed + 1)
+    params = list(tracker.parameters()) + (list(head.parameters()) if head else [])
+    if head is not None:
+        print(f"CPCHead: {sum(p.numel() for p in head.parameters()):,} params | "
+              f"{a.cpc_bins} bins, delta {a.cpc_delta}, {a.cpc_negs} negatives "
+              f"-> chance {1.0/(a.cpc_negs+1):.4f} | weight {a.cpc_weight}\n", flush=True)
+
+    opt = torch.optim.Adam(params, lr=3e-4)
     for ep in range(a.epochs):
-        run = 0.0
+        run, runc, nc = 0.0, 0.0, 0
         for i, r in enumerate(tr_rows):
-            loss, _ = run_with_tracker(lm, tracker, prompt_of(r), r["new"], "track", a.layer)
-            opt.zero_grad(); loss.backward()
-            torch.nn.utils.clip_grad_norm_(tracker.parameters(), 1.0)
+            loss, Z, H = run_with_tracker(lm, tracker, prompt_of(r), r["new"], "track", a.layer,
+                                          return_h=True)
+            total = loss
+            if head is not None and Z is not None and H is not None:
+                c = cpc_loss(head, Z, H, bank, i, a.cpc_bins, a.cpc_delta, a.cpc_negs, crng)
+                if c is not None:
+                    total = loss + a.cpc_weight * c
+                    runc += float(c); nc += 1
+            opt.zero_grad(); total.backward()
+            torch.nn.utils.clip_grad_norm_(params, 1.0)
             opt.step(); run += float(loss)
             if (i + 1) % 100 == 0:
-                print(f"    epoch {ep+1} [{i+1}/{len(tr_rows)}] train CE {run/(i+1):.4f}", flush=True)
-        print(f"    epoch {ep+1} done  train CE {run/max(1,len(tr_rows)):.4f}", flush=True)
+                cs = f"  cpc {runc/max(1,nc):.4f}" if nc else ""
+                print(f"    epoch {ep+1} [{i+1}/{len(tr_rows)}] train CE {run/(i+1):.4f}{cs}",
+                      flush=True)
+        cs = f"  cpc {runc/max(1,nc):.4f}" if nc else ""
+        print(f"    epoch {ep+1} done  train CE {run/max(1,len(tr_rows)):.4f}{cs}", flush=True)
 
     # collect held states first -- needed for the shuffle falsifier and the separation guard
     # capture each held example's HIDDEN TRAJECTORY at the hooked layer, for the h-permutation
@@ -426,6 +593,43 @@ def main():
     print(f"  GUARD across-instance state cosine: {sep:.4f} "
           f"{'<-- COLLAPSED, falsifier is meaningless' if sep > 0.99 else '(state varies, test is valid)'}")
     print(f"    -> {'STATE IS LOAD-BEARING (CI excludes 0)' if lo > 0 else 'NOT SIGNIFICANT -- CI includes 0'}")
+
+    # ------------------------------------------------------------------------------------------
+    # DID THE LOSS DO ITS JOB? Held-out CPC accuracy: can z_t pick THIS instance's future out of a
+    # candidate set drawn from other held instances at the same relative position?
+    #
+    # This is the direct analogue of the positive control's 0.4731-vs-0.1250, and it is a SEPARATE
+    # question from whether CE moved. CE can stay flat while the latent becomes genuinely
+    # instance-specific -- that would still be the result the NEXT STEP asks for, because it would
+    # show an objective that CE cannot reach. Reporting them together is the whole point.
+    # ------------------------------------------------------------------------------------------
+    if head is not None:
+        hbank = FutureBank(a.cpc_bins, cap=max(64, len(held)))
+        for i2, Hh in enumerate(Hs):
+            hbank.add(i2, resample_bins(Hh, a.cpc_bins))
+        hits, hrng = [], random.Random(999)
+        with torch.no_grad():
+            for i2, (Zh, Hh) in enumerate(zip(states, Hs)):
+                cpc_loss(head, Zh, Hh, hbank, i2, a.cpc_bins, a.cpc_delta, a.cpc_negs, hrng,
+                         collect=hits)
+        if hits:
+            acc = np.array([1.0 if h_ else 0.0 for h_, _ in hits])
+            chance = 1.0 / (a.cpc_negs + 1)
+            _rsc = np.random.RandomState(2)
+            bc = np.array([acc[_rsc.randint(0, len(acc), len(acc))].mean() for _ in range(4000)])
+            clo, chi = np.percentile(bc, [2.5, 97.5])
+            print(f"\n  HELD-OUT CPC  (can z_t pick its OWN future among {a.cpc_negs + 1}?)")
+            print(f"    chance                          {chance:.4f}")
+            print(f"    accuracy                        {acc.mean():.4f}   "
+                  f"95% CI [{clo:.4f}, {chi:.4f}]   n={len(acc)} anchors")
+            if clo > chance:
+                print(f"    -> THE LOSS WORKS DURING GENERATION: the state is instance-specific at "
+                      f"matched relative positions, which CE never achieved on this interface "
+                      f"(0.0011-0.0075 across three interfaces).")
+            else:
+                print(f"    -> AT CHANCE: contrastive supervision did NOT make the generation-time "
+                      f"state instance-specific here. Check trajectory separation above before "
+                      f"blaming the objective -- a collapsed state cannot be read by any head.")
     print(f"{'=' * 74}")
 
 
