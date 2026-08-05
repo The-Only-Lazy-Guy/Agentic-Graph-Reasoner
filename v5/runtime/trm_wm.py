@@ -176,6 +176,102 @@ class GatedCrossAttn(nn.Module):
 # ================================================================================================
 # SpikingSlotGate — LIF dynamics over the K working-memory slots, gating what reaches the LM
 # ================================================================================================
+class SlotContrast(nn.Module):
+    """A PER-RECURSION-STEP contrastive objective on the working-memory latents.
+
+    WHY THIS EXISTS. The only direct per-step force on y_t was conv_loss, which penalizes
+    ||y_{t+1} - y_t|| and therefore literally rewards NOT CHANGING, while deep supervision
+    (--ds-weight) defaults to 0 and was OFF in every run recorded here. A real 40-epoch run on
+    Qwen2.5-3B shows `ds 0.0000` at every epoch with `conv` active throughout, and ended at
+    across-task slot cosine 0.9880-1.0000 with a deranged slot table scoring 8/16 against the real
+    one's 7/16. The collapse was not a failure to learn: a constant slot table is the OPTIMUM of the
+    objective that was actually being minimized.
+
+    WHY CONTRASTIVE RATHER THAN THE EXISTING DS. Deep supervision here is MSE onto an oracle
+    INTERMEDIATE RESULT, so it only exists for synthetic composition -- math-cot and swe-action skip
+    it per-example, which is most of what this file is meant to scale to. A contrastive term needs
+    no oracle: the negatives are other tasks in the run. And it cannot be satisfied by collapse. If
+    y_t is the same vector for every task, the query is identical for every anchor while the
+    positive moves, so the loss sits at log(1+K) no matter how long it trains. Across-task cosine
+    stops being a thing you measure afterwards and becomes the thing being optimized.
+
+    HONEST NOTE ON DIFFICULTY. The slots are refined from task_emb, so a near-pass-through of the
+    task embedding would already score well here. That is fine and is the point: the bar is that the
+    working memory RETAIN the task's identity, which right now it does not do at all. Whether the
+    retained identity is USEFUL is a separate question, and the derangement + CE arms in run_real
+    are what answer it -- this term must never be read as evidence on its own.
+
+    No bias on either projection: a bias 2.09x the signal collapsed separation to 0.9170 in the
+    prefix module, three times in one session.
+    """
+
+    def __init__(self, d_trm: int, d_emb: int = EMBED_DIM, d: int = 256):
+        super().__init__()
+        self.q = nn.Linear(d_trm, d, bias=False)
+        self.k = nn.Linear(d_emb, d, bias=False)
+        self.scale = nn.Parameter(torch.tensor(10.0))
+
+    def logits(self, y_t: torch.Tensor, cands: torch.Tensor) -> torch.Tensor:
+        """y_t [d_trm]; cands [M, d_emb] -> [M]."""
+        q = nn.functional.normalize(self.q(y_t), dim=-1)
+        k = nn.functional.normalize(self.k(cands), dim=-1)
+        return self.scale * (k @ q)
+
+
+def slot_contrast_loss(head, states_tensor, tgt_embs, neg_bank, rng, n_neg: int = 15):
+    """InfoNCE at EVERY recursion step. states_tensor [B, T, d_trm]; tgt_embs [B, d_emb] this
+    batch's targets; neg_bank [M, d_emb] target embeddings from OTHER tasks.
+
+    The positive sits at a RANDOM index so slot position carries no information, and the effective
+    candidate count is returned so a caller can report chance from what was actually scored rather
+    than from what was requested.
+    """
+    if neg_bank is None or neg_bank.shape[0] < 2:
+        return None, 0
+    B, T = states_tensor.shape[0], states_tensor.shape[1]
+    terms, n_cand_seen = [], []
+    for b in range(B):
+        k = min(n_neg, neg_bank.shape[0])
+        pick = torch.tensor(rng.sample(range(neg_bank.shape[0]), k), device=neg_bank.device)
+        negs = neg_bank[pick]
+        cands = torch.cat([tgt_embs[b].unsqueeze(0), negs], 0)
+        j = rng.randrange(cands.shape[0])
+        order = list(range(cands.shape[0]))
+        order[0], order[j] = order[j], order[0]
+        cands = cands[order]
+        tgt = torch.tensor([j], device=states_tensor.device)
+        for t in range(T):
+            lg = head.logits(states_tensor[b, t], cands)
+            terms.append(nn.functional.cross_entropy(lg.unsqueeze(0), tgt))
+        n_cand_seen.append(cands.shape[0])
+    if not terms:
+        return None, 0
+    return torch.stack(terms).mean(), int(np.mean(n_cand_seen))
+
+
+def per_step_slot_cosine(slot_list) -> list:
+    """Across-task cosine at EACH recursion step, not pooled over them.
+
+    The existing slot_cos flattens [T, d_lm] into one vector per task, so a table that is distinct
+    at step 0 and constant by step T reads as a single middling number. Collapse is a per-step
+    phenomenon -- conv_loss is weighted QUADRATICALLY toward later steps, so that is exactly where
+    it should bite -- and this is the diagnostic that shows it.
+    """
+    if not slot_list:
+        return []
+    S = torch.stack([s.float() for s in slot_list])          # [N, T, d_lm]
+    if S.dim() != 3 or S.shape[0] < 2:
+        return []
+    out = []
+    for t in range(S.shape[1]):
+        M = S[:, t]
+        M = M / M.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+        C = M @ M.T
+        off = C[~torch.eye(len(M), dtype=torch.bool, device=C.device)]
+        out.append(float(off.mean()))
+    return out
+
+
 class SpikingSlotGate(nn.Module):
     """Decides, PER TOKEN POSITION, which working-memory slots are allowed to inject.
 
@@ -2591,7 +2687,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             adaptive_t: bool = False, ponder_weight: float = 0.0,
             slot_gate: bool = False, slot_theta0: float = 0.0,
             slot_w_inh: float = 0.5, slot_t: int = 3, derange: bool = True,
-            n_derange: int = 5):
+            n_derange: int = 5, contrast_weight: float = 0.0, contrast_negs: int = 15):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
@@ -2787,13 +2883,40 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         print(f"  tasks: {split} train, {len(all_tasks) - split} held-out (2-atom composition, auto-generated, "
               f"no train/held PAIR overlap)\n")
 
+    # PER-STEP CONTRASTIVE OBJECTIVE. contrast_weight 0 (default) leaves every line below inert, so
+    # existing runs reproduce exactly. See SlotContrast's docstring for why this term exists: the
+    # only per-step force on y_t was conv_loss, which rewards NOT changing, and ds_weight defaults
+    # to 0, so collapse was the optimum rather than a training failure.
+    contrast_head = (SlotContrast(R.trm.d).to(wb.device) if contrast_weight > 0 else None)
+    contrast_rng = random.Random(0)
+    tgt_emb_of: dict = {}
+    if contrast_head is not None:
+        _tg_texts = {t[0]: t[2] for t in (train_tasks + held_tasks)}     # task text -> target code
+        _keys = list(_tg_texts)
+        _vecs = encode_batch([_tg_texts[k] for k in _keys])
+        for _k, _v in zip(_keys, _vecs):
+            tgt_emb_of[_k] = torch.as_tensor(_v, dtype=torch.float32, device=wb.device)
+        # Negatives come from TRAIN targets only -- drawing them from held would leak the held set
+        # into the training signal, which is the same instance-split discipline this file applies
+        # everywhere else.
+        _train_texts = [t[0] for t in train_tasks]
+        neg_bank = torch.stack([tgt_emb_of[t] for t in _train_texts])
+        print(f"  per-step CONTRASTIVE objective ON (weight {contrast_weight}, {contrast_negs} "
+              f"negatives, applied at ALL {R.T} recursion steps). Negatives drawn from "
+              f"{neg_bank.shape[0]} TRAIN targets only.\n", flush=True)
+    else:
+        neg_bank = None
+
     gate_params = [a.g for a in R.adapters]
     gate_ids = {id(p) for p in gate_params}
     other_params = [p for p in R.parameters() if p.requires_grad and id(p) not in gate_ids]
-    opt = torch.optim.Adam([
+    _groups = [
         {"params": other_params, "weight_decay": 1e-4},
         {"params": gate_params, "weight_decay": 5e-2},
-    ], lr=1e-3)
+    ]
+    if contrast_head is not None:
+        _groups.append({"params": list(contrast_head.parameters()), "weight_decay": 1e-4})
+    opt = torch.optim.Adam(_groups, lr=1e-3)
     # GATE WARM-START. 0.8 (tanh~0.66) means the adapter injects strongly from step 0, through projections
     # that are still RANDOMLY initialized. That was harmless on synthetic composition, where the ablated
     # baseline is 0/16 by construction (the base LM cannot name graph atoms it was never shown), so noise
@@ -3063,6 +3186,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         random.shuffle(train_ex)
         tot_lm, n = 0.0, 0
         tot_gate_reg, tot_conv, tot_ds, tot_ponder = 0.0, 0.0, 0.0, 0.0
+        tot_ct = 0.0
         for b0 in range(0, len(train_ex), batch_size):
             if ep == 0 and n % heartbeat_every == 0:
                 # epoch 0 alone can run for many minutes on a real 4B model with batch_size=1 (100 forward+
@@ -3187,11 +3311,25 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             ds_loss = torch.tensor(0.0, device=wb.device)
             if ds_weight > 0 and ds_tgt_list and all(t is not None for t in ds_tgt_list):
                 ds_loss = R.ds_loss_batch(all_states, targets=torch.stack(ds_tgt_list).to(wb.device))
+
+            # PER-STEP CONTRASTIVE. Deliberately applied to states_tensor, the SAME [B, T, d] tensor
+            # conv_loss penalizes change on, so the two terms act on exactly the same quantity and
+            # their tug-of-war is visible in the printed per-epoch numbers rather than inferred.
+            ct_loss = torch.tensor(0.0, device=wb.device)
+            if contrast_head is not None and neg_bank is not None:
+                _tb = [tgt_emb_of.get(bx[4]) for bx in batch]
+                if all(v is not None for v in _tb):
+                    _cl, _ncand = slot_contrast_loss(
+                        contrast_head, states_tensor, torch.stack(_tb), neg_bank,
+                        contrast_rng, n_neg=contrast_negs)
+                    if _cl is not None:
+                        ct_loss = _cl
             ponder_loss = torch.tensor(0.0, device=wb.device)
             if ponder_weight > 0 and n_steps_list:
                 ponder_loss = torch.stack(n_steps_list).mean()
             loss = (lm_loss + gate_reg_weight * gate_reg + conv_weight * conv_loss
-                    + ds_weight * ds_loss + ponder_weight * ponder_loss)
+                    + ds_weight * ds_loss + ponder_weight * ponder_loss
+                    + contrast_weight * ct_loss)
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -3215,11 +3353,16 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             tot_conv += float(conv_loss.detach())
             tot_ds += float(ds_loss.detach()) if torch.is_tensor(ds_loss) else 0.0
             tot_ponder += float(ponder_loss.detach()) if torch.is_tensor(ponder_loss) else 0.0
+            tot_ct += float(ct_loss.detach()) if torch.is_tensor(ct_loss) else 0.0
             n += 1
 
         ponder_str = f"  ponder {tot_ponder/max(n,1):.2f}" if ponder_weight > 0 else ""
+        # ct is printed next to conv on purpose: they act on the SAME [B,T,d] tensor with opposite
+        # intent (conv penalizes change, ct requires the step to identify its own task), so their
+        # tug-of-war should be readable per epoch instead of reconstructed afterwards.
+        ct_str = f"  ct {tot_ct/max(n,1):.4f}" if contrast_weight > 0 else ""
         print(f"  ep {ep:>3}  lm {tot_lm/max(n,1):.3f}  gate_reg {tot_gate_reg/max(n,1):.4f}  "
-              f"conv {tot_conv/max(n,1):.4f}  ds {tot_ds/max(n,1):.4f}  "
+              f"conv {tot_conv/max(n,1):.4f}  ds {tot_ds/max(n,1):.4f}{ct_str}  "
               f"gate {R.adapters[0].g.detach().item():+.2f}{ponder_str}", flush=True)
         if ep % eval_every == 0 or ep == epochs - 1:
             R.eval()
@@ -3443,6 +3586,13 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 _off = _C[~torch.eye(len(_S), dtype=torch.bool, device=_C.device)]
                 slot_cos_val = float(_off.mean())
                 slot_cos_str = f"  slot_cos {slot_cos_val:.4f}"
+                # PER-STEP, not pooled. conv_loss is weighted QUADRATICALLY toward later steps, so
+                # if it is driving the collapse the damage should grow along the recursion -- a
+                # single pooled number cannot show that, and "which step collapses" is exactly the
+                # question a per-step objective is meant to answer.
+                _ps = per_step_slot_cosine(held_slots)
+                if _ps:
+                    slot_cos_str += "  per_step[" + " ".join(f"{c:.3f}" for c in _ps) + "]"
 
             # APPARATUS CROSS-CHECK, free, and the reason the two numbers are printed together.
             # Greedy decode + identical slots => bitwise identical output. So the deranged arm and
@@ -4023,6 +4173,19 @@ def main():
                          "its baseline is 0/16 by construction. Costs one extra greedy generate() per held "
                          "task per eval checkpoint and changes no existing arm, so pass this only when you "
                          "are deliberately trading the control away for wall clock.")
+    ap.add_argument("--contrast-weight", type=float, default=0.0, dest="contrast_weight",
+                    help="weight on the PER-RECURSION-STEP contrastive objective (SlotContrast). "
+                         "0 (default) = off, reproducing prior runs exactly. THIS IS THE TERM THE "
+                         "SLOTS WERE MISSING: the only per-step force on y_t was conv_loss, which "
+                         "penalizes ||y_t+1 - y_t|| and so rewards NOT CHANGING, while --ds-weight "
+                         "defaults to 0 and was off in every recorded run -- a real 40-epoch 3B run "
+                         "printed `ds 0.0000` every epoch and ended at slot_cos 0.9880-1.0000 with "
+                         "DERANGED slots scoring 8/16 against the real slots' 7/16. Collapse was the "
+                         "OPTIMUM of the objective being minimized, not a training failure. Unlike "
+                         "--ds-weight this needs no oracle intermediate, so it also applies to "
+                         "math-cot and swe-action. Try 0.5 and read slot_cos + the derangement arm.")
+    ap.add_argument("--contrast-negs", type=int, default=15, dest="contrast_negs",
+                    help="negatives per anchor for --contrast-weight, drawn from TRAIN targets only")
     ap.add_argument("--n-derange", type=int, default=5,
                     help="--run: how many independent derangements the CE readout averages over "
                          "(default 5). GENERATION always uses derangement 0 only, so this costs "
@@ -4054,7 +4217,8 @@ def main():
                  adaptive_t=a.adaptive_t, ponder_weight=a.ponder_weight,
                  slot_gate=a.slot_gate, slot_theta0=a.slot_theta0,
                  slot_w_inh=a.slot_w_inh, slot_t=a.slot_t, derange=a.derange,
-                 n_derange=a.n_derange)
+                 n_derange=a.n_derange, contrast_weight=a.contrast_weight,
+                 contrast_negs=a.contrast_negs)
     else:
         selftest()
 

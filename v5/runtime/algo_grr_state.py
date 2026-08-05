@@ -649,7 +649,18 @@ def main():
     print(f"  h-CONDITIONING         Fx vs T: {Fx - T:+.4f} CE")
     print(f"  H-PERMUTED (tracker reads ANOTHER example's h) CE {HP:.4f}")
     print(f"  READ-PATH SIGNAL      HP vs T: {HP - T:+.4f} CE   95% CI [{hlo:+.4f}, {hhi:+.4f}]")
-    print(f"    -> {'the tracker genuinely USES the hidden trajectory' if hlo > 0 else 'the tracker is NOT using the hidden state meaningfully'}")
+    # COLLAPSE GATES THE VERDICT. Measured on the CE-only control: separation was 1.0000 at EVERY
+    # relative position -- a literal constant state -- while HP vs T came out +0.0020 with a CI
+    # excluding 0, so this line printed "genuinely USES the hidden trajectory" about a state that
+    # cannot carry anything. A CI excluding 0 for 0.002 nats is significance without magnitude; the
+    # guard below already knew, and the verdict was not reading it.
+    _collapsed = sep_mean > 0.99
+    if _collapsed:
+        print(f"    -> UNINTERPRETABLE: the state is CONSTANT across instances (mean separation "
+              f"{sep_mean:.4f}), so no read-path claim is possible regardless of this CI. "
+              f"HP vs T = {HP - T:+.4f} is a difference between two identical states.")
+    else:
+        print(f"    -> {'the tracker genuinely USES the hidden trajectory' if hlo > 0 else 'the tracker is NOT using the hidden state meaningfully'}")
     print(f"\n  TRAJECTORY SEPARATION across instances, by relative position:")
     print("    " + "  ".join(f"{c:.2f}" for c in per_bin))
     print(f"    t=0 -> t=end   mean {sep_mean:.4f}   max {sep_max:.4f}")
@@ -657,7 +668,12 @@ def main():
     print(f"  (endpoint-only guard, kept for comparison: {sep:.4f})")
     print(f"  GUARD across-instance state cosine: {sep:.4f} "
           f"{'<-- COLLAPSED, falsifier is meaningless' if sep > 0.99 else '(state varies, test is valid)'}")
-    print(f"    -> {'STATE IS LOAD-BEARING (CI excludes 0)' if lo > 0 else 'NOT SIGNIFICANT -- CI includes 0'}")
+    if _collapsed:
+        print(f"    -> NOT LOAD-BEARING: separation {sep_mean:.4f} means the shuffled and tracked "
+              f"states are the SAME vector, so S vs T = {S - T:+.4f} measures noise, not memory. "
+              f"Fix the collapse before reading this number.")
+    else:
+        print(f"    -> {'STATE IS LOAD-BEARING (CI excludes 0)' if lo > 0 else 'NOT SIGNIFICANT -- CI includes 0'}")
 
     # ------------------------------------------------------------------------------------------
     # DID THE LOSS DO ITS JOB? Held-out CPC accuracy: can z_t pick THIS instance's future out of a
