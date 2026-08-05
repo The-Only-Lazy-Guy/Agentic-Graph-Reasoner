@@ -2941,7 +2941,24 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     # prefix separation to 0.9170"), and that is the module where the same contrastive objective
     # DID work. Zeroing + freezing rather than changing the layer shape keeps every existing
     # checkpoint loadable.
-    # TRM BIASES. THE ROOT CAUSE of the slot collapse, measured on this exact module across 3 seeds:
+    # TRM BIASES. **NOT the root cause** -- see the RETRACTION below. A real artifact, but it only
+    # moves where training STARTS; it does not stop the collapse.
+    #
+    # RETRACTION (2026-08-05, commit 644343c overclaimed). That commit called this THE ROOT CAUSE on
+    # the strength of an INITIALIZATION measurement, and then the run refuted it:
+    #     contrast 0.5 + no-proj-bias + trm-no-bias  ->  slot_cos 1.000000,
+    #     y_t[1.000 1.000 1.000 1.000], instance-specific +0.0017 CI [-0.0005,+0.0042], ratio 4226x
+    # y_t is already ~1.000 at the EPOCH-0 checkpoint despite starting at 0.364, i.e. the collapse
+    # happens within a single epoch of TRAINING. Init separation was a proxy for trained separation
+    # and the two are different quantities -- the same proxy-for-condition error that also produced
+    # "process is dead" from a log that had stopped growing, and "GPU is free" from a completion
+    # marker that prints before the process exits. Three times in one session, same shape.
+    #
+    # What remains TRUE and worth keeping: the bias/signal ratios below are real and large, and they
+    # do move initialization 0.885 -> 0.364 across 3 seeds. What is FALSE: that fixing them fixes
+    # the collapse. The driver is in the TRAINING objective, not the initialization -- and note that
+    # conv_weight (0.05, ALWAYS ON) was active in every arm run so far, including this one.
+    # Measured on this exact module across 3 seeds:
     #     shipped                y_t across-instance cosine 0.8911 0.8964 0.8680  (mean 0.8851)
     #     input projections only 0.8307 0.8548 0.8383                             (mean 0.8413)
     #     ALL biases zeroed      0.3270 0.4044 0.3619                             (mean 0.3644)
