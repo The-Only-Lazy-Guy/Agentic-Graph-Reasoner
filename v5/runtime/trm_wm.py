@@ -3126,6 +3126,12 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     elif task_domain == "math-cot":
         print(f"  tasks: {split} train, {len(all_tasks) - split} held-out (real math CoT, no train/held overlap)\n")
     else:
+        if (len(all_tasks) - split) < n_held:
+            print(f"  !! n_held CLAMPED: asked for {n_held}, got {len(all_tasks) - split}. The generator "
+                  f"makes a FIXED pool of 2-atom pairs and n_train takes from it first, so raising "
+                  f"--n-held alone cannot widen the held set -- LOWER --n-train to free pairs. A "
+                  f"silently clamped held set makes a confidence interval look better-supported than "
+                  f"the data allows.", flush=True)
         print(f"  tasks: {split} train, {len(all_tasks) - split} held-out (2-atom composition, auto-generated, "
               f"no train/held PAIR overlap)\n")
 
@@ -4074,12 +4080,20 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                 ce_msg = (f"NO instance-specific signal (CI includes 0), with {d_modal.mean():+.4f} nats "
                           f"of format/mode effect present. Adapter-shortcut shape: the adapter helps, "
                           f"the CONTENT of memory does not.")
-            elif d_spec.mean() <= NULL_BAND_HI or ratio > 50:
-                ce_msg = (f"ADAPTER SHORTCUT, not memory. The CI excludes 0, but {d_spec.mean():+.4f} nats "
-                          f"is inside the documented CE null band (<={NULL_BAND_HI}) and/or the format "
-                          f"effect is {ratio:.0f}x larger. This is the SAME signature as the three "
-                          f"interfaces in algo_grr_contrast.py (250-950x). Significance without "
-                          f"magnitude is not a channel.")
+            elif d_spec.mean() <= NULL_BAND_HI:
+                ce_msg = (f"ADAPTER SHORTCUT: the CI excludes 0, but {d_spec.mean():+.4f} nats is INSIDE "
+                          f"the documented CE null band (<={NULL_BAND_HI}). Significance without "
+                          f"magnitude is not a channel. Same signature as the three interfaces in "
+                          f"algo_grr_contrast.py (250-950x).")
+            elif ratio > 50:
+                # Say WHICH bar failed. The first version printed "inside the null band and/or the
+                # format effect is Nx larger" for an effect 18x ABOVE that band -- the opposite of the
+                # truth, on exactly the run where the effect finally cleared it.
+                ce_msg = (f"MIXED / FORMAT-DOMINATED: {d_spec.mean():+.4f} nats CLEARS the "
+                          f"{NULL_BAND_HI} null band by {d_spec.mean()/NULL_BAND_HI:.0f}x and the CI "
+                          f"excludes 0 -- a real instance-specific channel -- but the format effect is "
+                          f"still {ratio:.0f}x larger, above the 50x instance-independent-adapter bar. "
+                          f"Content matters here; it is not yet what the adapter mostly does.")
             else:
                 ce_msg = (f"REAL instance-specific channel: {d_spec.mean():+.4f} nats, CI excludes 0, "
                           f"above the {NULL_BAND_HI} null band, and only {ratio:.0f}x smaller than the "
