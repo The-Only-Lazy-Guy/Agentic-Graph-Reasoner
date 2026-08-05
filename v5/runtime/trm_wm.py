@@ -218,21 +218,35 @@ class SlotContrast(nn.Module):
         return self.scale * (k @ q)
 
 
-def slot_contrast_loss(head, states_tensor, tgt_embs, neg_bank, rng, n_neg: int = 15):
+def slot_contrast_loss(head, states_tensor, tgt_embs, neg_bank, rng, n_neg: int = 15,
+                       exclude_rows=None):
     """InfoNCE at EVERY recursion step. states_tensor [B, T, d_trm]; tgt_embs [B, d_emb] this
     batch's targets; neg_bank [M, d_emb] target embeddings from OTHER tasks.
 
     The positive sits at a RANDOM index so slot position carries no information, and the effective
     candidate count is returned so a caller can report chance from what was actually scored rather
     than from what was requested.
+
+    exclude_rows[b] is example b's OWN row in neg_bank, and it must be excluded. neg_bank holds
+    every TRAIN target, so without this an example can draw its own target as a "negative" -- the
+    positive then appears twice in the candidate list under two different indices, one of which is
+    scored as wrong. That is unlearnable by construction and silently caps the achievable accuracy
+    for a reason having nothing to do with the model. Same self-as-negative bug already fixed in
+    FutureBank in algo_grr_state.py.
     """
     if neg_bank is None or neg_bank.shape[0] < 2:
         return None, 0
     B, T = states_tensor.shape[0], states_tensor.shape[1]
     terms, n_cand_seen = [], []
     for b in range(B):
-        k = min(n_neg, neg_bank.shape[0])
-        pick = torch.tensor(rng.sample(range(neg_bank.shape[0]), k), device=neg_bank.device)
+        pool = list(range(neg_bank.shape[0]))
+        if exclude_rows is not None and exclude_rows[b] is not None:
+            own = exclude_rows[b]
+            pool = [r for r in pool if r != own]
+        if len(pool) < 1:
+            continue
+        k = min(n_neg, len(pool))
+        pick = torch.tensor(rng.sample(pool, k), device=neg_bank.device)
         negs = neg_bank[pick]
         cands = torch.cat([tgt_embs[b].unsqueeze(0), negs], 0)
         j = rng.randrange(cands.shape[0])
@@ -2901,11 +2915,13 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         # everywhere else.
         _train_texts = [t[0] for t in train_tasks]
         neg_bank = torch.stack([tgt_emb_of[t] for t in _train_texts])
+        neg_row_of = {t: i for i, t in enumerate(_train_texts)}
         print(f"  per-step CONTRASTIVE objective ON (weight {contrast_weight}, {contrast_negs} "
               f"negatives, applied at ALL {R.T} recursion steps). Negatives drawn from "
               f"{neg_bank.shape[0]} TRAIN targets only.\n", flush=True)
     else:
         neg_bank = None
+        neg_row_of = {}
 
     gate_params = [a.g for a in R.adapters]
     gate_ids = {id(p) for p in gate_params}
@@ -3319,9 +3335,11 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             if contrast_head is not None and neg_bank is not None:
                 _tb = [tgt_emb_of.get(bx[4]) for bx in batch]
                 if all(v is not None for v in _tb):
+                    # each example's OWN row in neg_bank, so it is never drawn as its own negative
+                    _rows = [neg_row_of.get(bx[4]) for bx in batch]
                     _cl, _ncand = slot_contrast_loss(
                         contrast_head, states_tensor, torch.stack(_tb), neg_bank,
-                        contrast_rng, n_neg=contrast_negs)
+                        contrast_rng, n_neg=contrast_negs, exclude_rows=_rows)
                     if _cl is not None:
                         ct_loss = _cl
             ponder_loss = torch.tensor(0.0, device=wb.device)
