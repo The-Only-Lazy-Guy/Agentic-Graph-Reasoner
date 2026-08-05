@@ -328,7 +328,15 @@ def probe_cpc(states_tr, Hs_tr, states_hd, Hs_hd, d_state, d_model, bins, delta,
     by_inst: dict = {}
     for h_, _, ix in hits:
         by_inst.setdefault(ix, []).append(1.0 if h_ else 0.0)
-    return np.array([float(np.mean(v)) for v in by_inst.values()]), len(hits)
+    # ACTUAL candidate counts, not the requested one. FutureBank.negatives() returns
+    # min(k, len(pool)), so a small held set silently yields FEWER candidates than --cpc-negs asked
+    # for -- which makes true chance HIGHER than 1/(negs+1). Computing chance from the request would
+    # then manufacture an above-chance result out of a thin pool. Chance is derived from what the
+    # scorer actually saw.
+    cand_counts = [c for _, c, _ in hits if c]
+    eff_chance = float(np.mean([1.0 / c for c in cand_counts])) if cand_counts else 0.0
+    return (np.array([float(np.mean(v)) for v in by_inst.values()]), len(hits), eff_chance,
+            float(np.mean(cand_counts)) if cand_counts else 0.0)
 
 
 def variance_penalty(Z, eps: float = 1e-4, target_std: float = 1.0):
@@ -664,11 +672,11 @@ def main():
     # detached states -- so the control has a comparable number and the treatment's number does not
     # come from a head that co-trained with the thing it is measuring.
     if states_tr and Hs_tr:
-        inst_means, n_anchors = probe_cpc(
+        inst_means, n_anchors, eff_chance, mean_cands = probe_cpc(
             states_tr, Hs_tr, states, Hs, tracker.d_state, d_model,
             a.cpc_bins, a.cpc_delta, a.cpc_negs, seed=a.seed, device=lm.device)
         if len(inst_means):
-            chance = 1.0 / (a.cpc_negs + 1)
+            chance = eff_chance
             acc = inst_means
             # BOOTSTRAP OVER INSTANCES, not anchors. Each held instance contributes ~(bins-delta)
             # anchors from ONE trajectory, so they are correlated; resampling anchors would treat
@@ -679,8 +687,11 @@ def main():
                            for _ in range(4000)])
             clo, chi = np.percentile(bc, [2.5, 97.5])
             ratio = acc.mean() / chance if chance > 0 else float("inf")
-            print(f"\n  HELD-OUT CPC  (can z_t pick its OWN future among {a.cpc_negs + 1}?)")
-            print(f"    chance                          {chance:.4f}")
+            print(f"\n  HELD-OUT CPC  (can z_t pick its OWN future?)")
+            print(f"    candidates actually scored      {mean_cands:.1f} on average "
+                  f"(--cpc-negs asked for {a.cpc_negs + 1})")
+            print(f"    chance                          {chance:.4f}  <- from the ACTUAL candidate "
+                  f"count, not the requested one")
             # Mean of PER-INSTANCE means: every held instance counts once, regardless of how many
             # anchors its trajectory happened to yield. That is the estimator the instance-level CI
             # below is an interval for; the raw anchor mean would silently weight long instances more.
