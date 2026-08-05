@@ -426,6 +426,8 @@ class WMReasoner(nn.Module):
         self._slots = None
         # Optional separate VALUE stream (see GatedCrossAttn.forward). None => keys are also the values.
         self._slots_v = None
+        # False => the original free-latent behaviour, bit-identical. See _refine_atom_slots.
+        self.atom_slots = False
 
         # Deep supervision: map y_t [d] → d_lm for MSE against native_text_embedding targets
         self.ds_proj = nn.Linear(trm.d, d_lm)
@@ -544,6 +546,56 @@ class WMReasoner(nn.Module):
             slots = slots * (w / w.max().clamp(min=1e-6)).unsqueeze(-1)
         return slots
 
+    def _refine_atom_slots(self, task_emb: torch.Tensor, atom_embs: torch.Tensor,
+                           track_deltas: bool = False):
+        """K SLOTS, ONE PER RETRIEVED ATOM, refined over T recursion steps.
+
+        This is the design this file's header has described since it was written -- "K slots the TRM
+        refines over T recursion steps, INITIALIZED from the top-K retrieved atoms -> grounded in real
+        content, not a free latent (this is what killed soft-prompt)" -- and which was never built.
+
+        What ran instead, verified by measurement:
+          * the slot count was T (recursion steps), NEVER K: 1 atom and 16 atoms both produced 4 slots
+          * z0 and y0 are nn.Parameter zeros, so EVERY instance started from the same latent, i.e. the
+            free latent the header warns against
+          * the cycle-0 attention query is exactly z0 = 0, so softmax over the atoms was exactly
+            uniform ([0.3333, 0.3333, 0.3333]) and PERMUTING the retrieved atoms changed nothing --
+            retrieval rank carried no information at all, and the atoms entered only as a mean
+        That is enough to explain every null measured on this module: the slots could not encode WHICH
+        atoms were retrieved, so a deranged slot table scored the same as the real one (WM 5/16 vs
+        deranged 4/16, ratio 2278x-8378x), and no auxiliary objective could extract information the
+        architecture never routed in. Removing every bias (0.885 -> 0.364 at init) and switching off
+        conv_loss both left slot_cos at ~0.9997, which is what a structural cause looks like.
+
+        Each slot is seeded with its OWN atom and refined against the shared task/context, so the slot
+        count tracks K, rank is preserved (slot k is atom k), and the starting point is instance-
+        specific by construction rather than by hoping an objective creates separation.
+        """
+        K = int(atom_embs.shape[0])
+        per_slot, finals = [], []
+        for k in range(K):
+            y0k = self.trm.atom_proj(atom_embs[k])          # SEED slot k from atom k
+            if self.trm.adaptive:
+                y_t, halt_w, n_steps = self.trm(task_emb, atom_embs, y_init=y0k)
+                self._halt_weights, self._n_steps = halt_w, n_steps
+            else:
+                y_t = self.trm(task_emb, atom_embs, y_init=y0k)
+                self._halt_weights, self._n_steps = None, None
+            per_slot.append(y_t)                            # [T, d]
+            finals.append(y_t[-1])                          # refined value of slot k
+        Y = torch.stack(finals)                             # [K, d]
+        slots = self.proj_y(Y)                              # [K, d_lm] -- COUNT NOW TRACKS K
+        self._slots = slots
+        P = torch.stack(per_slot)                           # [K, T, d]
+        # states stay a length-T list of [d] so conv_loss / ds_loss / the contrastive term are
+        # unchanged; each entry is the slot table's state at recursion step t, pooled over slots.
+        states = [P[:, t].mean(0) for t in range(P.shape[1])]
+        if track_deltas:
+            deltas = ([float((P[:, t + 1] - P[:, t]).norm()) for t in range(P.shape[1] - 1)]
+                      if P.shape[1] > 1 else [0.0])
+            return slots, states, deltas, [s_.detach() for s_ in slots]
+        return slots, states
+
     def refine(self, task_emb: torch.Tensor, atom_embs: torch.Tensor, native: bool = False,
               track_deltas: bool = False):
         """task_emb [d_in], atom_embs [N, d_in] (both in TRM's d_in space, typically MiniLM 384-d).
@@ -555,6 +607,8 @@ class WMReasoner(nn.Module):
         input (e.g. native_text_embedding's 2560-d vectors on Qwen3-4B) is an immediate shape error.
         membrane.py's WM path really did pass those, and it crashed on the first call -- nothing had ever
         constructed a Membrane(wb=..., wm=...) so it was never executed. Inputs here are MiniLM."""
+        if getattr(self, "atom_slots", False):
+            return self._refine_atom_slots(task_emb, atom_embs, track_deltas=track_deltas)
         if self.trm.adaptive:
             y_t, halt_w, n_steps = self.trm(task_emb, atom_embs)  # y_t [T, d], halt_w [T]
             self._halt_weights = halt_w
@@ -2733,7 +2787,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             slot_gate: bool = False, slot_theta0: float = 0.0,
             slot_w_inh: float = 0.5, slot_t: int = 3, derange: bool = True,
             n_derange: int = 5, contrast_weight: float = 0.0, contrast_negs: int = 15,
-            no_proj_bias: bool = False, trm_no_bias: bool = False):
+            no_proj_bias: bool = False, trm_no_bias: bool = False,
+            atom_slots: bool = False):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
@@ -2974,6 +3029,15 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     # contrastive run ESCAPED collapse; a bias-free TRM starts at 0.36, well inside that regime.
     # Zeroed and frozen after construction so algo_trm.py is untouched and every other consumer and
     # checkpoint is unaffected.
+    # ATOM-INITIALIZED SLOTS: the design in this file's header, finally built. See
+    # WMReasoner._refine_atom_slots for the measurements that show what ran instead.
+    if atom_slots:
+        R.atom_slots = True
+        print(f"  ATOM-INITIALIZED SLOTS ON: the slot table is now K vectors, one SEEDED FROM EACH "
+              f"retrieved atom and refined over {R.T} steps -- not T values read off a shared "
+              f"zero-init free latent. Slot count now tracks K; retrieval rank is preserved.",
+              flush=True)
+
     if trm_no_bias:
         _nz = 0
         with torch.no_grad():
@@ -4292,6 +4356,14 @@ def main():
                          "its baseline is 0/16 by construction. Costs one extra greedy generate() per held "
                          "task per eval checkpoint and changes no existing arm, so pass this only when you "
                          "are deliberately trading the control away for wall clock.")
+    ap.add_argument("--atom-slots", action="store_true", dest="atom_slots",
+                    help="build the working memory as K slots, each SEEDED FROM ONE RETRIEVED ATOM and "
+                         "refined over T steps -- the design this file's header has always described "
+                         "and which was never implemented. What ran instead: slot count was T not K (1 "
+                         "atom and 16 atoms both gave 4 slots), z0/y0 are shared zero Parameters so "
+                         "every instance started from the SAME latent, and the cycle-0 attention query "
+                         "is exactly 0 so the atoms entered as an exactly uniform mean with retrieval "
+                         "rank discarded. Off by default; existing runs stay bit-identical.")
     ap.add_argument("--trm-no-bias", action="store_true", dest="trm_no_bias",
                     help="zero and freeze EVERY bias inside the TRM. This is the measured ROOT CAUSE "
                          "of the slot collapse: PyTorch's default nn.Linear bias init is sized for "
@@ -4354,7 +4426,7 @@ def main():
                  slot_w_inh=a.slot_w_inh, slot_t=a.slot_t, derange=a.derange,
                  n_derange=a.n_derange, contrast_weight=a.contrast_weight,
                  contrast_negs=a.contrast_negs, no_proj_bias=a.no_proj_bias,
-                 trm_no_bias=a.trm_no_bias)
+                 trm_no_bias=a.trm_no_bias, atom_slots=a.atom_slots)
     else:
         selftest()
 
