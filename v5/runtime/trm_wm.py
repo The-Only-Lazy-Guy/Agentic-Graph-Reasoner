@@ -3016,7 +3016,8 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             atom_slots: bool = False, slotdim_k: int = 0,
             slotdim_depth: int = 1, slotdim_no_ffn: bool = False,
             slotdim_heads: int = 0, couple_frac: list | None = None,
-            delta_scale: float = 0.3, delta_mode: str = "rescale"):
+            delta_scale: float = 0.3, delta_mode: str = "rescale",
+            eval_every_arg: int = 0):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
@@ -3288,10 +3289,13 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         else:
             R.slotdim = SlotDIM(R.trm.d, k=slotdim_k, depth=slotdim_depth,
                                 ffn=not slotdim_no_ffn).to(wb.device)
-        print(f"  SLOTDIM ON: {slotdim_k} competing banks, depth {slotdim_depth}, "
-              f"FFN {'OFF (ablated)' if slotdim_no_ffn else 'ON'} -- replacing the TRM recursion, "
-              f"which measures as a contraction (two distinct seeds -> cos 0.8072 after ONE step).",
-              flush=True)
+        print(f"  SLOTDIM {'v2' if slotdim_heads > 0 else 'v1'} ON: {slotdim_k} banks, "
+              f"{slotdim_heads if slotdim_heads > 0 else 1} head(s), depth {slotdim_depth}, "
+              f"FFN {'OFF (ablated)' if slotdim_no_ffn else 'ON'}"
+              f"{'  [multi-head slot sets + selective decay + ABSOLUTE tanh(obs) gate]' if slotdim_heads > 0 else ''}"
+              f" -- replacing the TRM recursion, which measures as a contraction "
+              f"(two distinct seeds -> cos 0.8072 after ONE step).", flush=True)
+        print(f"     slot producer class: {type(R.slotdim).__name__}", flush=True)
 
     if atom_slots:
         R.atom_slots = True
@@ -3588,7 +3592,11 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         print(f"  Batched training: batch_size={batch_size} (pads variable-length sequences, "
               f"~{batch_size}x fewer optimizer steps)")
     best_held = 0.0
-    eval_every = max(1, epochs // 8)
+    # eval_every was epochs//8, so an 8-epoch run evaluated EVERY epoch. At held=32 that is 96
+    # generate() calls per checkpoint and the eval, not the training, dominates wall clock
+    # (~25 min/epoch measured). The CE readout is the quotable metric and is forward-only; the
+    # generation pass counts are the expensive AND noisy one. Make the cadence explicit.
+    eval_every = eval_every_arg if eval_every_arg > 0 else max(1, epochs // 8)
     last_dump = None
     # Pre-bound so the final report below is readable even if no eval checkpoint ever ran (epochs=0).
     held_ok, ablated_ok, deranged_ok, der_dump, slot_cos_val = 0, 0, 0, [], None
@@ -4636,6 +4644,11 @@ def main():
                          "0.8072 in ONE step, which is why every write-side fix failed. DIM asks how "
                          "violently an input perturbs the system rather than how similar two tokens "
                          "are, and accumulates rather than re-transforming. Try 8.")
+    ap.add_argument("--eval-every", type=int, default=0, dest="eval_every_arg",
+                    help="epochs between eval checkpoints (0 = the old epochs//8). Eval, not "
+                         "training, dominates wall clock: at held=32 each checkpoint is ~96 generate() "
+                         "calls. Raise this when you care about the FINAL numbers rather than the "
+                         "per-epoch trace.")
     ap.add_argument("--slotdim-heads", type=int, default=0, dest="slotdim_heads",
                     help="use SlotDIM **v2** with this many slot HEADS (0 = v1). v2 adds multi-head "
                          "slot sets, input-dependent selective decay, and a DIM-faithful ABSOLUTE "
@@ -4736,7 +4749,8 @@ def main():
                  trm_no_bias=a.trm_no_bias, atom_slots=a.atom_slots, slotdim_k=a.slotdim_k, slotdim_depth=a.slotdim_depth,
                  slotdim_no_ffn=a.slotdim_no_ffn, slotdim_heads=a.slotdim_heads,
                  couple_frac=[float(f) for f in a.couple_frac.split(",") if f.strip()],
-                 delta_scale=a.delta_scale, delta_mode=a.delta_mode)
+                 delta_scale=a.delta_scale, delta_mode=a.delta_mode,
+                 eval_every_arg=a.eval_every_arg)
     else:
         selftest()
 
