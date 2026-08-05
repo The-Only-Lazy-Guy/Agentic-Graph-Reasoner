@@ -323,6 +323,83 @@ class SlotDIM(nn.Module):
         return self.W_read(cur)                               # (k,d)
 
 
+class SlotDIMv2(nn.Module):
+    """Slot-DIM v2 (user's upgraded dim_vs_attention_test.ipynb), adapted to emit a SLOT TABLE.
+
+    Three additions over v1, each aimed at a failure this file has measured:
+
+    1. MULTI-HEAD SLOT SETS -- h groups of k/h slots with their own M0 and W_v. v1's slots were
+       measured collapsing toward each other (within-instance cosine 0.94 at depth 1, 0.995 with
+       FFN at depth 2): every slot competed for the same projection space, so an entity and a
+       relation had to fight for orthogonal room. Separate heads give feature specialisation
+       without attention's O(N^2).
+    2. SELECTIVE INPUT-DEPENDENT DECAY -- lam = sigmoid(W_f(x)) per channel, so the memory policy
+       depends on WHAT the input is, not how long ago it arrived. A static EMA/cumsum decays by
+       distance and would drop a premise introduced first, which is fatal when the write events are
+       a task followed by its retrieved atoms. Computed by exact parallel scan
+       M_t = K_t*(M0 + cumsum(b/K)), K_t = prod(keep), in fp64 so 1/K cannot underflow.
+    3. DIM-FAITHFUL SENSITIVITY GATE -- gate = tanh(obs) multiplying the write. The softmax over
+       slots is only RELATIVE ("if I must write this somewhere, where?"); it will force a write for
+       a token that perturbs nothing. tanh(sigma'(Z)) is an ABSOLUTE magnitude gate: no measured
+       consequence in the observer, no write. This is the piece that makes the mechanism actually
+       DIM rather than linear attention with extra steps.
+
+    Heads keep their own slot sets and are CONCATENATED (not summed as in the notebook, which sums
+    per-token reads) because the LM's GatedCrossAttn consumes the slot table itself.
+    """
+
+    def __init__(self, d: int, k: int = 8, n_heads: int = 2, decay_bias: float = 2.2,
+                 ffn: bool = True, depth: int = 1):
+        super().__init__()
+        assert k % n_heads == 0, f"k={k} must be divisible by n_heads={n_heads}"
+        self.h, self.ks, self.depth = n_heads, k // n_heads, max(1, depth)
+        self.M0 = nn.Parameter(torch.randn(self.h, self.ks, d) * 0.02)
+        self.W_v = nn.ModuleList([nn.Linear(d, d, bias=False) for _ in range(self.h * self.depth)])
+        self.W_f = nn.ModuleList([nn.Linear(d, d) for _ in range(self.h * self.depth)])
+        for W in self.W_f:                       # init keep ~ sigmoid(2.2) ~ 0.9, long-ish memory
+            W.weight.data.mul_(0.1)
+            W.bias.data.fill_(decay_bias)
+        self.W_read = nn.Linear(d, d, bias=False)
+        self.ln = nn.ModuleList([nn.LayerNorm(d) for _ in range(self.depth)]) if ffn else None
+        self.ffn = nn.ModuleList([
+            nn.Sequential(nn.Linear(d, 4 * d), nn.GELU(), nn.Linear(4 * d, d))
+            for _ in range(self.depth)]) if ffn else None
+
+    def _pass(self, x: torch.Tensor, di: int) -> torch.Tensor:
+        """x [T, d] write events -> slot table [k, d] for one depth level."""
+        outs = []
+        for hh in range(self.h):
+            i = di * self.h + hh
+            M0 = self.M0[hh]                                   # (ks,d)
+            Z = x @ M0.T                                       # (T,ks) interaction
+            sig = torch.sigmoid(Z)
+            obs = sig * (1.0 + Z * (1.0 - sig))                # closed-form observer
+            A = torch.softmax(obs, dim=-1)                     # RELATIVE: slots compete
+            gate = torch.tanh(obs)                             # ABSOLUTE: no impact, no write
+            lam = torch.sigmoid(self.W_f[i](x))                # (T,d) selective decay
+            v = nn.functional.silu(self.W_v[i](x))             # (T,d) candidate writes
+            w = A.unsqueeze(-1) * gate.unsqueeze(-1) * v.unsqueeze(1)   # (T,ks,d)
+            keep = lam.unsqueeze(1)                            # (T,1,d)
+            wd, kd = w.double(), keep.double()                 # fp64 scan, per the notebook
+            K = torch.exp(torch.cumsum(torch.log(kd.clamp(min=1e-6)), dim=0))
+            b = (1.0 - kd) * wd
+            M_seq = (K * (M0.double().unsqueeze(0) + torch.cumsum(b / K, dim=0))).float()
+            outs.append(M_seq[-1])                             # FINAL slot state (ks,d)
+        return torch.cat(outs, 0)                              # (k,d)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() == 1:
+            x = x.unsqueeze(0)
+        cur = x
+        for di in range(self.depth):
+            M = self._pass(cur, di)
+            if self.ffn is not None:
+                M = self.ln[di](M)
+                M = M + self.ffn[di](M)
+            cur = M
+        return self.W_read(cur)
+
+
 class SlotContrast(nn.Module):
     """A PER-RECURSION-STEP contrastive objective on the working-memory latents.
 
@@ -524,7 +601,8 @@ class WMReasoner(nn.Module):
     oracle-computed intermediate targets (native_text_embedding of true intermediate results).
     Loss is MSE in d_lm space — NOT CE against atom pools (TRM is not a ranker)."""
     def __init__(self, d_lm: int, couple_layers, trm, n_heads: int = 4, M: int = 4, top_trm=None,
-                 gate_init: float = 0.0):
+                 gate_init: float = 0.0, delta_scale: float = 0.3,
+                 delta_mode: str = "rescale"):
         super().__init__()
         self.T = trm.T
         self.M = M
@@ -534,7 +612,10 @@ class WMReasoner(nn.Module):
         self.proj_y = nn.Linear(trm.d, d_lm)
 
         # Gated cross-attention adapters (unchanged)
-        self.adapters = nn.ModuleList([GatedCrossAttn(d_lm, n_heads, gate_init=gate_init) for _ in couple_layers])
+        self.adapters = nn.ModuleList([
+            GatedCrossAttn(d_lm, n_heads, gate_init=gate_init,
+                           delta_scale=delta_scale, delta_mode=delta_mode)
+            for _ in couple_layers])
         self.couple_layers = list(couple_layers)
         # SPIKING SLOT GATE (opt-in; disabled => the adapters take their original dense-softmax
         # path bit-for-bit, so an existing checkpoint behaves identically).
@@ -2933,7 +3014,9 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             n_derange: int = 5, contrast_weight: float = 0.0, contrast_negs: int = 15,
             no_proj_bias: bool = False, trm_no_bias: bool = False,
             atom_slots: bool = False, slotdim_k: int = 0,
-            slotdim_depth: int = 1, slotdim_no_ffn: bool = False):
+            slotdim_depth: int = 1, slotdim_no_ffn: bool = False,
+            slotdim_heads: int = 0, couple_frac: list | None = None,
+            delta_scale: float = 0.3, delta_mode: str = "rescale"):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
@@ -2964,12 +3047,28 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     _, _, TRMReasoner = _build_trm()
     wb = WhiteBox(lm_name, quant=quant)
     d_lm = wb.d_model
-    couple = [wb.n_layers - 2, wb.n_layers - 1]
+    # COUPLING DEPTH. The default injects at only the LAST TWO layers, leaving the model almost no
+    # depth to integrate slot CONTENT -- enough to shift output FORMAT, not enough to change which
+    # atom gets named. That is the shape every arm has measured: ~+7.3 nats of format effect against
+    # a near-zero content effect. couple_frac moves the injection earlier so this is testable.
+    if couple_frac:
+        couple = sorted({max(0, min(wb.n_layers - 1, int(round(f * (wb.n_layers - 1)))))
+                         for f in couple_frac})
+        print(f"  COUPLING at layers {couple} of {wb.n_layers} (fractions {couple_frac}) instead of "
+              f"the default last-two.", flush=True)
+    else:
+        couple = [wb.n_layers - 2, wb.n_layers - 1]
+    if delta_mode != "rescale":
+        print(f"  DELTA MODE '{delta_mode}': rescale forces EVERY position to receive exactly "
+              f"delta_scale*||h||, making per-position emphasis unrepresentable and letting the "
+              f"adapter learn a format prior that survives its own ablation. This project's standing "
+              f"rule is clip, not rescale.", flush=True)
     print(f"  LM: {lm_name}  d={d_lm}  layers={wb.n_layers}  gate layers={couple}  device={wb.device}")
 
     trm = TRMReasoner(d_in=EMBED_DIM, d=256, T=4, n_heads=4, adaptive=adaptive_t)
     top_trm = TRMReasoner(d_in=EMBED_DIM, d=256, T=top_trm_t, n_heads=4) if top_trm_t > 0 else None
-    R = WMReasoner(d_lm, couple_layers=couple, trm=trm, n_heads=4, top_trm=top_trm).to(wb.device)
+    R = WMReasoner(d_lm, couple_layers=couple, trm=trm, n_heads=4, top_trm=top_trm,
+                   delta_scale=delta_scale, delta_mode=delta_mode).to(wb.device)
     # SPIKING SLOT GATE (opt-in). Off => the adapters take their original dense-softmax path
     # bit-for-bit, so this flag cannot perturb any previously measured run.
     if slot_gate:
@@ -3183,8 +3282,12 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
     # ATOM-INITIALIZED SLOTS: the design in this file's header, finally built. See
     # WMReasoner._refine_atom_slots for the measurements that show what ran instead.
     if slotdim_k > 0:
-        R.slotdim = SlotDIM(R.trm.d, k=slotdim_k, depth=slotdim_depth,
-                            ffn=not slotdim_no_ffn).to(wb.device)
+        if slotdim_heads > 0:
+            R.slotdim = SlotDIMv2(R.trm.d, k=slotdim_k, n_heads=slotdim_heads,
+                                  ffn=not slotdim_no_ffn, depth=slotdim_depth).to(wb.device)
+        else:
+            R.slotdim = SlotDIM(R.trm.d, k=slotdim_k, depth=slotdim_depth,
+                                ffn=not slotdim_no_ffn).to(wb.device)
         print(f"  SLOTDIM ON: {slotdim_k} competing banks, depth {slotdim_depth}, "
               f"FFN {'OFF (ablated)' if slotdim_no_ffn else 'ON'} -- replacing the TRM recursion, "
               f"which measures as a contraction (two distinct seeds -> cos 0.8072 after ONE step).",
@@ -4533,6 +4636,24 @@ def main():
                          "0.8072 in ONE step, which is why every write-side fix failed. DIM asks how "
                          "violently an input perturbs the system rather than how similar two tokens "
                          "are, and accumulates rather than re-transforming. Try 8.")
+    ap.add_argument("--slotdim-heads", type=int, default=0, dest="slotdim_heads",
+                    help="use SlotDIM **v2** with this many slot HEADS (0 = v1). v2 adds multi-head "
+                         "slot sets, input-dependent selective decay, and a DIM-faithful ABSOLUTE "
+                         "sensitivity gate tanh(sigma'(Z)) -- the softmax alone is only relative and "
+                         "will force a write for a token that perturbs nothing. Measured at init: "
+                         "within-instance slot cosine 0.9411 (v1) -> 0.0102 (v2, 2 heads), i.e. the "
+                         "slots stop being copies of each other.")
+    ap.add_argument("--couple-frac", type=str, default="", dest="couple_frac",
+                    help="comma-separated FRACTIONS of LM depth to inject at, e.g. 0.5,0.75,0.95. "
+                         "Default (empty) = the last two layers, which leaves almost no depth to "
+                         "integrate slot content and is a prime suspect for the persistent "
+                         "format-over-content result.")
+    ap.add_argument("--delta-mode", type=str, default="rescale", choices=["rescale", "clip"],
+                    dest="delta_mode",
+                    help="rescale (default) forces EVERY position to receive exactly "
+                         "delta_scale*||h||; clip bounds the same budget but lets the adapter stay "
+                         "quiet where it has nothing to add. This project's standing rule is clip.")
+    ap.add_argument("--delta-scale", type=float, default=0.3, dest="delta_scale")
     ap.add_argument("--slotdim-depth", type=int, default=1, dest="slotdim_depth",
                     help="stack this many DIM write passes; pass i+1 writes FROM pass i's slot table. "
                          "depth 1 is derivative-based POOLING (grabs the most impactful atoms); "
@@ -4613,7 +4734,9 @@ def main():
                  n_derange=a.n_derange, contrast_weight=a.contrast_weight,
                  contrast_negs=a.contrast_negs, no_proj_bias=a.no_proj_bias,
                  trm_no_bias=a.trm_no_bias, atom_slots=a.atom_slots, slotdim_k=a.slotdim_k, slotdim_depth=a.slotdim_depth,
-                 slotdim_no_ffn=a.slotdim_no_ffn)
+                 slotdim_no_ffn=a.slotdim_no_ffn, slotdim_heads=a.slotdim_heads,
+                 couple_frac=[float(f) for f in a.couple_frac.split(",") if f.strip()],
+                 delta_scale=a.delta_scale, delta_mode=a.delta_mode)
     else:
         selftest()
 
