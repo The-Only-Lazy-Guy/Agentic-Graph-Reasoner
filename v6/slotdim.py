@@ -198,12 +198,26 @@ class CrossDIM(nn.Module):
     prior that survives its own ablation.
     """
 
-    def __init__(self, d_lm: int, d_slot: int, cap: float = 0.15, gate_init: float = 0.0):
+    def __init__(self, d_lm: int, d_slot: int, cap: float = 0.15, gate_init: float = 0.05):
         super().__init__()
         self.cap = cap
         self.to_slot = nn.Linear(d_lm, d_slot, bias=False)    # no bias: bias/signal ~1 collapsed
         self.from_slot = nn.Linear(d_slot, d_lm, bias=False)  # separation 3x in v5
-        nn.init.zeros_(self.from_slot.weight)                 # untrained == frozen LM, exactly
+        # DO NOT zero-init this. The gate g is already zero, so tanh(g)=0 makes the module an exact
+        # identity on its own. Zeroing from_slot TOO creates a double-zero deadlock: delta==0 kills
+        # the gradient on g, and tanh(g)==0 kills the gradient on from_slot, so EVERY parameter --
+        # reader, thinker, seed projection -- receives exactly 0.000e+00 and nothing ever trains.
+        # Measured: 21/24 params with grad, 0 nonzero, max|grad| 0.0. That is a dead channel, and it
+        # would have produced a silent null indistinguishable from "the idea does not work".
+        # v5's GatedCrossAttn had this right: eye-init the value/output path, zero ONLY the gate.
+        nn.init.normal_(self.from_slot.weight, std=0.02)
+        # gate_init is SMALL BUT NON-ZERO on purpose. At exactly 0, tanh(g)=0 blocks the gradient
+        # to delta and therefore to the slot table M, so the THINKER receives 0.000e+00 on every
+        # parameter until g drifts off zero -- measured: reader 1/4 params live, thinker 0/16,
+        # seed_proj 0/1. That is a warm-up chain, not a deadlock, but it wastes most of a short run.
+        # This does NOT weaken the ablated control: that arm passes M=None, the hook returns early,
+        # and the LM is untouched regardless of gate_init. 0.05 sits below the 0.1-0.25 band v5
+        # documented as usable, so the adapter still has to earn its way up.
         self.g = nn.Parameter(torch.full((1,), gate_init))
         # THRESHOLD, and it is load-bearing. sigma'(0) = 0.5, NOT 0 -- so a position with no
         # interaction at all (Z=0) would still score tanh(0.5) ~ 0.46 and receive an injection.
