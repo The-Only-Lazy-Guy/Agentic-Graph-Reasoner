@@ -31,6 +31,39 @@ this tree and a fix restoring slot variance invalidates the premise; the gate cl
 +1.43, outside the 0.1-0.25 band documented at the gate_max clamp below; Qwen2.5-3B, not
 the Qwen3-4B the headline used; one seed.
 
+2026-08-06 -- CORRECTED TASK. The experiment could not measure memory until now; see _opaquify.
+With --opaque-atoms --code-prompt (answer no longer derivable from the prompt, ablated arm finally
+measuring capability), --slotdim 8 --trm-no-bias --no-proj-bias --contrast-weight 0.5, 6 epochs,
+32 train / 32 held:
+
+                       Qwen2.5-0.5B        Qwen2.5-1.5B
+    WM                 0/32                3/32
+    DERANGED           1/32                3/32
+    ABLATED            4/32                5/32      <- ablated WINS at both scales
+    slot_cos           0.883               0.999
+    instance-specific  +0.0589             +0.0020
+      95% CI           [+0.0392, +0.0805]  [-0.0007, +0.0048]
+    modal/specific     94x                 2703x
+    verdict            MIXED               FALSIFIED
+
+THE ADAPTER IS NET HARMFUL. At both scales the model does better with NO working memory. That was
+invisible while the prompt pinned ablated at 0 -- it read as a win. Third independent sighting:
+the gate_max note below already records swe-action at held WM 0/16 vs ablated 3/16. On every
+domain where the base model can actually do the task, this adapter degrades it.
+
+Mechanism, from the generations: WM hallucinates truncated atom names (op_qd, op_pj, op_gf -- none
+real) and then loops, while ablated writes coherent but wrong Python. The adapter buys 5.5 nats of
+TEACHER-FORCED CE and pays for it in generation. Exposure bias, at both capacities.
+
+The one positive: 0.5B shows +0.0589 nats instance-specific, CI excluding 0, 8x the null band, on
+a task where the answer is NOT in the prompt -- the first such number in this file. It vanishes at
+1.5B (+0.0020, CI includes 0, slot_cos 0.999). The LARGER model collapses its slots MORE, which is
+what more adapter capacity to find the shortcut looks like.
+
+STILL UNTESTED, and where the evidence now points: the READ path. delta_mode defaults to "rescale"
+(against this project's own clip-not-rescale rule) and injection is pinned to the last two layers.
+"Buys CE, destroys generation" is exactly what an unconditional per-position write produces.
+
 2026-08-05 (later) -- THE PER-STEP CONTRASTIVE FIX DOES **NOT** TRANSFER HERE. Matched A/B,
 40 epochs, Qwen2.5-3B 4-bit, n-train 48, held 16, identical code, only --contrast-weight differs:
 
@@ -4303,10 +4336,19 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         # "FALSIFIED" off specific <= 0 -- but 0-0=0 is an ABSENCE of measurement, not a falsification.
         # A falsifier that "fires" when nothing was solved would hand back exactly the kind of confident
         # null this project has already been burned by three times.
-        if held_ok == 0:
-            msg = ("VACUOUS: the WM arm solved NOTHING, so all three arms are 0 and no comparison "
-                   "between them carries information. This says nothing about the channel -- fix the "
-                   "run (model, epochs, task difficulty) before reading any verdict here.")
+        if held_ok == 0 and ablated_ok == 0:
+            msg = ("VACUOUS: WM and ABLATED are both 0, so no comparison between the arms carries "
+                   "information. This says nothing about the channel -- fix the run (model, epochs, "
+                   "task difficulty) before reading any verdict here.")
+        elif held_ok <= ablated_ok:
+            # The message used to claim "all three arms are 0" whenever held_ok was 0, and printed
+            # that on a run where ABLATED scored 4/32 -- a flatly false statement about the run it
+            # was summarising. It also hid the actually important case: once ablated measures real
+            # capability, the adapter can be NET HARMFUL, and that is a result rather than a defect.
+            msg = (f"ADAPTER IS NET HARMFUL: WM {held_ok}/{N} vs ABLATED {ablated_ok}/{N}. The model "
+                   f"does BETTER with no working memory at all. This is only visible once the ablated "
+                   f"arm can score above 0; when it is pinned at 0 by prompt design this reads as a "
+                   f"win. Already recorded once on swe-action (held WM 0/16 vs ablated 3/16).")
         elif specific > 0 and specific >= modal:
             msg = ("REAL: most of the gain needs the RIGHT working memory, not merely some working "
                    "memory. This is the first arm in this codebase that could have falsified the "
