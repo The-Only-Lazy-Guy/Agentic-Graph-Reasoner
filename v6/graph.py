@@ -43,6 +43,14 @@ def build_graph(nodes: dict[str, str], worlds: bool = True,
     if worlds:
         g.enable_worlds(join_threshold=join_threshold, materialize=True)
     for name, desc in nodes.items():
+        # DESCRIPTION ONLY for the retrieval embedding. Putting the opaque name in the embedded
+        # text was tried and REVERTED: MiniLM has no semantics for "op_wd8", so it encodes surface
+        # form and every node shares the "op_" prefix. Measured mean pairwise cosine over 28 nodes:
+        #     description only        0.3886   <- keep this
+        #     "op_xxx: description"   0.5048   <- worse
+        #     opaque names alone      0.6434
+        # The name still has to reach the LM, but through the LM's OWN embedding table, not through
+        # MiniLM -- see content_embeddings(). MiniLM retrieves, native injects.
         atom = Atom(name=name, code="", description=desc, kind="concept", provenance="v6")
         if worlds:
             g.add_or_merge_world(atom)
@@ -56,6 +64,20 @@ def retrieve(g: AtomGraph, query: str, k: int = 4, min_candidates: int = 256) ->
     if getattr(g, "_worlds_on", False) and getattr(g, "worlds", None):
         return g.cosine_rank_world(query, k=k, min_candidates=min_candidates)
     return g.cosine_rank(query, k=k)
+
+
+def content_embeddings(wb, names: list[str]) -> "torch.Tensor":
+    """[N, d_lm] rows: each node's NAME through the LM's OWN embedding table.
+
+    This is what gets WRITTEN into the slots. Retrieval decides WHICH node (MiniLM, on
+    descriptions, which separate at 0.3886); the slot then carries that node's identifier in the
+    space the LM actually reads, so there is no cross-model bridge for CE to collapse. v5's own
+    note: "MiniLM stays fine for cheap cosine RETRIEVAL, which never goes through the adapter" --
+    and then it routed the adapter through MiniLM anyway.
+    """
+    import torch
+    from v5.runtime.trm_wm import native_text_embedding
+    return torch.stack([native_text_embedding(wb, n) for n in names]).float()
 
 
 def node_embeddings(g: AtomGraph, names: list[str]) -> np.ndarray:

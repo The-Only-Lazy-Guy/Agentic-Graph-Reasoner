@@ -79,7 +79,7 @@ class SlotDIMv3(nn.Module):
                     high-pass. "Persistent premise" vs "salient event".
     """
 
-    def __init__(self, d: int, k: int = 8, n_heads: int = 2, decay_bias: float = 2.2,
+    def __init__(self, d: int, k: int = 8, n_heads: int = 2, decay_bias: float = 1.0,
                  ffn: bool = True, curvature: bool = True, integral: bool = True):
         super().__init__()
         assert k % n_heads == 0, f"k={k} must divide by n_heads={n_heads}"
@@ -88,7 +88,16 @@ class SlotDIMv3(nn.Module):
         self.M0 = nn.Parameter(torch.randn(self.h, self.ks, d) * 0.02)
         self.W_v = nn.ModuleList([nn.Linear(d, d, bias=False) for _ in range(self.h)])
         self.W_f = nn.ModuleList([nn.Linear(d, d) for _ in range(self.h)])
-        for W in self.W_f:                      # keep ~ sigmoid(2.2) ~ 0.9 at init: long-ish memory
+        # DECAY BIAS 1.0, NOT the notebook's 2.2. keep = sigmoid(decay_bias), and with T write
+        # events M ~ keep*M0 + (1-keep)*writes. The notebook runs T=128 TOKENS, where keep=0.90 is
+        # sensible. This thinker writes 1-5 EVENTS, where keep=0.90 means the task contributes ~10%
+        # and the SHARED M0 dominates -- measured across-task slot cosine at T=1/3/8:
+        #     decay_bias 2.2 (keep .90):  0.9551  0.6706  0.1889   <- identical slots, dead falsifier
+        #     decay_bias 1.0 (keep .73):  0.6834  0.1391  0.0083
+        #     decay_bias 0.0 (keep .50):  0.6228  0.1112  0.0094
+        # Lowering decay alone is not enough at T=1 (0.62); the seed must also carry more than one
+        # event, which is why run.py prefetches retrieved nodes into the seed.
+        for W in self.W_f:                      # keep ~ sigmoid(1.0) ~ 0.73 at init
             W.weight.data.mul_(0.1)
             W.bias.data.fill_(decay_bias)
         # curvature and integral channels are ZERO-INIT so an untrained v3 is exactly v2. Every

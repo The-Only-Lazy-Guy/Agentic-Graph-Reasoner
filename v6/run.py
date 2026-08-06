@@ -35,7 +35,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from v6.graph import build_graph, node_embeddings
+from v6.graph import build_graph, content_embeddings, node_embeddings
 from v6.slotdim import CrossDIM
 from v6.tasks import make_tasks, make_tests, prompt_for, verify
 from v6.thinker import Thinker
@@ -85,6 +85,8 @@ def main():
     ap.add_argument("--heads", type=int, default=2)
     ap.add_argument("--steps", type=int, default=2, help="thinker retrieval steps")
     ap.add_argument("--retrieve", default="always", choices=["always", "gated"])
+    ap.add_argument("--prefetch", type=int, default=4,
+                    help="cosine-retrieved nodes seeded into the slots before the learned gate runs")
     ap.add_argument("--max-new", type=int, default=24)
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args()
@@ -104,10 +106,15 @@ def main():
     print(f"  {len(descs)} atoms | {len(tr)} train / {len(hd)} held pairs (disjoint, pool shared)")
     print(f"  graph: {len(g)} nodes, worlds={len(getattr(g, 'worlds', {}) or {})}")
 
-    d_slot = 256
+    # SLOTS LIVE IN d_lm. Retrieval is MiniLM (descriptions, 0.3886 separation); what gets written
+    # into a slot is the node's NAME through the LM's own embedding table. That removes the
+    # cross-model bridge entirely -- the slot already speaks the LM's language, so CrossDIM has
+    # nothing to translate and CE has no bridge to collapse.
+    d_slot = d_lm
+    cemb = content_embeddings(wb, names).to(wb.device)          # [N, d_lm] native name rows
     thinker = Thinker(d_slot, k=a.k_slots, n_heads=a.heads, n_steps=a.steps).to(wb.device)
     reader = build_reader(a.read, d_lm, d_slot).to(wb.device)
-    seed_proj = nn.Linear(384, d_slot, bias=False).to(wb.device)
+    seed_proj = nn.Linear(384, d_slot, bias=False).to(wb.device)   # task text (MiniLM) -> slot space
     params = list(thinker.parameters()) + list(reader.parameters()) + list(seed_proj.parameters())
     print(f"  thinker {sum(p.numel() for p in thinker.parameters()):,} params | "
           f"reader {sum(p.numel() for p in reader.parameters()):,}\n", flush=True)
@@ -126,9 +133,23 @@ def main():
 
     handle = wb.model.model.layers[layer].register_forward_hook(hook)
 
+    nemb_n = nemb / nemb.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+
     def slots_for(text):
+        """Seed = task embedding PLUS a cheap cosine PREFETCH of graph nodes.
+
+        One write event is not enough: measured across-task slot cosine at T=1 is 0.62 even with
+        decay lowered, because M0 is shared. Worse, the learned gate's first query is built from
+        that collapsed state, so every task would retrieve the SAME nodes and the deranged arm
+        would be dead by construction. The first hop is therefore plain cosine (no learned gate
+        needed to look up what the task literally describes); the learned gate does the multi-hop
+        refinement on top of an already task-specific state.
+        """
         s = torch.as_tensor(encode_batch([text])[0], dtype=torch.float32, device=wb.device)
-        M, _ = thinker(seed_proj(s).unsqueeze(0), nemb, mode=a.retrieve)
+        pre = torch.topk(nemb_n @ (s / s.norm().clamp_min(1e-6)), k=a.prefetch).indices
+        # write events: the task (projected) + the NATIVE name rows of the prefetched nodes
+        seed = torch.cat([seed_proj(s).unsqueeze(0), cemb[pre]], dim=0)
+        M, _ = thinker(seed, nemb, content=cemb, mode=a.retrieve)
         return M
 
     def ids_for(text, target=None):
@@ -196,8 +217,15 @@ def main():
     print(f"  CE  WM {w.mean():.4f}   DERANGED {d.mean():.4f}   ABLATED {b.mean():.4f}")
     print(f"  instance-specific  der-WM  {spec.mean():+.4f}  95% CI [{slo:+.4f}, {shi:+.4f}]")
     print(f"  format/mode        abl-der {modal.mean():+.4f}")
-    ratio = modal.mean() / spec.mean() if spec.mean() > 1e-9 else float("inf")
-    print(f"  modal/specific ratio {ratio:.1f}x")
+    if spec.mean() > 1e-9:
+        ratio = modal.mean() / spec.mean()
+        print(f"  modal/specific ratio {ratio:.1f}x")
+    else:
+        # printing "inf" for a NEGATIVE effect reads as "infinitely format-dominated" when it
+        # actually means the deranged slots were BETTER -- a different and more alarming fact.
+        ratio = float("inf")
+        print(f"  modal/specific ratio  n/a  (instance-specific effect is {spec.mean():+.4f}, "
+              f"i.e. deranged slots did as well or better)")
     if ok["wm"] == 0 and ok["abl"] == 0:
         print(f"  -> VACUOUS: WM and ABLATED both 0, no comparison carries information. Fix the run "
               f"(model, epochs, task difficulty) before reading anything here.")

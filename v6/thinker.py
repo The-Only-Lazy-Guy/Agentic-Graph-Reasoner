@@ -63,9 +63,10 @@ class Thinker(nn.Module):
         self.slots = SlotDIMv3(d_slot, k=k, n_heads=n_heads,
                                curvature=curvature, integral=integral)
         self.gate = RetrievalGate(d_slot, d_node=d_node)
-        self.node_proj = nn.Linear(d_node, d_slot, bias=False)   # graph rows -> write events
+        self.node_proj = nn.Linear(d_node, d_slot, bias=False)   # used only if content is absent
 
-    def forward(self, seed: torch.Tensor, node_embs: torch.Tensor, mode: str = "always"):
+    def forward(self, seed: torch.Tensor, node_embs: torch.Tensor,
+                content: torch.Tensor | None = None, mode: str = "always"):
         """seed [T0, d_slot] initial write events (e.g. the task); node_embs [N, 384] graph rows.
 
         Returns (slot_table [k, d_slot], trace) where trace records, per step, which nodes were
@@ -79,7 +80,10 @@ class Thinker(nn.Module):
             idx, g = self.gate(state, node_embs, mode=mode)
             trace.append({"idx": idx.tolist(), "gate": float(g)})
             if idx.numel():
-                hits = self.node_proj(node_embs[idx])         # (m, d_slot)
+                # RETRIEVE by MiniLM (node_embs, descriptions), WRITE the native content row when
+                # available. The written vector then already lives in the LM's space -- no trained
+                # cross-model bridge, which is the thing that has collapsed on held-out every time.
+                hits = content[idx] if content is not None else self.node_proj(node_embs[idx])
                 writes = torch.cat([writes, hits], dim=0)     # retrieved nodes become write events
                 M = self.slots(writes)
         return M, trace
