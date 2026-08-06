@@ -14,6 +14,38 @@ included so the regression stays visible rather than argued; attn-clip is the ho
 CrossDIM has to beat, and it has never been run.
 
 Reported together, always: pass counts AND teacher-forced CE. A 32-item pass rate cannot resolve
+
+READ-PATH A/B RESULT (Qwen2.5-1.5B 4-bit, 120 train / 100 held, 2 epochs, CE-only training,
+opaque atom names + require-atoms verifier, so the answer is NOT derivable from the prompt):
+
+    read           CE WM     CE ABL   instance-specific            pass
+    attn-rescale   6.4842    7.8104   -0.0006 [-0.0024, +0.0010]   0/100
+    attn-clip      6.2842    7.8104   -0.0011 [-0.0030, +0.0008]   0/100
+    crossdim       6.4796    7.8104   -0.0018 [-0.0035, -0.0002]   0/100
+
+THE READ PATH IS NOT THE BOTTLENECK. Three structurally different injection mechanisms, one
+variable, and the instance-specific term is ~0 in all of them -- crossdim's CI even excludes
+zero on the NEGATIVE side, i.e. deranged slots did better, which is a sign flip and not a signal.
+
+clip beats rescale by 0.20 nats: the first direct evidence for this project's own
+"clip, do not rescale" rule at the read path, and a point against v5's default. One seed, and
+every arm still fails the task, so do not quote it further than that.
+
+CrossDIM does NOT beat attention-with-clip (6.4796 vs 6.2842). Its floor advantage is real and
+structural -- softmax is a convex combination of slot rows so attention cannot output zero,
+while the absolute gate can, verified at 0.339956 vs 0.000000 for a non-interacting position --
+but a lower noise floor does not help when the supervision never rewards using content. It is a
+better channel carrying nothing.
+
+All three buy ~1.3-1.5 nats of GENERIC help and zero instance-specific content: the same
+signature as the previous nine attempts, except that here it CANNOT be a prompt artifact,
+because with opaque names the answer is not in the prompt at all. That makes it the cleanest
+negative in the project: under CE the LM takes format help and ignores memory CONTENT,
+regardless of how the memory is delivered. algo_grr_contrast.py said the open question was the
+LOSS, not the architecture; this confirms it across two write mechanisms and three read
+mechanisms on a corrected task.
+
+The verifier-based RL on the retrieval gate is the one variable still untested.
 effects the size this project deals with (the whole adapter-shortcut result is stated in nats),
 and CE is forward-only so it costs nothing. Bootstrap is over INSTANCES, never over anchors.
 """
