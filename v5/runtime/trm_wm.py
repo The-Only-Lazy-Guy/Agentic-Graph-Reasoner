@@ -3274,18 +3274,29 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
             # A half-applied rename is worse than none: it would silently mismatch rather than crash
             # if the lists happened to line up. Remap every field that names an atom.
             def _remap(tasks):
+                # NO REGEX. The first version used a word-boundary pattern whose escape was
+                # mangled when this file was written -- the boundary became a literal backspace
+                # (), so nothing ever matched and the targets kept their original names while
+                # atoms_needed was renamed. Atoms always appear as CALLS, so a plain "name(" ->
+                # "new(" substitution is both sufficient and impossible to mis-escape.
                 out = []
                 for text, atoms_needed, code, code_expr in tasks:
                     an = [_amap[a_] for a_ in atoms_needed]
                     c, ce = code, code_expr
-                    for old, new in _amap.items():
-                        c = re.sub(rf"{re.escape(old)}", new, c)
-                        ce = re.sub(rf"{re.escape(old)}", new, ce)
+                    for old, new_ in _amap.items():
+                        c = c.replace(old + "(", new_ + "(")
+                        ce = ce.replace(old + "(", new_ + "(")
                     out.append((text, an, c, ce))
                 return out
             train_tasks, held_tasks = _remap(train_tasks), _remap(held_tasks)
+            # ASSERT ON THE CODE TOO. The first assert checked only atoms_needed, so it passed
+            # while every target still named the original atoms -- an assertion that cannot fail
+            # on the thing that broke is not a check.
             _bad = [a_ for t in (train_tasks + held_tasks) for a_ in t[1] if a_ not in atom_names]
             assert not _bad, f"rename left dangling atom refs: {sorted(set(_bad))[:5]}"
+            _leak = sorted({o for o in _amap for t in (train_tasks + held_tasks)
+                            if (o + "(") in t[2] or (o + "(") in t[3]})
+            assert not _leak, f"ORIGINAL atom names still in targets: {_leak[:5]}"
             print(f"  tasks remapped to opaque names; example target: {held_tasks[0][2]}", flush=True)
     all_tasks = train_tasks + held_tasks
     split = len(train_tasks)
