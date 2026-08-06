@@ -100,6 +100,7 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -3188,6 +3189,7 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
                              f"to ground in -- run --grow-cot (math-cot) or --swe-docs-path (swe-action) "
                              f"at least once first)")
         descs, codes = _seed_atoms()
+        _amap = {}
         if opaque_atoms:
             descs, codes, _amap = _opaquify(descs, codes)
             print(f"  OPAQUE ATOMS ON: names renamed to non-semantic tokens "
@@ -3265,6 +3267,26 @@ def run_real(lm_name: str, quant: str = "4bit", epochs: int = 40, n_train: int =
         train_tasks, held_tasks = _compose_tasks_from_graph(g, atom_names, n_train=n_train, n_held=n_held)
     else:
         train_tasks, held_tasks = _compose_tasks_real(n_train=n_train, n_held=n_held)
+        if _amap:
+            # _compose_tasks_real builds tasks from the ORIGINAL atom names, so renaming only descs
+            # and codes left atoms_needed and the target expression pointing at identifiers that no
+            # longer exist -- "ValueError: 'count_bits' is not in list" at atom_names.index(a).
+            # A half-applied rename is worse than none: it would silently mismatch rather than crash
+            # if the lists happened to line up. Remap every field that names an atom.
+            def _remap(tasks):
+                out = []
+                for text, atoms_needed, code, code_expr in tasks:
+                    an = [_amap[a_] for a_ in atoms_needed]
+                    c, ce = code, code_expr
+                    for old, new in _amap.items():
+                        c = re.sub(rf"{re.escape(old)}", new, c)
+                        ce = re.sub(rf"{re.escape(old)}", new, ce)
+                    out.append((text, an, c, ce))
+                return out
+            train_tasks, held_tasks = _remap(train_tasks), _remap(held_tasks)
+            _bad = [a_ for t in (train_tasks + held_tasks) for a_ in t[1] if a_ not in atom_names]
+            assert not _bad, f"rename left dangling atom refs: {sorted(set(_bad))[:5]}"
+            print(f"  tasks remapped to opaque names; example target: {held_tasks[0][2]}", flush=True)
     all_tasks = train_tasks + held_tasks
     split = len(train_tasks)
     if task_domain == "swe-action":
