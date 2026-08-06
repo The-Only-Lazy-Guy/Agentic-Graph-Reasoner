@@ -134,7 +134,39 @@ class CrossDIM(nn.Module):
 
     delta = (softmax_k(obs) * tanh(obs)) @ M,  obs = sigma'(h @ M^T)
 
-    HONEST STATUS OF THE RATIONALE, measured after this was written and BEFORE it was trained.
+    RATIONALE, third and correct version. The history matters because two of the three were wrong.
+
+      v1 (overclaim, unmeasured): "softmax sums to 1 so attention injects at every position".
+      v2 (over-retraction, WRONG METRIC): I measured the aligned/random RATIO, got CrossDIM 1.62x
+         vs attention 2.53x, and concluded attention was more content-conditional.
+      v3 (measured, correct): RATIO IS THE WRONG QUANTITY. What damages a residual stream is the
+         NOISE FLOOR on positions that have nothing to do with memory, because h + delta does not
+         care about contrast. And there the difference is structural, not empirical:
+
+            at Z = 0 (a position with NO interaction with memory)
+                attention   |output| = 0.339956   -- injects the mean slot row anyway
+                CrossDIM    |output| = 0.000000   -- exactly nothing
+
+            min |output| over 4000 random interaction states
+                attention   0.3518   (never goes below ~0.35)
+                CrossDIM    0.0645
+
+         softmax(Z) @ M is a CONVEX COMBINATION of the slot rows, so its norm is bounded below by
+         the min-norm point of conv(M). Attention CANNOT output zero. The absolute gate has no such
+         lower bound. Post-clip, on the same inputs, the noise floor on non-interacting positions
+         was 0.0093*||h|| for attention vs 0.0026*||h|| for CrossDIM -- 3.6x.
+
+         Attention's higher ratio is bought with a floor it cannot lower: "found it, inject
+         everything". CrossDIM injects only the difference the interaction actually makes, and
+         nothing when it makes none. For pushing an external graph / slot memory into a frozen LM,
+         protecting the residual stream is the requirement; a high ratio on top of a high floor is
+         not.
+
+    This does NOT retire the v5 diagnosis: delta_mode="rescale" forced every position to exactly
+    delta_scale*||h||, which is a worse version of the same disease and was the default. The
+    honest baseline for any CrossDIM claim remains attention WITH CLIP, which has never been run.
+
+    OLD NOTE, kept so the reasoning is auditable:
     The original claim here was: "softmax sums to 1, so attention necessarily injects SOMETHING at
     every position, whereas tanh(obs) is an ABSOLUTE gate that lets non-interacting positions pass
     through untouched." THAT CLAIM IS FALSE. Measured at init, magnitude of the pre-projection read
