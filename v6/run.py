@@ -188,6 +188,10 @@ def main():
         cache = [slots_for(t[0]) for t in hd]
     ce = {"wm": [], "der": [], "abl": []}
     ok = {"wm": 0, "der": 0, "abl": 0}
+    # DUMP THE GENERATIONS. Every real diagnosis in this project came from reading what the
+    # model actually wrote -- a behaviourally-correct answer using none of the atoms, "op(op("
+    # loops, prose where code was expected. Numbers alone hid all three.
+    dump: dict = {}
     with torch.no_grad():
         for i, (text, atoms, expr) in enumerate(hd):
             tests = make_tests(expr, codes, seed=i)
@@ -203,9 +207,18 @@ def main():
                                         pad_token_id=wb.tok.eos_token_id)
                 txt = wb.tok.decode(gen[0][p.shape[-1]:], skip_special_tokens=True)
                 ok[arm] += int(verify(txt, atoms, tests, codes))
+                if i < 4:
+                    dump.setdefault(i, {"target": expr})[arm] = " ".join(txt.split())[:88]
                 slots_now["M"] = None
     handle.remove()
 
+    for _i in sorted(dump):
+        _d = dump[_i]
+        print("")
+        print("  target : " + _d["target"])
+        for _arm in ("wm", "der", "abl"):
+            if _arm in _d:
+                print("  " + _arm.ljust(7) + ": " + _d[_arm])
     n = len(ce["wm"])
     w, d, b = (np.array(ce[k]) for k in ("wm", "der", "abl"))
     spec, modal = d - w, b - d
@@ -227,8 +240,14 @@ def main():
         print(f"  modal/specific ratio  n/a  (instance-specific effect is {spec.mean():+.4f}, "
               f"i.e. deranged slots did as well or better)")
     if ok["wm"] == 0 and ok["abl"] == 0:
-        print(f"  -> VACUOUS: WM and ABLATED both 0, no comparison carries information. Fix the run "
-              f"(model, epochs, task difficulty) before reading anything here.")
+        # ablated 0 is EXPECTED here and is NOT a broken control: with opaque names and a verifier
+        # that requires the atoms to be CALLED, the base LM cannot score -- it cannot guess op_wd8.
+        # That is the task doing its job (memory genuinely necessary), unlike v5 where ablated was
+        # pinned at 0 by a prompt asking for prose. So the number to read is WM, not ablated.
+        print("  -> NOTHING SOLVES IT. ablated 0 is BY DESIGN (opaque names + require-atoms mean "
+              "the base LM cannot guess an identifier), so the informative number is WM=0: memory "
+              "is not delivering the names either. Read the CE row -- a gap over ablated with a ~0 "
+              "instance-specific term means the slots give GENERIC help, not content.")
     elif ok["wm"] <= ok["abl"]:
         print(f"  -> ADAPTER NET HARMFUL: the model does better with NO memory. Only visible because "
               f"ablated can score above 0 here.")
